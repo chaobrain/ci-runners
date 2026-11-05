@@ -17,6 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 POL = 'ci_runners/policy.py'
 REM = 'ci_runners/remote.py'
 INV = 'ci_runners/inventory.py'
+LCK = 'ci_runners/locks.py'
 CLA = 'ci_runners/claim.py'
 OUT = 'ci_runners/outcome.py'
 GPU = 'ci_runners/gpus.py'
@@ -25,6 +26,7 @@ SLO = 'ci_runners/slots.py'
 TP = 'tests.test_policy'
 TR = 'tests.test_remote_env'
 TI = 'tests.test_inventory'
+TX = 'tests.test_interop'
 TC = 'tests.test_claim'
 TO = 'tests.test_outcome'
 TG = 'tests.test_gpus'
@@ -154,6 +156,24 @@ MUTANTS = [
     (SLO, "p = t.project or default_project\n            if", "p = t.project\n            if",
      [f'{TS}.Grants.test_tickets_without_a_project_are_the_default_projects']),
     (SLO, "return waiting >= max_waiting", "return waiting > max_waiting", [f'{TS}.Grants.test_queue_full']),
+    # the host lock and the slots, against brainspike's originals (acceptance 2)
+    (LCK, "                    fcntl.flock(ts, fcntl.LOCK_UN)\n                    os.close(ts)\n                    self._fds.remove(ts)\n", "",
+     [f'{TX}.LockInterop.test_every_mode_pair_both_ways']),
+    (LCK, "self._flock(fd, fcntl.LOCK_SH if want == 's' else fcntl.LOCK_EX, t0)", "self._flock(fd, fcntl.LOCK_SH, t0)",
+     [f'{TX}.LockInterop.test_every_mode_pair_both_ways']),
+    (LCK, "                    if mode == 's':  # a normal shared holder", "                    if False:",
+     [f'{TX}.LockInterop.test_light_enters_beside_a_normal_shared_holder_only']),
+    (LCK, "            if mode == 'l' and self._normal_shared_in():", "            if False:",
+     [f'{TX}.LockInterop.test_light_enters_beside_a_normal_shared_holder_only']),
+    (LCK, "            elif self.held == 'x' or want == 's':", "            elif want == 's':",
+     [f'{TX}.LockInterop.test_nesting_covers_cross_implementations']),
+    (LCK, "            if not self.cover_live():", "            if False:", [f'{TX}.LockInterop.test_a_stale_cover_takes_the_lock']),
+    (LCK, "if left <= 0 or not _wait_in_queue(fd, op, left):", "if not _wait_in_queue(fd, op, 1e6):",
+     [f'{TX}.LockInterop.test_a_timeout']),
+    (SLO, "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", "fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)",
+     [f'{TX}.SlotInterop.test_together_never_more_than_the_slot_count']),
+    (SLO, "                        return True\n    except (OSError", "                        pass\n    except (OSError",
+     [f'{TS}.Queue.test_flocked_reads_holders']),
     # the env allowlist
     (REM, "up.startswith(REFUSED_PREFIXES) or ", "", [f'{TR}.RemoteEnv.test_refused', f'{TR}.RemoteEnv.test_only_the_allowlist_passes']),
     (REM, "any(p in up for p in REFUSED_PARTS)", "any(p in name for p in REFUSED_PARTS)", [f'{TR}.RemoteEnv.test_refused']),
@@ -197,8 +217,12 @@ MUTANTS = [
 
 def run(tree: pathlib.Path, tests: list[str]) -> int:
     # -B: a stale .pyc of an earlier mutant of the same size and second would be used
-    return subprocess.run([sys.executable, '-B', '-m', 'unittest', '-q', *tests], cwd=tree, capture_output=True,
-                          timeout=300).returncode
+    try:  # no pipes: a holder a mutant leaves behind must not keep the run waiting
+        return subprocess.run([sys.executable, '-B', '-m', 'unittest', '-q', *tests], cwd=tree,
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=300).returncode
+    except subprocess.TimeoutExpired:
+        return 124  # a hang fails the tests
 
 
 def main() -> int:

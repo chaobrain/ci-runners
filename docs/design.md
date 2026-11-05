@@ -284,7 +284,8 @@ cpu|gpu|compile, gpus, gpu-mem-mib, memory, estimate-minutes}`. Optional inputs:
 project registry's by default) and `exclude` (hosts).
 
 Output `plan` gives, per part, `runs-on` (a label array), `fallback` (a label array or
-none) and `timeout-minutes`. The timeout is twice the estimate plus 30, scaled by the
+none) and `timeout-minutes`. Without `prefer`, every class tries the host that runs
+`place` first, then the inventory's other hosts in order (RUN-1: 3090b alone). The timeout is twice the estimate plus 30, scaled by the
 host's CPU slowdown (h100: 2.7), and at most 240.
 
 `place` probes each host over ssh: reachable, runner services active, proxy answering,

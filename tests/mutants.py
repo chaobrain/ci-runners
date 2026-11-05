@@ -26,6 +26,8 @@ OUT = 'ci_runners/outcome.py'
 GPU = 'ci_runners/gpus.py'
 PLA = 'ci_runners/place.py'
 SLO = 'ci_runners/slots.py'
+PRB = 'ci_runners/probe.py'
+GHB = 'ci_runners/github.py'
 REA = 'ci_runners/reaper.py'
 REG = 'setup/register.sh'
 INS = 'setup/install.sh'
@@ -42,6 +44,7 @@ TO = 'tests.test_outcome'
 TG = 'tests.test_gpus'
 TL = 'tests.test_place'
 TS = 'tests.test_slots'
+TQ = 'tests.test_probe_claim'
 TE = 'tests.test_reaper'
 TK = 'tests.test_scripts'
 
@@ -255,6 +258,22 @@ MUTANTS = [
     (UNI, " and os.path.dirname(m['path']) == unit_dir", "", [f'{TK}.Uninstall.test_each_unit_is_disabled_and_only_setups_files_go']),
     (UNI, "  systemctl --user disable --now \"$u\" >/dev/null 2>&1 || true", "  systemctl --user disable --now \"$u\" >/dev/null 2>&1",
      [f'{TK}.Uninstall.test_each_unit_is_disabled_and_only_setups_files_go']),
+    # place's probes and the claim step
+    (PRB, "        if m and m.group(1).startswith(role + '-'):", "        if m:", [f'{TQ}.Probe.test_the_local_probe']),
+    (PRB, "    ok = http_ok(h['proxy']['http_port'], timeout=20) if 'proxy' in h else True", "    ok = True",
+     [f'{TQ}.Probe.test_the_local_probe']),
+    (PRB, "reserved=d.get('reserved') is not False", "reserved=d.get('reserved') is True", [f'{TQ}.Probe.test_json_round_trip_and_fail_closed']),
+    (PRB, "reachable=d.get('reachable') is True", "reachable=bool(d.get('reachable'))", [f'{TQ}.Probe.test_json_round_trip_and_fail_closed']),
+    (PRB, "        return from_json(json.loads(r.stdout)) if r.returncode == 0 else place.Probe()",
+     "        return from_json(json.loads(r.stdout))", [f'{TQ}.Probe.test_remote_probe_over_ssh']),
+    (PRB, "        for f in concurrent.futures.as_completed(futs, timeout=bound):", "        for f in concurrent.futures.as_completed(futs):",
+     [f'{TQ}.Probe.test_a_slow_probe_skips_its_host_within_the_bound']),
+    (PRB, "and int(p[0]) in want", "", [f'{TQ}.Probe.test_the_local_probe']),
+    (GHB, "    if c.run:\n        target", "    if True:\n        target", [f'{TQ}.Claim.test_skip_posts_nothing']),
+    (GHB, "        if not c.run or now() >= deadline:", "        if True:", [f'{TQ}.Claim.test_the_wait_lets_a_local_claim_appear']),
+    (GHB, "            if e.code < 500 and e.code != 429:\n                break", "            if False:\n                break",
+     [f'{TQ}.Claim.test_api_retries_server_errors_only']),
+    (GHB, "    if not SHA.fullmatch(sha) or", "    if", [f'{TQ}.Claim.test_bad_inputs']),
     # the env allowlist
     (REM, "up.startswith(REFUSED_PREFIXES) or ", "", [f'{TR}.RemoteEnv.test_refused', f'{TR}.RemoteEnv.test_only_the_allowlist_passes']),
     (REM, "any(p in up for p in REFUSED_PARTS)", "any(p in name for p in REFUSED_PARTS)", [f'{TR}.RemoteEnv.test_refused']),

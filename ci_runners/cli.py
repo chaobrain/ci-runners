@@ -5,6 +5,9 @@
     ci-run plan|apply ...  host setup (setup/plan.sh, setup/apply.sh)
     ci-run runners         this host's runners: name, labels, class
     ci-run role            this host's role
+    ci-run claim ...       claim a head (actions/claim; design §4.1)
+    ci-run probe           this host's probe, as JSON (design §4.2)
+    ci-run place ...       place parts on hosts (actions/place; design §4.2)
 
 The inventory is ``$CI_RUNNERS_ETC/inventory.toml``, else ``~/data/ci-runners/etc``.
 """
@@ -43,6 +46,12 @@ def main(argv: list[str]) -> int:
         from ci_runners import reaper
         print(reaper.reap(load_inventory().host['data']))
         return 0
+    if cmd == 'claim':
+        from ci_runners import github
+        return github.main(args, etc_dir())
+    if cmd in ('probe', 'place'):
+        from ci_runners import probe
+        return probe.main(argv, load_inventory())
     if cmd in ('plan', 'apply', 'runners'):
         from ci_runners import setup
         return setup.main([cmd, *args])

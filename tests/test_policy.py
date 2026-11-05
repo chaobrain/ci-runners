@@ -248,6 +248,8 @@ class Load(unittest.TestCase):
             'visibility': POLICY.replace('visibility = "public"', 'visibility = "internal"'),
             'paused as str': POLICY.replace('paused = true', 'paused = "yes"'),
             'bot_dispatch as str': POLICY.replace('id = 1001\n', 'id = 1001\nbot_dispatch = "yes"\n'),
+            'bot_dispatch as int': POLICY.replace('id = 1001\n', 'id = 1001\nbot_dispatch = 1\n'),
+            'paused as int': POLICY.replace('paused = true', 'paused = 1'),
             'public bot_dispatch': POLICY.replace('id = 2002\n', 'id = 2002\nbot_dispatch = true\n'),
             'public extra events': POLICY.replace('id = 2002\n', 'id = 2002\nextra_events = ["pull_request_target"]\n'),
             'extra event malformed': POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["a b"]\n'),

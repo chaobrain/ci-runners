@@ -79,6 +79,8 @@ MUTANTS = [
     (POL, "        bot_dispatch = r.get('bot_dispatch', False)", "        bot_dispatch = r.get('bot_dispatch', True)", [f'{TP}.Refused.test_the_bot_dispatch_switch_is_off_by_default']),
     (POL, "        if bot_dispatch and vis == 'public':", "        if False:", [f'{TP}.Load.test_malformed_policies']),
     (POL, "        if type(bot_dispatch) is not bool:", "        if False:", [f'{TP}.Load.test_malformed_policies']),
+    (POL, "        if type(bot_dispatch) is not bool:", "        if not isinstance(bot_dispatch, int):", [f'{TP}.Load.test_malformed_policies']),
+    (POL, "        if type(paused) is not bool:", "        if not isinstance(paused, int):", [f'{TP}.Load.test_malformed_policies']),
     (POL, "        elif login not in policy.actors:", "        elif False:", [f'{TP}.Refused.test_unlisted_actors']),
     (POL, ", _ascii_lower(env.get('GITHUB_TRIGGERING_ACTOR'), _LOGIN)]", "]", [f'{TP}.Refused.test_unlisted_actors']),
     (POL, "        out.append(_login(event['sender'], 'login'))", "        pass", [f'{TP}.Refused.test_unlisted_actors']),

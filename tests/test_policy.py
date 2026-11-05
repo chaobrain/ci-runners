@@ -3,6 +3,7 @@ included: a fork head, a bot actor, an unlisted repository, ``pull_request_targe
 a public repository on a ``part`` runner (RUN-1 acceptance 1)."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
 import unittest
@@ -27,6 +28,7 @@ visibility = "private"
 paused = true
 """
 P = policy.load(POLICY)
+P_BOT = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nbot_dispatch = true\n'))
 P_TARGET = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["pull_request_target"]\n'))
 
 REPOS = {'chaobrain/brainspike': '1001', 'chaobrain/brainevent': '2002'}
@@ -65,10 +67,11 @@ class Accepted(unittest.TestCase):
         ev['sender']['login'] = 'CAROL'
         self.assertEqual(reason(P, env(event='workflow_dispatch', actor='carol', triggering='Alice'), ev), 'ok')
 
-    def test_the_bot_may_dispatch_in_a_private_repository(self):
+    def test_the_bot_may_dispatch_where_the_switch_is_on(self):
         bot = 'github-actions[bot]'
         for name in ('workflow_dispatch', 'repository_dispatch'):
-            self.assertEqual(reason(P, env(event=name, actor=bot), event('dispatch_bot')), 'ok', name)
+            self.assertEqual(reason(P_BOT, env(event=name, actor=bot), event('dispatch_bot')), 'ok', name)
+            self.assertEqual(reason(P_BOT, env(event=name, actor='mallory'), event('dispatch_bot')), 'actor', name)
 
     def test_a_public_repository_on_its_gpu_runners(self):
         for cls in ('gpu', 'h100'):
@@ -169,6 +172,14 @@ class Refused(unittest.TestCase):
         for cls in (None, '', 'PART', 'part ', 'h100-gpu0'):
             self.assertEqual(reason(P, env(cls=cls), event('pr_same_repo')), 'runner-class', cls)
 
+    def test_the_bot_dispatch_switch_is_off_by_default(self):
+        bot = 'github-actions[bot]'
+        self.assertFalse(P.repos['chaobrain/brainspike'].bot_dispatch)
+        for name in ('workflow_dispatch', 'repository_dispatch'):
+            self.assertEqual(reason(P, env(event=name, actor=bot), event('dispatch_bot')), 'bot', name)
+            self.assertEqual(reason(P, env(event=name, triggering=bot), event('dispatch_bot')), 'bot', name)
+        self.assertEqual(reason(P_BOT, env(event='push', actor=bot), event('push')), 'bot')  # on: dispatch only
+
     def test_the_bot(self):
         bot = 'github-actions[bot]'
         self.assertEqual(reason(P, env(event='push', actor=bot), event('push')), 'bot')
@@ -180,6 +191,11 @@ class Refused(unittest.TestCase):
         ev = event('push_public')
         self.assertEqual(reason(P, env('chaobrain/brainevent', 'workflow_dispatch', actor=bot, cls='gpu'),
                                 {**ev, 'sender': {'login': bot}}), 'bot')  # public: humans only
+        repos = dict(P.repos)  # even a public repository with the switch set (load refuses it) stays humans only
+        repos['chaobrain/brainevent'] = dataclasses.replace(repos['chaobrain/brainevent'], bot_dispatch=True)
+        self.assertEqual(reason(dataclasses.replace(P, repos=repos),
+                                env('chaobrain/brainevent', 'workflow_dispatch', actor=bot, cls='gpu'),
+                                {**ev, 'sender': {'login': bot}}), 'bot')
         self.assertEqual(reason(P, env(event='workflow_dispatch', actor='dependabot[bot]'),
                                 event('dispatch_member')), 'actor')  # another bot is just not listed
 
@@ -231,6 +247,10 @@ class Load(unittest.TestCase):
             'id zero': POLICY.replace('id = 1001', 'id = 0'),
             'visibility': POLICY.replace('visibility = "public"', 'visibility = "internal"'),
             'paused as str': POLICY.replace('paused = true', 'paused = "yes"'),
+            'bot_dispatch as str': POLICY.replace('id = 1001\n', 'id = 1001\nbot_dispatch = "yes"\n'),
+            'bot_dispatch as int': POLICY.replace('id = 1001\n', 'id = 1001\nbot_dispatch = 1\n'),
+            'paused as int': POLICY.replace('paused = true', 'paused = 1'),
+            'public bot_dispatch': POLICY.replace('id = 2002\n', 'id = 2002\nbot_dispatch = true\n'),
             'public extra events': POLICY.replace('id = 2002\n', 'id = 2002\nextra_events = ["pull_request_target"]\n'),
             'extra event malformed': POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["a b"]\n'),
             'extra event unchecked': POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["issue_comment"]\n'),

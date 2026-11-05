@@ -74,6 +74,17 @@ brainspike's private `docs/specs/arch/ci.md` names them.
    8. the manifest cost is chosen by RUN-2's measurement;
    9. `Default` is restricted to selected repositories;
    10. the org base permission stays `write` for now, to be tightened later.
+10. **The RUN-1b plan review (lead, 2026-11-05):**
+   1. "Bot dispatch: a per-repo switch, off by default. When it is off, a bot dispatch
+      goes through the actor allowlist." The policy's `bot_dispatch` (private
+      repositories only) is that switch; the bot is on no allowlist, so with the switch
+      off a bot-started job is refused (`bot`). §6.2.
+   2. "Tamper gap (§5.3, T13): accepted for private consumers for now. Before any
+      public repo uses the runners, the hook and policy move to a root-owned host
+      layer, as a separate task." §5.3 option (b).
+   3. "Hook path in job logs: accepted while only private brainspike uses the runners."
+      In the same task as item 2, before a public consumer: the hook moves to a generic
+      path such as `/opt/ci-runners`.
 
 ## Decisions of this spec
 
@@ -481,6 +492,10 @@ the exit is (b) or (c)); (b) a root-owned host layer: `releases/`, `hooks/`, `et
 account, with system units running as the CI account (`User=`), which moves setup to
 sudo; (c) ephemeral runners (`--ephemeral`) re-created from a root-owned template after
 each job. Recommendation: (a) now, (b) before a public repository uses the runners.
+Decided (lead, 2026-11-05; decision 10.2–10.3): (a) for private consumers now. Before
+any public repository uses the runners, one separate task moves the hook and the
+policy to a root-owned host layer (b) and the hook to a generic path such as
+`/opt/ci-runners`, so that job logs no longer show the CI account's home.
 
 **3090a, RUN-3**: as 3090b, with 5 runners (§5.1) and no ssh key to h100. Also:
 
@@ -591,7 +606,7 @@ a user unit on 3090b (measured 2026-11-05), so it is not used.
 
 | class | events accepted | actors | runner classes |
 |---|---|---|---|
-| private, allowlisted | `pull_request` (same repository), `push`, `workflow_dispatch`, `schedule`, `workflow_run`, `status`, `repository_dispatch` | `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR`, and for a pull request its author and for a push its pusher, all on the actor allowlist. The workflow bot is accepted only for `workflow_dispatch` and `repository_dispatch`. | all |
+| private, allowlisted | `pull_request` (same repository), `push`, `workflow_dispatch`, `schedule`, `workflow_run`, `status`, `repository_dispatch` | `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR`, and for a pull request its author and for a push its pusher, all on the actor allowlist. The workflow bot is accepted only for `workflow_dispatch` and `repository_dispatch`, and only where the repository's `bot_dispatch` switch is on (off by default; decision 10.1). | all |
 | public, allowlisted | `pull_request` with `head.repo.full_name == repository`, `push`, `workflow_dispatch` | as above, humans only (no bot) | `gpu`, `h100` |
 | any other repository, including ci-runners itself | none | none | none |
 

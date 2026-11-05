@@ -326,8 +326,8 @@ MUTANTS = [
      "                            if time.monotonic() >= deadline + 3600:\n                                return self._end(record, rec, a, unavailable='queue timeout: no CI slot')",
      [f'{TT}.Execute.test_a_held_slot_makes_the_part_wait_then_unavailable']),
     (PRT, "        return int((prev or {}).get('attempt', 1)) + 1", "        return 1", [f'{TT}.Execute.test_a_retry_counts_its_attempt']),
-    (PRT, "    child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj)",
-     "    child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj, close_fds=False)",
+    (PRT, "    child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj,",
+     "    child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj, close_fds=False,",
      [f'{TT}.Execute.test_the_command_does_not_inherit_the_slot']),
     (PRT, "            leases.release()\n", "            pass\n", [f'{TT}.Execute.test_cards_are_leased']),
     (PRT, "        if self.proc is not None:\n            raise SystemExit(128 + signum)", "        if False:\n            raise SystemExit(128 + signum)",
@@ -395,6 +395,10 @@ MUTANTS = [
     (INV, "return hashlib.sha256(_SALT + normalise(token).encode()).hexdigest()",
      "return hashlib.sha256(normalise(token).encode()).hexdigest()", [f'{TI}.Deny.test_hash_is_salted_and_normalised']),
     (INV, "    return token.strip(_SEP).lower()", "    return token.lower()", [f'{TI}.Deny.test_hash_is_salted_and_normalised']),
+    # the supervisor relays the command's output
+    (PRT, "preexec_fn=adj, stdout=subprocess.PIPE,\n                             stderr=subprocess.STDOUT)", "preexec_fn=adj)",
+     [f'{TT}.Execute.test_a_stopped_executor_leaves_the_part_to_salvage']),
+    (PRT, "                alive = False\n", "                return\n", [f'{TT}.Execute.test_a_stopped_executor_leaves_the_part_to_salvage']),
 ]
 
 

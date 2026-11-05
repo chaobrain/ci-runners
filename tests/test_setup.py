@@ -5,12 +5,18 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.server
 import io
 import json
 import os
 import pathlib
+import socket
+import subprocess
+import sys
 import tarfile
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -178,6 +184,60 @@ no_proxy = "localhost,127.0.0.1"
         self.assertTrue(setup.runner_complete(str(t / 'r2')))
         self.assertEqual((t / 'r2' / '.env').read_text(), 'kept')
         self.assertFalse((t / 'r2.ci-new').exists())
+
+    def test_the_download_waits_for_the_proxy_to_listen(self):
+        t = pathlib.Path(self.tmp.name)
+        app = t / 'app'
+        for f in setup.RUNNER_FILES:
+            (app / f).parent.mkdir(parents=True, exist_ok=True)
+            (app / f).write_text('x')
+        tgz = t / 'src.tgz'
+        with tarfile.open(tgz, 'w:gz') as tf:
+            for f in setup.RUNNER_FILES:
+                tf.add(app / f, arcname=f)
+        body = tgz.read_bytes()
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # a proxy for plain HTTP gets the absolute URL
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_a):
+                pass
+        with socket.socket() as s:
+            s.bind(('127.0.0.1', 0))
+            port = s.getsockname()[1]
+        servers = []
+
+        def late():  # the proxy starts listening a second after its unit started
+            time.sleep(1)
+            srv = http.server.HTTPServer(('127.0.0.1', port), H)
+            servers.append(srv)
+            srv.serve_forever()
+        threading.Thread(target=late, daemon=True).start()
+        try:
+            with mock.patch.object(setup, 'RUNNER_URL', 'http://example.invalid/runner.tgz'), \
+                    mock.patch.object(setup, 'RUNNER_SHA256', hashlib.sha256(body).hexdigest()):
+                setup._unpack(str(t / 'r'), str(t / 'cache' / 'runner.tgz'), port)
+        finally:
+            for srv in servers:
+                srv.shutdown()
+                srv.server_close()
+        self.assertTrue(setup.runner_complete(str(t / 'r')))
+
+    def test_a_proxy_that_never_listens_fails_within_the_bound(self):
+        with socket.socket() as s:
+            s.bind(('127.0.0.1', 0))
+            port = s.getsockname()[1]  # bound, never listening
+            code = (f'import sys; sys.path.insert(0, {str(ROOT)!r}); from ci_runners import setup; '
+                    f'setup.wait_port({port}, timeout=1, poll=0.2)')
+            t0 = time.monotonic()
+            r = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=20)
+            self.assertLess(time.monotonic() - t0, 10)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('nothing listens on the CI proxy port', r.stderr)
 
     def test_runner_names_and_labels(self):
         inv = inventory.load((self.etc / 'inventory.toml').read_text())

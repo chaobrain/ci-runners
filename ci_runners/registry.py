@@ -17,6 +17,8 @@ host, added by the lead. It holds what a consumer's inputs may leave out.
     env = "/abs/prefix/of/the/conda/env"  # PATH gets <env>/bin
     max_slots = 2                         # CI slots this project may hold here
     variables = { NAME = "value" }        # set in every part's environment
+    default = true                        # the host's default project: ci_slot.sh's tickets and
+                                          # holders are its, and its cap is the slot count (§7 rule 4)
 
 Pure but for ``load_file``.
 """

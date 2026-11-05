@@ -36,11 +36,15 @@ class Place(unittest.TestCase):
         out = plan([GPU, CPU, Part('k', 'compile', estimate_minutes=5)],
                    {'h100': h100(), '3090a': p3090(runners=frozenset({'part'})), '3090b': p3090()})
         self.assertEqual(out[0], {'id': 'g', 'runs-on': ['self-hosted', 'h100-gpu0'],
-                                  'fallback': ['self-hosted', 'part', '3090a'], 'timeout-minutes': 84})
+                                  'fallback': ['self-hosted', 'part', '3090a'], 'timeout-minutes': 84,
+                                  'gpus': 1, 'inner-timeout-minutes': 74})
         self.assertEqual(out[1], {'id': 'c', 'runs-on': ['self-hosted', 'part', '3090a'],
-                                  'fallback': ['self-hosted', 'part', '3090b'], 'timeout-minutes': 70})
+                                  'fallback': ['self-hosted', 'part', '3090b'], 'timeout-minutes': 70,
+                                  'gpus': 0, 'inner-timeout-minutes': 60})
         self.assertEqual(out[2], {'id': 'k', 'runs-on': ['self-hosted', 'compile', '3090b'], 'fallback': None,
-                                  'timeout-minutes': 40})
+                                  'timeout-minutes': 40, 'gpus': 0, 'inner-timeout-minutes': 30})
+        for e in out:  # the inner bound leaves the job room, and stays a valid part timeout
+            self.assertTrue(0 < e['inner-timeout-minutes'] <= e['timeout-minutes'] - pl.INNER_MARGIN)
 
     def test_a_host_that_fails_a_probe_gets_no_part(self):
         for bad in (dict(reachable=False), dict(proxy=False), dict(reserved=True), dict(quarantined=True),
@@ -53,8 +57,10 @@ class Place(unittest.TestCase):
 
     def test_no_candidate(self):
         out = plan([CPU], {'3090a': p3090(proxy=False), '3090b': p3090(reachable=False)})
-        self.assertEqual(out[0]['runs-on'], None)
+        self.assertEqual((out[0]['runs-on'], out[0]['timeout-minutes'], out[0]['inner-timeout-minutes'], out[0]['gpus']),
+                         (None, None, None, 0))
         self.assertEqual(out[0]['reason'], '3090a: proxy down; 3090b: unreachable')
+        self.assertEqual(plan([GPU], {})[0]['gpus'], 1)  # the part's own count, with or without a host
         self.assertEqual(plan([CPU], {}, prefer={})[0]['reason'], 'no host for this class')
         self.assertEqual(plan([CPU], {'3090a': p3090(), '3090b': p3090()}, exclude=['3090a', '3090b'])[0]['runs-on'],
                          None)

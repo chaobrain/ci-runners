@@ -14,6 +14,7 @@ POOL = {'cpu': 'part', 'gpu': 'part', 'compile': 'compile'}
 #: the pool of a remote (h100) host; each card has its own runner, ``h100-gpu<N>``
 REMOTE_POOL = 'h100'
 TIMEOUT_CAP = 240
+INNER_MARGIN = 10  # minutes of the job's bound kept outside the part's command (design §4.2)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -117,7 +118,8 @@ def _fits(part: Part, p: Probe, taken: Iterable[int]) -> bool:
 
 def place(parts: Sequence[Part], probes: Mapping[str, Probe], prefer: Mapping[str, Sequence[str]],
           exclude: Iterable[str] = ()) -> list[dict]:
-    """One entry per part, in order: ``{id, runs-on, fallback, timeout-minutes}``.
+    """One entry per part, in order: ``{id, runs-on, fallback, timeout-minutes, gpus,
+    inner-timeout-minutes}``; the inner bound is ``INNER_MARGIN`` below the job's.
 
     A part's candidates are the hosts of ``prefer[class]``, in that order, that are not
     excluded, pass their probes and fit it. It goes to the first candidate with room
@@ -135,15 +137,16 @@ def place(parts: Sequence[Part], probes: Mapping[str, Probe], prefer: Mapping[st
         if not cands:
             faults = {h: host_fault(probes.get(h)) or 'does not fit' for h in order}
             out.append({'id': part.id, 'runs-on': None, 'fallback': None, 'timeout-minutes': None,
-                        'reason': '; '.join(f'{h}: {f}' for h, f in faults.items()) or 'no host for this class'})
+                        'gpus': part.gpus, 'inner-timeout-minutes': None, 'reason': '; '.join(f'{h}: {f}' for h, f in faults.items()) or 'no host for this class'})
             continue
         room = [h for h in cands if probes[h].remote or load[h] < probes[h].slots]
         host = room[0] if room else cands[0]
         rest = cands[cands.index(host) + 1:] + [h for h in cands[:cands.index(host)]]
         fb = rest[0] if rest else None
+        job = timeout_minutes(part.estimate_minutes, probes[host].slowdown)
         entry = {'id': part.id, 'runs-on': _labels(part, host, probes[host], taken[host], take=True),
                  'fallback': _labels(part, fb, probes[fb], taken[fb], take=False) if fb else None,
-                 'timeout-minutes': timeout_minutes(part.estimate_minutes, probes[host].slowdown)}
+                 'timeout-minutes': job, 'gpus': part.gpus, 'inner-timeout-minutes': job - INNER_MARGIN}
         load[host] += 1
         out.append(entry)
     return out

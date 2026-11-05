@@ -83,8 +83,8 @@ jobs:
           project: myproj
           id: ${{ matrix.part.id }}
           command: scripts/run_part.sh ${{ matrix.part.id }}
-          timeout-minutes: 25     # inner bound: below the plan's, which is at least 30
-          # a GPU part also sets gpus; the plan names only id, runs-on, fallback, timeout-minutes
+          gpus: ${{ matrix.part.gpus }}
+          timeout-minutes: ${{ matrix.part.inner-timeout-minutes }}   # v1.1.0; below the job's
           results: "*.xml"
   # fallback: reads the ci-part-* artifacts and reruns each part whose `next` is retry
   # or fallback, once, on its `retry-on`. verdict (always, on light): salvage the parts

@@ -15,7 +15,7 @@ inputs:
     default: ''
 outputs:
   plan:
-    description: 'JSON list of {id, runs-on, fallback, timeout-minutes}'
+    description: 'JSON list of {id, runs-on, fallback, timeout-minutes, gpus, inner-timeout-minutes}'
     value: ${{ steps.place.outputs.plan }}
 runs:
   using: composite

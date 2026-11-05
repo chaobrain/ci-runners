@@ -24,6 +24,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 
@@ -33,6 +34,7 @@ from ci_runners import inventory, outcome, registry, slots
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 SLOT_CLASSES = ('part', 'compile', 'nightly')  # slot=full by default on these (design §4.3)
 KILL_GRACE = 30  # s between TERM and KILL at the inner timeout
+RELAY_DRAIN = 5  # s the relay may still copy once the command has ended
 #: the step's own files: the command must not write the part's outputs or the job's env
 STEP_FILES = frozenset({'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'GITHUB_ENV', 'GITHUB_PATH', 'GITHUB_STATE'})
 OUTPUTS = ('outcome', 'reason', 'next', 'retry-on', 'host', 'gpus', 'queue-seconds', 'run-seconds', 'verify',
@@ -116,12 +118,33 @@ def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, p
 # ------------------------------------------------------------------ the supervisor (in the scope)
 
 
+def _relay(src: int, dst: int) -> None:
+    """Copy ``src`` to ``dst`` until EOF; once ``dst`` fails, keep draining ``src``."""
+    alive = True
+    while True:
+        try:
+            chunk = os.read(src, 65536)
+        except OSError:
+            return
+        if not chunk:
+            return
+        while alive and chunk:
+            try:
+                chunk = chunk[os.write(dst, chunk):]
+            except OSError:  # the job's end closed: EPIPE (the supervisor ignores SIGPIPE)
+                alive = False
+
+
 def supervise(record: str, timeout: float, argv: Sequence[str]) -> int:
     """Run ``argv`` in its own session with OOM score +500, end it at ``timeout``, and
     write ``exit.json``. Runs inside the part's scope, in a session of its own, so the
     job's signals (a cancel, a stopped runner) do not reach it: only a stop of the scope
     does (job-completed, the reaper). It keeps the slot and lease fds it inherited for
-    the part's life; the command does not get them."""
+    the part's life; the command does not get them.
+
+    The command's output goes through a pipe this supervisor relays to its own: when the
+    job's end of it closes (a stopped runner), the relay drops the rest and the command
+    runs on, instead of dying of SIGPIPE at its next write."""
     try:
         os.setsid()
     except OSError:
@@ -143,7 +166,10 @@ def supervise(record: str, timeout: float, argv: Sequence[str]) -> int:
         with open('/proc/self/oom_score_adj', 'w') as f:
             f.write('500')
     timed_out = False
-    child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj)
+    child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT)
+    relay = threading.Thread(target=_relay, args=(child.stdout.fileno(), sys.stdout.fileno()), daemon=True)
+    relay.start()
     _write_json(os.path.join(record, 'scope.json'), {'supervisor': os.getpid(), 'child': child.pid})
     deadline = time.monotonic() + timeout
     while True:
@@ -164,6 +190,7 @@ def supervise(record: str, timeout: float, argv: Sequence[str]) -> int:
             except OSError:
                 pass
             deadline = time.monotonic() + KILL_GRACE
+    relay.join(timeout=RELAY_DRAIN)  # a background process the command left may hold the pipe
     oom_kills = 0
     try:
         with open('/proc/self/cgroup') as f:

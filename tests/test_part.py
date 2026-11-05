@@ -246,10 +246,10 @@ class Execute(Host):
                 f'ex = part.Executor(inv, {str(self.etc)!r}, json.loads(sys.argv[1]), release={str(ROOT)!r}, '
                 f'scope=False, poll=0.1); '
                 f'ex.execute(part.Inputs(project="p", id="long", timeout_minutes=1, '
-                f'command="sleep 3; touch \\"$CI_PART_DIR/done\\""))')
+                f'command="sleep 3; echo after the runner; head -c 8000000 /dev/zero; touch \\"$CI_PART_DIR/done\\""))')
         pathlib.Path(self.tmp.name, 'inv.toml').write_text(self.inv_text)
-        child = subprocess.Popen([sys.executable, '-I', '-c', code, json.dumps(self.env)], stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)  # a pipe would be held
+        child = subprocess.Popen([sys.executable, '-I', '-c', code, json.dumps(self.env)], stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, start_new_session=True)  # the runner's pipe
         rec = self.data / 'ci-runners/state/parts/org/repo/77-1/long-1'
         for _ in range(100):
             if (rec / 'scope.json').exists():
@@ -257,6 +257,7 @@ class Execute(Host):
             time.sleep(0.05)
         os.killpg(child.pid, signal.SIGTERM)  # the runner stops: it signals the step's process group
         self.assertEqual(child.wait(timeout=20), 128 + signal.SIGTERM)
+        child.stdout.close()  # the runner is gone: the command's next write meets a closed pipe
         self.assertFalse((rec / 'outcome.json').exists())
         fd = os.open(self.slot, os.O_WRONLY)
         try:

@@ -331,8 +331,10 @@ On 3090b and 3090a the command runs in
 `compile`), with OOM score +500. In the scope a supervisor runs the command, ends it at
 the inner timeout (TERM, then KILL after 30 s) and writes the exit and the scope's OOM
 kills into the record. The scope is not in the runner's cgroup, so a stopped runner
-leaves the part running and its record finishing: `salvage` reads it. The executor holds
-the CI slot and the GPU leases itself; the command does not inherit them.
+leaves the part running and its record finishing: `salvage` reads it. The supervisor
+relays the command's output to the job log; once the job's end of it is gone, it drops
+the rest, so the command never meets a closed pipe. The supervisor holds the CI slot and
+the GPU leases for the part's life; the command does not inherit them.
 
 | output | meaning |
 |---|---|

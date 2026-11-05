@@ -246,7 +246,7 @@ class Execute(Host):
                 f'ex = part.Executor(inv, {str(self.etc)!r}, json.loads(sys.argv[1]), release={str(ROOT)!r}, '
                 f'scope=False, poll=0.1); '
                 f'ex.execute(part.Inputs(project="p", id="long", timeout_minutes=1, '
-                f'command="sleep 3; echo after the runner; head -c 300000 /dev/zero; touch \\"$CI_PART_DIR/done\\""))')
+                f'command="sleep 3; echo after the runner; head -c 8000000 /dev/zero; touch \\"$CI_PART_DIR/done\\""))')
         pathlib.Path(self.tmp.name, 'inv.toml').write_text(self.inv_text)
         child = subprocess.Popen([sys.executable, '-I', '-c', code, json.dumps(self.env)], stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, start_new_session=True)  # the runner's pipe

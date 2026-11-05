@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import fcntl
 import json
+import signal
+import sys
+import time
 import os
 import pathlib
 import subprocess
@@ -92,9 +95,13 @@ class Execute(Host):
                          ('pass', 'none', '[]', 'false', '1'))
         self.assertEqual(json.loads(pathlib.Path(rec, 'outcome.json').read_text())['outcome'], 'pass')
         self.assertIn('### part `unit`', pathlib.Path(rec, 'summary.md').read_text())
+        self.assertEqual(o['summary'], 'org/repo/77-1/unit-1/summary.md')
+        self.assertNotIn('GITHUB_OUTPUT', env)  # the command cannot write the step's outputs
 
     def test_red_is_the_only_failing_exit(self):
-        code, out = self.execute(command='exit 3')
+        temp = pathlib.Path(self.tmp.name, 'runner-temp')
+        code, out = self.execute(env={**self.env, 'RUNNER_TEMP': str(temp)}, command='exit 3')
+        self.assertEqual(json.loads((temp / 'ci-runners/unit/outcome.json').read_text())['outcome'], 'red')  # the artifact
         self.assertEqual((code, out['outcome'], out['reason'], out['next']), (1, 'red', 'exit 3', 'none'))
 
     def test_the_inner_timeout_ends_the_command(self):
@@ -110,7 +117,9 @@ class Execute(Host):
                'an unknown project': (None, {'project': 'q'}),
                'a malformed project name': (None, {'project': '../p'}),
                'too many cards': (None, {'gpus': 3}),
-               'an endless timeout': (None, {'timeout_minutes': 241})}
+               'an endless timeout': (None, {'timeout_minutes': 241}),
+               'a negative card need': (None, {'gpu_mem_mib': -1}),
+               'a negative queue wait': (None, {'queue_timeout_minutes': -1})}
         for what, (env, kw) in bad.items():
             with self.assertRaises(part.Refused, msg=what):
                 self.execute(env=env, **kw)
@@ -133,7 +142,7 @@ class Execute(Host):
         self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no CI slot'))
         self.assertEqual(os.listdir(self.slot.parent / 's.queue') and
                          [n for n in os.listdir(self.slot.parent / 's.queue') if n.endswith('.wait')], [])
-        code, out = self.execute(command='true', slot='none')  # a part that takes no slot does not wait
+        code, out = self.execute(command='true', slot='none', id='unit2')  # a part that takes no slot does not wait
         self.assertEqual(out['outcome'], 'pass')
 
     def test_the_slot_is_held_while_the_command_runs(self):
@@ -153,6 +162,91 @@ class Execute(Host):
         self.assertTrue(second['record'].endswith('/unit-2'))
         with self.assertRaises(part.Refused):
             self.execute(attempt_of='hb:../../etc')
+
+    def test_an_id_runs_once_per_run(self):
+        self.execute(command='true')
+        with self.assertRaises(part.Refused):
+            self.execute(command='true')
+
+    def two_slots(self):
+        self.inv = inventory.load(self.inv_text.replace('slots = 1\n', 'slots = 2\n'))
+        (self.slot.parent / 's.2.lock').write_text('')
+
+    def test_a_local_holder_counts_as_the_default_project(self):
+        self.two_slots()
+        (self.etc / 'projects' / 'p.toml').write_text(
+            (self.etc / 'projects' / 'p.toml').read_text().replace('[hosts.hb]\n', '[hosts.hb]\nmax_slots = 1\n'))
+        fd = os.open(self.slot, os.O_WRONLY)  # a local run holds slot 1, with no project
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            code, out = self.execute(command='true')
+        finally:
+            os.close(fd)
+        self.assertEqual(out['outcome'], 'pass')  # slot 2 is free and p holds none
+
+    def test_the_cap_holds_with_a_free_slot(self):
+        self.two_slots()
+        (self.etc / 'projects' / 'p.toml').write_text(
+            (self.etc / 'projects' / 'p.toml').read_text().replace('[hosts.hb]\n', '[hosts.hb]\nmax_slots = 0\n'))
+        code, out = self.execute(command='true')
+        self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no CI slot'))
+
+    def test_cards_are_leased(self):
+        smi = '0, 24576, 576\n1, 24576, 24000\n'
+
+        def run(argv, **kw):
+            if argv[0] == 'nvidia-smi':
+                return subprocess.CompletedProcess(argv, 0, smi, '')
+            return subprocess.run(argv, **kw)
+        ex = part.Executor(self.inv, str(self.etc), self.env, release=str(ROOT), scope=False, poll=0.1, run=run)
+        code, out = ex.execute(part.Inputs(project='p', id='g', timeout_minutes=1, queue_timeout_minutes=0.02, gpus=1,
+                                           gpu_mem_mib=6000, slot='none',
+                                           command='echo $CUDA_VISIBLE_DEVICES > "$CI_PART_DIR/cards"'))
+        self.assertEqual((out['outcome'], out['gpus']), ('pass', '0'))  # card 1 has too little free
+        self.assertEqual(pathlib.Path(self.path(out), 'cards').read_text().strip(), '0')
+        leases = part.Leases(str(self.data / 'ci-runners/state/leases'))
+        self.assertEqual(leases.try_take(1, [0, 1], {0: 24000, 1: 24000}, 6000), [0])
+        other = part.Leases(str(self.data / 'ci-runners/state/leases'))
+        self.assertEqual(other.try_take(1, [0, 1], {0: 24000, 1: 24000}, 6000), [1])  # 0 is leased
+        self.assertIsNone(part.Leases(str(self.data / 'ci-runners/state/leases')).try_take(1, [0, 1],
+                                                                                          {0: 24000, 1: 24000}, 6000))
+        leases.release()
+        other.release()
+
+    def test_the_command_does_not_inherit_the_slot(self):
+        code, out = self.execute(command='for f in /proc/self/fd/*; do readlink "$f"; done > "$CI_PART_DIR/fds"')
+        self.assertNotIn(str(self.slot), pathlib.Path(self.path(out), 'fds').read_text())
+
+    def test_a_stopped_executor_leaves_the_part_to_salvage(self):
+        code = (f'import sys, json; sys.path.insert(0, {str(ROOT)!r}); from ci_runners import inventory, part; '
+                f'inv = inventory.load(open({str(self.tmp.name + "/inv.toml")!r}).read()); '
+                f'ex = part.Executor(inv, {str(self.etc)!r}, json.loads(sys.argv[1]), release={str(ROOT)!r}, '
+                f'scope=False, poll=0.1); '
+                f'ex.execute(part.Inputs(project="p", id="long", timeout_minutes=1, '
+                f'command="sleep 3; touch \\"$CI_PART_DIR/done\\""))')
+        pathlib.Path(self.tmp.name, 'inv.toml').write_text(self.inv_text)
+        child = subprocess.Popen([sys.executable, '-I', '-c', code, json.dumps(self.env)], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)  # a pipe would be held
+        rec = self.data / 'ci-runners/state/parts/org/repo/77-1/long-1'
+        for _ in range(100):
+            if (rec / 'scope.json').exists():
+                break
+            time.sleep(0.05)
+        os.killpg(child.pid, signal.SIGTERM)  # the runner stops: it signals the step's process group
+        self.assertEqual(child.wait(timeout=20), 128 + signal.SIGTERM)
+        self.assertFalse((rec / 'outcome.json').exists())
+        fd = os.open(self.slot, os.O_WRONLY)
+        try:
+            with self.assertRaises(BlockingIOError):  # the supervisor still holds the slot
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+        for _ in range(200):
+            if (rec / 'exit.json').exists():
+                break
+            time.sleep(0.05)
+        code, out = part.salvage(self.inv, 'hb:org/repo/77-1/long-1', self.env)
+        self.assertEqual((out['outcome'], (rec / 'done').exists()), ('pass', True))
 
 
 class Salvage(Host):
@@ -184,9 +278,30 @@ class Salvage(Host):
             (outside / n).write_bytes(pathlib.Path(self.path(out), n).read_bytes())
         link = self.data / 'ci-runners/state/parts/org/repo/77-1/linked'
         os.symlink(outside, link)
-        for ref in (f'hb:{outside}', 'hb:../../../outside', 'hb:org/repo/77-1/linked', 'other:org/repo/77-1/unit-1'):
+        lookalike = pathlib.Path(self.tmp.name, 'evil/org/repo/77-1/unit-1')  # shaped like one of ours
+        lookalike.mkdir(parents=True)
+        for n in ('record.json', 'outcome.json', 'exit.json'):
+            (lookalike / n).write_bytes((outside / n).read_bytes())
+        for ref in (f'hb:{outside}', 'hb:../../../outside', 'hb:org/repo/77-1/linked', 'other:org/repo/77-1/unit-1',
+                    f'hb:{lookalike}', 'hb:../../../../evil/org/repo/77-1/unit-1'):
             with self.assertRaises(part.Refused, msg=ref):
                 part.salvage(self.inv, ref, self.env)
+
+    def test_lost_is_not_kept_while_the_record_may_finish(self):
+        _, out = self.execute(command='exit 0')
+        rec = self.path(out)
+        os.unlink(os.path.join(rec, 'outcome.json'))
+        exit_json = pathlib.Path(rec, 'exit.json')
+        saved = exit_json.read_bytes()
+        exit_json.unlink()
+        self.assertEqual(part.salvage(self.inv, out['record'], self.env)[1]['outcome'], 'lost')
+        exit_json.write_bytes(saved)  # it finished after all
+        self.assertEqual(part.salvage(self.inv, out['record'], self.env)[1]['outcome'], 'pass')
+
+    def test_another_repository_cannot_salvage(self):
+        _, out = self.execute(command='exit 0')
+        with self.assertRaises(part.Refused):
+            part.salvage(self.inv, out['record'], {**self.env, 'GITHUB_REPOSITORY': 'org/other'})
 
 
 class Pure(unittest.TestCase):
@@ -205,6 +320,10 @@ class Pure(unittest.TestCase):
                          ['self-hosted', 'part', 'hb'])  # a reboot retries on the same host
         self.assertEqual(part.finish('/r', self.REC, {'rc': 143, 'boot_end': 'b1'}, stopped=True)['outcome'], 'stopped')
         self.assertEqual(part.finish('/r', self.REC, None)['outcome'], 'lost')
+        stopped = part.finish('/r', self.REC, {'rc': -15, 'signalled': True, 'boot_end': 'b1'})
+        self.assertEqual((stopped['outcome'], stopped['next']), ('stopped', 'none'))  # a scope stopped from outside
+        self.assertEqual(part.finish('/r', self.REC, {'rc': -15, 'signalled': True, 'timed_out': True,
+                                                      'boot_end': 'b1'})['outcome'], 'red')
 
     def test_scope_and_command(self):
         argv = part.scope_argv('ci-part-r-x-1.scope', 'p', '4G', ['sup'])
@@ -226,6 +345,15 @@ class Pure(unittest.TestCase):
         self.assertIn('verify=false\n', text)
         with self.assertRaises(ValueError):
             part.write_outputs({'reason': 'a\nb'}, '/dev/null')
+
+    def test_a_command_that_ignores_term_is_killed(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run(['python3', '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
+                                'from ci_runners import part; part.KILL_GRACE = 1; '
+                                'sys.exit(part.supervise(sys.argv[1], 1, ["bash", "-c", "trap \'\' TERM; sleep 30"]))',
+                                str(ROOT), d], capture_output=True, text=True, timeout=25)
+            ex = json.loads(pathlib.Path(d, 'exit.json').read_text())
+            self.assertEqual((r.returncode, ex['rc'], ex['timed_out']), (128 + 9, -9, True))
 
     def test_the_supervisor_records_the_exit(self):
         with tempfile.TemporaryDirectory() as d:
@@ -253,6 +381,9 @@ class Registry(unittest.TestCase):
                'env relative': ({'hosts': {'hb': {'memory_max': '2G', 'env': 'env'}}}, 'p'),
                'reserved var': ({'hosts': {'hb': {'memory_max': '2G', 'variables': {'LD_PRELOAD': 'x'}}}}, 'p'),
                'ci var': ({'hosts': {'hb': {'memory_max': '2G', 'variables': {'CI_RESUME': '1'}}}}, 'p'),
+               'PATH var': ({'hosts': {'hb': {'memory_max': '2G', 'variables': {'PATH': '/x'}}}}, 'p'),
+               'LD var': ({'hosts': {'hb': {'memory_max': '2G', 'variables': {'LD_BIND_NOW': '1'}}}}, 'p'),
+               'default as str': ({'hosts': {'hb': {'memory_max': '2G', 'default': 'yes'}}}, 'p'),
                'multi-line var': ({'hosts': {'hb': {'memory_max': '2G', 'variables': {'A': 'x\ny'}}}}, 'p'),
                'fallback': ({'fallback': {'part': []}}, 'p')}
         for what, (change, stem) in bad.items():

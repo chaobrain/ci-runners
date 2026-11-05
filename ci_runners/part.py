@@ -33,6 +33,8 @@ from ci_runners import inventory, outcome, registry, slots
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 SLOT_CLASSES = ('part', 'compile', 'nightly')  # slot=full by default on these (design §4.3)
 KILL_GRACE = 30  # s between TERM and KILL at the inner timeout
+#: the step's own files: the command must not write the part's outputs or the job's env
+STEP_FILES = frozenset({'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'GITHUB_ENV', 'GITHUB_PATH', 'GITHUB_STATE'})
 OUTPUTS = ('outcome', 'reason', 'next', 'retry-on', 'host', 'gpus', 'queue-seconds', 'run-seconds', 'verify',
            'record', 'summary', 'attempt', 'resume')
 
@@ -97,7 +99,7 @@ def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, p
              cards: Sequence[int], cpus: str, files: Mapping[str, str], slot: str, resume: bool) -> dict[str, str]:
     """The command's environment (design §4.3): the job's without our ``CI_*`` names,
     then the project's variables, then ours, which nothing overrides. Pure."""
-    env = {k: v for k, v in base.items() if not k.startswith('CI_')}
+    env = {k: v for k, v in base.items() if not k.startswith('CI_') and k not in STEP_FILES}
     env.update(project.variables)
     if project.env:
         env['PATH'] = f'{project.env}/bin:' + env.get('PATH', '/usr/bin:/bin')
@@ -116,7 +118,14 @@ def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, p
 
 def supervise(record: str, timeout: float, argv: Sequence[str]) -> int:
     """Run ``argv`` in its own session with OOM score +500, end it at ``timeout``, and
-    write ``exit.json``. Runs inside the part's scope."""
+    write ``exit.json``. Runs inside the part's scope, in a session of its own, so the
+    job's signals (a cancel, a stopped runner) do not reach it: only a stop of the scope
+    does (job-completed, the reaper). It keeps the slot and lease fds it inherited for
+    the part's life; the command does not get them."""
+    try:
+        os.setsid()
+    except OSError:
+        pass  # already a session leader
     child: subprocess.Popen | None = None
     signalled = []
 
@@ -252,7 +261,8 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
     """The outputs of a part from its record and exit (design §4.4). Pure but for nothing."""
     ev = outcome.Evidence(
         rc=None if ex is None else ex.get('rc'), timed_out=bool(ex and ex.get('timed_out')),
-        stopped=stopped, unavailable=unavailable, boot_start=str(rec.get('boot_start', '')),
+        stopped=stopped or bool(ex and ex.get('signalled') and not ex.get('timed_out')),
+        unavailable=unavailable, boot_start=str(rec.get('boot_start', '')),
         boot_end=str((ex or {}).get('boot_end', '')),
         oom_kills=int((ex or {}).get('oom_kills', 0)) + (1 if unit_result == 'oom-kill' else 0),
         start_epoch=float(rec.get('start_epoch', 0)))
@@ -271,7 +281,7 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
     return {'outcome': o.kind, 'reason': o.reason, 'next': h.next, 'retry-on': retry_on, 'host': role,
             'gpus': ','.join(str(c) for c in rec.get('cards', [])), 'queue-seconds': int(rec.get('queue_seconds', 0)),
             'run-seconds': run_seconds, 'verify': False,
-            'record': f'{role}:{record_ref(record)}', 'summary': os.path.join(record, 'summary.md'), 'attempt': attempt,
+            'record': f'{role}:{record_ref(record)}', 'summary': f'{record_ref(record)}/summary.md', 'attempt': attempt,
             'resume': h.resume}
 
 
@@ -280,6 +290,11 @@ def _publish(record: str, out: dict[str, object], part_id: str, env: Mapping[str
         f.write(summary_md(out, part_id))
     _write_json(os.path.join(record, 'outcome.json'), out)
     write_outputs(out, env.get('GITHUB_OUTPUT', ''))
+    if env.get('RUNNER_TEMP'):  # what the part action uploads as ci-part-<id>-<attempt>
+        art = os.path.join(env['RUNNER_TEMP'], 'ci-runners', part_id)
+        os.makedirs(art, exist_ok=True)
+        for n in ('outcome.json', 'summary.md'):
+            shutil.copyfile(os.path.join(record, n), os.path.join(art, n))
     if env.get('GITHUB_STEP_SUMMARY'):
         with open(env['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
             f.write(summary_md(out, part_id))
@@ -358,6 +373,8 @@ class Executor:
                 raise Refused(f'memory {memory} is above the project\'s {proj.memory_max} here')
         except registry.RegistryError as e:
             raise Refused(str(e)) from None
+        if a.gpu_mem_mib < 0 or a.queue_timeout_minutes < 0:
+            raise Refused('gpu-mem-mib and queue-timeout-minutes must not be negative')
         if not 0 <= a.gpus <= len(self.inv.host['gpus']):
             raise Refused(f'gpus must be in [0, {len(self.inv.host["gpus"])}] here')
         if a.lock not in ('none', 's', 'x', 'l'):
@@ -381,15 +398,14 @@ class Executor:
 
     # -- the run
 
-    def _on_signal(self, _signum, _frame) -> None:
+    def _on_signal(self, signum, _frame) -> None:
+        """The job is cancelled or its runner stops. Before the command starts: end
+        ``stopped``. Once it runs: leave it to its scope (job-completed stops it on a
+        cancel; after a stopped runner it finishes and ``salvage`` reads it) and exit
+        without outputs."""
         self.stopped = True
-        if self.unit and self.scope:
-            self.run(['systemctl', '--user', 'stop', '--no-block', self.unit], capture_output=True, timeout=30)
-        elif self.proc is not None:
-            try:
-                self.proc.send_signal(signal.SIGTERM)
-            except OSError:
-                pass
+        if self.proc is not None:
+            raise SystemExit(128 + signum)
 
     def execute(self, a: Inputs) -> tuple[int, dict[str, object]]:
         proj, memory = self.check(a)
@@ -397,6 +413,8 @@ class Executor:
         cls = self.env['CI_RUNNER_CLASS']
         attempt = self.attempt(a)
         record = self.record_dir(a, attempt)
+        if os.path.exists(os.path.join(record, 'record.json')):
+            raise Refused(f'part {a.id} already ran in this run (give each part its own id)')
         os.makedirs(record, mode=0o700, exist_ok=True)
         results = os.path.join(record, 'results')
         os.makedirs(results, mode=0o700, exist_ok=True)
@@ -425,9 +443,10 @@ class Executor:
                     return self._end(record, rec, a, unavailable='project queue full')
                 q.take_ticket(proj.name, f'part {a.id}')
                 try:
-                    caps = {proj.name: proj.max_slots}
+                    caps, default = registry.slot_caps(self.etc, self.inv.this, h['slots'])
+                    caps.setdefault(proj.name, proj.max_slots)
                     while slot_fd is None:
-                        slot_fd = q.try_take(proj.name, caps, default=proj.name)
+                        slot_fd = q.try_take(proj.name, caps, default=default)
                         if slot_fd is None:
                             if self.stopped:
                                 return self._end(record, rec, a, stopped=True)
@@ -438,7 +457,7 @@ class Executor:
                     if q.ticket and os.path.exists(q.ticket):
                         os.unlink(q.ticket)
                 slot_path = q.slots[q._index(slot_fd)]
-                os.set_inheritable(slot_fd, False)
+                os.set_inheritable(slot_fd, False)  # passed to the supervisor alone (pass_fds)
             cards: list[int] = []
             if a.gpus:
                 need = a.gpu_mem_mib or proj.gpu_mem_mib
@@ -469,7 +488,8 @@ class Executor:
             argv = scope_argv(self.unit, proj.name, memory, sup) if self.scope else sup
             if self.stopped:
                 return self._end(record, rec, a, stopped=True)
-            self.proc = self.spawn(argv, cwd=self.env.get('GITHUB_WORKSPACE') or os.getcwd(), env=env)
+            held = tuple(fd for fd in [slot_fd, *leases.fds] if fd is not None)
+            self.proc = self.spawn(argv, cwd=self.env.get('GITHUB_WORKSPACE') or os.getcwd(), env=env, pass_fds=held)
             self.proc.wait()
             unit_result = ''
             if self.scope:
@@ -528,6 +548,8 @@ def salvage(inv: inventory.Inventory, ref: str, env: Mapping[str, str], *, wait_
     rec = _read_json(os.path.join(record, 'record.json'))
     if rec is None:
         raise Refused('no part record there')
+    if not record_ref(record).lower().startswith(env.get('GITHUB_REPOSITORY', '').lower() + '/'):
+        raise Refused('the record is another repository\'s')
     done = _read_json(os.path.join(record, 'outcome.json'))
     if done is None:
         deadline = time.monotonic() + wait_seconds
@@ -537,8 +559,12 @@ def salvage(inv: inventory.Inventory, ref: str, env: Mapping[str, str], *, wait_
             if (r.stdout or '').strip() not in ('active', 'activating', 'deactivating'):
                 break
             time.sleep(poll)
-        done = finish(record, rec, _read_json(os.path.join(record, 'exit.json')))
-        _publish(record, done, str(rec.get('id', 'part')), env)
+        ex = _read_json(os.path.join(record, 'exit.json'))
+        done = finish(record, rec, ex)
+        if ex is not None:  # final: kept for the next reader
+            _publish(record, done, str(rec.get('id', 'part')), env)
+        else:  # lost for now: the record may still finish, so nothing is kept
+            write_outputs(done, env.get('GITHUB_OUTPUT', ''))
     else:
         write_outputs(done, env.get('GITHUB_OUTPUT', ''))
     return (1 if done['outcome'] == 'red' else 0), done

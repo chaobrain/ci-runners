@@ -70,6 +70,18 @@ class Reap(unittest.TestCase):
         self.assertTrue((outside / 'f').exists())
         self.assertFalse(os.path.lexists(self.base / 'state/parts/o/r/9-1'))
 
+    def test_a_linked_owner_or_repository_is_not_walked(self):
+        outside = self.data / 'outside'
+        (outside / 'repo/1-1').mkdir(parents=True)
+        (outside / 'repo/1-1/f').write_text('x')
+        t = self.now - 30 * DAY
+        for q in ('repo/1-1/f', 'repo/1-1', 'repo'):
+            os.utime(outside / q, (t, t))
+        (self.base / 'state/parts').mkdir(parents=True)
+        os.symlink(outside, self.base / 'state/parts/o')
+        reaper.reap(str(self.data), now=self.now)
+        self.assertTrue((outside / 'repo/1-1/f').exists())
+
     def test_nothing_there_is_fine(self):
         self.assertEqual(reaper.reap(str(self.data), now=self.now), 'reaper: removed 0 old entries')
 

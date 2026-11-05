@@ -44,6 +44,7 @@ UNITS = ('ci-runner@.service', 'ci-proxy.service', 'ci-proxy-check.service', 'ci
 RUNNER_FILES = ('config.sh', 'run.sh', os.path.join('bin', 'Runner.Listener'))
 # what goes into a unit file: one word each, so nothing can add a line
 PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,39}')
+CLIENT = re.compile(r'/[A-Za-z0-9._/-]+')
 MEMORY = re.compile(r'[1-9][0-9]*[KMGT]?|[1-9][0-9]?%|infinity')
 TIMERS = ('ci-proxy-check.timer', 'ci-reaper.timer')
 
@@ -176,6 +177,9 @@ def build(etc: str) -> Plan:
     plan.add('units:')
     if not isinstance(h['memory_max'], str) or not MEMORY.fullmatch(h['memory_max']):
         raise ValueError(f'memory_max must match {MEMORY.pattern}')
+    client = h.get('proxy', {}).get('client', '/bin/false')
+    if not isinstance(client, str) or not CLIENT.fullmatch(client):
+        raise ValueError(f'proxy.client must be an absolute path matching {CLIENT.pattern}')
     subs = {'CI_MEMORY_MAX': h['memory_max'], 'PROXY_CLIENT': h.get('proxy', {}).get('client', '/bin/false')}
     unit_dir = os.path.join(home, '.config', 'systemd', 'user')
     for name in UNITS:

@@ -139,6 +139,14 @@ no_proxy = "localhost,127.0.0.1"
             with self.assertRaises(ValueError, msg=(name, mem)):
                 setup.build(str(self.etc))
 
+    def test_the_proxy_client_is_one_absolute_path(self):
+        inv = self.etc / 'inventory.toml'
+        for bad in ('proxy-client', '/usr/bin/x -c /tmp/y', '/usr/bin/x\\nExecStartPre=/bin/y'):
+            inv.write_text(inv.read_text().replace('client = "/usr/bin/proxy-client"', f'client = "{bad}"'))
+            with self.assertRaises(ValueError, msg=bad):
+                setup.build(str(self.etc))
+            inv.write_text(inv.read_text().replace(f'client = "{bad}"', 'client = "/usr/bin/proxy-client"'))
+
     def test_the_runner_app_is_checked_and_unpacked_whole(self):
         t = pathlib.Path(self.tmp.name)
         app = t / 'app'

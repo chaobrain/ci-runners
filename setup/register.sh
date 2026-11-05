@@ -25,6 +25,8 @@ for r in "$@"; do
   labels=$(echo "$known" | awk -v n="$r" '$1 == n {print $2}')
   # the proxy settings, read as data: only these three names, nothing executed
   px=$(grep -E '^(https_proxy|http_proxy|no_proxy)=[A-Za-z0-9.:/,_-]*$' "$dir/.env" || true)
+  [ "$(echo "$px" | grep -c .)" = "$(grep -cE '^(https_proxy|http_proxy|no_proxy)=' "$dir/.env" || true)" ] ||
+    { echo "register.sh: $dir/.env has a proxy line that is not one word of [A-Za-z0-9.:/,_-]" >&2; exit 1; }
   # printf is a shell builtin: the token reaches the child's stdin, not an argv
   printf '%s\n' "$token" | (cd "$dir" && env -i PATH=/usr/bin:/bin HOME="$HOME" LANG=C.UTF-8 $px \
     /bin/sh -c 'IFS= read -r ACTIONS_RUNNER_INPUT_TOKEN && export ACTIONS_RUNNER_INPUT_TOKEN && exec ./config.sh "$@"' \

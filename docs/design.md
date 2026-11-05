@@ -625,7 +625,7 @@ bound).
 | T9 | The hook's output leaks inventory in public logs. | a reason code only; the inventory lint. The runner itself logs the hook's path (§5.3): the CI account's name is generic |
 | T10 | A hostile event payload targets the hook. | JSON parsing in `python -I`; no shell interpolation; fixtures with hostile strings |
 | T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the bot's and allowlisted actors' statuses; consumers audit merges (brainspike: daily) |
-| T13 | An accepted job (or its dependency) edits the host layer it owns: the hook, the policy, `.env` or the units, so later jobs pass unchecked. | private consumers only until the host layer is root-owned (§5.3, option (b)); the policy's hash in every hook line shows drift; the hook writes its log without following links or blocking on FIFOs |
+| T13 | An accepted job (or its dependency) edits the host layer it owns: the hook, the policy, `.env` or the units, so later jobs pass unchecked. | private consumers only until the host layer is root-owned (§5.3, option (b)); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs |
 | T12 | A burst of refused jobs blocks our runners. | refusal in under 10 s (RUN-1 acceptance); repo-level public runners do not share pools with private ones; the lead can pause a repository in the policy |
 
 ## 7. Scheduling and fairness

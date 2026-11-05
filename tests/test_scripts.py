@@ -72,6 +72,16 @@ class Register(unittest.TestCase):
         self.assertIn('enable --now ci-runner@r-light-1.service', calls)
         self.assertIn('enable --now ci-runner@r-part-1.service', calls)
 
+    def test_a_hostile_env_line_stops_registration(self):
+        _exe(self.bin / 'evil', f'#!/bin/sh\ncat > {self.out}/stolen\n')
+        env = self.home / 'data/actions-runner/r-part-1/.env'
+        env.write_text(env.read_text().replace('no_proxy=localhost,127.0.0.1', f'no_proxy=a {self.bin}/evil'))
+        r = self.register('r-part-1')
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('not one word', r.stderr)
+        self.assertFalse((self.out / 'stolen').exists())
+        self.assertFalse((self.out / 'r-part-1.argv').exists())
+
     def test_refusals(self):
         self.assertEqual(self.register('r-gpu-9').returncode, 2)
         self.assertEqual(self.register('r-light-1', token='').returncode, 2)
@@ -215,6 +225,14 @@ class Uninstall(unittest.TestCase):
             self.assertIn(f'--user disable --now {u}\n', calls)
         self.assertEqual(sorted(p.name for p in self.units.iterdir()), ['ci-mine.slice'])
         self.assertTrue((self.home / 'data/actions-runner/r-light-1/.env').exists())
+
+    def test_another_roles_inventory_is_refused(self):
+        r = subprocess.run(['sh', str(ROOT / 'setup/uninstall.sh'), 'other'],
+                           env={'HOME': str(self.home), 'PATH': f'{self.bin}:/usr/bin:/bin'},
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse((self.out / 'calls').exists())
+        self.assertEqual(len(list(self.units.iterdir())), 4)
 
     def test_a_unit_still_active_removes_nothing(self):
         (self.out / 'active').write_text('ci-reaper.timer\n')

@@ -2,6 +2,7 @@
 GitHub API stood in for."""
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import pathlib
@@ -9,6 +10,7 @@ import tempfile
 import time
 import unittest
 import urllib.error
+from unittest import mock
 
 from ci_runners import github, inventory, place, probe
 
@@ -101,13 +103,22 @@ files = {{ host_lock = "/tmp/h.lock", slot_lock = "/tmp/s.lock", slot_queue = "/
         self.assertEqual(place.host_fault(probe.from_json({'reachable': 'yes', 'proxy': True})), 'unreachable')
         self.assertEqual(place.host_fault(probe.from_json({'reachable': True, 'proxy': True})), 'reserved')
         self.assertEqual(probe.from_json([1]), place.Probe())
+        del d['quarantined']
+        self.assertTrue(probe.from_json(d).quarantined)
+        card = dict(probe.to_json(p)['cards'][0])
+        for drop, field, want in (('healthy', 'healthy', False), ('others', 'others', True)):
+            c = {k: v for k, v in card.items() if k != drop}
+            self.assertEqual(getattr(probe.from_json({**d, 'cards': [c]}).cards[0], field), want, drop)
+        self.assertFalse(probe.from_json({**d, 'cards': [{**card, 'healthy': 'false'}]}).cards[0].healthy)
+        hot = {k: v for k, v in card.items() if k != 'temp_c'}
+        self.assertEqual(probe.from_json({**d, 'cards': [hot]}), place.Probe())  # no temperature: the probe fails
 
     def test_remote_probe_over_ssh(self):
         good = json.dumps(probe.to_json(place.Probe(reachable=True, runners=frozenset({'part'}), proxy=True, slots=2)))
         fake = Fake(ssh=(0, good))
         self.assertTrue(probe.remote(self.inv, 'hc', run=fake).reachable)
         self.assertIn('BatchMode=yes', fake.calls[0])
-        self.assertIn('alias-y', fake.calls[0])
+        self.assertEqual(fake.calls[0][fake.calls[0].index('--') + 1], 'alias-y')
         self.assertFalse(probe.remote(self.inv, 'hc', run=Fake(ssh=(255, ''))).reachable)
         self.assertFalse(probe.remote(self.inv, 'hc', run=Fake(ssh=(1, good))).reachable)  # a failed probe's output
         self.assertFalse(probe.remote(self.inv, 'hc', run=Fake(ssh=(0, 'not json'))).reachable)
@@ -195,6 +206,14 @@ class Claim(unittest.TestCase):
         self.assertEqual(tries, [30, 30, 30])
         tries.clear()
 
+        def limited(req, timeout):
+            tries.append(timeout)
+            raise urllib.error.HTTPError(req.full_url, 429, 'x', {}, io.BytesIO())
+        with self.assertRaises(github.ApiError):
+            github.api('GET', 'https://x/y', 't', opener=limited, pause=0)
+        self.assertEqual(len(tries), 3)  # a rate limit is retried
+        tries.clear()
+
         def refused(req, timeout):
             tries.append(timeout)
             raise urllib.error.HTTPError(req.full_url, 403, 'x', {}, io.BytesIO())
@@ -216,6 +235,83 @@ class Claim(unittest.TestCase):
         self.assertEqual(github.api('POST', 'https://x/y', 'tk', {'a': 1}, opener=ok), [1])
         self.assertEqual(req_seen[0].get_header('Authorization'), 'Bearer tk')
         self.assertEqual(json.loads(req_seen[0].data), {'a': 1})
+
+    def test_statuses_are_read_page_by_page(self):
+        pages = {1: [self.status('pending', 'bob')] * 100, 2: [self.status('pending', 'alice')]}
+        urls = []
+
+        def call(method, url, token, body=None):
+            urls.append(url)
+            return pages.get(int(url.rsplit('page=', 1)[1]), []) if method == 'GET' else {}
+        c = self.claim(call)
+        self.assertEqual((c.run, c.reason), (False, 'claimed by a local run'))  # the claim on page 2 counts
+        self.assertEqual(len(urls), 2)
+        with self.assertRaises(github.ApiError):
+            github.statuses(lambda *a, **k: {'message': 'x'}, 'https://x/y?per_page=100', 't')
+
+
+class ClaimMain(unittest.TestCase):
+    """``ci-run claim`` end to end: the outputs a workflow reads, and exit 2 on failure."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.etc = t / 'etc'
+        self.etc.mkdir()
+        (self.etc / 'policy.toml').write_text('schema = 1\nactors = ["alice"]\n')
+        self.out = t / 'out'
+        self.out.write_text('')
+        self.env = {'GITHUB_REPOSITORY': 'org/repo', 'GITHUB_TOKEN': 't0k', 'GITHUB_RUN_ID': '5',
+                    'GITHUB_SHA': SHA, 'GITHUB_OUTPUT': str(self.out)}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def main(self, call, *extra, etc=None):
+        err = io.StringIO()
+        with mock.patch.dict('os.environ', self.env, clear=True), contextlib.redirect_stderr(err):
+            rc = github.main(['--context', 'p/ci', *extra], str(etc or self.etc), call=call)
+        return rc, self.out.read_text(), err.getvalue()
+
+    @staticmethod
+    def answer(statuses):
+        posts = []
+
+        def call(method, url, token, body=None):
+            if method == 'POST':
+                posts.append(body)
+                return {}
+            return statuses
+        return call, posts
+
+    def local_pending(self):
+        return [{'context': 'p/ci', 'state': 'pending', 'creator': {'login': 'alice'},
+                 'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}]
+
+    def test_an_api_error_exits_2_without_a_verdict(self):
+        def broken(*a, **k):
+            raise github.ApiError('GET /x: HTTP 502')
+        rc, out, err = self.main(broken)
+        self.assertEqual((rc, out), (2, ''))
+        self.assertIn('HTTP 502', err)
+        self.assertNotIn('t0k', err)
+
+    def test_a_skip_writes_run_false(self):
+        call, posts = self.answer(self.local_pending())
+        self.assertEqual(self.main(call)[:2], (0, 'run=false\nreason=claimed by a local run\n'))
+        self.assertEqual(posts, [])
+
+    def test_a_run_writes_run_true_and_posts(self):
+        call, posts = self.answer([])
+        self.assertEqual(self.main(call)[:2], (0, 'run=true\nreason=no verdict on this head\n'))
+        self.assertEqual([b['state'] for b in posts], ['pending'])
+
+    def test_hosted_ignores_the_allowlist(self):
+        call, posts = self.answer(self.local_pending())
+        rc, out, _ = self.main(call, '--hosted', etc=pathlib.Path(self.tmp.name) / 'absent')
+        self.assertEqual((rc, out.splitlines()[0]), (0, 'run=true'))  # no policy read; alice does not count
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(self.main(call, etc=pathlib.Path(self.tmp.name) / 'absent')[0], 2)  # self-hosted needs it
 
 
 if __name__ == '__main__':

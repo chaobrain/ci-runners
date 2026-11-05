@@ -56,12 +56,14 @@ def to_json(p: place.Probe) -> dict:
 
 
 def from_json(d: object) -> place.Probe:
-    """A probe from its JSON; anything malformed gives the failing probe. Pure."""
+    """A probe from its JSON; anything malformed gives the failing probe, and a field
+    it does not state counts against the host (a card without a temperature fails the
+    probe; one without ``healthy`` or ``others`` is unhealthy, in use by others). Pure."""
     try:
         if not isinstance(d, dict):
             raise TypeError
-        cs = tuple(place.Card(int(c['index']), int(c['free_mib']), float(c.get('temp_c', 0)),
-                              bool(c.get('others', False)), bool(c.get('healthy', True))) for c in d.get('cards', []))
+        cs = tuple(place.Card(int(c['index']), int(c['free_mib']), float(c['temp_c']),
+                              c.get('others') is not False, c.get('healthy') is True) for c in d.get('cards', []))
         return place.Probe(reachable=d.get('reachable') is True, runners=frozenset(str(r) for r in d.get('runners', [])),
                            proxy=d.get('proxy') is True, reserved=d.get('reserved') is not False,
                            quarantined=d.get('quarantined') is not False, slots=int(d.get('slots', 0)),
@@ -72,9 +74,12 @@ def from_json(d: object) -> place.Probe:
 
 
 def local(inv: inventory.Inventory, run: Callable = subprocess.run, http_ok: Callable = proxy.probe) -> place.Probe:
+    """This host's probe, within ``PROBE_BOUND`` (10 + 20 + 20 s at most). It does not
+    yet read a host reservation or the cards' use by others (§4.2): 3090b has neither;
+    both come with RUN-3, before 3090a joins."""
     h = inv.host
     r = run(['systemctl', '--user', 'list-units', '--type=service', '--state=active', '--plain', '--no-legend',
-             'ci-runner@*'], capture_output=True, text=True, timeout=30)
+             'ci-runner@*'], capture_output=True, text=True, timeout=10)
     pools = runner_pools(r.stdout or '', inv.this)
     ok = http_ok(h['proxy']['http_port'], timeout=20) if 'proxy' in h else True
     q = slots.SlotQueue(h['files']['slot_lock'], h['slots'], h['files']['slot_queue'])
@@ -87,7 +92,7 @@ def local(inv: inventory.Inventory, run: Callable = subprocess.run, http_ok: Cal
     if h['gpus']:
         try:
             g = run(['nvidia-smi', '--query-gpu=index,memory.total,memory.used,temperature.gpu',
-                     '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=30)
+                     '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=20)
             cs = cards(g.stdout or '', list(h['gpus'])) if g.returncode == 0 else ()
         except (OSError, subprocess.SubprocessError):
             cs = ()
@@ -101,7 +106,7 @@ def remote(inv: inventory.Inventory, role: str, run: Callable = subprocess.run) 
     h = inv.hosts[role]
     try:
         r = run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-o', 'ServerAliveInterval=30',
-                 '-o', 'ServerAliveCountMax=4', str(h['ssh']), 'data/ci-runners/releases/hook/bin/ci-run', 'probe'],
+                 '-o', 'ServerAliveCountMax=4', '--', str(h['ssh']), 'data/ci-runners/releases/hook/bin/ci-run', 'probe'],
                 capture_output=True, text=True, timeout=PROBE_BOUND)
         return from_json(json.loads(r.stdout)) if r.returncode == 0 else place.Probe()
     except (OSError, subprocess.SubprocessError, ValueError):

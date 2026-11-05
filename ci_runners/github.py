@@ -22,6 +22,7 @@ from collections.abc import Callable, Mapping
 from ci_runners import claim, policy
 
 TRIES, CALL_BOUND = 3, 30
+PAGE, PAGES = 100, 10
 SHA = re.compile(r'[0-9a-f]{40}')
 
 
@@ -51,6 +52,19 @@ def api(method: str, url: str, token: str, body: dict | None = None, opener: Cal
     raise ApiError(f'{method} {url.split("?")[0]}: {last}')
 
 
+def statuses(call: Callable, url: str, token: str) -> list:
+    """Every status of a head, newest first: up to ``PAGES`` pages of ``PAGE``."""
+    out: list = []
+    for page in range(1, PAGES + 1):
+        got = call('GET', f'{url}&page={page}', token)
+        if not isinstance(got, list):
+            raise ApiError('GET statuses: not a list')
+        out += got
+        if len(got) < PAGE:
+            break
+    return out
+
+
 def run_claim(env: Mapping[str, str], *, context: str, sha: str, wait_seconds: float, lapse_minutes: float,
               description: str, actors: frozenset[str], bot: str, hosted: bool,
               call: Callable = api, now: Callable = time.time, sleep: Callable = time.sleep,
@@ -59,10 +73,10 @@ def run_claim(env: Mapping[str, str], *, context: str, sha: str, wait_seconds: f
     base = env.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
     if not SHA.fullmatch(sha) or not re.fullmatch(r'[A-Za-z0-9-]+/[A-Za-z0-9._-]+', repo) or not token:
         raise ValueError('claim needs a full sha, GITHUB_REPOSITORY and GITHUB_TOKEN')
-    url = f'{base}/repos/{repo}/commits/{sha}/statuses?per_page=100'
+    url = f'{base}/repos/{repo}/commits/{sha}/statuses?per_page={PAGE}'
     deadline = now() + wait_seconds
     while True:
-        c = claim.decide(claim.parse_statuses(call('GET', url, token), context), actors=actors, bot=bot, now=now(),
+        c = claim.decide(claim.parse_statuses(statuses(call, url, token), context), actors=actors, bot=bot, now=now(),
                          lapse_minutes=lapse_minutes, hosted=hosted)
         if not c.run or now() >= deadline:
             break
@@ -74,7 +88,7 @@ def run_claim(env: Mapping[str, str], *, context: str, sha: str, wait_seconds: f
     return c
 
 
-def main(argv: list[str], etc: str) -> int:
+def main(argv: list[str], etc: str, call: Callable | None = None) -> int:
     p = argparse.ArgumentParser(prog='ci-run claim')
     p.add_argument('--context', required=True)
     p.add_argument('--sha', default='')
@@ -93,7 +107,7 @@ def main(argv: list[str], etc: str) -> int:
                 pol = policy.load(f.read(1 << 20))
             actors, bot = pol.actors, pol.bot
         c = run_claim(env, context=a.context, sha=sha, wait_seconds=a.wait_seconds, lapse_minutes=a.local_lapse_minutes,
-                      description=a.pending_description, actors=actors, bot=bot, hosted=a.hosted)
+                      description=a.pending_description, actors=actors, bot=bot, hosted=a.hosted, call=call or api)
     except (OSError, ValueError, ApiError) as e:
         print(f'ci-run claim: {e}', file=sys.stderr)
         return 2

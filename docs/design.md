@@ -291,7 +291,10 @@ host's CPU slowdown (h100: 2.7), and at most 240.
 `place` probes each host over ssh: reachable, runner services active, proxy answering,
 no reservation held, the slot queue, and per card the free memory, temperature, use by
 others and the h100 health gate. A probe gets 60 s and the whole step 5 min. A host
-that fails a probe gets no part. `place()` is a pure function of the probe results.
+that fails a probe gets no part. `place()` is a pure function of the probe results. A field a
+probe does not state counts against its host. RUN-1's probe reads neither a host
+reservation nor the cards' use by others; 3090b has neither, and RUN-3 adds both before
+3090a joins.
 
 ### 4.3 `part`: run one command (the executor)
 

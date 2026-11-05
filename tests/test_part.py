@@ -81,7 +81,8 @@ class Execute(Host):
         self.assertEqual((code, out['outcome'], out['next']), (0, 'pass', 'none'))
         self.assertEqual(out['record'], 'hb:org/repo/77-1/unit-1')  # no home path in the outputs
         rec = self.path(out)
-        env = dict(x.split('=', 1) for x in pathlib.Path(rec, 'env.txt').read_text().splitlines() if '=' in x)
+        env = dict(x.split('=', 1) for x in pathlib.Path(rec, 'work', 'env.txt').read_text().splitlines() if '=' in x)
+        self.assertEqual((env['CI_PART_DIR'], env['CI_RESULTS_DIR']), (f'{rec}/work', f'{rec}/work/results'))
         self.assertEqual(env['CI_PROJECT'], 'p')  # ours, not the job's
         self.assertEqual(env['P_HOST'], 'hb')
         self.assertEqual(env['CI_RUNNERS_HOST'], 'hb')
@@ -89,7 +90,7 @@ class Execute(Host):
         self.assertTrue(env['PATH'].startswith('/opt/env-p/bin:'))
         self.assertEqual((env['CUDA_VISIBLE_DEVICES'], env['CI_RESUME']), ('', '0'))
         self.assertEqual(env['CI_SLOT_HELD'], str(self.slot))  # a part runner takes a slot by default
-        self.assertEqual(pathlib.Path(rec, 'pwd.txt').read_text().strip(), str(self.ws))
+        self.assertEqual(pathlib.Path(rec, 'work', 'pwd.txt').read_text().strip(), str(self.ws))
         o = self.outputs()
         self.assertEqual((o['outcome'], o['next'], o['retry-on'], o['verify'], o['attempt']),
                          ('pass', 'none', '[]', 'false', '1'))
@@ -130,7 +131,7 @@ class Execute(Host):
         code, out = self.execute(command='touch "$CI_PART_DIR/ran"')
         self.assertEqual((code, out['outcome'], out['next']), (0, 'unavailable', 'fallback'))
         self.assertEqual(out['retry-on'], ['self-hosted', 'part', 'other'])
-        self.assertFalse(os.path.exists(os.path.join(self.path(out), 'ran')))
+        self.assertFalse(os.path.exists(os.path.join(self.path(out), 'work', 'ran')))
 
     def test_a_held_slot_makes_the_part_wait_then_unavailable(self):
         fd = os.open(self.slot, os.O_WRONLY)
@@ -148,7 +149,7 @@ class Execute(Host):
     def test_the_slot_is_held_while_the_command_runs(self):
         code, out = self.execute(command='flock -n "$CI_SLOT_HELD" true && echo free > "$CI_PART_DIR/probe" || '
                                          'echo held > "$CI_PART_DIR/probe"')
-        self.assertEqual(pathlib.Path(self.path(out), 'probe').read_text().strip(), 'held')
+        self.assertEqual(pathlib.Path(self.path(out), 'work', 'probe').read_text().strip(), 'held')
         fd = os.open(self.slot, os.O_WRONLY)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released at the end
@@ -162,6 +163,28 @@ class Execute(Host):
         self.assertTrue(second['record'].endswith('/unit-2'))
         with self.assertRaises(part.Refused):
             self.execute(attempt_of='hb:../../etc')
+
+    def test_an_older_local_ticket_keeps_its_turn(self):
+        q = self.slot.parent / 's.queue'
+        q.mkdir()
+        (q / '000000000001.ticket').write_text(f'1 {os.getpid()} {int(time.time())} /x local_ci.sh\n')  # ci_slot.sh's
+        _, out = self.execute(command='true')
+        self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no CI slot'))
+
+    def test_two_default_projects_are_refused(self):
+        original = (self.etc / 'projects' / 'p.toml').read_text()
+        for n in ('p', 'q'):
+            text = original.replace('name = "p"', f'name = "{n}"')
+            (self.etc / 'projects' / f'{n}.toml').write_text(text.replace('[hosts.hb]\n', '[hosts.hb]\ndefault = true\n'))
+        _, out = self.execute(command='true')
+        self.assertEqual(out['outcome'], 'unavailable')
+        self.assertIn('both the default project', out['reason'])
+
+    def test_the_command_cannot_rewrite_its_record(self):
+        _, out = self.execute(command='echo "{}" > "$CI_PART_DIR/../record.json" 2>/dev/null; '
+                                      'echo x > "$CI_PART_DIR/record.json"; exit 3')
+        self.assertEqual(out['outcome'], 'red')
+        self.assertEqual(json.loads(pathlib.Path(self.path(out), 'record.json').read_text())['id'], 'unit')
 
     def test_an_id_runs_once_per_run(self):
         self.execute(command='true')
@@ -203,7 +226,7 @@ class Execute(Host):
                                            gpu_mem_mib=6000, slot='none',
                                            command='echo $CUDA_VISIBLE_DEVICES > "$CI_PART_DIR/cards"'))
         self.assertEqual((out['outcome'], out['gpus']), ('pass', '0'))  # card 1 has too little free
-        self.assertEqual(pathlib.Path(self.path(out), 'cards').read_text().strip(), '0')
+        self.assertEqual(pathlib.Path(self.path(out), 'work', 'cards').read_text().strip(), '0')
         leases = part.Leases(str(self.data / 'ci-runners/state/leases'))
         self.assertEqual(leases.try_take(1, [0, 1], {0: 24000, 1: 24000}, 6000), [0])
         other = part.Leases(str(self.data / 'ci-runners/state/leases'))
@@ -215,7 +238,7 @@ class Execute(Host):
 
     def test_the_command_does_not_inherit_the_slot(self):
         code, out = self.execute(command='for f in /proc/self/fd/*; do readlink "$f"; done > "$CI_PART_DIR/fds"')
-        self.assertNotIn(str(self.slot), pathlib.Path(self.path(out), 'fds').read_text())
+        self.assertNotIn(str(self.slot), pathlib.Path(self.path(out), 'work', 'fds').read_text())
 
     def test_a_stopped_executor_leaves_the_part_to_salvage(self):
         code = (f'import sys, json; sys.path.insert(0, {str(ROOT)!r}); from ci_runners import inventory, part; '
@@ -246,7 +269,7 @@ class Execute(Host):
                 break
             time.sleep(0.05)
         code, out = part.salvage(self.inv, 'hb:org/repo/77-1/long-1', self.env)
-        self.assertEqual((out['outcome'], (rec / 'done').exists()), ('pass', True))
+        self.assertEqual((out['outcome'], (rec / 'work' / 'done').exists()), ('pass', True))
 
 
 class Salvage(Host):

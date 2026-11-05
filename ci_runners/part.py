@@ -413,11 +413,14 @@ class Executor:
         cls = self.env['CI_RUNNER_CLASS']
         attempt = self.attempt(a)
         record = self.record_dir(a, attempt)
-        if os.path.exists(os.path.join(record, 'record.json')):
-            raise Refused(f'part {a.id} already ran in this run (give each part its own id)')
-        os.makedirs(record, mode=0o700, exist_ok=True)
-        results = os.path.join(record, 'results')
-        os.makedirs(results, mode=0o700, exist_ok=True)
+        os.makedirs(os.path.dirname(record), mode=0o700, exist_ok=True)
+        try:
+            os.mkdir(record, 0o700)  # atomic: two runs of one id cannot both pass
+        except FileExistsError:
+            raise Refused(f'part {a.id} already ran in this run (give each part its own id)') from None
+        work = os.path.join(record, 'work')  # the command's CI_PART_DIR: it cannot rewrite the record
+        results = os.path.join(work, 'results')
+        os.makedirs(results, mode=0o700)
         fallback = list(proj.fallback.get(cls, ()))
         rec: dict[str, object] = {
             'project': proj.name, 'id': a.id, 'class': cls, 'host': self.inv.this, 'runner': self.env.get('RUNNER_NAME', ''),
@@ -443,7 +446,10 @@ class Executor:
                     return self._end(record, rec, a, unavailable='project queue full')
                 q.take_ticket(proj.name, f'part {a.id}')
                 try:
-                    caps, default = registry.slot_caps(self.etc, self.inv.this, h['slots'])
+                    try:
+                        caps, default = registry.slot_caps(self.etc, self.inv.this, h['slots'])
+                    except registry.RegistryError as e:
+                        return self._end(record, rec, a, unavailable=f'registry: {e}')
                     caps.setdefault(proj.name, proj.max_slots)
                     while slot_fd is None:
                         slot_fd = q.try_take(proj.name, caps, default=default)
@@ -473,7 +479,7 @@ class Executor:
                     time.sleep(self.poll)
             rec.update(queue_seconds=round(time.monotonic() - t0), cards=cards, slot=slot_path, run_epoch=time.time())
             cpus = str(h.get('cpus') or len(os.sched_getaffinity(0)))
-            env = part_env(self.env, role=self.inv.this, project=proj, part_dir=record, results=results, cards=cards,
+            env = part_env(self.env, role=self.inv.this, project=proj, part_dir=work, results=results, cards=cards,
                            cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume)
             inner = command_argv(a.command, compile_part=cls == 'compile', lock=a.lock,
                                  lock_bin=os.path.join(self.release, 'bin', 'ci-lock'), host_lock=h['files']['host_lock'])
@@ -562,7 +568,8 @@ def salvage(inv: inventory.Inventory, ref: str, env: Mapping[str, str], *, wait_
         ex = _read_json(os.path.join(record, 'exit.json'))
         done = finish(record, rec, ex)
         if ex is not None:  # final: kept for the next reader
-            _publish(record, done, str(rec.get('id', 'part')), env)
+            pid = str(rec.get('id', ''))
+            _publish(record, done, pid if ID.fullmatch(pid) else 'part', env)
         else:  # lost for now: the record may still finish, so nothing is kept
             write_outputs(done, env.get('GITHUB_OUTPUT', ''))
     else:

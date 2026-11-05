@@ -161,7 +161,9 @@ def slot_caps(etc: str, role: str, slots: int) -> tuple[dict[str, int], str]:
         except RegistryError:
             continue
         caps[p.name] = p.max_slots
-        if p.default and not default:
+        if p.default:
+            if default:
+                raise RegistryError(f'{default} and {p.name} are both the default project here')
             default = p.name
     caps[default] = slots
     return caps, default

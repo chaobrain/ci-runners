@@ -70,6 +70,7 @@ class Repo:
     paused: bool = False
     extra_events: frozenset[str] = frozenset()  # private only: events beyond PRIVATE_EVENTS
     bot_dispatch: bool = False  # private only: the bot may start BOT_EVENTS (lead, 2026-11-05)
+    org_members: bool = False  # set by ``with_snapshot`` only: the org's members may run here too
 
 
 @dataclasses.dataclass(frozen=True)
@@ -98,6 +99,7 @@ class Policy:
     bot: str = 'github-actions[bot]'
     digest: str = ''  # sha256 of the policy file, printed (shortened) with every decision
     org: Org | None = None  # schema 2: merge the org snapshot (``with_snapshot``)
+    members: frozenset[str] = frozenset()  # the snapshot's members: actors of ``org_members`` repositories only
     snapshot_digest: str = ''  # set by ``with_snapshot``; printed beside the policy's
 
 
@@ -116,7 +118,7 @@ def _ascii_lower(s: object, pattern: re.Pattern[str]) -> str | None:
 
 
 def load(data: bytes | str) -> Policy:
-    """Parse ``policy.toml`` (schema 1). Raises PolicyError on anything unexpected."""
+    """Parse ``policy.toml`` (schema 1 or 2). Raises PolicyError on anything unexpected."""
     raw = data.encode() if isinstance(data, str) else data
     try:
         doc = tomllib.loads(raw.decode('utf-8'))
@@ -232,10 +234,13 @@ def load_snapshot(data: bytes | str) -> Snapshot:
 def with_snapshot(policy: Policy, snap: Snapshot, now: float) -> Policy:
     """``policy`` with the org snapshot merged in, by its ``[org]`` table (design §6.5):
 
-    - the snapshot's members join ``actors`` if ``members``;
     - each snapshot repository that the policy does not list joins ``repos`` as private
       if ``private_repositories``. A listed one keeps the policy's entry, so the lead
-      can pause it, and a public one is never made private.
+      can pause it, and a public one is never made private;
+    - if ``members``, the snapshot's members may act in the org's private repositories
+      of the snapshot (``Repo.org_members``), and only there: a repository listed by hand
+      is open to them only if it is private and the snapshot holds it with the same id.
+      A public repository, or any other listed one, keeps the hand-kept actors alone.
 
     Raises StaleSnapshot when the snapshot is older than ``max_age_minutes`` or more
     than ``CLOCK_SKEW`` seconds in the future, and PolicyError when it is another
@@ -248,13 +253,17 @@ def with_snapshot(policy: Policy, snap: Snapshot, now: float) -> Policy:
         raise PolicyError('org snapshot: another org')
     if not now - org.max_age_minutes * 60 <= snap.fetched_at <= now + CLOCK_SKEW:
         raise StaleSnapshot('org snapshot: stale')
-    actors = policy.actors | snap.members if org.members else policy.actors
     repos = dict(policy.repos)
     if org.private_repositories:
         for name, rid in snap.repos.items():
             if name != SELF and name not in repos:
                 repos[name] = Repo(name, rid, 'private')
-    return dataclasses.replace(policy, actors=frozenset(actors), repos=repos, snapshot_digest=snap.digest)
+    members = snap.members if org.members else frozenset()
+    if members:
+        for name, repo in repos.items():
+            if repo.visibility == 'private' and snap.repos.get(name) == repo.id and name != SELF:
+                repos[name] = dataclasses.replace(repo, org_members=True)
+    return dataclasses.replace(policy, repos=repos, members=members, snapshot_digest=snap.digest)
 
 
 def _repo_matches(r: object, repo: Repo) -> bool:
@@ -345,9 +354,17 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
         if login == policy.bot:  # on no allowlist: passes only where the repository's switch is on
             if public or not repo.bot_dispatch or event_name not in BOT_EVENTS:
                 return no('bot')
-        elif login not in policy.actors:
+        elif login not in policy.actors and not (repo.org_members and login in policy.members):
             return no('actor')
     return Decision(True, 'ok')
+
+
+def actors_for(policy: Policy, repository: str) -> frozenset[str]:
+    """The logins that may act in ``repository`` (as ``decide`` counts them, the bot
+    aside): the hand-kept actors, plus the org's members where the snapshot opened the
+    repository to them. ``claim`` counts these logins' statuses. Pure."""
+    repo = policy.repos.get(_ascii_lower(repository, _REPO) or '')
+    return policy.actors | policy.members if repo is not None and repo.org_members else policy.actors
 
 
 def line(decision: Decision, policy_digest: str, snapshot_digest: str = '') -> str:

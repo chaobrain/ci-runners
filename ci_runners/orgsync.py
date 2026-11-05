@@ -42,23 +42,24 @@ def snapshot(org: str, members: list, repos: list, now: float) -> dict:
     """The ``org.json`` document from the API's member and repository lists. Pure.
 
     Members are users (``type == "User"``); a repository counts only if the API states
-    it private and it belongs to ``org``. Raises SyncError on an item without a login,
-    a name or an id, and on an empty member list (an org always has one; an empty list
-    would refuse everyone).
+    it private and it belongs to ``org``. Raises SyncError on an item without an ASCII
+    login, name or an id, and on an empty member list (an org always has one; an empty
+    list would refuse everyone). Names are checked as ASCII before they are lower-cased.
     """
     org = org.lower()
     logins = set()
     for m in members:
-        if not isinstance(m, dict) or not isinstance(m.get('login'), str):
-            raise SyncError('a member without a login')
+        if not isinstance(m, dict) or not isinstance(m.get('login'), str) or not m['login'].isascii():
+            raise SyncError('a member without an ASCII login')
         if m.get('type', 'User') == 'User':
             logins.add(m['login'].lower())
     if not logins:
         raise SyncError('no members')
     out = {}
     for r in repos:
-        if not isinstance(r, dict) or not isinstance(r.get('full_name'), str) or type(r.get('id')) is not int:
-            raise SyncError('a repository without a name or an id')
+        if (not isinstance(r, dict) or not isinstance(r.get('full_name'), str) or not r['full_name'].isascii()
+                or type(r.get('id')) is not int):
+            raise SyncError('a repository without an ASCII name or an id')
         name = r['full_name'].lower()
         if r.get('private') is True and name.startswith(org + '/'):
             out[name] = r['id']
@@ -71,16 +72,24 @@ def snapshot(org: str, members: list, repos: list, now: float) -> dict:
 def fetch(org: str, token: str, call: Callable = github.api, base: str = 'https://api.github.com',
           now: Callable = time.time) -> dict:
     base = base.rstrip('/')
+    started = now()  # the snapshot is as old as its first page: a removal during the fetch counts
     members = pages(call, f'{base}/orgs/{org}/members?per_page={PAGE}', token)
     repos = pages(call, f'{base}/orgs/{org}/repos?type=private&per_page={PAGE}', token)
-    return snapshot(org, members, repos, now())
+    return snapshot(org, members, repos, started)
 
 
 def write(etc: str, doc: dict) -> str:
-    """Write ``etc/org.json`` atomically, mode 600: a temporary file, then a rename. The
-    temporary file is created exclusively and without following a link."""
+    """Write ``etc/org.json`` atomically, mode 600: a temporary file, then a rename and
+    an fsync of ``etc``. The temporary file is created exclusively and without following
+    a link; those a killed run left behind are removed first (unlink follows no link)."""
     path = os.path.join(etc, 'org.json')
     tmp = f'{path}.{os.getpid()}.tmp'
+    for name in os.listdir(etc):
+        if name.startswith('org.json.') and name.endswith('.tmp'):
+            try:
+                os.unlink(os.path.join(etc, name))
+            except OSError:
+                pass
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -89,6 +98,11 @@ def write(etc: str, doc: dict) -> str:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        dfd = os.open(etc, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -105,8 +119,9 @@ def main(etc: str, call: Callable = github.api, now: Callable = time.time) -> in
         if pol.org is None:
             print('ci-run org-sync: the policy has no [org] table: nothing to sync', file=sys.stderr)
             return 0
-        with open(os.path.join(etc, 'orgsync.token'), encoding='ascii') as f:
-            token = f.read(MAX_TOKEN + 1).strip()
+        with open(os.path.join(etc, 'orgsync.token'), 'rb') as f:
+            raw = f.read(MAX_TOKEN + 2)
+        token = raw.strip().decode('ascii') if raw.isascii() else ''  # no byte of it reaches the journal
         if not token or len(token) > MAX_TOKEN or any(c.isspace() for c in token):
             raise SyncError('orgsync.token is empty or malformed')
         doc = fetch(pol.org.name, token, call, os.environ.get('GITHUB_API_URL', 'https://api.github.com'), now)

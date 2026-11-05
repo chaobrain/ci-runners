@@ -7,8 +7,11 @@ import os
 import pathlib
 import stat
 import tempfile
+import contextlib
+import io
 import time
 import unittest
+import unittest.mock
 
 from ci_runners import github, hook, orgsync, policy
 from tests.test_policy import EVENTS, event, reason
@@ -70,6 +73,29 @@ class Merge(unittest.TestCase):
         ev = retarget(event('pr_same_repo'), 'chaobrain/newproj', 5005)
         ev['sender']['login'] = ev['pull_request']['user']['login'] = 'eve'
         self.assertEqual(reason(MERGED, env(event='pull_request', actor='eve'), ev), 'ok')
+
+    def test_members_act_only_in_the_snapshots_private_repositories(self):
+        # a hand-listed public repository keeps the hand-kept actors alone
+        ev = push(name='chaobrain/brainevent', rid=2002)
+        self.assertEqual(reason(MERGED, env('chaobrain/brainevent', '2002', cls='h100'), ev), 'actor')
+        self.assertEqual(reason(MERGED, env('chaobrain/brainevent', '2002', actor='alice', cls='h100'),
+                                push('alice', 'chaobrain/brainevent', 2002)), 'ok')
+        # a hand-listed private repository: open to members only if the snapshot holds it with its id
+        text = POLICY2 + ('[repositories."chaobrain/handkept"]\nid = 6006\nvisibility = "private"\n'
+                          '[repositories."chaobrain/moved"]\nid = 7007\nvisibility = "private"\n')
+        snap2 = snap(repositories={**SNAP['repositories'], 'chaobrain/moved': 7008})
+        m = policy.with_snapshot(policy.load(text), snap2, NOW)
+        self.assertEqual(reason(m, env('chaobrain/handkept', '6006'), push(name='chaobrain/handkept', rid=6006)),
+                         'actor')
+        self.assertEqual(reason(m, env('chaobrain/moved', '7007'), push(name='chaobrain/moved', rid=7007)), 'actor')
+        self.assertEqual(policy.actors_for(m, 'chaobrain/handkept'), frozenset({'alice'}))
+        self.assertEqual(policy.actors_for(m, 'ChaoBrain/NewProj'), frozenset({'alice', 'dave', 'eve'}))
+        self.assertEqual(policy.actors_for(m, 'chaobrain/nowhere'), frozenset({'alice'}))
+        snap3 = snap(repositories={**SNAP['repositories'], 'chaobrain/handkept': 6006})
+        m = policy.with_snapshot(policy.load(text), snap3, NOW)
+        self.assertTrue(m.repos['chaobrain/handkept'].org_members)
+        self.assertEqual(reason(m, env('chaobrain/handkept', '6006'), push(name='chaobrain/handkept', rid=6006)), 'ok')
+        self.assertFalse(m.repos['chaobrain/brainevent'].org_members)  # the snapshot lists it, but it is public
 
     def test_without_the_merge_nothing_of_the_snapshot_counts(self):
         self.assertEqual(reason(P2, env(), push()), 'repository')
@@ -270,6 +296,16 @@ class Hook(unittest.TestCase):
             os.environ.update(saved)
         self.assertEqual(code, 0)
         self.assertEqual([m for m, _ in calls], ['GET'])  # eve's green counts: skipped, nothing posted
+        (self.etc / 'org.json').write_bytes(b' ' * ((4 << 20) + 1))
+        os.environ.update({'GITHUB_REPOSITORY': 'chaobrain/newproj', 'GITHUB_TOKEN': 't', 'GITHUB_OUTPUT': ''})
+        try:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                code = github.main(['--context', 'newproj/ci', '--sha', 'a' * 40], str(self.etc), call=call)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertEqual(code, 2)
+        self.assertIn('larger than 4 MiB', err.getvalue())
 
 
 def api_pages(members, repos):
@@ -300,7 +336,19 @@ class Sync(unittest.TestCase):
         self.assertNotIn('ci-app', doc['members'])
         self.assertEqual(doc['repositories'], {'chaobrain/private1': 11, 'chaobrain/private2': 13})
         self.assertTrue(any('/orgs/chaobrain/repos?type=private&' in u for u in calls))
+        self.assertTrue(any('/orgs/chaobrain/members?' in u for u in calls))  # members: no outside collaborators
         self.assertEqual(policy.load_snapshot(json.dumps(doc)).fetched_at, NOW)
+
+    def test_strict_fields(self):
+        with self.assertRaises(orgsync.SyncError):
+            orgsync.snapshot('chaobrain', [{'login': 'dav\u212a', 'type': 'User'}], [], NOW)
+        with self.assertRaises(orgsync.SyncError):
+            orgsync.snapshot('chaobrain', self.MEMBERS, [{'full_name': 'chaobrain/\u212aa', 'id': 1, 'private': True}], NOW)
+        doc = orgsync.snapshot('chaobrain', self.MEMBERS, [{'full_name': 'chaobrain/x', 'id': 1, 'private': 'yes'}], NOW)
+        self.assertEqual(doc['repositories'], {})  # only a stated private counts
+        clock = iter([NOW, NOW + 400])
+        call, _ = api_pages(self.MEMBERS, self.REPOS)
+        self.assertEqual(orgsync.fetch('chaobrain', 'tok', call, now=lambda: next(clock))['fetched_at'], NOW)
 
     def test_a_bad_fetch_raises(self):
         with self.assertRaises(orgsync.SyncError):
@@ -320,7 +368,8 @@ class Sync(unittest.TestCase):
             (pathlib.Path(d) / 'policy.toml').write_text(POLICY2)
             (pathlib.Path(d) / 'orgsync.token').write_text('tok\n')
             call, _ = api_pages(self.MEMBERS, self.REPOS)
-            self.assertEqual(orgsync.main(d, call, now=lambda: NOW), 0)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(orgsync.main(d, call, now=lambda: NOW), 0)
             path = pathlib.Path(d) / 'org.json'
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             before = path.read_bytes()
@@ -337,6 +386,12 @@ class Sync(unittest.TestCase):
             self.assertEqual(orgsync.main(d, call, now=lambda: NOW), 1)
             (pathlib.Path(d) / 'orgsync.token').write_text('\n')
             self.assertEqual(orgsync.main(d, call, now=lambda: NOW), 1)
+            (pathlib.Path(d) / 'orgsync.token').write_bytes(b'tok\xff\n')
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(orgsync.main(d, call, now=lambda: NOW), 1)
+            self.assertIn('orgsync.token is empty or malformed', err.getvalue())
+            self.assertNotIn('xff', err.getvalue())
 
     def test_main_without_org_does_nothing(self):
         with tempfile.TemporaryDirectory() as d:
@@ -348,9 +403,24 @@ class Sync(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             victim = pathlib.Path(d) / 'victim'
             victim.write_text('keep')
-            os.symlink(victim, pathlib.Path(d) / f'org.json.{os.getpid()}.tmp')
-            with self.assertRaises(OSError):
-                orgsync.write(d, {'x': 1})
+            os.symlink(victim, pathlib.Path(d) / f'org.json.{os.getpid()}.tmp')  # planted under our next name
+            os.symlink(victim, pathlib.Path(d) / 'org.json.1.tmp')  # left by a killed run
+            orgsync.write(d, {'x': 1})
+            self.assertEqual(victim.read_text(), 'keep')
+            self.assertTrue(stat.S_ISREG(os.lstat(pathlib.Path(d) / 'org.json').st_mode))
+            self.assertEqual(sorted(os.listdir(d)), ['org.json', 'victim'])
+        with tempfile.TemporaryDirectory() as d:  # a link raced in after the clean-up is refused
+            victim = pathlib.Path(d) / 'victim'
+            victim.write_text('keep')
+            real = os.listdir
+
+            def racing(path):
+                names = real(path)
+                os.symlink(victim, pathlib.Path(d) / f'org.json.{os.getpid()}.tmp')
+                return [n for n in names if n != f'org.json.{os.getpid()}.tmp']
+            with unittest.mock.patch.object(orgsync.os, 'listdir', racing):
+                with self.assertRaises(OSError):
+                    orgsync.write(d, {'x': 1})
             self.assertEqual(victim.read_text(), 'keep')
 
 

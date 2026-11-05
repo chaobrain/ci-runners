@@ -424,6 +424,12 @@ MUTANTS = [
     (APT, '  record:\n    description: "the part record, for salvage"\n    value: ${{ steps.part.outputs.record }}\n',
      "  record: {description: the part record, for salvage, value: '${{ steps.part.outputs.record }}'}\n",
      [f'{TA}.Actions.test_no_flow_mappings']),
+    # the plan's gpus and inner bound (v1.1.0)
+    (PLA, "'inner-timeout-minutes': job - INNER_MARGIN}", "'inner-timeout-minutes': job}", [f'{TL}.Place.test_preferred_host_and_its_fallback']),
+    (PLA, "'timeout-minutes': job, 'gpus': part.gpus,", "'timeout-minutes': job, 'gpus': 0,", [f'{TL}.Place.test_preferred_host_and_its_fallback']),
+    (PLA, "                        'gpus': part.gpus, 'inner-timeout-minutes': None, 'reason':",
+     "                        'gpus': 0, 'inner-timeout-minutes': 0, 'reason':", [f'{TL}.Place.test_no_candidate']),
+    (PLA, "INNER_MARGIN = 10 ", "INNER_MARGIN = 0 ", [f'{TL}.Place.test_preferred_host_and_its_fallback']),
 ]
 
 

@@ -1,0 +1,25 @@
+name: ci-runners salvage
+description: The outputs of a part whose job ended without them, read from its record (design §4.5). Runs on light.
+inputs:
+  record:
+    description: the part's record output, <host>:<ref>
+    required: true
+  wait-seconds:
+    description: how long to wait for a part that still runs
+    default: '0'
+outputs:
+  outcome: {description: as part, value: '${{ steps.salvage.outputs.outcome }}'}
+  reason: {description: as part, value: '${{ steps.salvage.outputs.reason }}'}
+  next: {description: as part, value: '${{ steps.salvage.outputs.next }}'}
+  retry-on: {description: as part, value: '${{ steps.salvage.outputs.retry-on }}'}
+  record: {description: as part, value: '${{ steps.salvage.outputs.record }}'}
+  attempt: {description: as part, value: '${{ steps.salvage.outputs.attempt }}'}
+runs:
+  using: composite
+  steps:
+    - id: salvage
+      shell: bash
+      env:
+        IN_RECORD: ${{ inputs.record }}
+        IN_WAIT: ${{ inputs.wait-seconds }}
+      run: '"$GITHUB_ACTION_PATH/../lib/ci-run.sh" salvage --record "$IN_RECORD" --wait-seconds "$IN_WAIT"'

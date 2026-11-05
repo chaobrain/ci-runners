@@ -81,9 +81,10 @@ jobs:
       - uses: chaobrain/ci-runners/actions/part@v1
         with:
           project: myproj
+          id: ${{ matrix.part.id }}
           command: scripts/run_part.sh ${{ matrix.part.id }}
-          gpus: ${{ matrix.part.gpus }}
-          timeout-minutes: ${{ matrix.part.inner-timeout }}
+          timeout-minutes: 25     # inner bound: below the plan's, which is at least 30
+          # a GPU part also sets gpus; the plan names only id, runs-on, fallback, timeout-minutes
           results: "*.xml"
   # fallback: reads the ci-part-* artifacts and reruns each part whose `next` is retry
   # or fallback, once, on its `retry-on`. verdict (always, on light): salvage the parts

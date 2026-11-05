@@ -39,6 +39,8 @@ GHB = 'ci_runners/github.py'
 PRT = 'ci_runners/part.py'
 RGY = 'ci_runners/registry.py'
 REA = 'ci_runners/reaper.py'
+LCH = 'actions/lib/ci-run.sh'
+APT = 'actions/part/action.yml'
 REG = 'setup/register.sh'
 INS = 'setup/install.sh'
 UNI = 'setup/uninstall.sh'
@@ -58,6 +60,7 @@ TQ = 'tests.test_probe_claim'
 TT = 'tests.test_part'
 TE = 'tests.test_reaper'
 TK = 'tests.test_scripts'
+TA = 'tests.test_actions'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
@@ -395,6 +398,17 @@ MUTANTS = [
     (INV, "return hashlib.sha256(_SALT + normalise(token).encode()).hexdigest()",
      "return hashlib.sha256(normalise(token).encode()).hexdigest()", [f'{TI}.Deny.test_hash_is_salted_and_normalised']),
     (INV, "    return token.strip(_SEP).lower()", "    return token.lower()", [f'{TI}.Deny.test_hash_is_salted_and_normalised']),
+    # the actions and their launcher
+    (LCH, '  [ "$cmd" = claim ] || {', '  true || {', [f'{TA}.Launcher.test_a_hosted_runner_runs_only_claim_from_the_checkout']),
+    (LCH, 'ci-run" claim --hosted "$@"', 'ci-run" claim "$@"', [f'{TA}.Launcher.test_a_hosted_runner_runs_only_claim_from_the_checkout']),
+    (LCH, 'case $release in hook|v[0-9]*.[0-9]*.[0-9]*) ;;', 'case $release in *) ;;', [f'{TA}.Launcher.test_a_bad_stamp_is_refused']),
+    (LCH, 'ci_run=$HOME/data/ci-runners/releases/$release/bin/ci-run', 'ci_run=$HOME/data/ci-runners/releases/hook/bin/ci-run',
+     [f'{TA}.Launcher.test_the_stamped_release_runs']),
+    (LCH, 'if [ "$cmd" = part ] || [ "$cmd" = salvage ]; then', 'if false; then', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
+    (LCH, 'echo "next=fallback";', 'echo "next=none";', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
+    (LCH, 'exec "$ci_run" "$cmd" "$@"', 'exec "$ci_run" "$@"', [f'{TA}.Launcher.test_the_stamped_release_runs']),
+    (APT, ' --attempt-of "$IN_ATTEMPT_OF"', '', [f'{TA}.Actions.test_inputs_reach_their_flags']),
+    (APT, '        IN_RESUME: ${{ inputs.resume }}\n', '', [f'{TA}.Actions.test_every_input_is_used_and_every_use_declared']),
 ]
 
 

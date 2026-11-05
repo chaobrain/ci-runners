@@ -1,0 +1,85 @@
+name: ci-runners part
+description: Run one part of a project on this host, in its own memory scope, and classify its end (design §4.3, §4.4).
+inputs:
+  project:
+    description: the registry key; it must belong to github.repository
+    required: true
+  id:
+    description: the part's name, unique in the run
+    required: true
+  command:
+    description: run with bash -c in the job's checkout, inside the project's env
+    required: true
+  timeout-minutes:
+    description: the inner bound, below the job's timeout-minutes
+    required: true
+  gpus:
+    description: cards to lease; 0 is a CPU part
+    default: '0'
+  gpu-mem-mib:
+    description: free MiB a card needs (default the registry's)
+    default: '0'
+  memory:
+    description: MemoryMax of the part's scope (default the registry's)
+    default: ''
+  slot:
+    description: full or none (default full on part, compile and nightly; none on light)
+    default: ''
+  lock:
+    description: host lock for the whole command, s, x, l or none
+    default: none
+  queue-timeout-minutes:
+    description: longest wait for a slot or a lease, then unavailable
+    default: '60'
+  results:
+    description: glob of JUnit XML the command writes into CI_RESULTS_DIR
+    default: ''
+  resume:
+    description: sets CI_RESUME=1
+    default: 'false'
+  attempt-of:
+    description: the record of the attempt this one retries
+    default: ''
+outputs:
+  outcome: {description: 'pass, red, oom, thermal, reboot, yielded, unavailable, lost or stopped', value: '${{ steps.part.outputs.outcome }}'}
+  reason: {description: why, value: '${{ steps.part.outputs.reason }}'}
+  next: {description: 'none, retry or fallback', value: '${{ steps.part.outputs.next }}'}
+  retry-on: {description: label array for the retry or the fallback, value: '${{ steps.part.outputs.retry-on }}'}
+  resume: {description: whether the retry resumes, value: '${{ steps.part.outputs.resume }}'}
+  host: {description: the host role, value: '${{ steps.part.outputs.host }}'}
+  gpus: {description: the cards leased, value: '${{ steps.part.outputs.gpus }}'}
+  queue-seconds: {description: time waiting for a slot or cards, value: '${{ steps.part.outputs.queue-seconds }}'}
+  run-seconds: {description: time running, value: '${{ steps.part.outputs.run-seconds }}'}
+  verify: {description: whether the keyed draw picked this part (h100), value: '${{ steps.part.outputs.verify }}'}
+  record: {description: the part record, for salvage, value: '${{ steps.part.outputs.record }}'}
+  attempt: {description: the attempt number, value: '${{ steps.part.outputs.attempt }}'}
+runs:
+  using: composite
+  steps:
+    - id: part
+      shell: bash
+      env:
+        IN_PROJECT: ${{ inputs.project }}
+        IN_ID: ${{ inputs.id }}
+        IN_COMMAND: ${{ inputs.command }}
+        IN_TIMEOUT: ${{ inputs.timeout-minutes }}
+        IN_GPUS: ${{ inputs.gpus }}
+        IN_GPU_MEM: ${{ inputs.gpu-mem-mib }}
+        IN_MEMORY: ${{ inputs.memory }}
+        IN_SLOT: ${{ inputs.slot }}
+        IN_LOCK: ${{ inputs.lock }}
+        IN_QUEUE: ${{ inputs.queue-timeout-minutes }}
+        IN_RESULTS: ${{ inputs.results }}
+        IN_RESUME: ${{ inputs.resume }}
+        IN_ATTEMPT_OF: ${{ inputs.attempt-of }}
+      run: >-
+        "$GITHUB_ACTION_PATH/../lib/ci-run.sh" part --project "$IN_PROJECT" --id "$IN_ID" --command "$IN_COMMAND"
+        --timeout-minutes "$IN_TIMEOUT" --gpus "$IN_GPUS" --gpu-mem-mib "$IN_GPU_MEM" --memory "$IN_MEMORY"
+        --slot "$IN_SLOT" --lock "$IN_LOCK" --queue-timeout-minutes "$IN_QUEUE" --results "$IN_RESULTS"
+        --resume "$IN_RESUME" --attempt-of "$IN_ATTEMPT_OF"
+    - if: always() && steps.part.outputs.outcome != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: ci-part-${{ inputs.id }}-${{ steps.part.outputs.attempt || '1' }}
+        path: ${{ runner.temp }}/ci-runners/${{ inputs.id }}
+        retention-days: 7

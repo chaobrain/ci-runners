@@ -11,6 +11,8 @@
     ci-run place ...       place parts on hosts (actions/place; design §4.2)
     ci-run part ...        run one part (actions/part; design §4.3)
     ci-run salvage ...     the outputs of a part whose job ended without them (§4.5)
+    ci-run verdict ...     post a run's verdict (actions/verdict; h100-test.yml, §4.7)
+    ci-run env build P     build project P's env from its default branch's spec (decision 11.4)
 
 The inventory is ``$CI_RUNNERS_ETC/inventory.toml``, else ``~/data/ci-runners/etc``.
 """
@@ -64,6 +66,12 @@ def main(argv: list[str]) -> int:
     if cmd in ('part', 'salvage'):
         from ci_runners import part
         return part.main(argv if cmd == 'salvage' else args, load_inventory(), etc_dir())
+    if cmd == 'verdict':
+        from ci_runners import verdict
+        return verdict.main(args, load_inventory())
+    if cmd == 'env':
+        from ci_runners import envbuild
+        return envbuild.main(args, load_inventory(), etc_dir())
     if cmd in ('plan', 'apply', 'runners'):
         from ci_runners import setup
         return setup.main([cmd, *args])

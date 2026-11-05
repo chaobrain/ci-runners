@@ -1,0 +1,180 @@
+# The standard test CI on h100 (design §4.7, decision 11): a reusable workflow for
+# private chaobrain repositories. Every job runs on h100's runners and carries the guard:
+# a pull request only from this repository, or a push or dispatch. This repository's
+# own jobs never call it; the hook refuses them on every runner.
+name: h100-test
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: the registry key
+        type: string
+        required: true
+      cpu-command:
+        description: the CPU part's command; empty skips the part
+        type: string
+        default: ''
+      gpu-command:
+        description: the GPU part's command; empty skips the part
+        type: string
+        default: ''
+      gpus:
+        description: cards for the GPU part (1 on h100, D7)
+        type: number
+        default: 1
+      timeout-minutes:
+        description: each part's inner bound; its job's is this plus 15
+        type: number
+        default: 60
+      results:
+        description: glob of JUnit XML under CI_RESULTS_DIR
+        type: string
+        default: ''
+      context:
+        description: the status context; empty means <project>/ci
+        type: string
+        default: ''
+permissions:
+  contents: read
+jobs:
+  claim:
+    if: (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, h100-light]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      statuses: write
+    outputs:
+      run: ${{ steps.claim.outputs.run }}
+      parts: ${{ steps.prep.outputs.parts }}
+      context: ${{ steps.prep.outputs.context }}
+      job-timeout: ${{ steps.prep.outputs.job-timeout }}
+    steps:
+      - id: prep
+        shell: bash
+        env:
+          IN_TIMEOUT: ${{ inputs.timeout-minutes }}
+          IN_PROJECT: ${{ inputs.project }}
+          IN_CONTEXT: ${{ inputs.context }}
+          HAS_CPU: ${{ inputs.cpu-command != '' }}
+          HAS_GPU: ${{ inputs.gpu-command != '' }}
+        run: |
+          [[ $IN_TIMEOUT =~ ^[0-9]+$ ]] && (( IN_TIMEOUT >= 1 && IN_TIMEOUT <= 240 )) || { echo "::error::timeout-minutes must be 1 to 240"; exit 2; }
+          [[ $IN_PROJECT =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || { echo "::error::project is not a registry key"; exit 2; }
+          parts=; [ "$HAS_CPU" = true ] && parts=cpu; [ "$HAS_GPU" = true ] && parts="${parts:+$parts }gpu"
+          [ -n "$parts" ] || { echo "::error::set cpu-command or gpu-command"; exit 2; }
+          { echo "parts=$parts"; echo "context=${IN_CONTEXT:-$IN_PROJECT/ci}"; echo "job-timeout=$((IN_TIMEOUT + 15))"; } >> "$GITHUB_OUTPUT"
+      - id: claim
+        uses: chaobrain/ci-runners/actions/claim@v1
+        with:
+          context: ${{ steps.prep.outputs.context }}
+
+  cpu:
+    needs: claim
+    if: ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.claim.outputs.run == 'true' && inputs.cpu-command != ''
+    runs-on: [self-hosted, h100-cpu]
+    timeout-minutes: ${{ fromJSON(needs.claim.outputs.job-timeout) }}
+    outputs:
+      next: ${{ steps.part.outputs.next }}
+      record: ${{ steps.part.outputs.record }}
+      resume: ${{ steps.part.outputs.resume }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - id: part
+        uses: chaobrain/ci-runners/actions/part@v1
+        with:
+          project: ${{ inputs.project }}
+          id: cpu
+          command: ${{ inputs.cpu-command }}
+          gpus: '0'
+          timeout-minutes: ${{ inputs.timeout-minutes }}
+          results: ${{ inputs.results }}
+
+  gpu:
+    needs: claim
+    if: ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.claim.outputs.run == 'true' && inputs.gpu-command != ''
+    runs-on: [self-hosted, h100]
+    timeout-minutes: ${{ fromJSON(needs.claim.outputs.job-timeout) }}
+    outputs:
+      next: ${{ steps.part.outputs.next }}
+      retry-on: ${{ steps.part.outputs.retry-on }}
+      record: ${{ steps.part.outputs.record }}
+      resume: ${{ steps.part.outputs.resume }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - id: part
+        uses: chaobrain/ci-runners/actions/part@v1
+        with:
+          project: ${{ inputs.project }}
+          id: gpu
+          command: ${{ inputs.gpu-command }}
+          gpus: ${{ inputs.gpus }}
+          timeout-minutes: ${{ inputs.timeout-minutes }}
+          results: ${{ inputs.results }}
+
+  # One retry per part, when its first attempt asked for one. h100 is the only host, so
+  # a fallback stays on h100 too: the CPU part on its own pool, the GPU part on the card
+  # the executor named (a cool one after a thermal end), else on any card.
+  cpu-retry:
+    needs: [claim, cpu]
+    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (needs.cpu.outputs.next == 'retry' || needs.cpu.outputs.next == 'fallback') }}
+    runs-on: [self-hosted, h100-cpu]
+    timeout-minutes: ${{ fromJSON(needs.claim.outputs.job-timeout) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: chaobrain/ci-runners/actions/part@v1
+        with:
+          project: ${{ inputs.project }}
+          id: cpu
+          command: ${{ inputs.cpu-command }}
+          gpus: '0'
+          timeout-minutes: ${{ inputs.timeout-minutes }}
+          results: ${{ inputs.results }}
+          resume: ${{ needs.cpu.outputs.resume }}
+          attempt-of: ${{ needs.cpu.outputs.record }}
+
+  gpu-retry:
+    needs: [claim, gpu]
+    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (needs.gpu.outputs.next == 'retry' || needs.gpu.outputs.next == 'fallback') }}
+    runs-on: ${{ contains(needs.gpu.outputs.retry-on, '"h100-gpu') && fromJSON(needs.gpu.outputs.retry-on) || fromJSON('["self-hosted","h100"]') }}
+    timeout-minutes: ${{ fromJSON(needs.claim.outputs.job-timeout) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: chaobrain/ci-runners/actions/part@v1
+        with:
+          project: ${{ inputs.project }}
+          id: gpu
+          command: ${{ inputs.gpu-command }}
+          gpus: ${{ inputs.gpus }}
+          timeout-minutes: ${{ inputs.timeout-minutes }}
+          results: ${{ inputs.results }}
+          resume: ${{ needs.gpu.outputs.resume }}
+          attempt-of: ${{ needs.gpu.outputs.record }}
+
+  # The verdict runs whatever the parts did, but not for a cancelled run: a newer head
+  # took its place, and its own run posts.
+  verdict:
+    needs: [claim, cpu, gpu, cpu-retry, gpu-retry]
+    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.claim.outputs.run == 'true' }}
+    runs-on: [self-hosted, h100-light]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: chaobrain/ci-runners/actions/verdict@v1
+        with:
+          context: ${{ needs.claim.outputs.context }}
+          parts: ${{ needs.claim.outputs.parts }}

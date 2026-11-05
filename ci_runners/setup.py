@@ -98,12 +98,26 @@ def python_of(inv: inventory.Inventory) -> str:
     return str(inv.host.get('python') or SYSTEM_PYTHON)
 
 
+HOOK_PYTHON = 'py=/usr/bin/python3  # @CI_PYTHON@\n'
+
+
+def hook_text(src: str, python: str) -> str:
+    """A hook as installed: its interpreter line names ``python`` (validated by the
+    caller as one absolute path). Raises ValueError if the hook has no such line. Pure."""
+    if src.count(HOOK_PYTHON) != 1:
+        raise ValueError('a hook has no interpreter line')
+    return src.replace(HOOK_PYTHON, f'py={python}\n')
+
+
 def check_python(path: str, run=subprocess.run) -> None:
     """Refuse an interpreter that is not an executable Python 3.11 or later (``tomllib``)."""
     if not os.path.isfile(path) or not os.access(path, os.X_OK):
         raise ValueError(f'python {path} is not an executable file')
-    r = run([path, '-I', '-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'],
-            capture_output=True, timeout=60)
+    try:
+        r = run([path, '-I', '-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'],
+                capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ValueError(f'python {path} did not answer: {type(e).__name__}') from None
     if r.returncode != 0:
         raise ValueError(f'python {path} is not Python 3.11 or later')
 
@@ -231,11 +245,6 @@ def build(etc: str) -> Plan:
             plan.add(f'  keep   {d}/')  # the unit directory is the account's: its mode is never changed
         else:
             plan.add(f'  mkdir  {d}/ mode {mode:o}', kind='mkdir', path=d, mode=mode)
-    plan.add('hooks:')
-    for name in ('job-started.sh', 'job-completed.sh'):
-        with open(os.path.join(release, 'hooks', name)) as f:
-            _file(plan, os.path.join(base, 'hooks', name), f.read(), 0o755)
-    plan.add('units:')
     if not isinstance(h['memory_max'], str) or not MEMORY.fullmatch(h['memory_max']):
         raise ValueError(f'memory_max must match {MEMORY.pattern}')
     client = h.get('proxy', {}).get('client', '/bin/false')
@@ -247,6 +256,11 @@ def build(etc: str) -> Plan:
         raise ValueError(f'the etc directory must be {os.path.join(base, "etc")}')
     if h.get('python'):
         check_python(python)
+    plan.add('hooks:')
+    for name in ('job-started.sh', 'job-completed.sh'):
+        with open(os.path.join(release, 'hooks', name)) as f:
+            _file(plan, os.path.join(base, 'hooks', name), hook_text(f.read(), python), 0o755)
+    plan.add('units:')
     subs = {'CI_MEMORY_MAX': h['memory_max'], 'PROXY_CLIENT': client, 'CI_DATA': data, 'CI_ETC': etc,
             'CI_PYTHON': python, 'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else ''}
     ours = _ours(os.path.join(base, 'state', 'setup.json'))
@@ -405,6 +419,15 @@ def apply(etc: str, plan_file: str, run=subprocess.run) -> int:
         return 1
     state_path = os.path.join(os.path.dirname(etc), 'state', 'setup.json')
     made = []
+    try:
+        _apply_actions(plan, made, run)
+    finally:  # a failed apply still records what it made, so the next plan knows its own files
+        _record(state_path, plan.digest(), made)
+    print(f'apply: {len(made)} change(s), plan {plan.digest()[:16]}')
+    return 0
+
+
+def _apply_actions(plan: Plan, made: list, run) -> None:
     for a in plan.actions:
         k = a['kind']
         if k == 'mkdir':
@@ -427,18 +450,21 @@ def apply(etc: str, plan_file: str, run=subprocess.run) -> int:
             run(a['argv'], check=True, timeout=300)
         made.append({x: a[x] for x in ('kind', 'path', 'argv') if x in a})
         print(f'apply: {k} {a.get("path") or " ".join(a.get("argv", []))}')
+
+
+def _record(state_path: str, digest: str, made: list) -> None:
+    if not made:
+        return
     os.makedirs(os.path.dirname(state_path), exist_ok=True)
     try:
         with open(state_path) as f:
             state = json.load(f)
     except (OSError, ValueError):
         state = {'applied': []}
-    state['applied'].append({'plan': plan.digest(), 'made': made})
+    state['applied'].append({'plan': digest, 'made': made})
     with open(state_path + '.new', 'w') as f:
         json.dump(state, f, indent=1)
     os.replace(state_path + '.new', state_path)
-    print(f'apply: {len(made)} change(s), plan {plan.digest()[:16]}')
-    return 0
 
 
 def main(argv: list[str]) -> int:

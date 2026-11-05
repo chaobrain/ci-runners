@@ -40,7 +40,9 @@ class Load(unittest.TestCase):
                'light = { count = 1, per_card = true }', 'light = { count = 1, labels = [] }',
                'light = { count = 1, labels = ["A"] }', 'light = { count = 1, labels = ["a b"] }',
                'light = { count = 1, labels = ["a", "a"] }', 'light = { count = 1, labels = "a" }',
-               'light = { count = 1, extra = 1 }', 'h100 = { per_card = 1 }', 'light = { count = true }')
+               'light = { count = 1, extra = 1 }', 'h100 = { per_card = 1 }', 'light = { count = true }',
+               'light = { count = 1, labels = ["light"] }', 'light = { count = 1, labels = ["self-hosted"] }',
+               'h100 = { per_card = true, labels = ["gpu"] }')  # a 3090 class or GitHub's own label
         for b in bad:
             with self.assertRaises(inv.InventoryError, msg=b):
                 inv.load(base.replace('@', b))

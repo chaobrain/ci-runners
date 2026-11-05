@@ -653,13 +653,13 @@ system `python3` is 3.10.
 |---|---|
 | directories | §3.2 (RUN-5) under our subtree; `etc/` mode 700 |
 | runner app | the pinned release, checked by sha256, into 9 runner directories (§5.1) |
-| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card. No proxy lines. |
+| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON` (for the launcher and the units; the hooks have the interpreter written into them by setup, so a job's environment never chooses it); `CI_RUNNER_POOL_LABELS`, the pool's own labels (`h100-light`, `h100-cpu`, `h100`), for a retry's `retry-on`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card. No proxy lines. |
 | `ci-runner@.service` | as on 3090b, without `After=`/`Wants=ci-proxy.service` |
 | `ci-orgsync.{service,timer}` | every 10 min: the org snapshot (§6.5) |
 | `ci-reaper.timer` | as on 3090b |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 512G of 2 TB) and `ci-<project>.slice` |
 | lock and slot files | new ones under `state/`: h100 has no brainspike files to share (D5 does not apply) |
-| unit names | every unit file starts with `ci-`; `plan.sh` refuses if a unit of that name exists and no earlier `apply` wrote it (another user of the account may have one). The unit directory exists (mode 700) and is the account's: setup never changes its mode. |
+| unit names | every unit file starts with `ci-` (`ci.slice` included); `uninstall.sh` stops and removes only the units an `apply` recorded in `state/setup.json`; `plan.sh` refuses if a unit of that name exists and no earlier `apply` wrote it (another user of the account may have one). The unit directory exists (mode 700) and is the account's: setup never changes its mode. |
 | unchanged | the shared account's shell files, crontab, `authorized_keys`, other users' files, envs and units; no proxy, no ssh key |
 
 There is no root step: the shared account has no sudo for us, and none is needed.

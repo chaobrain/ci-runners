@@ -113,6 +113,32 @@ no_proxy = "localhost,127.0.0.1"
         self.assertEqual(self.apply(text), 0)  # the approved plan again: nothing left to do
         self.assertEqual(self.ran, [])
 
+    def test_a_hung_or_missing_python_is_refused(self):
+        def hung(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, kw.get('timeout', 60))
+        with self.assertRaisesRegex(ValueError, 'did not answer'):
+            setup.check_python(sys.executable, run=hung)
+        with self.assertRaisesRegex(ValueError, 'not an executable'):
+            setup.check_python('/nonexistent/python3')
+
+    def test_a_failed_apply_records_what_it_made(self):
+        """An apply that fails half way (a systemctl call here; on h100 the runner download)
+        still records the files it wrote, so the next plan owns its units instead of
+        refusing them as another user's."""
+        text = setup.build(str(self.etc)).text()
+
+        def failing(argv, **_kw):
+            if 'enable' in argv:
+                raise subprocess.CalledProcessError(1, argv)
+        f = pathlib.Path(self.tmp.name) / 'plan.txt'
+        f.write_text(text)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(subprocess.CalledProcessError):
+            setup.apply(str(self.etc), str(f), run=failing)
+        st = json.loads((self.data / 'ci-runners' / 'state' / 'setup.json').read_text())
+        made = {m.get('path') for a in st['applied'] for m in a['made']}
+        self.assertIn(str(self.home / '.config/systemd/user/ci-reaper.timer'), made)
+        setup.build(str(self.etc))  # no refusal of our own units
+
     def test_apply_refuses_a_plan_that_is_not_the_fresh_one(self):
         text = setup.build(str(self.etc)).text()
         self.assertEqual(self.apply(text.replace('mode 700', 'mode 777', 1)), 1)
@@ -376,6 +402,9 @@ h100 = {{ per_card = true, labels = ["h100"] }}
         orgsync = (self.units / 'ci-orgsync.service').read_text()
         self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run org-sync\n', orgsync)
         self.assertIn(f'Environment=CI_RUNNERS_PYTHON={sys.executable}\n', orgsync)
+        hook = (self.data / 'ci-runners' / 'hooks' / 'job-started.sh').read_text()
+        self.assertIn(f'\npy={sys.executable}\n', hook)  # written in: no job's environment picks it
+        self.assertNotIn('CI_RUNNERS_PYTHON', hook)
         runner = (self.units / 'ci-runner@.service').read_text()
         self.assertNotIn('ci-proxy', runner)
         self.assertIn('Description=ci-runners: GitHub Actions runner %i\n\n[Service]', runner)

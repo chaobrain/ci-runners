@@ -35,6 +35,9 @@ _SIZE = re.compile(r'[1-9][0-9]{0,5}[KMGT]\Z')
 _CPUS = re.compile(r'[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*\Z')
 #: a runner label the inventory gives (design §5.1): GitHub's own are added at registration
 LABEL = re.compile(r'[a-z0-9][a-z0-9-]{0,39}\Z')
+#: labels a pool may not give itself: GitHub's own, and the 3090 pools' classes, which a
+#: job of another host's policy asks for (design §5.1: h100's labels share nothing with them)
+RESERVED_LABELS = frozenset({'self-hosted', 'linux', 'x64', 'light', 'part', 'compile', 'nightly', 'gpu'})
 #: what a pool's runners run with, besides the count (RUN-5)
 POOL_KEYS = frozenset({'count', 'labels', 'per_card'})
 
@@ -75,7 +78,7 @@ def _pool(v: object) -> bool:
         return False
     labels = v.get('labels', [])
     return (isinstance(labels, list) and len(labels) <= 8 and len(set(labels)) == len(labels)
-            and all(isinstance(x, str) and LABEL.match(x) for x in labels) and ('labels' not in v or bool(labels)))
+            and all(isinstance(x, str) and LABEL.match(x) and x not in RESERVED_LABELS for x in labels) and ('labels' not in v or bool(labels)))
 
 
 #: per host: key -> (check, required). Paths are absolute.

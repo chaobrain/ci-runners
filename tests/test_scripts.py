@@ -219,7 +219,7 @@ class Uninstall(unittest.TestCase):
              '#!/bin/sh\ncase $1 in role) echo r ;; runners) echo "r-light-1 light,r light" ;; esac\n')
         # disable fails for a missing unit; is-active is true for what the test lists
         _exe(self.bin / 'systemctl', f'#!/bin/sh\necho "$*" >> {self.out}/calls\n'
-                                     f'case $2 in disable) [ "$4" != ci-proxy.service ] ;;\n'
+                                     f'case $2 in disable) [ "$4" != ci-reaper.timer ] ;;\n'  # one of ours fails: the rest still go
                                      f'  is-active) grep -qx "$4" {self.out}/active 2>/dev/null ;; esac\n')
         self.units = self.home / '.config/systemd/user'
         self.units.mkdir(parents=True)
@@ -228,6 +228,7 @@ class Uninstall(unittest.TestCase):
             (self.units / n).write_text('x')
             made.append({'kind': 'file', 'path': str(self.units / n)})
         (self.units / 'ci-mine.slice').write_text('not setup\'s')
+        (self.units / 'ci-proxy.service').write_text('a co-user\'s unit of the same name')
         env = self.home / 'data/actions-runner/r-light-1/.env'
         env.parent.mkdir(parents=True)
         env.write_text('x')
@@ -248,9 +249,10 @@ class Uninstall(unittest.TestCase):
         r = self.uninstall()
         self.assertEqual(r.returncode, 0, r.stderr)
         calls = (self.out / 'calls').read_text()
-        for u in ('ci-runner@r-light-1.service', 'ci-proxy-check.timer', 'ci-reaper.timer', 'ci-proxy.service'):
+        for u in ('ci-runner@r-light-1.service', 'ci-reaper.timer'):
             self.assertIn(f'--user disable --now {u}\n', calls)
-        self.assertEqual(sorted(p.name for p in self.units.iterdir()), ['ci-mine.slice'])
+        self.assertNotIn('ci-proxy', calls)  # never written by an apply here: not ours to stop
+        self.assertEqual(sorted(p.name for p in self.units.iterdir()), ['ci-mine.slice', 'ci-proxy.service'])
         self.assertTrue((self.home / 'data/actions-runner/r-light-1/.env').exists())
 
     def test_another_roles_inventory_is_refused(self):
@@ -259,7 +261,7 @@ class Uninstall(unittest.TestCase):
                            capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 2)
         self.assertFalse((self.out / 'calls').exists())
-        self.assertEqual(len(list(self.units.iterdir())), 4)
+        self.assertEqual(len(list(self.units.iterdir())), 5)
 
     def test_the_state_and_the_release_follow_ci_runners_etc(self):
         """h100: uninstall.sh, plan.sh and apply.sh find the host layer beside CI_RUNNERS_ETC."""
@@ -271,7 +273,7 @@ class Uninstall(unittest.TestCase):
         r = subprocess.run(['sh', str(ROOT / 'setup/uninstall.sh'), 'r'], env=env, capture_output=True, text=True,
                            timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(sorted(p.name for p in self.units.iterdir()), ['ci-mine.slice'])
+        self.assertEqual(sorted(p.name for p in self.units.iterdir()), ['ci-mine.slice', 'ci-proxy.service'])
         _exe(sub / 'releases/hook/bin/ci-run', '#!/bin/sh\ncase $1 in role) echo r ;; *) echo "ran $* $CI_RUNNERS_ETC" ;; esac\n')
         r = subprocess.run(['sh', str(ROOT / 'setup/plan.sh'), 'r'], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.stdout, f'ran plan {sub / "etc"}\n')
@@ -284,7 +286,7 @@ class Uninstall(unittest.TestCase):
         r = self.uninstall()
         self.assertEqual(r.returncode, 1)
         self.assertIn('ci-reaper.timer', r.stderr)
-        self.assertEqual(len(list(self.units.iterdir())), 4)
+        self.assertEqual(len(list(self.units.iterdir())), 5)
 
 
 if __name__ == '__main__':

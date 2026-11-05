@@ -361,7 +361,7 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
     if h.next != 'none' and retry_on is not None:
         retry_on = list(retry_on)
     elif h.next == 'retry' and h.where == 'cool-card':
-        retry_on = ['self-hosted', f'{H100_POOL}-gpu{cool_card}']
+        retry_on = ['self-hosted', f'{role}-gpu{cool_card}']  # setup labels a card's runner <role>-gpu<N>
     elif h.next == 'retry':
         retry_on = ['self-hosted', *own] if own else ['self-hosted', cls, role] if h.where == 'same-host' \
             else ['self-hosted', cls]
@@ -644,7 +644,7 @@ class Executor:
                         other = self.cool_elsewhere(mine)
                         return self._end(record, rec, a, unavailable=f'health gate: card {",".join(map(str, mine))} '
                                          f'is at or above {h["max_temp_c"]} C or unread',
-                                         retry_on=None if other is None else ['self-hosted', f'{H100_POOL}-gpu{other}'])
+                                         retry_on=None if other is None else ['self-hosted', f'{self.inv.this}-gpu{other}'])
                     got = leases.try_take(a.gpus, cool, smi_free(self.run), need)
                     if got is not None:
                         cards = got

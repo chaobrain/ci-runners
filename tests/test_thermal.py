@@ -124,7 +124,7 @@ class Finish(unittest.TestCase):
 
     def test_a_kill_line_counts_with_our_pid_on_our_card(self):
         out = part.finish('/r', self.REC, self.EX, watchdog=WATCHDOG, cool_card=2)
-        self.assertEqual((out['outcome'], out['next'], out['retry-on']), ('thermal', 'retry', ['self-hosted', 'h100-gpu2']))
+        self.assertEqual((out['outcome'], out['next'], out['retry-on']), ('thermal', 'retry', ['self-hosted', 'hx-gpu2']))
         self.assertIn('bus a8', out['reason'])
 
     def test_a_kill_line_of_another_pid_or_time_does_not(self):
@@ -140,7 +140,7 @@ class Finish(unittest.TestCase):
 
     def test_a_reboot_on_h100_is_thermal(self):
         out = part.finish('/r', self.REC, {**self.EX, 'boot_end': 'b2'}, cool_card=0)
-        self.assertEqual((out['outcome'], out['next'], out['retry-on']), ('reboot', 'retry', ['self-hosted', 'h100-gpu0']))
+        self.assertEqual((out['outcome'], out['next'], out['retry-on']), ('reboot', 'retry', ['self-hosted', 'hx-gpu0']))
         out = part.finish('/r', {**self.REC, 'h100': False, 'class': 'part'}, {**self.EX, 'boot_end': 'b2'}, cool_card=0)
         self.assertEqual(out['retry-on'], ['self-hosted', 'part', 'hx'])  # elsewhere: the same host
 
@@ -199,13 +199,13 @@ class H100(Host):
     def test_a_hot_card_refuses_to_a_cool_cards_runner(self):
         code, out = self.go()  # card 3 is at 88 C
         self.assertEqual((code, out['outcome'], out['next']), (0, 'unavailable', 'fallback'))
-        self.assertEqual(out['retry-on'], ['self-hosted', 'h100-gpu2'])  # the coolest that passes
+        self.assertEqual(out['retry-on'], ['self-hosted', 'hb-gpu2'])  # the coolest that passes
         self.assertIn('health gate', out['reason'])
         self.assertFalse(self.ran(out))
 
     def test_an_unread_card_is_not_cool(self):
         code, out = self.go(env={**self.env, 'CI_RUNNER_CARD': '4'})
-        self.assertEqual((out['outcome'], out['retry-on']), ('unavailable', ['self-hosted', 'h100-gpu2']))
+        self.assertEqual((out['outcome'], out['retry-on']), ('unavailable', ['self-hosted', 'hb-gpu2']))
 
     def test_every_card_hot_goes_to_the_fallback(self):
         self.status = [''.join(f'{i}, 00000000:9{i}:00.0, 85, 100\n' for i in range(5))]
@@ -251,7 +251,7 @@ class H100(Host):
         code, out = self.go(env={**self.env, 'CI_RUNNER_CARD': '2'}, command='sleep 30', sample_s=0.3,
                             clock=lambda: next(ticks))
         self.assertEqual((out['outcome'], out['reason']), ('thermal', 'our card stayed hot: stopped early'))
-        self.assertEqual((out['next'], out['retry-on']), ('retry', ['self-hosted', 'h100-gpu0']))
+        self.assertEqual((out['next'], out['retry-on']), ('retry', ['self-hosted', 'hb-gpu0']))
         self.assertLess(out['run-seconds'], 20)
 
     def test_a_watchdog_kill_of_our_process_is_thermal(self):
@@ -261,7 +261,7 @@ class H100(Host):
                             command=f'sleep 1.2; echo "{line}" >> {self.log}; sleep 1.2')
         self.assertEqual(out['outcome'], 'thermal')
         self.assertIn('bus 9d', out['reason'])
-        self.assertEqual(out['retry-on'], ['self-hosted', 'h100-gpu0'])
+        self.assertEqual(out['retry-on'], ['self-hosted', 'hb-gpu0'])
 
     def test_a_kill_of_another_users_process_is_not_ours(self):
         self.apps = '4242, 00000000:9D:00.0\n'

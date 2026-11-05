@@ -76,6 +76,8 @@ HOST_KEYS = {
     'files': (lambda v: isinstance(v, dict) and set(v) == {'host_lock', 'slot_lock', 'slot_queue'}
               and all(_abs(p) for p in v.values()), True),  # brainspike's lock and slot files (D5)
     'proxy': (lambda v: isinstance(v, dict), False),
+    'watchdog_log': (_abs, False),     # the host's GPU watchdog log: its kill lines (design §4.4)
+    'watchdog_notice': (_abs, False),  # present while the watchdog warns: GPU parts are unavailable
 }
 PROXY_KEYS = {
     'client': (_abs, True),

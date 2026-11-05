@@ -39,6 +39,7 @@ GHB = 'ci_runners/github.py'
 PRT = 'ci_runners/part.py'
 RGY = 'ci_runners/registry.py'
 REA = 'ci_runners/reaper.py'
+SMP = 'ci_runners/sampler.py'
 LCH = 'actions/lib/ci-run.sh'
 APT = 'actions/part/action.yml'
 REG = 'setup/register.sh'
@@ -61,6 +62,7 @@ TT = 'tests.test_part'
 TE = 'tests.test_reaper'
 TK = 'tests.test_scripts'
 TA = 'tests.test_actions'
+TM = 'tests.test_thermal'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
@@ -424,6 +426,53 @@ MUTANTS = [
     (APT, '  record:\n    description: "the part record, for salvage"\n    value: ${{ steps.part.outputs.record }}\n',
      "  record: {description: the part record, for salvage, value: '${{ steps.part.outputs.record }}'}\n",
      [f'{TA}.Actions.test_no_flow_mappings']),
+    # the h100 health gate, the sampler and the early stop (RUN-5, design §5.4)
+    (GPU, "    ok = [c for c in cards if c in status and status[c][1] < max_temp_c]",
+     "    ok = [c for c in cards if c in status and status[c][1] <= max_temp_c]",
+     [f'{TM}.Parse.test_cool_cards_are_below_the_limit_coolest_first']),
+    (GPU, "    ok = [c for c in cards if c in status and", "    ok = [c for c in cards if (c not in status) or",
+     [f'{TM}.Parse.test_cool_cards_are_below_the_limit_coolest_first', f'{TM}.H100.test_an_unread_card_is_not_cool']),
+    (GPU, "    return sorted(ok, key=lambda c: (status[c][1], c))", "    return ok",
+     [f'{TM}.Parse.test_cool_cards_are_below_the_limit_coolest_first']),
+    (SMP, "        hot = [c for c, s in self.since.items() if t - s >= self.hold_s]",
+     "        hot = [c for c, s in self.since.items() if t - s >= 0]",
+     [f'{TM}.Watch.test_three_minutes_at_85_and_not_before']),
+    (SMP, "                self.since.pop(card, None)", "                pass",
+     [f'{TM}.Watch.test_a_cooler_reading_ends_the_streak']),
+    (SMP, " and pid in procs})", "})", [f'{TM}.Sample.test_only_our_pids_on_our_card',
+                                        f'{TM}.H100.test_a_kill_of_another_users_process_is_not_ours']),
+    (SMP, "        if self.early_stop:", "        if True:", [f'{TM}.Sample.test_no_early_stop_where_it_is_off']),
+    (SMP, "        if self.stopped_card is not None:\n            return True\n", "",
+     [f'{TM}.Sample.test_the_early_stop_stops_once']),
+    (PRT, "        if h100_style(h) and a.gpus > 1:", "        if False:", [f'{TM}.H100.test_one_card_per_part_on_h100']),
+    (PRT, "        if h100_style(h) and cls != H100_POOL:", "        if False:", [f'{TM}.H100.test_cpu_runners_take_no_card']),
+    (PRT, "        if notice and os.path.lexists(str(notice)):", "        if False:",
+     [f'{TM}.H100.test_the_watchdog_notice_makes_gpu_parts_unavailable']),
+    (PRT, "        if card and h100_style(self.inv.host):\n            return [int(card)]", "        if False:\n            pass",
+     [f'{TM}.H100.test_a_hot_card_refuses_to_a_cool_cards_runner']),
+    (PRT, "        if card and (not card.isdigit() or int(card) not in self.inv.host['gpus']):", "        if False:",
+     [f'{TM}.H100.test_the_runner_card_must_be_the_hosts']),
+    (PRT, "retry_on=None if other is None else ['self-hosted', f'{H100_POOL}-gpu{other}'])", "retry_on=None)",
+     [f'{TM}.H100.test_a_hot_card_refuses_to_a_cool_cards_runner']),
+    (PRT, "if h100_style(h) else mine\n", "if False else mine\n", [f'{TM}.H100.test_a_hot_card_refuses_to_a_cool_cards_runner']),
+    (PRT, "        retry_on = ['self-hosted', f'{H100_POOL}-gpu{cool_card}']", "        retry_on = ['self-hosted', cls]",
+     [f'{TM}.Finish.test_a_kill_line_counts_with_our_pid_on_our_card']),
+    (PRT, "remote=bool(rec.get('h100')),", "remote=False,", [f'{TM}.Finish.test_a_reboot_on_h100_is_thermal']),
+    (PRT, "watchdog=watchdog, start=_local(rec.get('run_epoch')),", "watchdog='', start=_local(rec.get('run_epoch')),",
+     [f'{TM}.Finish.test_a_kill_line_counts_with_our_pid_on_our_card']),
+    (PRT, "        early_stop=bool(rec.get('early_stop')))", "        early_stop=False)",
+     [f'{TM}.Finish.test_thermal_without_a_cool_card_falls_back']),
+    (PRT, "                             watchdog=read_tail(log) if log and cards else '',",
+     "                             watchdog='',", [f'{TM}.H100.test_a_watchdog_kill_of_our_process_is_thermal']),
+    (PRT, "                           early_stop=smp.stopped_card is not None,", "                           early_stop=False,",
+     [f'{TM}.H100.test_the_early_stop_ends_a_hot_part_as_thermal']),
+    (PRT, "                                          early_stop=h100_style(h), clock=self.clock)",
+     "                                          early_stop=False, clock=self.clock)",
+     [f'{TM}.H100.test_the_early_stop_ends_a_hot_part_as_thermal']),
+    (PRT, "    argv = ['taskset', '-c', cpus] if cpus else []", "    argv = []",
+     [f'{TM}.Parse.test_taskset_where_the_inventory_gives_cpus', f'{TM}.H100.test_a_cool_card_runs_pinned_and_sampled']),
+    (PRT, "                                 cpus=str(h.get('cpus') or ''))", "                                 cpus='')",
+     [f'{TM}.H100.test_a_cool_card_runs_pinned_and_sampled']),
 ]
 
 

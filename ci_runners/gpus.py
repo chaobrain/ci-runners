@@ -51,3 +51,46 @@ def choose_lease(n: int, *, cards: Sequence[int], free: Mapping[int, int], need_
         return []
     ok = [i for i in rank_gpus({i: free[i] for i in cards if i in free}, need_mib) if leased.get(i, 0) < max_parts]
     return ok[:n] if len(ok) >= n else None
+
+
+def _num(s: str) -> float | None:
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    return v if v == v and v not in (float('inf'), float('-inf')) else None
+
+
+def gpu_status(csv: str) -> dict[int, tuple[str, float, float]]:
+    """``index -> (bus id, temperature C, utilisation %)`` from ``nvidia-smi
+    --query-gpu=index,pci.bus_id,temperature.gpu,utilization.gpu --format=csv,noheader,nounits``.
+    A card whose temperature does not parse is missing (it then counts against itself);
+    an unparsable utilisation reads -1. Pure."""
+    out = {}
+    for line in csv.splitlines():
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) != 4 or not parts[0].isdigit() or not parts[1]:
+            continue
+        temp, util = _num(parts[2]), _num(parts[3].rstrip(' %'))
+        if temp is not None:
+            out[int(parts[0])] = (parts[1], temp, -1.0 if util is None else util)
+    return out
+
+
+def compute_apps(csv: str) -> list[tuple[int, str]]:
+    """``(pid, bus id)`` per compute process, from ``nvidia-smi
+    --query-compute-apps=pid,gpu_bus_id --format=csv,noheader``. Pure."""
+    out = []
+    for line in csv.splitlines():
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) == 2 and parts[0].isdigit() and parts[1]:
+            out.append((int(parts[0]), parts[1]))
+    return out
+
+
+def cool_cards(cards: Sequence[int], status: Mapping[int, tuple[str, float, float]], max_temp_c: float) -> list[int]:
+    """The cards of ``cards`` with a reading below ``max_temp_c``, coolest first; ties go
+    to the lower index. A card without a reading is not cool (design §5.4 health gate).
+    Pure."""
+    ok = [c for c in cards if c in status and status[c][1] < max_temp_c]
+    return sorted(ok, key=lambda c: (status[c][1], c))

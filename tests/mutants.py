@@ -411,6 +411,7 @@ MUTANTS = [
      [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, 'else next=none; retry_on=', 'else next=fallback; retry_on=', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, ' && [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]', '', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
+    (LCH, '[ "$1" = --id ] && { id=$2; break; }', '[ "$1" = --id ] && { id=$2; }', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, '"$reason" "$next" "$retry_on" > "$art/outcome.json"', '"$reason" "$next" "$retry_on" > /dev/null',
      [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, 'exec "$ci_run" "$cmd" "$@"', 'exec "$ci_run" "$@"', [f'{TA}.Launcher.test_the_stamped_release_runs']),

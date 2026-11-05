@@ -30,7 +30,7 @@ cls=${CI_RUNNER_CLASS:-}
 if [[ $cls =~ ^[a-z]+$ ]]; then next=fallback; retry_on="[\"self-hosted\",\"$cls\"]"; else next=none; retry_on='[]'; fi
 { echo "outcome=unavailable"; echo "reason=$reason"; echo "next=$next"; echo "retry-on=$retry_on"; } >> "${GITHUB_OUTPUT:-/dev/null}"
 id=
-while [ $# -gt 0 ]; do [ "$1" = --id ] && [ $# -gt 1 ] && id=$2; shift; done
+while [ $# -gt 1 ]; do [ "$1" = --id ] && { id=$2; break; }; shift; done  # the first --id: the action passes it before --command
 if [ "$cmd" = part ] && [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] && [ -n "${RUNNER_TEMP:-}" ]; then
   art=$RUNNER_TEMP/ci-runners/$id  # what the part action uploads, as part's own outcome would be
   mkdir -p "$art" && printf '{"outcome": "unavailable", "reason": "%s", "next": "%s", "retry-on": %s}\n' \

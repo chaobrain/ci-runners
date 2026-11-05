@@ -114,7 +114,8 @@ class Launcher(unittest.TestCase):
         self.stamp('v1.2.3')
         self.stub('hook')
         temp = pathlib.Path(self.tmp.name) / 'runner-temp'
-        r = self.launch('part', '--id', 'x', '--command', 'true', RUNNER_TEMP=str(temp), CI_RUNNER_CLASS='part')
+        r = self.launch('part', '--id', 'x', '--command', '--id', '--timeout-minutes', '5', RUNNER_TEMP=str(temp),
+                        CI_RUNNER_CLASS='part')  # a command that reads '--id' is not the id
         self.assertEqual(r.returncode, 0)
         out = self.out.read_text()
         self.assertIn('outcome=unavailable\n', out)

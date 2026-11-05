@@ -26,6 +26,8 @@ OUT = 'ci_runners/outcome.py'
 GPU = 'ci_runners/gpus.py'
 PLA = 'ci_runners/place.py'
 SLO = 'ci_runners/slots.py'
+PRT = 'ci_runners/part.py'
+RGY = 'ci_runners/registry.py'
 REA = 'ci_runners/reaper.py'
 REG = 'setup/register.sh'
 INS = 'setup/install.sh'
@@ -42,6 +44,7 @@ TO = 'tests.test_outcome'
 TG = 'tests.test_gpus'
 TL = 'tests.test_place'
 TS = 'tests.test_slots'
+TT = 'tests.test_part'
 TE = 'tests.test_reaper'
 TK = 'tests.test_scripts'
 
@@ -255,6 +258,33 @@ MUTANTS = [
     (UNI, " and os.path.dirname(m['path']) == unit_dir", "", [f'{TK}.Uninstall.test_each_unit_is_disabled_and_only_setups_files_go']),
     (UNI, "  systemctl --user disable --now \"$u\" >/dev/null 2>&1 || true", "  systemctl --user disable --now \"$u\" >/dev/null 2>&1",
      [f'{TK}.Uninstall.test_each_unit_is_disabled_and_only_setups_files_go']),
+    # the executor and the registry
+    (PRT, "        if self.env.get('GITHUB_REPOSITORY', '').lower() != proj.repository:", "        if False:",
+     [f'{TT}.Execute.test_refusals']),
+    (PRT, "    env = {k: v for k, v in base.items() if not k.startswith('CI_')}", "    env = dict(base)",
+     [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (PRT, "        'CI_RUNNERS_HOST': role, 'CI_PROJECT': project.name,", "        'CI_RUNNERS_HOST': role,",
+     [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (PRT, "            timed_out = True\n", "            timed_out = False\n", [f'{TT}.Execute.test_the_inner_timeout_ends_the_command']),
+    (PRT, "        return (1 if out['outcome'] == 'red' else 0), out\n\n\n#", "        return 0, out\n\n\n#",
+     [f'{TT}.Execute.test_red_is_the_only_failing_exit']),
+    (PRT, "('full' if cls in SLOT_CLASSES else 'none')", "('none')", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (PRT, "            if free < h['disk_min_gib']:", "            if False:", [f'{TT}.Execute.test_low_disk_is_unavailable_before_the_command']),
+    (PRT, "    if not real.startswith(root + os.sep):", "    if False:", [f'{TT}.Salvage.test_only_our_part_records']),
+    (PRT, "    real = os.path.realpath(os.path.join(root, rel))", "    real = os.path.normpath(os.path.join(root, rel))", [f'{TT}.Salvage.test_only_our_part_records']),
+    (PRT, "        retry_on = ['self-hosted', cls, role] if h.where == 'same-host' else", "        retry_on = ['self-hosted', cls] if h.where == 'same-host' else",
+     [f'{TT}.Pure.test_reboot_stopped_and_lost']),
+    (PRT, "+ (1 if unit_result == 'oom-kill' else 0)", "", [f'{TT}.Pure.test_oom_retries_once_with_resume']),
+    (PRT, "            f.write('500')", "            f.write('0')", [f'{TT}.Pure.test_the_supervisor_records_the_exit']),
+    (PRT, "            if registry.memory_bytes(memory) > registry.memory_bytes(proj.memory_max):", "            if False:",
+     [f'{TT}.Execute.test_refusals']),
+    (PRT, "                            if time.monotonic() >= deadline:\n                                return self._end(record, rec, a, unavailable='queue timeout: no CI slot')",
+     "                            if time.monotonic() >= deadline + 3600:\n                                return self._end(record, rec, a, unavailable='queue timeout: no CI slot')",
+     [f'{TT}.Execute.test_a_held_slot_makes_the_part_wait_then_unavailable']),
+    (PRT, "        return int((prev or {}).get('attempt', 1)) + 1", "        return 1", [f'{TT}.Execute.test_a_retry_counts_its_attempt']),
+    (RGY, "        if not VAR.fullmatch(k) or RESERVED.fullmatch(k):", "        if not VAR.fullmatch(k):", [f'{TT}.Registry.test_malformed']),
+    (RGY, "    if type(v) is not int or not lo <= v <= hi:", "    if not lo <= v <= hi:", [f'{TT}.Registry.test_malformed']),
+    (RGY, " or (stem and name != stem)", "", [f'{TT}.Registry.test_malformed']),
     # the env allowlist
     (REM, "up.startswith(REFUSED_PREFIXES) or ", "", [f'{TR}.RemoteEnv.test_refused', f'{TR}.RemoteEnv.test_only_the_allowlist_passes']),
     (REM, "any(p in up for p in REFUSED_PARTS)", "any(p in name for p in REFUSED_PARTS)", [f'{TR}.RemoteEnv.test_refused']),

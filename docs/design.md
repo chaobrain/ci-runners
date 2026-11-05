@@ -297,6 +297,7 @@ that fails a probe gets no part. `place()` is a pure function of the probe resul
 | input | default | meaning |
 |---|---|---|
 | `project` | required | registry key. It must match `github.repository`, or the job is refused. |
+| `id` | required | the part's name, `[A-Za-z0-9][A-Za-z0-9_.-]*`: its record, scope and artifact are named after it |
 | `command` | required | `bash -c` in the job's checkout, inside the project's env |
 | `env` | registry | conda env name on this host |
 | `gpus` | 0 | number of cards to lease; 0 is a CPU part |
@@ -321,8 +322,12 @@ The command's environment holds:
 
 On 3090b and 3090a the command runs in
 `systemd-run --user --scope --slice=ci-<project>.slice -p MemoryMax=<memory>
--p MemorySwapMax=0`, at nice 10 and ionice 7 (nice 0 for `compile`), with OOM score
-+500.
+-p MemorySwapMax=0 -p OOMPolicy=continue`, at nice 10 and ionice 7 (nice 0 for
+`compile`), with OOM score +500. In the scope a supervisor runs the command, ends it at
+the inner timeout (TERM, then KILL after 30 s) and writes the exit and the scope's OOM
+kills into the record. The scope is not in the runner's cgroup, so a stopped runner
+leaves the part running and its record finishing: `salvage` reads it. The executor holds
+the CI slot and the GPU leases itself; the command does not inherit them.
 
 | output | meaning |
 |---|---|
@@ -331,7 +336,7 @@ On 3090b and 3090a the command runs in
 | `retry-on` | label array for the retry or the fallback (on h100: a cool card's `h100-gpu<M>`) |
 | `host`, `gpus`, `queue-seconds`, `run-seconds` | for the consumer's summary |
 | `verify` | `true` if the keyed draw picked this h100 part |
-| `record` | `<host role>:<path>` of the part record, for `salvage` |
+| `record` | `<host role>:<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>`, the part record below the host's `state/parts/`, for `salvage` |
 | `summary` | path to a Markdown block: host, cards, peak temperature per card, CPU frequency cap, waits, events |
 
 The step exits 1 only for `red` (D6). It also uploads these outputs as `outcome.json`, in

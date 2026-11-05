@@ -1,0 +1,565 @@
+"""The executor (design §4.3) and ``salvage`` (§4.5): run one part on this host.
+
+``ci-run part`` checks the inputs against the project registry, takes a CI slot and
+GPU leases, and runs the command in its own systemd scope
+(``ci-part-<runner>-<id>-<n>`` under ``ci-<project>.slice``, with ``MemoryMax``,
+``MemorySwapMax=0``, nice 10, ionice best-effort 7 and OOM score +500). In the scope a
+small supervisor runs the command, enforces the inner timeout and records the exit in
+the part's record, so the record finishes even when the runner itself is stopped
+mid-part (the scope is not in the runner's cgroup): ``salvage`` then reads it.
+
+A part's record is ``state/parts/<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>/``:
+``record.json`` (inputs, start), ``exit.json`` (the supervisor's) and ``outcome.json``
+(the outputs). The step exits 1 only for ``red``; 2 for an input the registry refuses.
+"""
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import fcntl
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Mapping, Sequence
+
+from ci_runners import gpus as gpus_mod
+from ci_runners import inventory, outcome, registry, slots
+
+ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
+SLOT_CLASSES = ('part', 'compile', 'nightly')  # slot=full by default on these (design §4.3)
+KILL_GRACE = 30  # s between TERM and KILL at the inner timeout
+OUTPUTS = ('outcome', 'reason', 'next', 'retry-on', 'host', 'gpus', 'queue-seconds', 'run-seconds', 'verify',
+           'record', 'summary', 'attempt', 'resume')
+
+
+class Refused(Exception):
+    """An input the registry or the host refuses: exit 2, no outcome."""
+
+
+# ------------------------------------------------------------------ small facts
+
+
+def boot_id() -> str:
+    try:
+        with open('/proc/sys/kernel/random/boot_id') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
+def _write_json(path: str, obj: object) -> None:
+    tmp = f'{path}.{os.getpid()}.new'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        json.dump(obj, f, indent=1, sort_keys=True)
+        f.write('\n')
+    os.replace(tmp, path)
+
+
+def _read_json(path: str) -> dict | None:
+    try:
+        with open(path, encoding='utf-8') as f:
+            v = json.load(f)
+        return v if isinstance(v, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def unit_name(runner: str, part_id: str, run: str) -> str:
+    """The scope's name, unique per run and attempt; ``job-completed`` stops
+    ``ci-part-<runner>-*``. Pure."""
+    safe = re.sub(r'[^A-Za-z0-9_.-]', '_', runner) or 'runner'
+    return f'ci-part-{safe}-{part_id}-{run}.scope'
+
+
+def scope_argv(unit: str, project: str, memory: str, inner: Sequence[str]) -> list[str]:
+    """``systemd-run`` for the part's scope (design §4.3). Pure."""
+    return ['systemd-run', '--user', '--scope', '--quiet', f'--unit={unit}',
+            f'--slice=ci-{project}.slice', '-p', f'MemoryMax={memory}', '-p', 'MemorySwapMax=0',
+            '-p', 'OOMPolicy=continue', *inner]
+
+
+def command_argv(command: str, *, compile_part: bool, lock: str, lock_bin: str, host_lock: str) -> list[str]:
+    """What the supervisor runs: nice and ionice, the host lock if the part declares one,
+    then ``bash -c``. Pure."""
+    argv = ['nice', '-n', '0' if compile_part else '10', 'ionice', '-c', '2', '-n', '7']
+    if lock != 'none':
+        argv += [lock_bin, '--lock', host_lock, f'-{lock}']
+    return argv + ['bash', '-c', command]
+
+
+def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, part_dir: str, results: str,
+             cards: Sequence[int], cpus: str, files: Mapping[str, str], slot: str, resume: bool) -> dict[str, str]:
+    """The command's environment (design §4.3): the job's without our ``CI_*`` names,
+    then the project's variables, then ours, which nothing overrides. Pure."""
+    env = {k: v for k, v in base.items() if not k.startswith('CI_')}
+    env.update(project.variables)
+    if project.env:
+        env['PATH'] = f'{project.env}/bin:' + env.get('PATH', '/usr/bin:/bin')
+        env['CONDA_PREFIX'] = project.env
+    env.update({
+        'CI_RUNNERS_HOST': role, 'CI_PROJECT': project.name, 'CI_PART_DIR': part_dir, 'CI_RESULTS_DIR': results,
+        'CUDA_VISIBLE_DEVICES': ','.join(str(c) for c in cards), 'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
+        'CI_CPUS': cpus, 'CI_HOST_LOCK': files['host_lock'], 'CI_SLOT_LOCK': files['slot_lock'],
+        'CI_SLOT_QUEUE': files['slot_queue'], 'CI_SLOT_HELD': slot, 'CI_RESUME': '1' if resume else '0',
+    })
+    return env
+
+
+# ------------------------------------------------------------------ the supervisor (in the scope)
+
+
+def supervise(record: str, timeout: float, argv: Sequence[str]) -> int:
+    """Run ``argv`` in its own session with OOM score +500, end it at ``timeout``, and
+    write ``exit.json``. Runs inside the part's scope."""
+    child: subprocess.Popen | None = None
+    signalled = []
+
+    def stop(signum, _frame):
+        signalled.append(signum)
+        if child is not None:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except OSError:
+                pass
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, stop)
+
+    def adj():
+        with open('/proc/self/oom_score_adj', 'w') as f:
+            f.write('500')
+    timed_out = False
+    child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj)
+    _write_json(os.path.join(record, 'scope.json'), {'supervisor': os.getpid(), 'child': child.pid})
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            rc = child.wait(timeout=max(0.0, deadline - time.monotonic()))
+            break
+        except subprocess.TimeoutExpired:
+            if timed_out:  # TERM did not end it within the grace: KILL
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                deadline = time.monotonic() + 3600
+                continue
+            timed_out = True
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            deadline = time.monotonic() + KILL_GRACE
+    oom_kills = 0
+    try:
+        with open('/proc/self/cgroup') as f:
+            cg = f.read().strip().split('::', 1)[-1]
+        with open(f'/sys/fs/cgroup{cg}/memory.events') as f:
+            oom_kills = outcome.memory_oom_kills(f.read())
+    except (OSError, ValueError):
+        pass
+    _write_json(os.path.join(record, 'exit.json'), {'rc': rc, 'timed_out': timed_out, 'oom_kills': oom_kills,
+                                                     'signalled': bool(signalled), 'end_epoch': time.time(),
+                                                     'boot_end': boot_id()})
+    return rc if rc >= 0 else 128 - rc
+
+
+# ------------------------------------------------------------------ leases
+
+
+class Leases:
+    """GPU leases: per card ``max_parts`` lock files under ``state/leases``, flock-held by
+    the executor for the part's life. Choosing and taking happen under ``.lock``."""
+
+    def __init__(self, directory: str, max_parts: int = 1) -> None:
+        self.dir, self.max_parts = directory, max_parts
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        self.fds: list[int] = []
+
+    def _path(self, card: int, k: int) -> str:
+        return os.path.join(self.dir, f'card{card}.{k}.lock')
+
+    def leased(self, cards: Sequence[int]) -> dict[int, int]:
+        return {c: sum(slots._flocked(self._path(c, k)) for k in range(self.max_parts)) for c in cards}
+
+    def try_take(self, n: int, cards: Sequence[int], free: Mapping[int, int], need_mib: int) -> list[int] | None:
+        mutex = os.open(os.path.join(self.dir, '.lock'), os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(mutex, fcntl.LOCK_EX)
+            chosen = gpus_mod.choose_lease(n, cards=cards, free=free, need_mib=need_mib,
+                                           leased=self.leased(cards), max_parts=self.max_parts)
+            if chosen is None:
+                return None
+            for c in chosen:
+                for k in range(self.max_parts):
+                    fd = os.open(self._path(c, k), os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
+                        os.close(fd)
+                        continue
+                    self.fds.append(fd)
+                    break
+            return chosen
+        finally:
+            os.close(mutex)
+
+    def release(self) -> None:
+        for fd in self.fds:
+            os.close(fd)
+        self.fds = []
+
+
+def smi_free(run: Callable = subprocess.run) -> dict[int, int]:
+    try:
+        r = run(['nvidia-smi', '--query-gpu=index,memory.total,memory.used', '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=30)
+        return gpus_mod.gpu_free_mib(r.stdout) if r.returncode == 0 else {}
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+
+# ------------------------------------------------------------------ outputs
+
+
+def write_outputs(out: Mapping[str, object], github_output: str) -> None:
+    if not github_output:
+        return
+    with open(github_output, 'a', encoding='utf-8') as f:
+        for k in OUTPUTS:
+            v = out.get(k, '')
+            v = json.dumps(v) if isinstance(v, (list, dict)) else ('true' if v is True else 'false' if v is False
+                                                                     else str(v))
+            if '\n' in v:
+                raise ValueError(f'output {k} spans lines')
+            f.write(f'{k}={v}\n')
+
+
+def summary_md(out: Mapping[str, object], part_id: str) -> str:
+    rows = [('outcome', f'{out["outcome"]} ({out["reason"]})'), ('next', out['next']), ('host', out['host']),
+            ('cards', out['gpus'] or 'none'), ('queue', f'{out["queue-seconds"]} s'), ('run', f'{out["run-seconds"]} s'),
+            ('attempt', out['attempt'])]
+    return f'### part `{part_id}`\n\n| | |\n|---|---|\n' + ''.join(f'| {k} | {v} |\n' for k, v in rows)
+
+
+def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | None, *, stopped: bool = False,
+           unavailable: str = '', unit_result: str = '') -> dict[str, object]:
+    """The outputs of a part from its record and exit (design §4.4). Pure but for nothing."""
+    ev = outcome.Evidence(
+        rc=None if ex is None else ex.get('rc'), timed_out=bool(ex and ex.get('timed_out')),
+        stopped=stopped, unavailable=unavailable, boot_start=str(rec.get('boot_start', '')),
+        boot_end=str((ex or {}).get('boot_end', '')),
+        oom_kills=int((ex or {}).get('oom_kills', 0)) + (1 if unit_result == 'oom-kill' else 0),
+        start_epoch=float(rec.get('start_epoch', 0)))
+    o = outcome.classify(ev)
+    attempt = int(rec.get('attempt', 1))
+    h = outcome.hint(o.kind, attempt=attempt, retries=int(rec.get('retries', 1)))
+    cls, role = str(rec.get('class', '')), str(rec.get('host', ''))
+    if h.next == 'retry':
+        retry_on = ['self-hosted', cls, role] if h.where == 'same-host' else ['self-hosted', cls]
+    elif h.next == 'fallback':
+        retry_on = list(rec.get('fallback') or ['self-hosted', cls])
+    else:
+        retry_on = []
+    end = float((ex or {}).get('end_epoch') or time.time())
+    run_seconds = int(max(0.0, end - float(rec['run_epoch']))) if rec.get('run_epoch') else 0
+    return {'outcome': o.kind, 'reason': o.reason, 'next': h.next, 'retry-on': retry_on, 'host': role,
+            'gpus': ','.join(str(c) for c in rec.get('cards', [])), 'queue-seconds': int(rec.get('queue_seconds', 0)),
+            'run-seconds': run_seconds, 'verify': False,
+            'record': f'{role}:{record_ref(record)}', 'summary': os.path.join(record, 'summary.md'), 'attempt': attempt,
+            'resume': h.resume}
+
+
+def _publish(record: str, out: dict[str, object], part_id: str, env: Mapping[str, str]) -> None:
+    with open(os.path.join(record, 'summary.md'), 'w', encoding='utf-8') as f:
+        f.write(summary_md(out, part_id))
+    _write_json(os.path.join(record, 'outcome.json'), out)
+    write_outputs(out, env.get('GITHUB_OUTPUT', ''))
+    if env.get('GITHUB_STEP_SUMMARY'):
+        with open(env['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+            f.write(summary_md(out, part_id))
+
+
+# ------------------------------------------------------------------ the executor
+
+
+@dataclasses.dataclass
+class Inputs:
+    project: str
+    command: str
+    id: str
+    timeout_minutes: float
+    gpus: int = 0
+    gpu_mem_mib: int = 0
+    memory: str = ''
+    slot: str = ''  # full or none; empty: by the runner class
+    lock: str = 'none'
+    queue_timeout_minutes: float = 60
+    results: str = ''
+    resume: bool = False
+    attempt_of: str = ''
+
+
+def parse_args(argv: Sequence[str]) -> Inputs:
+    p = argparse.ArgumentParser(prog='ci-run part')
+    p.add_argument('--project', required=True)
+    p.add_argument('--command', required=True)
+    p.add_argument('--id', required=True)
+    p.add_argument('--timeout-minutes', type=float, required=True)
+    p.add_argument('--gpus', type=int, default=0)
+    p.add_argument('--gpu-mem-mib', type=int, default=0)
+    p.add_argument('--memory', default='')
+    p.add_argument('--slot', choices=('', 'full', 'none'), default='')
+    p.add_argument('--lock', choices=('none', 's', 'x', 'l'), default='none')
+    p.add_argument('--queue-timeout-minutes', type=float, default=60)
+    p.add_argument('--results', default='')
+    p.add_argument('--resume', choices=('true', 'false', ''), default='false')
+    p.add_argument('--attempt-of', default='')
+    a = p.parse_args(list(argv))
+    return Inputs(a.project, a.command, a.id, a.timeout_minutes, a.gpus, a.gpu_mem_mib, a.memory, a.slot, a.lock,
+                  a.queue_timeout_minutes, a.results, a.resume == 'true', a.attempt_of)
+
+
+class Executor:
+    """One part. The I/O is injectable: ``run`` (subprocess.run), ``spawn``
+    (subprocess.Popen) and ``scope`` (False runs the supervisor without systemd, for tests)."""
+
+    def __init__(self, inv: inventory.Inventory, etc: str, env: Mapping[str, str], *, release: str,
+                 run: Callable = subprocess.run, spawn: Callable = subprocess.Popen, scope: bool = True,
+                 poll: float = 3.0) -> None:
+        self.inv, self.etc, self.env, self.release = inv, etc, dict(env), release
+        self.run, self.spawn, self.scope, self.poll = run, spawn, scope, poll
+        self.stopped = False
+        self.proc: subprocess.Popen | None = None
+        self.unit = ''
+
+    # -- checks before anything is taken
+
+    def check(self, a: Inputs) -> tuple[registry.Project, str]:
+        if not ID.fullmatch(a.id):
+            raise Refused(f'id must match {ID.pattern}')
+        try:
+            proj = registry.load_file(self.etc, a.project, self.inv.this)
+        except registry.RegistryError as e:
+            raise Refused(f'project {a.project}: {e}') from None
+        if self.env.get('GITHUB_REPOSITORY', '').lower() != proj.repository:
+            raise Refused(f'project {a.project} belongs to another repository')
+        cls = self.env.get('CI_RUNNER_CLASS', '')
+        if not cls:
+            raise Refused('CI_RUNNER_CLASS is not set: not one of our runners')
+        memory = a.memory or proj.memory or proj.memory_max
+        try:
+            if registry.memory_bytes(memory) > registry.memory_bytes(proj.memory_max):
+                raise Refused(f'memory {memory} is above the project\'s {proj.memory_max} here')
+        except registry.RegistryError as e:
+            raise Refused(str(e)) from None
+        if not 0 <= a.gpus <= len(self.inv.host['gpus']):
+            raise Refused(f'gpus must be in [0, {len(self.inv.host["gpus"])}] here')
+        if a.lock not in ('none', 's', 'x', 'l'):
+            raise Refused('lock must be none, s, x or l')
+        if not 0 < a.timeout_minutes <= (600 if cls == 'nightly' else 240):
+            raise Refused('timeout-minutes is out of range')
+        return proj, memory
+
+    def record_dir(self, a: Inputs, attempt: int) -> str:
+        repo = self.env.get('GITHUB_REPOSITORY', 'unknown/unknown').lower()
+        run = f'{self.env.get("GITHUB_RUN_ID", "0")}-{self.env.get("GITHUB_RUN_ATTEMPT", "1")}'
+        if not re.fullmatch(r'[0-9]+-[0-9]+', run) or not registry.REPO.fullmatch(repo):
+            raise Refused('GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT or GITHUB_REPOSITORY is malformed')
+        return os.path.join(self.inv.host['data'], 'ci-runners', 'state', 'parts', repo, run, f'{a.id}-{attempt}')
+
+    def attempt(self, a: Inputs) -> int:
+        if not a.attempt_of:
+            return 1
+        prev = read_record(self.inv, a.attempt_of)
+        return int((prev or {}).get('attempt', 1)) + 1
+
+    # -- the run
+
+    def _on_signal(self, _signum, _frame) -> None:
+        self.stopped = True
+        if self.unit and self.scope:
+            self.run(['systemctl', '--user', 'stop', '--no-block', self.unit], capture_output=True, timeout=30)
+        elif self.proc is not None:
+            try:
+                self.proc.send_signal(signal.SIGTERM)
+            except OSError:
+                pass
+
+    def execute(self, a: Inputs) -> tuple[int, dict[str, object]]:
+        proj, memory = self.check(a)
+        h = self.inv.host
+        cls = self.env['CI_RUNNER_CLASS']
+        attempt = self.attempt(a)
+        record = self.record_dir(a, attempt)
+        os.makedirs(record, mode=0o700, exist_ok=True)
+        results = os.path.join(record, 'results')
+        os.makedirs(results, mode=0o700, exist_ok=True)
+        fallback = list(proj.fallback.get(cls, ()))
+        rec: dict[str, object] = {
+            'project': proj.name, 'id': a.id, 'class': cls, 'host': self.inv.this, 'runner': self.env.get('RUNNER_NAME', ''),
+            'attempt': attempt, 'retries': proj.retries, 'fallback': fallback, 'inputs': dataclasses.asdict(a),
+            'start_epoch': time.time(), 'boot_start': boot_id(), 'executor': os.getpid(),
+            'release': self.release}
+        _write_json(os.path.join(record, 'record.json'), rec)
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(sig, self._on_signal)
+        t0 = time.monotonic()
+        deadline = t0 + a.queue_timeout_minutes * 60
+        leases = Leases(os.path.join(h['data'], 'ci-runners', 'state', 'leases'))
+        slot_fd, slot_path = None, ''
+        try:
+            free = shutil.disk_usage(h['data']).free / (1 << 30)
+            if free < h['disk_min_gib']:
+                return self._end(record, rec, a, unavailable=f'low disk: {free:.0f} GiB free under the data directory')
+            take_slot = (a.slot or ('full' if cls in SLOT_CLASSES else 'none')) == 'full'
+            if take_slot:
+                q = slots.SlotQueue(h['files']['slot_lock'], h['slots'], h['files']['slot_queue'], poll=self.poll)
+                mine = sum(1 for t in q.waiting() if t.project == proj.name)
+                if slots.queue_full(mine, proj.max_waiting):
+                    return self._end(record, rec, a, unavailable='project queue full')
+                q.take_ticket(proj.name, f'part {a.id}')
+                try:
+                    caps = {proj.name: proj.max_slots}
+                    while slot_fd is None:
+                        slot_fd = q.try_take(proj.name, caps, default=proj.name)
+                        if slot_fd is None:
+                            if self.stopped:
+                                return self._end(record, rec, a, stopped=True)
+                            if time.monotonic() >= deadline:
+                                return self._end(record, rec, a, unavailable='queue timeout: no CI slot')
+                            time.sleep(self.poll)
+                finally:
+                    if q.ticket and os.path.exists(q.ticket):
+                        os.unlink(q.ticket)
+                slot_path = q.slots[q._index(slot_fd)]
+                os.set_inheritable(slot_fd, False)
+            cards: list[int] = []
+            if a.gpus:
+                need = a.gpu_mem_mib or proj.gpu_mem_mib
+                while True:
+                    got = leases.try_take(a.gpus, list(h['gpus']), smi_free(self.run), need)
+                    if got is not None:
+                        cards = got
+                        break
+                    if self.stopped:
+                        return self._end(record, rec, a, stopped=True)
+                    if time.monotonic() >= deadline:
+                        return self._end(record, rec, a, unavailable='queue timeout: no card fits')
+                    time.sleep(self.poll)
+            rec.update(queue_seconds=round(time.monotonic() - t0), cards=cards, slot=slot_path, run_epoch=time.time())
+            cpus = str(h.get('cpus') or len(os.sched_getaffinity(0)))
+            env = part_env(self.env, role=self.inv.this, project=proj, part_dir=record, results=results, cards=cards,
+                           cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume)
+            inner = command_argv(a.command, compile_part=cls == 'compile', lock=a.lock,
+                                 lock_bin=os.path.join(self.release, 'bin', 'ci-lock'), host_lock=h['files']['host_lock'])
+            sup = [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
+                   'from ci_runners.part import supervise; '
+                   'sys.exit(supervise(sys.argv[1], float(sys.argv[2]), sys.argv[3:]))',
+                   self.release, record, str(a.timeout_minutes * 60), *inner]
+            run_id = f'{os.path.basename(os.path.dirname(record))}-{attempt}'
+            self.unit = unit_name(self.env.get('RUNNER_NAME', ''), a.id, run_id) if self.scope else ''
+            rec['unit'] = self.unit
+            _write_json(os.path.join(record, 'record.json'), rec)
+            argv = scope_argv(self.unit, proj.name, memory, sup) if self.scope else sup
+            if self.stopped:
+                return self._end(record, rec, a, stopped=True)
+            self.proc = self.spawn(argv, cwd=self.env.get('GITHUB_WORKSPACE') or os.getcwd(), env=env)
+            self.proc.wait()
+            unit_result = ''
+            if self.scope:
+                r = self.run(['systemctl', '--user', 'show', '-p', 'Result', '--value', self.unit],
+                             capture_output=True, text=True, timeout=30)
+                unit_result = (r.stdout or '').strip()
+                self.run(['systemctl', '--user', 'reset-failed', self.unit], capture_output=True, timeout=30)
+            return self._end(record, rec, a, ex=_read_json(os.path.join(record, 'exit.json')),
+                             stopped=self.stopped, unit_result=unit_result)
+        finally:
+            leases.release()
+            if slot_fd is not None:
+                os.close(slot_fd)
+
+    def _end(self, record: str, rec: dict[str, object], a: Inputs, *, ex: Mapping[str, object] | None = None,
+             stopped: bool = False, unavailable: str = '', unit_result: str = '') -> tuple[int, dict[str, object]]:
+        _write_json(os.path.join(record, 'record.json'), rec)
+        out = finish(record, rec, ex, stopped=stopped, unavailable=unavailable, unit_result=unit_result)
+        _publish(record, out, a.id, self.env)
+        return (1 if out['outcome'] == 'red' else 0), out
+
+
+# ------------------------------------------------------------------ salvage
+
+
+def record_ref(record: str) -> str:
+    """A record's path below ``state/parts`` (``<owner>/<repo>/<run>/<id>-<attempt>``):
+    what the ``record`` output names, so no home path reaches the job's outputs. Pure."""
+    parts = record.split(os.sep)
+    return '/'.join(parts[-4:])
+
+
+def _record_path(inv: inventory.Inventory, ref: str) -> str:
+    """The local path of a ``<role>:<owner>/<repo>/<run>/<id>-<attempt>`` record,
+    which must lie under this host's part records."""
+    role, _, rel = ref.partition(':')
+    if role != inv.this:
+        raise Refused(f'record {ref!r} is on another host (salvage over ssh comes with RUN-3)')
+    root = os.path.realpath(os.path.join(inv.host['data'], 'ci-runners', 'state', 'parts'))
+    real = os.path.realpath(os.path.join(root, rel))
+    if not real.startswith(root + os.sep):
+        raise Refused('the record is not a part record of this host')
+    return real
+
+
+def read_record(inv: inventory.Inventory, ref: str) -> dict | None:
+    return _read_json(os.path.join(_record_path(inv, ref), 'record.json'))
+
+
+def salvage(inv: inventory.Inventory, ref: str, env: Mapping[str, str], *, wait_seconds: float = 0,
+            run: Callable = subprocess.run, poll: float = 10) -> tuple[int, dict[str, object]]:
+    """The outputs of a part whose job ended without them (design §4.5): its
+    ``outcome.json``, else what its record and exit say, else ``lost``. A part whose
+    scope still runs is waited for up to ``wait_seconds``."""
+    record = _record_path(inv, ref)
+    rec = _read_json(os.path.join(record, 'record.json'))
+    if rec is None:
+        raise Refused('no part record there')
+    done = _read_json(os.path.join(record, 'outcome.json'))
+    if done is None:
+        deadline = time.monotonic() + wait_seconds
+        unit = str(rec.get('unit', ''))
+        while unit and not os.path.exists(os.path.join(record, 'exit.json')) and time.monotonic() < deadline:
+            r = run(['systemctl', '--user', 'is-active', unit], capture_output=True, text=True, timeout=30)
+            if (r.stdout or '').strip() not in ('active', 'activating', 'deactivating'):
+                break
+            time.sleep(poll)
+        done = finish(record, rec, _read_json(os.path.join(record, 'exit.json')))
+        _publish(record, done, str(rec.get('id', 'part')), env)
+    else:
+        write_outputs(done, env.get('GITHUB_OUTPUT', ''))
+    return (1 if done['outcome'] == 'red' else 0), done
+
+
+# ------------------------------------------------------------------ CLI
+
+
+def main(argv: list[str], inv: inventory.Inventory, etc: str) -> int:
+    release = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        if argv and argv[0] == 'salvage':
+            p = argparse.ArgumentParser(prog='ci-run salvage')
+            p.add_argument('--record', required=True)
+            p.add_argument('--wait-seconds', type=float, default=0)
+            a = p.parse_args(argv[1:])
+            code, out = salvage(inv, a.record, os.environ, wait_seconds=a.wait_seconds)
+        else:
+            code, out = Executor(inv, etc, os.environ, release=release).execute(parse_args(argv))
+    except Refused as e:
+        print(f'ci-run part: refused: {e}', file=sys.stderr)
+        return 2
+    print(f'ci-run part: {out["outcome"]} ({out["reason"]}), next {out["next"]}', file=sys.stderr)
+    return code

@@ -30,7 +30,7 @@ outcomes follow the design's §4 and §5.1.
 
 1. **Ask the lead.** The lead adds the repository, its class and its actors to the
    hosts' policy and registry, through `setup/plan.sh` and `apply.sh`. A public
-   repository also needs the routing of design §12 item 2.
+   repository also gets its own repository-level GPU runners (design §12 item 2).
 2. **Add the env spec** to the project's default branch.
 3. **Build the envs** on each host the project uses. For h100, build the env and its
    manifest from 3090b.

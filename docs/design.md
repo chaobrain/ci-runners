@@ -1,6 +1,6 @@
 # ci-runners: design (contract)
 
-Status: draft, RUN-0, for the lead's approval. No code exists yet. Consumers onboard
+Status: approved by the lead on 2026-11-05 (#1). RUN-1 is next. No code exists yet. Consumers onboard
 through [consumers.md](consumers.md).
 
 This repository becomes public (D1). Hosts appear here under role names: **3090b**,
@@ -61,6 +61,19 @@ brainspike's private `docs/specs/arch/ci.md` names them.
 8. **Generic outcome classification, with fixtures.** The fixtures are journal OOM
    lines, the h100 GPU watchdog's kill lines, boot-id changes and a stopped runner.
    Thermal and OOM kills are retried per policy and are not reported as test failures.
+9. **The choices of §12, each as recommended (lead, 2026-11-05):**
+   1. ci-runners goes public before the first registration, with rulesets on `main`
+      and `v*`;
+   2. public consumers get repository-level GPU runners, and
+      `allows_public_repositories` stays off;
+   3. runner pools are shared per host and class;
+   4. the CI proxy is a separate instance;
+   5. brainevent is the first public consumer;
+   6. the verdict waits for a drawn verify;
+   7. the early thermal stop is at 85 °C for 3 min;
+   8. the manifest cost is chosen by RUN-2's measurement;
+   9. `Default` is restricted to selected repositories;
+   10. the org base permission stays `write` for now, to be tightened later.
 
 ## Decisions of this spec
 
@@ -114,7 +127,7 @@ every repository. ci-runners is private, with Actions access `none`.
 |---|---|---|
 | An org has one Default runner group. Only Team can create more. | docs: runner groups ("organizations using the GitHub Team plan"); API: one group, `Default`, `visibility: all`, `allows_public_repositories: false`, `restricted_to_workflows: false`; 0 runners | Every org runner is open to every private org repository (11 today), so the hook's repository allowlist is the per-repository boundary. Whether Free allows setting Default to `selected` is untested (it would be a settings change). |
 | By default, only private repositories can use a runner group. | docs; API default `allows_public_repositories: false` | Public repositories reach no org runner unless the flag is turned on. See below. |
-| A public caller can use only public reusable workflows. A private caller can use public ones, and private ones whose repository grants Actions access. | docs: "Reusing workflow configurations", access table | Public consumers need ci-runners public (D1). Alternatives are in §12 item 1. |
+| A public caller can use only public reusable workflows. A private caller can use public ones, and private ones whose repository grants Actions access. | docs: "Reusing workflow configurations", access table | Public consumers need ci-runners public (D1). Decided in §12 item 1. |
 | Rulesets and branch protection exist only for public repositories on Free. | API: private ci-runners returns 403 "Upgrade to GitHub Pro or make this repository public"; public brainstate has an active ruleset | D1 |
 | Self-hosted runners and standard hosted runners for public repositories are free. | docs: Actions billing | This repository's CI runs on hosted runners. |
 | The pre-job hook runs in "Set up runner" with the default variables and the event payload (`GITHUB_EVENT_PATH`). A nonzero exit fails the job. It has no timeout, and its output is visible to anyone who can read the repository. | docs: "Running scripts before or after a job" | The hook bounds itself, reads only local files and prints a reason code, never inventory. |
@@ -143,7 +156,7 @@ The hook refuses such a job before its first step, but the job still takes a run
 a public repository's job matches no runner and fails after 24 h. The path that keeps
 the flag off is to register *repository-level* GPU runners on each public consumer.
 Then only that repository, including its fork pull requests, which the hook still
-refuses, reaches only its own GPU runners. §12 item 2 recommends that path.
+refuses, reaches only its own GPU runners. §12 item 2 decides that path.
 
 ## 3. Layout
 
@@ -654,7 +667,7 @@ These are starting values, tuned from RUN-1's measured runs.
 
 Each phase is one or more PRs of at most about 1,500 lines, each carrying its evidence.
 
-**RUN-0, this spec.** *Acceptance:* the lead approves it and decides §12. AGENTS.md is
+**RUN-0, this spec.** *Acceptance:* the lead approves it and decides §12 (done 2026-11-05). AGENTS.md is
 merged.
 
 **RUN-1: 3090b runners and the generic executor.** Sub-PRs:
@@ -708,8 +721,8 @@ with brainspike's nightly files on a test night. With the proxy stopped on 3090a
 go to 3090b within the bounds. brainspike's CI-3 runs the nightly on the `nightly`
 pool.
 
-**RUN-4: the first public-repo GPU consumer.** §12 item 5 proposes brainevent.
-*Acceptance:* the lead applies the routing chosen in §12 item 2. The hook refuses:
+**RUN-4: the first public-repo GPU consumer**, brainevent (§12 item 5).
+*Acceptance:* the lead registers its repository-level GPU runners (§12 item 2). The hook refuses:
 
 - a real pull request from a fork by an account not on the allowlist;
 - a push by a member not on the allowlist;
@@ -772,43 +785,32 @@ here):
 12. Milestone: CI-1a's file list drops `scripts/runner/` and pins `chaobrain/ci-runners@v1`.
     CI-1b's acceptance points to RUN-2's.
 
-## 12. Open choices for the lead
+## 12. Decided choices (lead, 2026-11-05)
 
-1. **Visibility of ci-runners.** *Recommended:* public before RUN-1's first
-   registration, with rulesets on `main` and `v*`, and no inventory ever (D1). The
-   alternatives:
-   - Keep it private until RUN-4. Any member can then move `v1` (base permission
-     write), and RUN-4 needs a flip or a second, public repository for the workflow
-     layer.
-   - Never public, with public consumers calling the host CLI from inline workflow
-     steps. They copy about 40 lines of workflow each, and the tag risk stays.
-2. **How public consumers reach the runners.**
-   - *Recommended:* repository-level `gpu` and `h100-gpu<N>` runners registered on each
-     public consumer, with `allows_public_repositories` left off. This is an exception
-     to "org level" for public repositories only.
-   - Or turn the flag on, which exposes every runner to every public org repository,
-     forks included, with the hook as the only gate (§2).
-3. **Runner pools.** *Recommended:* shared pools per host and class, with one waiting
-   seat per project and `max_waiting`. The alternative is per-project pools, enforced by
-   the hook through label ownership: fairer at GitHub's queue, but more runners.
-4. **The CI proxy.** *Recommended:* a separate CI instance on its own ports, so that
-   stopping the interactive proxy or switching its node never drops the runners. The alternative is
-   to turn the interactive proxy into the service, which changes the shell functions on
-   each host.
-5. **First public consumer (RUN-4).** *Recommended:* brainevent, whose GPU kernels have
-   the clearest need. The alternative is brainstate.
-6. **Verify timing.** *Recommended:* the verdict waits for a drawn verify part, adding a
-   trusted-host GPU run to 10 % of h100 heads. The alternative is an asynchronous verify
-   that later flips the status, or files an issue if the head is already merged.
-7. **Early thermal stop.** *Recommended:* stop at 85 °C for 3 min and retry on a cool
-   card, before the watchdog's throttle and kill. The alternative is to rely on the
-   watchdog and classify its kill.
-8. **Manifest cost.** *Recommended:* full hashes before each part if RUN-2 measures the
-   check at 60 s or less; otherwise every `.py`, `.pth` and metadata file plus a
-   rotating 10 % of the rest.
-9. **Default group's repository access.** *Recommended:* try `selected` (the onboarded
-   private repositories) once RUN-1 starts, as defence in depth. If Free refuses it,
-   rely on the hook. This is a settings change, so it is the lead's.
-10. **Org base permission `write`.** *Recommended:* no change for this design: the hook
-    and rulesets cover the runners. Lowering it to `read`, with write by team, would also
-    protect every private repository's `main`, which Free cannot protect.
+1. **Visibility of ci-runners.** The repository becomes public before RUN-1's first
+   runner registration, with rulesets on `main` and `v*` that only the lead may bypass.
+   It never holds inventory (D1). The lead makes both changes (lead, 2026-11-05).
+2. **How public consumers reach the runners.** Each public consumer gets
+   repository-level `gpu` and `h100-gpu<N>` runners, registered on that repository.
+   `allows_public_repositories` stays off on `Default`. This is an exception to "org
+   level" for public repositories only (lead, 2026-11-05).
+3. **Runner pools.** Pools are shared per host and class, with one waiting seat per
+   project and `max_waiting` (lead, 2026-11-05).
+4. **The CI proxy.** A separate CI instance runs on its own ports. Stopping the
+   interactive proxy or switching its node never drops the runners (lead, 2026-11-05).
+5. **First public consumer (RUN-4).** brainevent (lead, 2026-11-05).
+6. **Verify timing.** The verdict waits for a drawn verify part (lead, 2026-11-05).
+7. **Early thermal stop.** A part whose card stays at 85 °C or more for 3 min is stopped
+   and retried on a cool card, before the watchdog throttles or kills it (lead,
+   2026-11-05).
+8. **Manifest cost.** Every file is hashed before each part if RUN-2 measures the check
+   at 60 s or less. Otherwise the check covers every `.py`, `.pth` and metadata file
+   plus a rotating 10 % of the rest (lead, 2026-11-05).
+9. **Default group's repository access.** `Default` is restricted to the onboarded
+   private repositories (`selected`) when RUN-1 starts, as defence in depth. If Free
+   refuses that, the hook alone is the boundary. The lead makes this change (lead,
+   2026-11-05).
+10. **Org base permission.** It stays `write` for now: the hook and the rulesets cover
+    the runners (lead, 2026-11-05).
+    - *Follow-up for the lead:* tighten it later to `read`, with write granted by team.
+      On Free that is the only way to protect each private repository's `main`.

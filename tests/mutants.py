@@ -467,7 +467,7 @@ MUTANTS = [
      [f'{TU}.Standalone.test_runners_labels_and_cards']),
     (SET, "[*labels, f'{inv.this}-gpu{card}']", "labels", [f'{TU}.Standalone.test_runners_labels_and_cards']),
     (SET, "    if len(set(names)) != len(names):", "    if False:", [f'{TU}.Standalone.test_runners_labels_and_cards']),
-    (SET, " or d == unit_dir):", "):", [f'{TU}.Standalone.test_the_accounts_unit_directory_keeps_its_mode']),
+    (SET, "(d == unit_dir or os.stat(d)", "(os.stat(d)", [f'{TU}.Standalone.test_the_accounts_unit_directory_keeps_its_mode']),
     (CLI, "        if 'proxy' not in h:  # GitHub", "        if False:  # GitHub", [f'{TU}.Standalone.test_proxy_check_without_a_proxy']),
     (HKS, '/*) [ -f "$py" ] && [ -x "$py" ] || py=/usr/bin/python3 ;;', '/*) ;;',
      [f'{TH}.Started.test_the_wrappers_run_the_inventorys_python']),

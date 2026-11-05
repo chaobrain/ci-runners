@@ -218,7 +218,7 @@ def build(etc: str) -> Plan:
         dirs += [(os.path.join(etc, 'proxy'), 0o700), (os.path.join(etc, 'proxy', 'nodes'), 0o700)]
     unit_dir = os.path.join(home, '.config', 'systemd', 'user')
     for d, mode in dirs:
-        if os.path.isdir(d) and (os.stat(d).st_mode & 0o777 == mode or d == unit_dir):
+        if os.path.isdir(d) and (d == unit_dir or os.stat(d).st_mode & 0o777 == mode):
             plan.add(f'  keep   {d}/')  # the unit directory is the account's: its mode is never changed
         else:
             plan.add(f'  mkdir  {d}/ mode {mode:o}', kind='mkdir', path=d, mode=mode)

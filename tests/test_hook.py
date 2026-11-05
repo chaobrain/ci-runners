@@ -67,7 +67,7 @@ class Started(unittest.TestCase):
         for what, (env, reason) in cases.items():
             code, line = hook.started(env)
             self.assertEqual((code, line.split()[2]), (1, reason), what)
-        (self.etc / 'policy.toml').write_text('schema = 2\n')
+        (self.etc / 'policy.toml').write_text('schema = 3\n')
         self.assertEqual(hook.started(self.env)[1].split()[1:3], ['refused', 'policy'])
 
     def test_an_oversized_event_is_refused(self):

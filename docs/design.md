@@ -807,9 +807,12 @@ following every page, and writes `etc/org.json`: `{schema: 1, fetched_at, member
 renames it, mode 600. A failed or partial fetch leaves the old snapshot in place. 30 s
 per call, 3 tries.
 
-`policy.toml` schema 2 adds `[org]`: `members = true` (the snapshot's members join
-`actors`), `private_repositories = true` (each snapshot repository joins `repositories`
-as private) and `max_age_minutes = 60`. A repository written in `policy.toml` keeps its
+`policy.toml` schema 2 adds `[org]`: `name`, `members = true`, `private_repositories =
+true` (each snapshot repository joins `repositories` as private) and `max_age_minutes =
+60`. With `members`, the snapshot's members may act **only in the org's private
+repositories of the snapshot**: a repository written by hand is open to them only if it
+is private and the snapshot holds it with the same id. A public repository written by
+hand (the GPU path of decision 2) keeps the hand-kept `actors` alone. A repository written in `policy.toml` keeps its
 own entry, so `paused`, `extra_events` and `bot_dispatch` stay the lead's. A public
 repository is never added from the snapshot: the call asks only for private ones, and a
 snapshot entry already listed as public is ignored. Schema 1 is read as before (3090b).

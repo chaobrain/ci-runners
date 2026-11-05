@@ -78,6 +78,7 @@ HOST_KEYS = {
     'proxy': (lambda v: isinstance(v, dict), False),
     'watchdog_log': (_abs, False),     # the host's GPU watchdog log: its kill lines (design §4.4)
     'watchdog_notice': (_abs, False),  # present while the watchdog warns: GPU parts are unavailable
+    'orgsync': (lambda v: type(v) is bool, False),  # runs ci-orgsync.timer: the org snapshot (§6.5)
 }
 PROXY_KEYS = {
     'client': (_abs, True),

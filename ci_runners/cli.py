@@ -8,6 +8,8 @@
     ci-run claim ...       claim a head (actions/claim; design §4.1)
     ci-run probe           this host's probe, as JSON (design §4.2)
     ci-run place ...       place parts on hosts (actions/place; design §4.2)
+    ci-run part ...        run one part (actions/part; design §4.3)
+    ci-run salvage ...     the outputs of a part whose job ended without them (§4.5)
 
 The inventory is ``$CI_RUNNERS_ETC/inventory.toml``, else ``~/data/ci-runners/etc``.
 """
@@ -52,6 +54,9 @@ def main(argv: list[str]) -> int:
     if cmd in ('probe', 'place'):
         from ci_runners import probe
         return probe.main(argv, load_inventory())
+    if cmd in ('part', 'salvage'):
+        from ci_runners import part
+        return part.main(argv if cmd == 'salvage' else args, load_inventory(), etc_dir())
     if cmd in ('plan', 'apply', 'runners'):
         from ci_runners import setup
         return setup.main([cmd, *args])

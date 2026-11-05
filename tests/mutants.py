@@ -1,19 +1,27 @@
 """Mutants of the lines the tests guard (AGENTS.md, working agreement 4).
 
 Each mutant replaces one exact snippet in a copy of the tree and runs only the tests
-that should kill it; a mutant that passes them survives and fails this script. Run it
-with ``python tests/mutants.py`` from the repository root (CI runs it on every PR).
+that should kill it; a mutant that passes them survives and fails this script. Up to
+``WORKERS`` mutants run at once, each in its own copy; tests still running after
+``HANG`` seconds have hung, which kills the mutant. Run it with
+``python tests/mutants.py`` from the repository root (CI runs it on every PR).
 """
 from __future__ import annotations
 
+import concurrent.futures
+import os
 import pathlib
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+WORKERS = 4  # a hosted runner's cores; each worker has its own copy of the tree
+HANG = 60  # seconds: the slowest guarded test takes about 9 s, so a mutant's tests still running have hung
 POL = 'ci_runners/policy.py'
 REM = 'ci_runners/remote.py'
 INV = 'ci_runners/inventory.py'
@@ -28,6 +36,8 @@ PLA = 'ci_runners/place.py'
 SLO = 'ci_runners/slots.py'
 PRB = 'ci_runners/probe.py'
 GHB = 'ci_runners/github.py'
+PRT = 'ci_runners/part.py'
+RGY = 'ci_runners/registry.py'
 REA = 'ci_runners/reaper.py'
 REG = 'setup/register.sh'
 INS = 'setup/install.sh'
@@ -45,6 +55,7 @@ TG = 'tests.test_gpus'
 TL = 'tests.test_place'
 TS = 'tests.test_slots'
 TQ = 'tests.test_probe_claim'
+TT = 'tests.test_part'
 TE = 'tests.test_reaper'
 TK = 'tests.test_scripts'
 
@@ -291,6 +302,61 @@ MUTANTS = [
     (PRB, "c.get('others') is not False", "bool(c.get('others', False))", [f'{TQ}.Probe.test_json_round_trip_and_fail_closed']),
     (PRB, "float(c['temp_c'])", "float(c.get('temp_c', 0))", [f'{TQ}.Probe.test_json_round_trip_and_fail_closed']),
     (PRB, "'ServerAliveCountMax=4', '--', ", "'ServerAliveCountMax=4', ", [f'{TQ}.Probe.test_remote_probe_over_ssh']),
+    # the executor and the registry
+    (PRT, "        if self.env.get('GITHUB_REPOSITORY', '').lower() != proj.repository:", "        if False:",
+     [f'{TT}.Execute.test_refusals']),
+    (PRT, "    env = {k: v for k, v in base.items() if not k.startswith('CI_') and k not in STEP_FILES}", "    env = {k: v for k, v in base.items() if k not in STEP_FILES}",
+     [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (PRT, "        'CI_RUNNERS_HOST': role, 'CI_PROJECT': project.name,", "        'CI_RUNNERS_HOST': role,",
+     [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (PRT, "            timed_out = True\n", "            timed_out = False\n", [f'{TT}.Execute.test_the_inner_timeout_ends_the_command']),
+    (PRT, "        return (1 if out['outcome'] == 'red' else 0), out\n\n\n#", "        return 0, out\n\n\n#",
+     [f'{TT}.Execute.test_red_is_the_only_failing_exit']),
+    (PRT, "('full' if cls in SLOT_CLASSES else 'none')", "('none')", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (PRT, "            if free < h['disk_min_gib']:", "            if False:", [f'{TT}.Execute.test_low_disk_is_unavailable_before_the_command']),
+    (PRT, "    if not real.startswith(root + os.sep):", "    if False:", [f'{TT}.Salvage.test_only_our_part_records']),
+    (PRT, "    real = os.path.realpath(os.path.join(root, rel))", "    real = os.path.normpath(os.path.join(root, rel))", [f'{TT}.Salvage.test_only_our_part_records']),
+    (PRT, "        retry_on = ['self-hosted', cls, role] if h.where == 'same-host' else", "        retry_on = ['self-hosted', cls] if h.where == 'same-host' else",
+     [f'{TT}.Pure.test_reboot_stopped_and_lost']),
+    (PRT, "+ (1 if unit_result == 'oom-kill' else 0)", "", [f'{TT}.Pure.test_oom_retries_once_with_resume']),
+    (PRT, "            f.write('500')", "            f.write('0')", [f'{TT}.Pure.test_the_supervisor_records_the_exit']),
+    (PRT, "            if registry.memory_bytes(memory) > registry.memory_bytes(proj.memory_max):", "            if False:",
+     [f'{TT}.Execute.test_refusals']),
+    (PRT, "                            if time.monotonic() >= deadline:\n                                return self._end(record, rec, a, unavailable='queue timeout: no CI slot')",
+     "                            if time.monotonic() >= deadline + 3600:\n                                return self._end(record, rec, a, unavailable='queue timeout: no CI slot')",
+     [f'{TT}.Execute.test_a_held_slot_makes_the_part_wait_then_unavailable']),
+    (PRT, "        return int((prev or {}).get('attempt', 1)) + 1", "        return 1", [f'{TT}.Execute.test_a_retry_counts_its_attempt']),
+    (PRT, "    child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj)",
+     "    child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj, close_fds=False)",
+     [f'{TT}.Execute.test_the_command_does_not_inherit_the_slot']),
+    (PRT, "            leases.release()\n", "            pass\n", [f'{TT}.Execute.test_cards_are_leased']),
+    (PRT, "        if self.proc is not None:\n            raise SystemExit(128 + signum)", "        if False:\n            raise SystemExit(128 + signum)",
+     [f'{TT}.Execute.test_a_stopped_executor_leaves_the_part_to_salvage']),
+    (PRT, "        os.setsid()\n", "        pass\n", [f'{TT}.Execute.test_a_stopped_executor_leaves_the_part_to_salvage']),
+    (PRT, "env=env, pass_fds=held)", "env=env)", [f'{TT}.Execute.test_a_stopped_executor_leaves_the_part_to_salvage']),
+    (PRT, "                    os.killpg(child.pid, signal.SIGKILL)", "                    pass", [f'{TT}.Pure.test_a_command_that_ignores_term_is_killed']),
+    (PRT, "                        slot_fd = q.try_take(proj.name, caps, default=default)", "                        slot_fd = q.try_take(proj.name, caps, default=proj.name)",
+     [f'{TT}.Execute.test_a_local_holder_counts_as_the_default_project']),
+    (PRT, "                    caps.setdefault(proj.name, proj.max_slots)\n", "                    caps[proj.name] = 1\n",
+     [f'{TT}.Execute.test_the_cap_holds_with_a_free_slot']),
+    (PRT, "    if not record_ref(record).lower().startswith(", "    if False and not record_ref(record).lower().startswith(",
+     [f'{TT}.Salvage.test_another_repository_cannot_salvage']),
+    (PRT, "        if ex is not None:  # final", "        if True:  # final", [f'{TT}.Salvage.test_lost_is_not_kept_while_the_record_may_finish']),
+    (PRT, "        stopped=stopped or bool(ex and ex.get('signalled') and not ex.get('timed_out')),", "        stopped=stopped,",
+     [f'{TT}.Pure.test_reboot_stopped_and_lost']),
+    (PRT, "        if a.gpu_mem_mib < 0 or a.queue_timeout_minutes < 0:", "        if False:", [f'{TT}.Execute.test_refusals']),
+    (PRT, "            os.mkdir(record, 0o700)  # atomic", "            os.makedirs(record, 0o700, exist_ok=True)  # atomic",
+     [f'{TT}.Execute.test_an_id_runs_once_per_run']),
+    (PRT, " and k not in STEP_FILES}", "}", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (RGY, "(CI_|GITHUB_|ACTIONS_|RUNNER_|LD_|PYTHON).*|CUDA_VISIBLE_DEVICES|CUDA_DEVICE_ORDER|PATH|", "(CI_|GITHUB_|ACTIONS_|RUNNER_).*|CUDA_VISIBLE_DEVICES|",
+     [f'{TT}.Registry.test_malformed']),
+    (RGY, "    caps[default] = slots\n", "", [f'{TT}.Execute.test_an_older_local_ticket_keeps_its_turn']),
+    (RGY, "            if default:\n                raise RegistryError", "            if False:\n                raise RegistryError",
+     [f'{TT}.Execute.test_two_default_projects_are_refused']),
+    (PRT, "part_dir=work, results=results", "part_dir=record, results=results", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (RGY, "        if not VAR.fullmatch(k) or RESERVED.fullmatch(k):", "        if not VAR.fullmatch(k):", [f'{TT}.Registry.test_malformed']),
+    (RGY, "    if type(v) is not int or not lo <= v <= hi:", "    if not lo <= v <= hi:", [f'{TT}.Registry.test_malformed']),
+    (RGY, " or (stem and name != stem)", "", [f'{TT}.Registry.test_malformed']),
     # the env allowlist
     (REM, "up.startswith(REFUSED_PREFIXES) or ", "", [f'{TR}.RemoteEnv.test_refused', f'{TR}.RemoteEnv.test_only_the_allowlist_passes']),
     (REM, "any(p in up for p in REFUSED_PARTS)", "any(p in name for p in REFUSED_PARTS)", [f'{TR}.RemoteEnv.test_refused']),
@@ -332,39 +398,60 @@ MUTANTS = [
 ]
 
 
-def run(tree: pathlib.Path, tests: list[str]) -> int:
+def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:
     # -B: a stale .pyc of an earlier mutant of the same size and second would be used
     try:  # no pipes: a holder a mutant leaves behind must not keep the run waiting
         return subprocess.run([sys.executable, '-B', '-m', 'unittest', '-q', *tests], cwd=tree,
                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              timeout=300).returncode
+                              timeout=hang).returncode
     except subprocess.TimeoutExpired:
         return 124  # a hang fails the tests
 
 
+def one(tree: pathlib.Path, rel: str, old: str, new: str, tests: list[str]) -> tuple[bool, float]:
+    """Whether the tests kill one mutant, and their time, applied to ``tree`` (one worker's own copy)."""
+    path = tree / rel
+    src = path.read_text()
+    path.write_text(src.replace(old, new))
+    t0 = time.monotonic()
+    try:
+        return run(tree, tests) != 0, time.monotonic() - t0
+    finally:
+        path.write_text(src)
+
+
 def main() -> int:
-    survived = 0
+    for n, (rel, old, _new, _tests) in enumerate(MUTANTS, 1):
+        count = (ROOT / rel).read_text().count(old)
+        if count != 1:
+            print(f'mutant {n}: the snippet occurs {count} times in {rel}', file=sys.stderr)
+            return 2
+    workers = max(1, min(WORKERS, os.cpu_count() or 1))
     with tempfile.TemporaryDirectory() as d:
-        tree = pathlib.Path(d) / 'tree'
-        shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+        trees = queue.SimpleQueue()
+        for w in range(workers):  # a tree per worker: a mutant is never seen by another's tests
+            tree = pathlib.Path(d) / f'tree{w}'
+            shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+            trees.put(tree)
         every = sorted({t for *_, ts in MUTANTS for t in ts})
-        if run(tree, every):
+        tree0 = trees.get()
+        if run(tree0, every, hang=600):
             print('the unmutated tree fails its tests', file=sys.stderr)
             return 2
-        for n, (rel, old, new, tests) in enumerate(MUTANTS, 1):
-            path = tree / rel
-            src = path.read_text()
-            if src.count(old) != 1:
-                print(f'mutant {n}: the snippet occurs {src.count(old)} times in {rel}', file=sys.stderr)
-                return 2
-            path.write_text(src.replace(old, new))
+        trees.put(tree0)
+
+        def job(m):
+            tree = trees.get()
             try:
-                killed = run(tree, tests) != 0
+                return one(tree, *m)
             finally:
-                path.write_text(src)
-            survived += not killed
-            print(f'{"killed  " if killed else "SURVIVED"} {n:3d} {rel}: {old.strip()[:70]!r}')
-    print(f'{len(MUTANTS) - survived}/{len(MUTANTS)} mutants killed')
+                trees.put(tree)
+        with concurrent.futures.ThreadPoolExecutor(workers) as ex:
+            killed = list(ex.map(job, MUTANTS))
+    for n, ((rel, old, *_), (k, secs)) in enumerate(zip(MUTANTS, killed), 1):
+        print(f'{"killed  " if k else "SURVIVED"} {n:3d} {secs:5.1f}s {rel}: {old.strip()[:70]!r}')
+    survived = [k for k, _ in killed].count(False)
+    print(f'{len(MUTANTS) - survived}/{len(MUTANTS)} mutants killed ({workers} workers)')
     return 1 if survived else 0
 
 

@@ -1,19 +1,27 @@
 """Mutants of the lines the tests guard (AGENTS.md, working agreement 4).
 
 Each mutant replaces one exact snippet in a copy of the tree and runs only the tests
-that should kill it; a mutant that passes them survives and fails this script. Run it
-with ``python tests/mutants.py`` from the repository root (CI runs it on every PR).
+that should kill it; a mutant that passes them survives and fails this script. Up to
+``WORKERS`` mutants run at once, each in its own copy; tests still running after
+``HANG`` seconds have hung, which kills the mutant. Run it with
+``python tests/mutants.py`` from the repository root (CI runs it on every PR).
 """
 from __future__ import annotations
 
+import concurrent.futures
+import os
 import pathlib
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+WORKERS = 4  # a hosted runner's cores; each worker has its own copy of the tree
+HANG = 60  # seconds: the slowest guarded test takes about 9 s, so a mutant's tests still running have hung
 POL = 'ci_runners/policy.py'
 REM = 'ci_runners/remote.py'
 INV = 'ci_runners/inventory.py'
@@ -354,39 +362,60 @@ MUTANTS = [
 ]
 
 
-def run(tree: pathlib.Path, tests: list[str]) -> int:
+def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:
     # -B: a stale .pyc of an earlier mutant of the same size and second would be used
     try:  # no pipes: a holder a mutant leaves behind must not keep the run waiting
         return subprocess.run([sys.executable, '-B', '-m', 'unittest', '-q', *tests], cwd=tree,
                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              timeout=300).returncode
+                              timeout=hang).returncode
     except subprocess.TimeoutExpired:
         return 124  # a hang fails the tests
 
 
+def one(tree: pathlib.Path, rel: str, old: str, new: str, tests: list[str]) -> tuple[bool, float]:
+    """Whether the tests kill one mutant, and their time, applied to ``tree`` (one worker's own copy)."""
+    path = tree / rel
+    src = path.read_text()
+    path.write_text(src.replace(old, new))
+    t0 = time.monotonic()
+    try:
+        return run(tree, tests) != 0, time.monotonic() - t0
+    finally:
+        path.write_text(src)
+
+
 def main() -> int:
-    survived = 0
+    for n, (rel, old, _new, _tests) in enumerate(MUTANTS, 1):
+        count = (ROOT / rel).read_text().count(old)
+        if count != 1:
+            print(f'mutant {n}: the snippet occurs {count} times in {rel}', file=sys.stderr)
+            return 2
+    workers = max(1, min(WORKERS, os.cpu_count() or 1))
     with tempfile.TemporaryDirectory() as d:
-        tree = pathlib.Path(d) / 'tree'
-        shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+        trees = queue.SimpleQueue()
+        for w in range(workers):  # a tree per worker: a mutant is never seen by another's tests
+            tree = pathlib.Path(d) / f'tree{w}'
+            shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+            trees.put(tree)
         every = sorted({t for *_, ts in MUTANTS for t in ts})
-        if run(tree, every):
+        tree0 = trees.get()
+        if run(tree0, every, hang=600):
             print('the unmutated tree fails its tests', file=sys.stderr)
             return 2
-        for n, (rel, old, new, tests) in enumerate(MUTANTS, 1):
-            path = tree / rel
-            src = path.read_text()
-            if src.count(old) != 1:
-                print(f'mutant {n}: the snippet occurs {src.count(old)} times in {rel}', file=sys.stderr)
-                return 2
-            path.write_text(src.replace(old, new))
+        trees.put(tree0)
+
+        def job(m):
+            tree = trees.get()
             try:
-                killed = run(tree, tests) != 0
+                return one(tree, *m)
             finally:
-                path.write_text(src)
-            survived += not killed
-            print(f'{"killed  " if killed else "SURVIVED"} {n:3d} {rel}: {old.strip()[:70]!r}')
-    print(f'{len(MUTANTS) - survived}/{len(MUTANTS)} mutants killed')
+                trees.put(tree)
+        with concurrent.futures.ThreadPoolExecutor(workers) as ex:
+            killed = list(ex.map(job, MUTANTS))
+    for n, ((rel, old, *_), (k, secs)) in enumerate(zip(MUTANTS, killed), 1):
+        print(f'{"killed  " if k else "SURVIVED"} {n:3d} {secs:5.1f}s {rel}: {old.strip()[:70]!r}')
+    survived = [k for k, _ in killed].count(False)
+    print(f'{len(MUTANTS) - survived}/{len(MUTANTS)} mutants killed ({workers} workers)')
     return 1 if survived else 0
 
 

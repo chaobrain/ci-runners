@@ -17,9 +17,19 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 POL = 'ci_runners/policy.py'
 REM = 'ci_runners/remote.py'
 INV = 'ci_runners/inventory.py'
+CLA = 'ci_runners/claim.py'
+OUT = 'ci_runners/outcome.py'
+GPU = 'ci_runners/gpus.py'
+PLA = 'ci_runners/place.py'
+SLO = 'ci_runners/slots.py'
 TP = 'tests.test_policy'
 TR = 'tests.test_remote_env'
 TI = 'tests.test_inventory'
+TC = 'tests.test_claim'
+TO = 'tests.test_outcome'
+TG = 'tests.test_gpus'
+TL = 'tests.test_place'
+TS = 'tests.test_slots'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
@@ -69,6 +79,81 @@ MUTANTS = [
     (POL, "        if name == SELF:\n            raise", "        if False:\n            raise",
      [f'{TP}.Load.test_malformed_policies']),
     (POL, "if extra and vis == 'public':", "if False:", [f'{TP}.Load.test_malformed_policies']),
+    # the claim
+    (CLA, "frozenset() if hosted else frozenset(", "frozenset(", [f'{TC}.Decide.test_on_a_hosted_runner_only_the_bot_counts']),
+    (CLA, "for a in actors) - {bot}", "for a in actors)", [f'{TC}.Decide.test_the_bot_listed_as_an_actor_is_still_the_bot']),
+    (CLA, "max(counted, key=lambda s: s.time)", "counted[0]", [f'{TC}.Decide.test_only_the_newest_counted_status_decides']),
+    (CLA, "if newest.state == 'failure' and local:", "if newest.state == 'failure':",
+     [f'{TC}.Decide.test_a_local_red_skips_but_a_runner_red_runs']),
+    (CLA, "now - newest.time < lapse_minutes * 60", "now - newest.time <= lapse_minutes * 60",
+     [f'{TC}.Decide.test_a_live_local_claim_skips_until_it_lapses']),
+    (CLA, "if s.creator.lower() == bot or s.creator", "if s.creator",
+     [f'{TC}.Decide.test_green_by_the_bot_or_a_member_skips']),
+    (CLA, "if dt.tzinfo is not None else None", "", [f'{TC}.Parse.test_parse']),
+    # outcomes and hints
+    (OUT, "    if e.stopped:\n        return Outcome('stopped'", "    if False:\n        return Outcome('stopped'",
+     [f'{TO}.Classify.test_precedence']),
+    (OUT, "e.boot_start and e.boot_end and e.boot_start != e.boot_end", "e.boot_end and e.boot_start != e.boot_end",
+     [f'{TO}.Classify.test_each_outcome_from_its_own_evidence']),
+    (OUT, "    if e.early_stop:", "    if False:", [f'{TO}.Classify.test_each_outcome_from_its_own_evidence']),
+    (OUT, "return [k for k in kills if k.bus in cards and any(", "return [k for k in kills if any(",
+     [f'{TO}.Watchdog.test_ours_needs_our_card_and_a_recorded_pid']),
+    (OUT, "(not end or m.group(1) <= end)", "True", [f'{TO}.Watchdog.test_kill_lines_only']),
+    (OUT, "(not start or m.group(1) >= start)", "True", [f'{TO}.Watchdog.test_kill_lines_only']),
+    (OUT, "        s = parts[-2] if len(parts) >= 2 else s", "        s = parts[-1]", [f'{TO}.Watchdog.test_bus_key']),
+    (OUT, "    if e.oom_kills > 0 or journal_oom(e.journal, e.unit):", "    if journal_oom(e.journal, e.unit):",
+     [f'{TO}.Classify.test_each_outcome_from_its_own_evidence']),
+    (OUT, "(not unit or unit in line or '.scope' not in line)", "(not unit or unit in line)", [f'{TO}.Oom.test_journal']),
+    (OUT, "m.group(1).endswith('/' + unit)", "m.group(1).endswith(unit)", [f'{TO}.Oom.test_journal']),
+    (OUT, "if k == 'oom_kill' and", "if k.startswith('oom') and", [f'{TO}.Oom.test_memory_events']),
+    (OUT, "e.yield_marker > e.start_epoch", "e.yield_marker >= e.start_epoch",
+     [f'{TO}.Classify.test_each_outcome_from_its_own_evidence']),
+    (OUT, "    if e.rc is None:\n", "    if False:\n", [f'{TO}.Classify.test_each_outcome_from_its_own_evidence']),
+    (OUT, "    if e.timed_out:", "    if False:", [f'{TO}.Classify.test_each_outcome_from_its_own_evidence']),
+    (OUT, "if kind in FINAL or attempt > retries:", "if kind in FINAL:", [f'{TO}.Hint.test_at_most_one_retry']),
+    (OUT, "if kind in FINAL or attempt > retries:", "if kind in FINAL or attempt >= retries:", [f'{TO}.Hint.test_hints']),
+    (OUT, "    if kind == 'reboot' and remote:", "    if False:", [f'{TO}.Hint.test_hints']),
+    (OUT, "Hint('retry', resume=True, where='more-memory')", "Hint('retry', where='more-memory')", [f'{TO}.Hint.test_hints']),
+    (OUT, "if cool_card else Hint('fallback')", "", [f'{TO}.Hint.test_hints']),
+    # GPUs
+    (GPU, "if i in free and free[i] >= need_mib]", "if free.get(i, 0) >= need_mib]", [f'{TG}.Gpus.test_free_memory_and_rank']),
+    (GPU, "if leased.get(i, 0) < max_parts]", "]", [f'{TG}.Gpus.test_lease']),
+    (GPU, "return ok[:n] if len(ok) >= n else None", "return ok[:n]", [f'{TG}.Gpus.test_lease']),
+    (GPU, "for i in cards if i in free}", "for i in free}", [f'{TG}.Gpus.test_lease']),
+    # place
+    (PLA, "    if not p.proxy:", "    if False:", [f'{TL}.Place.test_a_host_that_fails_a_probe_gets_no_part']),
+    (PLA, "    if p.reserved:", "    if False:", [f'{TL}.Place.test_a_host_that_fails_a_probe_gets_no_part']),
+    (PLA, "    if p.quarantined:", "    if False:", [f'{TL}.Place.test_a_host_that_fails_a_probe_gets_no_part']),
+    (PLA, "return part.cls == 'gpu' and part.gpus == 1 and ", "return ",
+     [f'{TL}.Place.test_h100_takes_gpu_parts_with_one_card_only']),
+    (PLA, "    if POOL[part.cls] not in p.runners:", "    if False:",
+     [f'{TL}.Place.test_a_host_that_fails_a_probe_gets_no_part']),
+    (PLA, "return c.healthy and not c.others and c.free_mib >= need_mib and c.temp_c < max_temp_c",
+     "return c.healthy and not c.others and c.free_mib >= need_mib",
+     [f'{TL}.Place.test_each_h100_part_gets_its_own_coolest_fitting_card', f'{TL}.Place.test_a_3090_needs_enough_fitting_cards']),
+    (PLA, "return c.healthy and not c.others and c.free_mib", "return not c.others and c.free_mib",
+     [f'{TL}.Place.test_each_h100_part_gets_its_own_coolest_fitting_card']),
+    (PLA, "            taken.add(card.index)", "            pass", [f'{TL}.Place.test_each_h100_part_gets_its_own_coolest_fitting_card']),
+    (PLA, " and f'{REMOTE_POOL}-gpu{c.index}' in p.runners", "",
+     [f'{TL}.Place.test_each_h100_part_gets_its_own_coolest_fitting_card']),
+    (PLA, "key=lambda c: (c.temp_c, -c.free_mib, c.index)", "key=lambda c: (c.temp_c, c.index)",
+     [f'{TL}.Place.test_each_h100_part_gets_its_own_coolest_fitting_card']),
+    (PLA, "load[h] < probes[h].slots", "load[h] <= probes[h].slots",
+     [f'{TL}.Place.test_load_spreads_to_a_host_with_room_and_waits_on_the_first_when_none_has']),
+    (PLA, "        load[host] += 1\n", "",
+     [f'{TL}.Place.test_load_spreads_to_a_host_with_room_and_waits_on_the_first_when_none_has']),
+    (PLA, "if h not in exclude]", "]", [f'{TL}.Place.test_excluded_hosts']),
+    (PLA, "math.ceil(2 * max(0.0, estimate_minutes) * max(1.0, slowdown) + 30)",
+     "int(2 * max(0.0, estimate_minutes) * max(1.0, slowdown) + 30)", [f'{TL}.Place.test_timeout']),
+    (PLA, "* max(1.0, slowdown) + 30", "* slowdown + 30", [f'{TL}.Place.test_timeout']),
+    (PLA, "if (p['class'] == 'gpu') != (gpus > 0):", "if False:", [f'{TL}.Parse.test_malformed']),
+    # the fair queue
+    (SLO, "held.get(p, 0) >= caps.get(p, 0)", "False", [f'{TS}.Grants.test_a_project_at_its_cap_is_skipped']),
+    (SLO, "key = (held.get(p, 0), t.seq)", "key = (0, t.seq)", [f'{TS}.Grants.test_the_project_holding_fewest_goes_first']),
+    (SLO, "        held[p] = held.get(p, 0) + 1\n", "", [f'{TS}.Grants.test_a_project_at_its_cap_is_skipped']),
+    (SLO, "p = t.project or default_project\n            if", "p = t.project\n            if",
+     [f'{TS}.Grants.test_tickets_without_a_project_are_the_default_projects']),
+    (SLO, "return waiting >= max_waiting", "return waiting > max_waiting", [f'{TS}.Grants.test_queue_full']),
     # the env allowlist
     (REM, "up.startswith(REFUSED_PREFIXES) or ", "", [f'{TR}.RemoteEnv.test_refused', f'{TR}.RemoteEnv.test_only_the_allowlist_passes']),
     (REM, "any(p in up for p in REFUSED_PARTS)", "any(p in name for p in REFUSED_PARTS)", [f'{TR}.RemoteEnv.test_refused']),

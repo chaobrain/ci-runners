@@ -5,6 +5,8 @@
     ci-run plan|apply ...  host setup (setup/plan.sh, setup/apply.sh)
     ci-run runners         this host's runners: name, labels, class
     ci-run role            this host's role
+    ci-run part ...        run one part (actions/part; design §4.3)
+    ci-run salvage ...     the outputs of a part whose job ended without them (§4.5)
 
 The inventory is ``$CI_RUNNERS_ETC/inventory.toml``, else ``~/data/ci-runners/etc``.
 """
@@ -43,6 +45,9 @@ def main(argv: list[str]) -> int:
         from ci_runners import reaper
         print(reaper.reap(load_inventory().host['data']))
         return 0
+    if cmd in ('part', 'salvage'):
+        from ci_runners import part
+        return part.main(argv if cmd == 'salvage' else args, load_inventory(), etc_dir())
     if cmd in ('plan', 'apply', 'runners'):
         from ci_runners import setup
         return setup.main([cmd, *args])

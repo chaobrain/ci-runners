@@ -1,13 +1,13 @@
-# One GitHub Actions runner, ~/data/actions-runner/%i (design §5.3). The pre-job hook,
-# set in the runner's .env, is the boundary; NoNewPrivileges makes sudo fail (D4).
+# One GitHub Actions runner, <data>/actions-runner/%i (design §5.3). The pre-job hook,
+# set in the runner's .env, is the boundary; NoNewPrivileges makes sudo fail (D4). It
+# starts after the CI proxy where the host has one.
 [Unit]
 Description=ci-runners: GitHub Actions runner %i
-After=ci-proxy.service
-Wants=ci-proxy.service
+@PROXY_ORDER@
 
 [Service]
-WorkingDirectory=%h/data/actions-runner/%i
-ExecStart=%h/data/actions-runner/%i/run.sh
+WorkingDirectory=@CI_DATA@/actions-runner/%i
+ExecStart=@CI_DATA@/actions-runner/%i/run.sh
 NoNewPrivileges=yes
 KillMode=mixed
 KillSignal=SIGTERM

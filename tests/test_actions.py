@@ -96,6 +96,20 @@ class Launcher(unittest.TestCase):
         r = self.launch('part', '--id', 'x y')
         self.assertEqual((r.returncode, r.stdout), (0, 'v1.2.3 part --id x y\n'))
 
+    def test_the_release_is_found_beside_ci_runners_etc(self):
+        """h100's data root is not ~/data: the runner's CI_RUNNERS_ETC names it."""
+        self.stamp('hook')
+        self.stub('hook')
+        b = pathlib.Path(self.tmp.name) / 'sub' / 'ci-runners' / 'releases' / 'hook' / 'bin'
+        b.mkdir(parents=True)
+        (b / 'ci-run').write_text('#!/bin/sh\necho "sub $*"\n')
+        (b / 'ci-run').chmod(0o755)
+        etc = pathlib.Path(self.tmp.name) / 'sub' / 'ci-runners' / 'etc'
+        self.assertEqual(self.launch('part', '--id', 'x', CI_RUNNERS_ETC=str(etc)).stdout, 'sub part --id x\n')
+        self.assertEqual(self.launch('part', '--id', 'x', CI_RUNNERS_ETC='sub/ci-runners/etc').stdout,
+                         'hook part --id x\n')  # not absolute: the default
+        self.assertEqual(self.launch('part', '--id', 'x').stdout, 'hook part --id x\n')
+
     def test_a_bad_stamp_is_refused(self):
         self.stub('hook')
         self.stub('v1.2.3')  # so that v1.2.3/../.. resolves
@@ -129,6 +143,11 @@ class Launcher(unittest.TestCase):
         self.assertIn('next=none\n', self.out.read_text())
         self.assertEqual(sorted(str(p.relative_to(temp)) for p in temp.rglob('*')), ['ci-runners', 'ci-runners/x', 'ci-runners/x/outcome.json'])
         self.assertEqual(self.launch('place', '--parts', '[]').returncode, 2)  # only a part has a fallback
+        for own, want in (('h100-cpu', '["self-hosted","h100-cpu"]'), ('a,b-1', '["self-hosted","a","b-1"]'),
+                          ('bad label', '["self-hosted","part"]'), ('x"]', '["self-hosted","part"]')):
+            self.out.write_text('')
+            self.launch('part', '--id', 'y', CI_RUNNER_CLASS='part', CI_RUNNER_POOL_LABELS=own)
+            self.assertIn(f'retry-on={want}\n', self.out.read_text(), own)
 
     def test_a_hosted_runner_runs_only_claim_from_the_checkout(self):
         r = self.launch('part', '--id', 'x', RUNNER_ENVIRONMENT='github-hosted')

@@ -6,6 +6,7 @@ import contextlib
 import io
 import pathlib
 import tempfile
+import re
 import tomllib
 import unittest
 
@@ -22,7 +23,41 @@ class Load(unittest.TestCase):
         self.assertEqual(i.this, '3090b')
         self.assertEqual(sorted(i.hosts), ['3090b', 'h100'])
         self.assertEqual(i.host['pools'], {'light': 2, 'part': 4, 'compile': 1})
-        self.assertTrue(i.hosts['h100']['remote'])
+        h = i.hosts['h100']
+        self.assertNotIn('remote', h)  # RUN-5: standalone (decision 11.3)
+        self.assertNotIn('proxy', h)
+        self.assertEqual(h['pools']['h100'], {'per_card': True, 'labels': ['h100']})
+
+    def test_pools_as_tables(self):
+        """RUN-5: a pool may give its labels, or have one runner per card."""
+        base = EXAMPLE.replace('pools = { light = 2, part = 4, compile = 1 }', 'pools = { @ }')
+        self.assertIn('@', base)
+        good = ('light = 2', 'light = { count = 2 }', 'light = { count = 1, labels = ["h100-light"] }',
+                'h100 = { per_card = true }', 'h100 = { per_card = true, labels = ["h100", "x-1"] }')
+        for g in good:
+            inv.load(base.replace('@', g))
+        bad = ('light = 0', 'light = {}', 'light = { labels = ["a"] }', 'light = { count = 0 }',
+               'light = { count = 1, per_card = true }', 'light = { count = 1, labels = [] }',
+               'light = { count = 1, labels = ["A"] }', 'light = { count = 1, labels = ["a b"] }',
+               'light = { count = 1, labels = ["a", "a"] }', 'light = { count = 1, labels = "a" }',
+               'light = { count = 1, extra = 1 }', 'h100 = { per_card = 1 }', 'light = { count = true }',
+               'light = { count = 1, labels = ["light"] }', 'light = { count = 1, labels = ["self-hosted"] }',
+               'h100 = { per_card = true, labels = ["gpu"] }')  # a 3090 class or GitHub's own label
+        for b in bad:
+            with self.assertRaises(inv.InventoryError, msg=b):
+                inv.load(base.replace('@', b))
+        with self.assertRaisesRegex(inv.InventoryError, 'without gpus'):
+            inv.load(base.replace('@', 'h100 = { per_card = true }').replace('gpus = [0, 1]', 'gpus = []', 1))
+        with self.assertRaises(inv.InventoryError):
+            inv.load(EXAMPLE.replace('pools = { light = 2, part = 4, compile = 1 }', 'pools = {}'))
+
+    def test_python_and_orgsync(self):
+        inv.load(EXAMPLE.replace('this = "3090b"', 'this = "h100"'))
+        for bad in ('python = "python3"', 'python = ""', 'python = 3', 'orgsync = "yes"'):
+            key = bad.split(' ')[0]
+            text = re.sub(rf'^{key} = .*$', bad, EXAMPLE, count=1, flags=re.M)
+            with self.assertRaises(inv.InventoryError, msg=bad):
+                inv.load(text)
 
     def test_an_unknown_schema_is_refused(self):
         for s in ('schema = 2', 'schema = "1"', ''):
@@ -71,6 +106,11 @@ class Deny(unittest.TestCase):
         # public keys, table keys, numbers, short and common words are not tokens
         for t in ('role-a', '120g', '/tmp/public.lock', 'chaobrain/x', 'github-actions[bot]', 'nd', 'localhost'):
             self.assertNotIn(inv.normalise(t), got)
+
+    def test_labels_are_public_and_the_python_is_not(self):
+        doc = {'hosts': {'h': {'python': '/opt/private-env/bin/python3',
+                               'pools': {'light': {'count': 2, 'labels': ['h100-light']}}}}}
+        self.assertEqual(inv.deny_tokens(doc), {'opt/private-env/bin/python3'})
 
     def test_tokens_split_as_the_lint_reads_words(self):
         doc = {'nodes': ['hk+node01', 'node=sg02', 'Tokyo#3x', '\u9999\u6e2f01']}

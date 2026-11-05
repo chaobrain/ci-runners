@@ -42,6 +42,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'proxy-check':
         from ci_runners import proxy
         h = load_inventory().host
+        if 'proxy' not in h:  # GitHub is reached directly (h100, decision 11.6)
+            print('ci-run proxy-check: this host has no CI proxy; nothing to check')
+            return 0
         p = h['proxy']
         print(proxy.check(h['data'], p['http_port'], p['nodes']))
         return 0

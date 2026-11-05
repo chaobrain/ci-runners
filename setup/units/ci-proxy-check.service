@@ -3,6 +3,8 @@ Description=ci-runners: check the CI proxy, switch its node after 3 failures
 
 [Service]
 Type=oneshot
-ExecStart=%h/data/ci-runners/releases/hook/bin/ci-run proxy-check
+ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run proxy-check
+Environment=CI_RUNNERS_ETC=@CI_ETC@
+Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
 NoNewPrivileges=yes
 TimeoutStartSec=90

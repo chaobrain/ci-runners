@@ -5,7 +5,7 @@
 Description=ci-runners: CI proxy
 
 [Service]
-ExecStart=@PROXY_CLIENT@ run -c %h/data/ci-runners/etc/proxy/active.json -c %h/data/ci-runners/etc/proxy/routing.json
+ExecStart=@PROXY_CLIENT@ run -c @CI_ETC@/proxy/active.json -c @CI_ETC@/proxy/routing.json
 NoNewPrivileges=yes
 Restart=always
 RestartSec=5

@@ -27,9 +27,11 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
+import time
 import tomllib
 import urllib.request
 
@@ -37,6 +39,7 @@ from ci_runners import inventory
 
 RUNNER_VERSION = '2.338.2'
 RUNNER_SHA256 = 'baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40'
+PROXY_WAIT = 60  # s: the CI proxy's start, before the runner app is fetched through it
 RUNNER_URL = (f'https://github.com/actions/runner/releases/download/v{RUNNER_VERSION}/'
               f'actions-runner-linux-x64-{RUNNER_VERSION}.tar.gz')
 UNITS = ('ci-runner@.service', 'ci-proxy.service', 'ci-proxy-check.service', 'ci-proxy-check.timer',
@@ -247,10 +250,26 @@ def build(etc: str) -> Plan:
     return plan
 
 
+def wait_port(port: int, timeout: float = PROXY_WAIT, poll: float = 0.5) -> None:
+    """Wait until something listens on ``127.0.0.1:port``: ``systemctl enable --now``
+    returns once the CI proxy has started, before it listens."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with socket.create_connection(('127.0.0.1', port), timeout=poll):
+                return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f'nothing listens on the CI proxy port {port} after {timeout:g} s') from None
+            time.sleep(poll)
+
+
 def _unpack(path: str, cache: str, port: int) -> None:
     if not os.path.exists(cache):
         os.makedirs(os.path.dirname(cache), exist_ok=True)
-        proxies = {'https': f'http://127.0.0.1:{port}'} if port else {}
+        if port:
+            wait_port(port)
+        proxies = {'https': f'http://127.0.0.1:{port}', 'http': f'http://127.0.0.1:{port}'} if port else {}
         opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
         with opener.open(RUNNER_URL, timeout=600) as r, open(cache + '.part', 'wb') as f:
             while chunk := r.read(1 << 20):

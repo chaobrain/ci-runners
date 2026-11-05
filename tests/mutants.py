@@ -215,6 +215,8 @@ MUTANTS = [
     (HOK, " | os.O_NONBLOCK", "", [f'{TH}.Started.test_a_planted_log_fifo_neither_blocks_nor_breaks_the_line']),
     (HOK, " | os.O_NOFOLLOW", "", [f'{TH}.Started.test_a_planted_log_fifo_neither_blocks_nor_breaks_the_line']),
     (SET, "    if h.hexdigest() != RUNNER_SHA256:", "    if False:", [f'{TU}.Setup.test_the_runner_app_is_checked_and_unpacked_whole']),
+    (SET, "        if port:\n            wait_port(port)\n", "", [f'{TU}.Setup.test_the_download_waits_for_the_proxy_to_listen']),
+    (SET, "            if time.monotonic() >= deadline:", "            if False:", [f'{TU}.Setup.test_a_proxy_that_never_listens_fails_within_the_bound']),
     (SET, "    if not runner_complete(tmp):", "    if False:", [f'{TU}.Setup.test_the_runner_app_is_checked_and_unpacked_whole']),
     (SET, "            if os.path.lexists(tmp):\n                os.unlink(tmp)  # a leftover", "            if False:\n                os.unlink(tmp)  # a leftover",
      [f'{TU}.Setup.test_a_planted_link_is_not_followed']),

@@ -1,0 +1,43 @@
+name: ci-runners claim
+description: Skip a head that already has a verdict; else take it and post pending (design §4.1).
+inputs:
+  context:
+    description: the project's status context, such as myproj/ci
+    required: true
+  sha:
+    description: the head (default the pull request's head, else github.sha)
+    default: ''
+  wait-seconds:
+    description: how long to wait for a local claim to appear
+    default: '0'
+  local-lapse-minutes:
+    description: a pending local claim older than this has lapsed
+    default: '45'
+  pending-description:
+    description: posted with pending when the runners take the head
+    default: queued on the runners
+  token:
+    description: a token with statuses write (the job's)
+    default: ${{ github.token }}
+outputs:
+  run:
+    description: true or false
+    value: ${{ steps.claim.outputs.run }}
+  reason:
+    description: why
+    value: ${{ steps.claim.outputs.reason }}
+runs:
+  using: composite
+  steps:
+    - id: claim
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        IN_CONTEXT: ${{ inputs.context }}
+        IN_SHA: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+        IN_WAIT: ${{ inputs.wait-seconds }}
+        IN_LAPSE: ${{ inputs.local-lapse-minutes }}
+        IN_DESCRIPTION: ${{ inputs.pending-description }}
+      run: >-
+        "$GITHUB_ACTION_PATH/../lib/ci-run.sh" claim --context "$IN_CONTEXT" --sha "$IN_SHA"
+        --wait-seconds "$IN_WAIT" --local-lapse-minutes "$IN_LAPSE" --pending-description "$IN_DESCRIPTION"

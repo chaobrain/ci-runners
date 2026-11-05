@@ -18,20 +18,32 @@ POL = 'ci_runners/policy.py'
 REM = 'ci_runners/remote.py'
 INV = 'ci_runners/inventory.py'
 LCK = 'ci_runners/locks.py'
+HOK = 'ci_runners/hook.py'
+SET = 'ci_runners/setup.py'
+PRX = 'ci_runners/proxy.py'
 CLA = 'ci_runners/claim.py'
 OUT = 'ci_runners/outcome.py'
 GPU = 'ci_runners/gpus.py'
 PLA = 'ci_runners/place.py'
 SLO = 'ci_runners/slots.py'
+REA = 'ci_runners/reaper.py'
+REG = 'setup/register.sh'
+INS = 'setup/install.sh'
+UNI = 'setup/uninstall.sh'
 TP = 'tests.test_policy'
 TR = 'tests.test_remote_env'
 TI = 'tests.test_inventory'
 TX = 'tests.test_interop'
+TH = 'tests.test_hook'
+TU = 'tests.test_setup'
+TY = 'tests.test_proxy'
 TC = 'tests.test_claim'
 TO = 'tests.test_outcome'
 TG = 'tests.test_gpus'
 TL = 'tests.test_place'
 TS = 'tests.test_slots'
+TE = 'tests.test_reaper'
+TK = 'tests.test_scripts'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
@@ -171,9 +183,69 @@ MUTANTS = [
     (LCK, "if left <= 0 or not _wait_in_queue(fd, op, left):", "if not _wait_in_queue(fd, op, 1e6):",
      [f'{TX}.LockInterop.test_a_timeout']),
     (SLO, "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", "fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)",
-     [f'{TX}.SlotInterop.test_together_never_more_than_the_slot_count']),
+     [f'{TX}.SlotInterop.test_together_never_more_than_the_slot_count', f'{TS}.Queue.test_a_taken_slot_is_held_exclusively']),
     (SLO, "                        return True\n    except (OSError", "                        pass\n    except (OSError",
      [f'{TS}.Queue.test_flocked_reads_holders']),
+    # the hook, setup and the proxy check
+    (HOK, "    return (0 if d.accepted else 1), policy.line(d, digest)", "    return 0, policy.line(d, digest)",
+     [f'{TH}.Started.test_accept_and_refuse']),
+    (HOK, "except (OSError, ValueError, RecursionError) as e:", "except (OSError, ValueError) as e:",
+     [f'{TH}.Started.test_errors_refuse']),
+    (HOK, "    if len(data) > limit:", "    if False:", [f'{TH}.Started.test_an_oversized_event_is_refused']),
+    (SET, "    if plan.text() != approved:", "    if False:",
+     [f'{TU}.Setup.test_apply_refuses_a_plan_that_is_not_the_fresh_one']),
+    (SET, "    if secret:\n", "    if False:\n", [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
+    (SET, "            os.chmod(a['path'], a['mode'])\n        elif k == 'file':", "            pass\n        elif k == 'file':",
+     [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
+    (SET, "    out.pop('log', None)\n    return out", "    return src", [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
+    (PRX, "    if failures < threshold:", "    if failures <= threshold:", [f'{TY}.Step.test_three_failures_switch_to_the_next_node']),
+    # review round 1 of the hook, setup, the proxy check, the reaper and the scripts
+    (HOK, "    except _Timeout:\n        d = policy.Decision(False, 'timeout')", "    except _Timeout:\n        d = policy.Decision(True, 'timeout')",
+     [f'{TH}.Started.test_a_hung_read_is_refused_at_the_bound']),
+    (HOK, "        signal.alarm(START_BOUND)\n", "", [f'{TH}.Started.test_a_hung_read_is_refused_at_the_bound']),
+    (HOK, "            code, out = 1, policy.line(policy.Decision(False, 'timeout'), '')",
+     "            raise", [f'{TH}.Started.test_the_bound_outside_the_decision_still_prints_the_fixed_line']),
+    (HOK, " | os.O_NONBLOCK", "", [f'{TH}.Started.test_a_planted_log_fifo_neither_blocks_nor_breaks_the_line']),
+    (HOK, " | os.O_NOFOLLOW", "", [f'{TH}.Started.test_a_planted_log_fifo_neither_blocks_nor_breaks_the_line']),
+    (SET, "    if h.hexdigest() != RUNNER_SHA256:", "    if False:", [f'{TU}.Setup.test_the_runner_app_is_checked_and_unpacked_whole']),
+    (SET, "    if not runner_complete(tmp):", "    if False:", [f'{TU}.Setup.test_the_runner_app_is_checked_and_unpacked_whole']),
+    (SET, "            if os.path.lexists(tmp):\n                os.unlink(tmp)  # a leftover", "            if False:\n                os.unlink(tmp)  # a leftover",
+     [f'{TU}.Setup.test_a_planted_link_is_not_followed']),
+    (SET, "    if not plan.actions:\n        print(f'apply: nothing", "    if False:\n        print(f'apply: nothing",
+     [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
+    (SET, "        if not PROJECT_NAME.fullmatch(name) or not MEMORY.fullmatch(mem):", "        if False:",
+     [f'{TU}.Setup.test_project_names_and_memory_are_single_words']),
+    (PRX, "    except urllib.error.HTTPError:\n        return True", "    except urllib.error.HTTPError:\n        return False",
+     [f'{TY}.Probe.test_any_http_answer_means_the_proxy_works']),
+    (REA, "                    t = max(t, os.lstat(os.path.join(top, n)).st_mtime)", "                    pass",
+     [f'{TE}.Reap.test_a_run_counts_by_its_newest_file']),
+    (REA, "RUN_DEPTH = 3", "RUN_DEPTH = 1", [f'{TE}.Reap.test_a_run_counts_by_its_newest_file']),
+    (REA, "if os.path.basename(p).startswith('hook-')", "if True", [f'{TE}.Reap.test_dated_logs_go_after_14_days_and_nothing_else_there']),
+    (REA, "    if os.path.isdir(p) and not os.path.islink(p):\n        shutil.rmtree", "    if os.path.isdir(p):\n        shutil.rmtree",
+     [f'{TE}.Reap.test_a_link_is_removed_not_followed']),
+    (REG, "exec ./config.sh \"$@\"' \\\n    config.sh --unattended", "exec ./config.sh --token \"$ACTIONS_RUNNER_INPUT_TOKEN\" \"$@\"' \\\n    config.sh --unattended",
+     [f'{TK}.Register.test_the_token_reaches_config_only_through_its_environment']),
+    (REG, "env -i PATH=", "env PATH=", [f'{TK}.Register.test_the_token_reaches_config_only_through_its_environment']),
+    (REG, "[ -z \"$running\" ] ||", "true ||", [f'{TK}.Register.test_refusals']),
+    (REG, " && [ -x \"$dir/bin/Runner.Listener\" ]", "", [f'{TK}.Register.test_refusals']),
+    (INS, "  [ \"$got\" = \"$sha\" ] || die", "  true || die", [f'{TK}.Install.test_an_annotated_tag_resolves_to_its_commit']),
+    (INS, "awk -v r=\"refs/tags/$tag^{}\" '$2 == r {print $1}'", "awk '{print $1}' | head -1",
+     [f'{TK}.Install.test_an_annotated_tag_resolves_to_its_commit']),
+    (INS, "        [ \"$top\" = \"$tag\" ] || die", "        true || die", [f'{TK}.Install.test_the_hook_moves_only_forward']),
+    (INS, "  [ -d \"$rel/$id\" ] && [ ! -L \"$rel/$id\" ] || die", "  [ -d \"$rel/$id\" ] || die",
+     [f'{TK}.Install.test_an_existing_release_must_be_the_real_one']),
+    (INS, "  [ \"$(cat \"$rel/$id/COMMIT\" 2>/dev/null)\" = \"$sha\" ] || die", "  true || die",
+     [f'{TK}.Install.test_an_existing_release_must_be_the_real_one']),
+    (REG, "=[A-Za-z0-9.:/,_-]*$' \"$dir/.env\"", "=.*$' \"$dir/.env\"", [f'{TK}.Register.test_a_hostile_env_line_stops_registration']),
+    (REA, "            if os.path.islink(d) or not os.path.isdir(d):", "            if not os.path.isdir(d):",
+     [f'{TE}.Reap.test_a_linked_owner_or_repository_is_not_walked']),
+    (UNI, "[ \"$role\" = \"$1\" ] ||", "true ||", [f'{TK}.Uninstall.test_another_roles_inventory_is_refused']),
+    (SET, "    if not isinstance(client, str) or not CLIENT.fullmatch(client):", "    if False:",
+     [f'{TU}.Setup.test_the_proxy_client_is_one_absolute_path']),
+    (UNI, "[ -z \"$left\" ] || {", "true || {", [f'{TK}.Uninstall.test_a_unit_still_active_removes_nothing']),
+    (UNI, " and os.path.dirname(m['path']) == unit_dir", "", [f'{TK}.Uninstall.test_each_unit_is_disabled_and_only_setups_files_go']),
+    (UNI, "  systemctl --user disable --now \"$u\" >/dev/null 2>&1 || true", "  systemctl --user disable --now \"$u\" >/dev/null 2>&1",
+     [f'{TK}.Uninstall.test_each_unit_is_disabled_and_only_setups_files_go']),
     # the env allowlist
     (REM, "up.startswith(REFUSED_PREFIXES) or ", "", [f'{TR}.RemoteEnv.test_refused', f'{TR}.RemoteEnv.test_only_the_allowlist_passes']),
     (REM, "any(p in up for p in REFUSED_PARTS)", "any(p in name for p in REFUSED_PARTS)", [f'{TR}.RemoteEnv.test_refused']),

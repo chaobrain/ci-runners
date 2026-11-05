@@ -1,0 +1,8 @@
+[Unit]
+Description=ci-runners: check the CI proxy, switch its node after 3 failures
+
+[Service]
+Type=oneshot
+ExecStart=%h/data/ci-runners/releases/hook/bin/ci-run proxy-check
+NoNewPrivileges=yes
+TimeoutStartSec=90

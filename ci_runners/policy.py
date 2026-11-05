@@ -35,7 +35,7 @@ EXTRA_EVENTS = frozenset({'pull_request_target', 'pull_request_review', 'pull_re
 
 #: the reason codes ``decide`` returns; the hook prints one of them and nothing else
 REASONS = ('ok', 'runner-class', 'self', 'repository', 'repository-id', 'payload', 'paused', 'event', 'fork',
-           'actor', 'bot')
+           'actor', 'bot', 'policy', 'timeout', 'error')  # the last three: the hook could not decide
 
 _REPO = re.compile(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}\Z')
 _LOGIN = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?\Z')

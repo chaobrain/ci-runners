@@ -1,0 +1,7 @@
+# One project's parts, inside ci.slice (design §7); installed as ci-<project>.slice.
+[Unit]
+Description=ci-runners: project @PROJECT@
+
+[Slice]
+MemoryMax=@PROJECT_MEMORY_MAX@
+MemorySwapMax=0

@@ -4,6 +4,7 @@ runners, or the action's own checkout on a GitHub-hosted runner."""
 from __future__ import annotations
 
 import pathlib
+import json
 import re
 import shutil
 import subprocess
@@ -97,21 +98,35 @@ class Launcher(unittest.TestCase):
 
     def test_a_bad_stamp_is_refused(self):
         self.stub('hook')
-        for bad in ('../hook', 'main', 'v1'):
+        self.stub('v1.2.3')  # so that v1.2.3/../.. resolves
+        planted = self.home / 'data/ci-runners/tmp/e.1.1/bin'  # a glob would pass v1.2.3/../../tmp/e.1.1
+        planted.mkdir(parents=True)
+        (planted / 'ci-run').write_text('#!/bin/sh\necho planted\n')
+        (planted / 'ci-run').chmod(0o755)
+        for bad in ('../hook', 'main', 'v1', 'v1.2.3/../../tmp/e.1.1', 'v1.2.3x'):
             self.stamp(bad)
             r = self.launch('part', '--id', 'x')
             self.assertEqual(r.returncode, 2, bad)
             self.assertIn('bad RELEASE', r.stdout)
+            self.assertNotIn('planted', r.stdout)
 
     def test_a_missing_release_makes_a_part_unavailable(self):
         self.stamp('v1.2.3')
         self.stub('hook')
-        r = self.launch('part', '--id', 'x')
+        temp = pathlib.Path(self.tmp.name) / 'runner-temp'
+        r = self.launch('part', '--id', 'x', '--command', 'true', RUNNER_TEMP=str(temp), CI_RUNNER_CLASS='part')
         self.assertEqual(r.returncode, 0)
         out = self.out.read_text()
         self.assertIn('outcome=unavailable\n', out)
         self.assertIn('next=fallback\n', out)
+        self.assertIn('retry-on=["self-hosted","part"]\n', out)  # its own class, not light
         self.assertNotIn(str(self.home), out + r.stdout)  # no home path reaches the job
+        art = json.loads((temp / 'ci-runners' / 'x' / 'outcome.json').read_text())  # what the action uploads
+        self.assertEqual((art['outcome'], art['next'], art['retry-on']), ('unavailable', 'fallback', ['self-hosted', 'part']))
+        self.out.write_text('')
+        self.launch('part', '--id', '../x', RUNNER_TEMP=str(temp))  # no class: no fallback; a bad id: no artifact
+        self.assertIn('next=none\n', self.out.read_text())
+        self.assertEqual(sorted(str(p.relative_to(temp)) for p in temp.rglob('*')), ['ci-runners', 'ci-runners/x', 'ci-runners/x/outcome.json'])
         self.assertEqual(self.launch('place', '--parts', '[]').returncode, 2)  # only a part has a fallback
 
     def test_a_hosted_runner_runs_only_claim_from_the_checkout(self):

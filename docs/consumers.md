@@ -95,6 +95,8 @@ jobs:
 
 CPU jobs stay on `ubuntu-latest`. Only the GPU part comes to our runners, through the
 reusable workflow, and only for same-repository pull requests, pushes and dispatches.
+A `claim` on a GitHub-hosted runner runs the action's own checkout with the image's
+`/usr/bin/python3`, which must be 3.11 or later (`ubuntu-24.04`, today's `ubuntu-latest`).
 
 ```yaml
 on:

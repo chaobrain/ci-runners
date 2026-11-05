@@ -74,6 +74,9 @@ outputs:
   record:
     description: "the part record, for salvage"
     value: ${{ steps.part.outputs.record }}
+  summary:
+    description: "the part's Markdown summary below the host's part records (also in the artifact and the step summary)"
+    value: ${{ steps.part.outputs.summary }}
   attempt:
     description: "the attempt number"
     value: ${{ steps.part.outputs.attempt }}

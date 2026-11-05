@@ -61,6 +61,13 @@ TT = 'tests.test_part'
 TE = 'tests.test_reaper'
 TK = 'tests.test_scripts'
 TA = 'tests.test_actions'
+VRD = 'ci_runners/verdict.py'
+ENB = 'ci_runners/envbuild.py'
+WFL = '.github/workflows/h100-test.yml'
+AVD = 'actions/verdict/action.yml'
+TV = 'tests.test_verdict'
+TB = 'tests.test_envbuild'
+TW = 'tests.test_workflow'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
@@ -424,6 +431,64 @@ MUTANTS = [
     (APT, '  record:\n    description: "the part record, for salvage"\n    value: ${{ steps.part.outputs.record }}\n',
      "  record: {description: the part record, for salvage, value: '${{ steps.part.outputs.record }}'}\n",
      [f'{TA}.Actions.test_no_flow_mappings']),
+    # the verdict of h100-test.yml (design §4.7)
+    (VRD, "    if bad:\n        return Verdict('failure'", "    if False:\n        return Verdict('failure'",
+     [f'{TV}.Decide.test_a_red_part_fails_the_head_whatever_the_others_did']),
+    (VRD, "    infra = [e for e in ends if e.outcome != 'pass']", "    infra = []",
+     [f'{TV}.Decide.test_an_infrastructure_end_is_an_error_not_a_failure']),
+    (VRD, "        return Verdict('error', 'no part ran')", "        return Verdict('success', 'no part ran')",
+     [f'{TV}.Decide.test_no_part_is_an_error']),
+    (VRD, "return text if len(text) <= 140 else text[:137] + '...'", "return text",
+     [f'{TV}.Decide.test_the_description_fits_a_status']),
+    (VRD, "if not m or os.path.islink(d) or not os.path.isdir(d):", "if not m or not os.path.isdir(d):",
+     [f'{TV}.Artifacts.test_what_is_not_an_artifact_is_skipped']),
+    (VRD, "if not isinstance(o, dict) or o.get('outcome') not in KINDS:", "if not isinstance(o, dict):",
+     [f'{TV}.Artifacts.test_what_is_not_an_artifact_is_skipped']),
+    (VRD, " and last < MAX_ATTEMPT:", ":", [f'{TV}.Artifacts.test_next_attempt']),
+    (VRD, "{'outcome': 'lost', 'reason': 'no artifact and no record'}",
+     "{'outcome': 'pass', 'reason': 'no artifact and no record'}",
+     [f'{TV}.Artifacts.test_ends_read_the_records_where_the_artifacts_stop',
+      f'{TV}.Main.test_a_part_without_artifact_or_record_is_lost']),
+    (VRD, "    if len(set(ids)) != len(ids):", "    if False:", [f'{TV}.Artifacts.test_part_ids']),
+    (VRD, "        if not token:", "        if False:", [f'{TV}.Main.test_malformed_inputs_post_nothing']),
+    # env build (decision 11.4)
+    (ENB, "if not registry.VAR.fullmatch(k) or registry.RESERVED.fullmatch(k):",
+     "if not registry.VAR.fullmatch(k):", [f'{TB}.Spec.test_a_reserved_variable_is_refused']),
+    (ENB, "isinstance(i, str) and SPECIFIER.fullmatch(i) for i in install", "isinstance(i, str) for i in install",
+     [f'{TB}.Spec.test_install_takes_specifiers_only']),
+    (ENB, " or posixpath.normpath(p) != p or p.startswith('..'):", ":",
+     [f'{TB}.Spec.test_paths_stay_inside_the_repository']),
+    (ENB, "        if not m or '..' in ref:", "        if not m:", [f'{TB}.Spec.test_upstream_refs_are_branches_of_origin']),
+    (ENB, "?ref={sha}'", "?ref={branch}'", [f'{TB}.Fetch.test_everything_is_read_at_the_default_branch_head']),
+    (ENB, "        if len(files) >= MAX_FILES:", "        if False:", [f'{TB}.Fetch.test_too_many_files']),
+    (ENB, "            if os.path.lexists(link) and not os.path.islink(link):", "            if False:",
+     [f'{TB}.Main.test_a_real_directory_in_the_way_is_not_replaced']),
+    (ENB, "shutil.rmtree(d, ignore_errors=True)  # a failed build", "pass  # a failed build",
+     [f'{TB}.Main.test_a_failed_step_leaves_the_link_alone']),
+    (ENB, "r = run(c, env=genv if c[0] == 'git' else None)", "r = run(c, env=genv)",
+     [f'{TB}.Main.test_a_build_is_linked_when_complete']),
+    (ENB, "        scope = ('systemd-run',", "        scope = () and ('systemd-run',",
+     [f'{TB}.Main.test_a_build_is_linked_when_complete']),
+    # h100-test.yml (design §4.7)
+    (WFL, "    if: ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.claim.outputs.run == 'true' && inputs.cpu-command != ''",
+     "    if: needs.claim.outputs.run == 'true' && inputs.cpu-command != ''",
+     [f'{TW}.Workflow.test_every_job_carries_the_guard']),
+    (WFL, " && inputs.gpu-command != ''", "", [f'{TW}.Workflow.test_a_part_without_command_is_skipped']),
+    (WFL, "    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.claim.outputs.run == 'true' }}",
+     "    if: ${{ always() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.claim.outputs.run == 'true' }}",
+     [f'{TW}.Workflow.test_a_part_without_command_is_skipped']),
+    (WFL, "    runs-on: [self-hosted, h100-cpu]\n    timeout-minutes: ${{ fromJSON(needs.claim.outputs.job-timeout) }}\n    outputs:",
+     "    runs-on: [self-hosted, part]\n    timeout-minutes: ${{ fromJSON(needs.claim.outputs.job-timeout) }}\n    outputs:",
+     [f'{TW}.Workflow.test_the_jobs_run_on_h100_only']),
+    (WFL, "contains(needs.gpu.outputs.retry-on, '\"h100-gpu') && ", "", [f'{TW}.Workflow.test_the_jobs_run_on_h100_only']),
+    (WFL, "permissions:\n  contents: read\njobs:", "permissions:\n  contents: write\njobs:",
+     [f'{TW}.Workflow.test_permissions_stay_minimal']),
+    (WFL, "          persist-credentials: false\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@v1\n        with:\n          project: ${{ inputs.project }}\n          id: cpu",
+     "          persist-credentials: true\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@v1\n        with:\n          project: ${{ inputs.project }}\n          id: cpu",
+     [f'{TW}.Workflow.test_checkouts_keep_no_credentials']),
+    (WFL, "&& (( IN_TIMEOUT >= 1 && IN_TIMEOUT <= 240 ))", "&& true", [f'{TW}.Prep.test_refusals']),
+    (WFL, "[[ $IN_PROJECT =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]]", "true", [f'{TW}.Prep.test_refusals']),
+    (AVD, ' --parts "$IN_PARTS"', '', [f'{TA}.Actions.test_inputs_reach_their_flags']),
 ]
 
 

@@ -101,8 +101,13 @@ allowlist edit is needed.
 
 1. Add `.github/ci-runners.toml` to the default branch (below).
 2. Ask a maintainer to add the registry entry (`etc/projects/<p>.toml` on h100, design
-   §4) and to run `ci-run env build <p>`, which builds the env from that file as the
-   default branch holds it. Rerun it after a dependency change has merged.
+   §4) and to run `ci-run env build <p> [--conda PATH] [--dry-run]`. It reads that file
+   and the requirement files it names (with their `-r` and `-c` files) at the default
+   branch's head, builds the env into `envs/<p>-<stamp>/`, links `envs/<p>` to it only
+   once every step has passed, and keeps the two builds before it. It prints the
+   registry lines to add: `env` and the spec's `variables`. Rerun it after a dependency
+   change has merged. Its token (`GH_TOKEN`, else `etc/envbuild.token`) needs Contents:
+   read on the repository and on any private upstream.
 3. Add the workflow below, pinning `@v1`.
 4. Canary and done as in §2, steps 5 and 6.
 
@@ -111,14 +116,19 @@ allowlist edit is needed.
 ```toml
 schema = 1
 python = "3.12"                                   # conda python version of the env
-requirements = ["requirements-dev.txt"]           # pip -r, in order
-install = ["-e ."]                                # further pip arguments, after them
+requirements = ["requirements-dev.txt"]           # pip -r, in order; paths inside the repository
+install = ["pytest-xdist"]                        # more requirement specifiers: no options, URLs or paths
 [[upstream]]                                      # optional: editable sibling checkouts
 repository = "chaobrain/brainstate"
 ref = "origin/main"
-[variables]                                       # set in every part (registry RESERVED names refused)
+[variables]                                       # for the registry entry (registry RESERVED names refused)
 XLA_PYTHON_CLIENT_PREALLOCATE = "false"
 ```
+
+The project itself is not installed into the env: an editable install would point at a
+build's temporary checkout. A part runs from the job's checkout, so `python -m pytest`
+imports the project from there. Upstreams are cloned into the build and installed
+editable, at the branch head when the env was built.
 
 **Workflow.**
 

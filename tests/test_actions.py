@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-ACTIONS = ('claim', 'place', 'part', 'salvage')
+ACTIONS = ('claim', 'place', 'part', 'salvage', 'verdict')
 
 
 def declared(text: str, section: str) -> list[str]:
@@ -35,7 +35,7 @@ class Actions(unittest.TestCase):
             self.assertEqual(used, ins, name)
 
     def test_inputs_reach_their_flags(self):
-        modules = {'claim': 'github', 'place': 'probe', 'part': 'part', 'salvage': 'part'}
+        modules = {'claim': 'github', 'place': 'probe', 'part': 'part', 'salvage': 'part', 'verdict': 'verdict'}
         skip = {'token'}  # claim's token travels as GITHUB_TOKEN
         for name in ACTIONS:
             text = (ROOT / 'actions' / name / 'action.yml').read_text()

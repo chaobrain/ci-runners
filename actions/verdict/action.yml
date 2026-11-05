@@ -1,0 +1,42 @@
+name: ci-runners verdict
+description: Read a run's part artifacts, salvage the parts without one, and post the head's status (design §4.7). Runs on light.
+inputs:
+  context:
+    description: the status context to post, such as myproj/ci
+    required: true
+  sha:
+    description: the head (default the pull request's head, else github.sha)
+    default: ''
+  parts:
+    description: the ids of the parts the run started, space-separated
+    required: true
+  wait-seconds:
+    description: how long salvage waits for a part that still runs
+    default: '300'
+  token:
+    description: a token with statuses write (the job's)
+    default: ${{ github.token }}
+outputs:
+  state:
+    description: "success, failure or error"
+    value: ${{ steps.verdict.outputs.state }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        pattern: ci-part-*
+        path: ${{ runner.temp }}/ci-verdict
+    - id: verdict
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        IN_CONTEXT: ${{ inputs.context }}
+        IN_SHA: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+        IN_PARTS: ${{ inputs.parts }}
+        IN_WAIT: ${{ inputs.wait-seconds }}
+        ARTIFACTS: ${{ runner.temp }}/ci-verdict
+      run: >-
+        "$GITHUB_ACTION_PATH/../lib/ci-run.sh" verdict --context "$IN_CONTEXT" --sha "$IN_SHA"
+        --parts "$IN_PARTS" --wait-seconds "$IN_WAIT" --artifacts "$ARTIFACTS"

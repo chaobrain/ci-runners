@@ -243,7 +243,7 @@ setup/                plan.sh, apply.sh, install.sh, register.sh, uninstall.sh
 setup/units/          user unit templates: ci-runner@.service, ci-proxy.service,
                       ci-proxy-check.{service,timer}, ci-reaper.{service,timer}, slices
 setup/inventory.example.toml   the schema, with placeholder values
-actions/              claim/, place/, part/, salvage/, compare/ (composite, action.yml);
+actions/              claim/, place/, part/, salvage/, verdict/, compare/ (composite, action.yml);
                       lib/ci-run.sh, the launcher; RELEASE, the release stamp
 .github/workflows/    gpu.yml (reusable, public consumers); h100-test.yml (reusable, the
                       standard test CI, RUN-5); test.yml (this repo's tests, hosted only)
@@ -305,6 +305,7 @@ defaults to `/usr/bin/python3`.
 | repository and actor allowlists, per-class event rules | `etc/policy.toml` | no, but never published |
 | project registry (env names, caps, env allowlist, upstream list, status context) | `etc/projects/<p>.toml` | no |
 | integrity manifests | `etc/manifests/<p>/<remote>.json` on 3090b | no; tamper-relevant, so only on trusted hosts |
+| the env-build token (RUN-5): fine-grained, Contents read on the repositories whose envs are built | `GH_TOKEN` of the maintainer's shell, or `etc/envbuild.token` on h100, mode 600 | yes |
 | the org-sync token (RUN-5): fine-grained, read-only, org Members and repository Metadata | `etc/orgsync.token` on h100, mode 600, minted by the lead | yes, though it reads only the member list and the private repositories' names (T14) |
 | the org snapshot (RUN-5): member logins, private repository names and ids | `etc/org.json` on h100, written by `ci-orgsync` | no, but never published |
 
@@ -483,15 +484,31 @@ caller spends none of its hosted Actions minutes.
 Jobs. Each one has the guard: `pull_request` only with
 `head.repo.full_name == github.repository`, and `push`, `workflow_dispatch`:
 
-1. `claim` on `[self-hosted, h100-light]` (§4.1);
+1. `claim` on `[self-hosted, h100-light]` (§4.1). Its first step checks the inputs
+   (`timeout-minutes` 1 to 240, at least one command) and gives the later jobs the part
+   ids, the context and the jobs' timeout, since an expression cannot add;
 2. `cpu` on `[self-hosted, h100-cpu]`, `part` with `gpus: 0`;
 3. `gpu` on `[self-hosted, h100]`, `part` with `gpus: 1` (the executor picks the card,
    §5.4 health gate);
-4. `retry`: each part whose `next` is `retry` or `fallback`, once, on its `retry-on`.
-   h100 is the only host, so `fallback` also stays there;
-5. `verdict` on `[self-hosted, h100-light]`, always: `salvage` for parts without an artifact,
-   then `context` is set to success, failure (a part `red`) or error (an infrastructure
-   end twice), and the parts' summaries are merged into the job summary.
+4. `cpu-retry` and `gpu-retry`: each part whose `next` is `retry` or `fallback`, once,
+   with `attempt-of` its first record and `resume` as the hint says. h100 is the only
+   host, so the retry stays there: the CPU part on `[self-hosted, h100-cpu]`, the GPU part
+   on the `h100-gpu<M>` that `retry-on` names (a cool card after a thermal end), else on
+   `[self-hosted, h100]`. `retry-on` is not taken as is, because it names runner
+   classes (`part`), which are not h100's labels (§5.1). A part whose job ended without
+   outputs is not retried here; the verdict salvages it;
+5. `verdict` on `[self-hosted, h100-light]`, the `verdict` action, unless the run was
+   cancelled (a newer head's run posts instead; the cancelled head keeps its pending).
+   It reads the parts' `ci-part-<id>-<attempt>` artifacts. Where a part's artifacts stop
+   short (none at all, or a retry asked for and no retry artifact), it reads that
+   attempt's record on this host by `salvage`, else the part is `lost`. A part's last
+   attempt decides: any `red` or `disagreement` sets `context` to failure; all `pass`,
+   success; else error. The parts' summaries are merged into the job summary, and the
+   job fails unless the state is success.
+
+The workflow calls the actions at `@v1`, since an expression cannot pin `uses:`. A canary
+of a new minor therefore exercises the new workflow with `v1`'s actions until the lead
+moves `v1` (§9).
 
 Permissions: `contents: read`, plus `statuses: write` for claim and verdict. A caller
 grants the same at the call site.

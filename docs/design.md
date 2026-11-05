@@ -531,7 +531,9 @@ could be given to a 3090b runner and be refused there, and brainspike's `[light]
 could land on h100. So h100's light and CPU runners carry only `h100-light` and
 `h100-cpu`. Their runner class (`CI_RUNNER_CLASS`) is still `light` and `part`, which is
 what the hook and the executor read. `setup` takes the labels from the inventory's pool
-entry where it gives them (RUN-5). On h100 the `part` class runs CPU parts only: the
+entry where it gives them (RUN-5). The `h100` pool is `per_card`: one runner per card,
+named `h100-gpu<N>` rather than `<role>-<pool>-<i>`, labelled `h100` and `h100-gpu<N>`,
+with `CI_RUNNER_CARD=<N>` in its `.env`. On h100 the `part` class runs CPU parts only: the
 executor refuses `gpus > 0` there (`unavailable`), so only the `h100` runners lease
 cards.
 
@@ -651,13 +653,13 @@ system `python3` is 3.10.
 |---|---|
 | directories | §3.2 (RUN-5) under our subtree; `etc/` mode 700 |
 | runner app | the pinned release, checked by sha256, into 9 runner directories (§5.1) |
-| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON`. No proxy lines. |
+| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card. No proxy lines. |
 | `ci-runner@.service` | as on 3090b, without `After=`/`Wants=ci-proxy.service` |
 | `ci-orgsync.{service,timer}` | every 10 min: the org snapshot (§6.5) |
 | `ci-reaper.timer` | as on 3090b |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 512G of 2 TB) and `ci-<project>.slice` |
 | lock and slot files | new ones under `state/`: h100 has no brainspike files to share (D5 does not apply) |
-| unit names | every unit file starts with `ci-`; `plan.sh` refuses if a unit of that name exists and is not ours (another user of the account may have one) |
+| unit names | every unit file starts with `ci-`; `plan.sh` refuses if a unit of that name exists and no earlier `apply` wrote it (another user of the account may have one). The unit directory exists (mode 700) and is the account's: setup never changes its mode. |
 | unchanged | the shared account's shell files, crontab, `authorized_keys`, other users' files, envs and units; no proxy, no ssh key |
 
 There is no root step: the shared account has no sudo for us, and none is needed.

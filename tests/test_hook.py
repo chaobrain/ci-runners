@@ -145,6 +145,35 @@ class Started(unittest.TestCase):
                            text=True, timeout=60)
         self.assertEqual(r.returncode, 0)
 
+    def test_the_wrappers_run_the_inventorys_python(self):
+        """CI_RUNNERS_PYTHON (h100: the system's Python is 3.10) when it is an absolute
+        path to an executable file; the system's otherwise."""
+        rel = self.base / 'releases'
+        rel.mkdir()
+        os.symlink(ROOT, rel / 'hook')
+        hooks = self.base / 'hooks'
+        hooks.mkdir()
+        for n in ('job-started.sh', 'job-completed.sh'):
+            (hooks / n).write_bytes((ROOT / 'hooks' / n).read_bytes())
+        mark = self.base / 'ran'
+        fake = self.base / 'py' / 'python3'
+        fake.parent.mkdir()
+        fake.write_text(f'#!/bin/sh\necho "$@" >> {mark}\nexec {sys.executable} "$@"\n')
+        fake.chmod(0o755)
+        plain = self.base / 'py' / 'notexec'
+        plain.write_text('#!/bin/sh\nexit 9\n')
+        for n in ('job-started.sh', 'job-completed.sh'):
+            for py, used in ((str(fake), True), ('py/python3', False), (str(plain), False), ('', False)):
+                if mark.exists():
+                    mark.unlink()
+                r = subprocess.run(['sh', str(hooks / n)], env={**self.env, 'PATH': '/usr/bin:/bin',
+                                                                  'CI_RUNNERS_PYTHON': py},
+                                   capture_output=True, text=True, timeout=60, cwd=self.base)
+                self.assertEqual(r.returncode, 0, (n, py, r.stdout, r.stderr))
+                self.assertEqual(mark.exists(), used, (n, py))
+                if used:
+                    self.assertTrue(mark.read_text().startswith('-I -c '), mark.read_text())
+
 
 if __name__ == '__main__':
     unittest.main()

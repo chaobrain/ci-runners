@@ -72,6 +72,33 @@ class Register(unittest.TestCase):
         self.assertIn('enable --now ci-runner@r-light-1.service', calls)
         self.assertIn('enable --now ci-runner@r-part-1.service', calls)
 
+    def test_another_data_root_and_no_proxy(self):
+        """h100 (RUN-5): the data root is CI_RUNNERS_ETC's, and its .env has no proxy lines."""
+        sub = self.home / 'sub'
+        _exe(sub / 'ci-runners/releases/hook/bin/ci-run', '#!/bin/sh\n[ "$1" = runners ] && '
+             'printf "h-gpu0 h100,h-gpu0 h100\\n"\n')
+        d = sub / 'actions-runner' / 'h-gpu0'
+        _exe(d / 'config.sh', f'#!/bin/sh\nprintf "%s\\n" "$@" > {self.out}/h.argv\nenv > {self.out}/h.env\n'
+                              'touch .runner\n')
+        _exe(d / 'bin/Runner.Listener', '#!/bin/sh\n')
+        (d / '.env').write_text('CI_RUNNER_CLASS=h100\nCI_RUNNER_CARD=0\nLANG=C.UTF-8\n')
+        r = subprocess.run(['sh', str(ROOT / 'setup/register.sh'), 'h-gpu0'], input=TOKEN + '\n',
+                           env={'HOME': str(self.home), 'PATH': f'{self.bin}:/usr/bin:/bin',
+                                'CI_RUNNERS_ETC': str(sub / 'ci-runners' / 'etc')},
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        argv = (self.out / 'h.argv').read_text().splitlines()
+        self.assertEqual(argv[argv.index('--work') + 1], str(sub / 'ci-work' / 'h-gpu0'))
+        self.assertEqual(argv[argv.index('--labels') + 1], 'h100,h-gpu0')
+        env = dict(x.split('=', 1) for x in (self.out / 'h.env').read_text().splitlines() if '=' in x)
+        self.assertNotIn('https_proxy', env)
+        self.assertEqual(env['ACTIONS_RUNNER_INPUT_TOKEN'], TOKEN)
+        r = subprocess.run(['sh', str(ROOT / 'setup/register.sh'), 'h-gpu0'], input=TOKEN + '\n',
+                           env={'HOME': str(self.home), 'PATH': f'{self.bin}:/usr/bin:/bin', 'CI_RUNNERS_ETC': 'rel/etc'},
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('absolute path', r.stderr)
+
     def test_a_hostile_env_line_stops_registration(self):
         _exe(self.bin / 'evil', f'#!/bin/sh\ncat > {self.out}/stolen\n')
         env = self.home / 'data/actions-runner/r-part-1/.env'
@@ -233,6 +260,24 @@ class Uninstall(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertFalse((self.out / 'calls').exists())
         self.assertEqual(len(list(self.units.iterdir())), 4)
+
+    def test_the_state_and_the_release_follow_ci_runners_etc(self):
+        """h100: uninstall.sh, plan.sh and apply.sh find the host layer beside CI_RUNNERS_ETC."""
+        sub = self.home / 'sub' / 'ci-runners'
+        (sub / 'releases').mkdir(parents=True)
+        os.rename(self.home / 'data/ci-runners/releases/hook', sub / 'releases' / 'hook')
+        os.rename(self.home / 'data/ci-runners/state', sub / 'state')
+        env = {'HOME': str(self.home), 'PATH': f'{self.bin}:/usr/bin:/bin', 'CI_RUNNERS_ETC': str(sub / 'etc')}
+        r = subprocess.run(['sh', str(ROOT / 'setup/uninstall.sh'), 'r'], env=env, capture_output=True, text=True,
+                           timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(sorted(p.name for p in self.units.iterdir()), ['ci-mine.slice'])
+        _exe(sub / 'releases/hook/bin/ci-run', '#!/bin/sh\ncase $1 in role) echo r ;; *) echo "ran $* $CI_RUNNERS_ETC" ;; esac\n')
+        r = subprocess.run(['sh', str(ROOT / 'setup/plan.sh'), 'r'], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.stdout, f'ran plan {sub / "etc"}\n')
+        r = subprocess.run(['sh', str(ROOT / 'setup/apply.sh'), 'r', '--plan', 'f'], env=env, capture_output=True,
+                           text=True, timeout=60)
+        self.assertEqual(r.stdout, f'ran apply --plan f {sub / "etc"}\n')
 
     def test_a_unit_still_active_removes_nothing(self):
         (self.out / 'active').write_text('ci-reaper.timer\n')

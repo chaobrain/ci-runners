@@ -9,10 +9,16 @@
 - the hook scripts, the rendered units and slices, each with its sha256 and a diff
   against the file in place;
 - the CI proxy's node configs, made from the source configs (``proxy.config``) with
-  their local ports replaced by the CI ports; their content is withheld (secrets);
+  their local ports replaced by the CI ports; their content is withheld (secrets). A
+  host without ``proxy`` (h100, decision 11.6) gets no CI proxy and no proxy lines;
 - the runner app, checked by sha256, extracted once per runner directory;
 - each runner's ``.env``;
 - the ``systemctl --user`` commands.
+
+Units are rendered with the inventory's ``data`` (the root of §3.2, ``~/data`` on the 3090
+hosts, our subtree on h100) and ``python``. A ``ci-*`` unit file that exists but that no
+earlier ``apply`` wrote (``state/setup.json``) stops the plan: another user of a shared
+account may own it.
 
 Registration is not in the plan: the lead runs ``setup/register.sh`` with a fresh
 token. ``apply --plan FILE`` refuses unless a fresh plan is identical (by sha256) and
@@ -50,21 +56,56 @@ PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,39}')
 CLIENT = re.compile(r'/[A-Za-z0-9._/-]+')
 MEMORY = re.compile(r'[1-9][0-9]*[KMGT]?|[1-9][0-9]?%|infinity')
 TIMERS = ('ci-proxy-check.timer', 'ci-reaper.timer')
+SYSTEM_PYTHON = '/usr/bin/python3'
+#: the runner unit's order after the CI proxy, where the host has one
+PROXY_ORDER = 'After=ci-proxy.service\nWants=ci-proxy.service'
+
+
+def _runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str, int | None]]:
+    out = []
+    for pool, v in inv.host['pools'].items():
+        spec = v if isinstance(v, dict) else {'count': v}
+        labels = list(spec.get('labels') or dict.fromkeys([pool, inv.this]))
+        if spec.get('per_card'):
+            for card in inv.host['gpus']:
+                out.append((f'{inv.this}-gpu{card}', [*labels, f'{inv.this}-gpu{card}'], pool, card))
+        else:
+            for i in range(1, spec['count'] + 1):
+                out.append((f'{inv.this}-{pool}-{i}', labels, pool, None))
+    names = [n for n, _, _, _ in out]
+    if len(set(names)) != len(names):
+        raise ValueError('two runners of this host have the same name')
+    return out
 
 
 def runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str]]:
-    """``(name, labels, class)`` of this host's runners: ``<role>-<pool>-<i>``, labelled
-    with the pool (the class) and the host role (design §5.1). A remote host's runners
-    are not here: they live on the host that drives it (RUN-2)."""
-    out = []
-    for pool, n in inv.host['pools'].items():
-        for i in range(1, n + 1):
-            out.append((f'{inv.this}-{pool}-{i}', [pool, inv.this], pool))
-    return out
+    """``(name, labels, class)`` of this host's runners (design §5.1): ``<role>-<pool>-<i>``,
+    labelled with the pool (the class) and the host role, or with the pool's own
+    ``labels``; a ``per_card`` pool has one runner per card, ``<role>-gpu<N>``, labelled
+    also ``<role>-gpu<N>``. A remote host's runners are not here: they live on the host
+    that drives it (RUN-2)."""
+    return [(n, labels, cls) for n, labels, cls, _ in _runners(inv)]
+
+
+def python_of(inv: inventory.Inventory) -> str:
+    """The host layer's interpreter: the inventory's ``python``, else the system's."""
+    return str(inv.host.get('python') or SYSTEM_PYTHON)
+
+
+def check_python(path: str, run=subprocess.run) -> None:
+    """Refuse an interpreter that is not an executable Python 3.11 or later (``tomllib``)."""
+    if not os.path.isfile(path) or not os.access(path, os.X_OK):
+        raise ValueError(f'python {path} is not an executable file')
+    r = run([path, '-I', '-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'],
+            capture_output=True, timeout=60)
+    if r.returncode != 0:
+        raise ValueError(f'python {path} is not Python 3.11 or later')
 
 
 def render(template: str, subs: dict[str, str]) -> str:
     for k, v in subs.items():
+        if not v:  # an empty value takes its line with it
+            template = template.replace(f'@{k}@\n', '')
         template = template.replace(f'@{k}@', v)
     if '@' in ''.join(line for line in template.splitlines() if not line.lstrip().startswith('#')):
         raise ValueError('a unit template has an unknown @KEY@')
@@ -83,8 +124,10 @@ def node_config(src: dict, http_port: int, socks_port: int) -> dict:
     return out
 
 
-def env_file(inv: inventory.Inventory, cls: str, etc: str) -> str:
-    """A runner's ``.env`` (design §5.3)."""
+def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = None) -> str:
+    """A runner's ``.env`` (design §5.3): the runner app reads it into its environment,
+    which its hooks and its jobs' steps inherit. A per-card runner names its card in
+    ``CI_RUNNER_CARD``."""
     h = inv.host
     hooks = os.path.join(h['data'], 'ci-runners', 'hooks')
     lines = []
@@ -94,7 +137,12 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str) -> str:
                   f'no_proxy={p["no_proxy"]}']
     lines += [f'ACTIONS_RUNNER_HOOK_JOB_STARTED={hooks}/job-started.sh',
               f'ACTIONS_RUNNER_HOOK_JOB_COMPLETED={hooks}/job-completed.sh',
-              f'CI_RUNNER_CLASS={cls}', f'CI_RUNNERS_ETC={etc}', 'LANG=C.UTF-8']
+              f'CI_RUNNER_CLASS={cls}', f'CI_RUNNERS_ETC={etc}']
+    if card is not None:
+        lines.append(f'CI_RUNNER_CARD={card}')
+    if h.get('python'):
+        lines.append(f'CI_RUNNERS_PYTHON={h["python"]}')
+    lines.append('LANG=C.UTF-8')
     return '\n'.join(lines) + '\n'
 
 
@@ -168,9 +216,10 @@ def build(etc: str) -> Plan:
             (os.path.join(home, '.config', 'systemd', 'user'), 0o755)]
     if 'proxy' in h:
         dirs += [(os.path.join(etc, 'proxy'), 0o700), (os.path.join(etc, 'proxy', 'nodes'), 0o700)]
+    unit_dir = os.path.join(home, '.config', 'systemd', 'user')
     for d, mode in dirs:
-        if os.path.isdir(d) and os.stat(d).st_mode & 0o777 == mode:
-            plan.add(f'  keep   {d}/')
+        if os.path.isdir(d) and (os.stat(d).st_mode & 0o777 == mode or d == unit_dir):
+            plan.add(f'  keep   {d}/')  # the unit directory is the account's: its mode is never changed
         else:
             plan.add(f'  mkdir  {d}/ mode {mode:o}', kind='mkdir', path=d, mode=mode)
     plan.add('hooks:')
@@ -181,15 +230,30 @@ def build(etc: str) -> Plan:
     if not isinstance(h['memory_max'], str) or not MEMORY.fullmatch(h['memory_max']):
         raise ValueError(f'memory_max must match {MEMORY.pattern}')
     client = h.get('proxy', {}).get('client', '/bin/false')
-    if not isinstance(client, str) or not CLIENT.fullmatch(client):
-        raise ValueError(f'proxy.client must be an absolute path matching {CLIENT.pattern}')
-    subs = {'CI_MEMORY_MAX': h['memory_max'], 'PROXY_CLIENT': h.get('proxy', {}).get('client', '/bin/false')}
-    unit_dir = os.path.join(home, '.config', 'systemd', 'user')
+    python = python_of(inv)
+    for key, v in (('proxy.client', client), ('data', data), ('python', python), ('etc', etc)):
+        if not isinstance(v, str) or not CLIENT.fullmatch(v):
+            raise ValueError(f'{key} must be an absolute path matching {CLIENT.pattern}')
+    if etc != os.path.join(base, 'etc'):
+        raise ValueError(f'the etc directory must be {os.path.join(base, "etc")}')
+    if h.get('python'):
+        check_python(python)
+    subs = {'CI_MEMORY_MAX': h['memory_max'], 'PROXY_CLIENT': client, 'CI_DATA': data, 'CI_ETC': etc,
+            'CI_PYTHON': python, 'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else ''}
+    ours = _ours(os.path.join(base, 'state', 'setup.json'))
+
+    def unit(name: str, content: str) -> None:
+        path = os.path.join(unit_dir, name)
+        if os.path.lexists(path) and path not in ours:
+            raise ValueError(f'{path} exists and no apply of ci-runners wrote it: another user\'s unit? '
+                             'Rename or remove it first')
+        _file(plan, path, content, 0o644)
+
     for name in UNITS:
         if name.startswith('ci-proxy') and 'proxy' not in h:
             continue
         with open(os.path.join(release, 'setup', 'units', name)) as f:
-            _file(plan, os.path.join(unit_dir, name), render(f.read(), subs), 0o644)
+            unit(name, render(f.read(), subs))
     with open(os.path.join(release, 'setup', 'units', 'ci-project.slice')) as f:
         tmpl = f.read()
     projects = []
@@ -202,8 +266,7 @@ def build(etc: str) -> Plan:
         if not PROJECT_NAME.fullmatch(name) or not MEMORY.fullmatch(mem):
             raise ValueError(f'{path}: name must match {PROJECT_NAME.pattern} and memory_max {MEMORY.pattern}')
         projects.append(name)
-        _file(plan, os.path.join(unit_dir, f'ci-{name}.slice'),
-              render(tmpl, {'PROJECT': name, 'PROJECT_MEMORY_MAX': mem}), 0o644)
+        unit(f'ci-{name}.slice', render(tmpl, {'PROJECT': name, 'PROJECT_MEMORY_MAX': mem}))
     if 'proxy' in h:
         p = h['proxy']
         plan.add('CI proxy:')
@@ -222,32 +285,45 @@ def build(etc: str) -> Plan:
             plan.add(f'  link   {active} -> nodes/{p["nodes"][0]}.json', kind='symlink', path=active,
                      target=f'nodes/{p["nodes"][0]}.json')
     if plan.actions:
-        plan.add('systemd --user (units, CI proxy):')
+        plan.add('systemd --user (units, CI proxy):' if 'proxy' in h else 'systemd --user (units):')
         plan.add('  run    systemctl --user daemon-reload', kind='run', argv=['systemctl', '--user', 'daemon-reload'])
         if 'proxy' in h:
             argv = ['systemctl', '--user', 'enable', '--now', 'ci-proxy.service']
             plan.add(f'  run    {" ".join(argv)}', kind='run', argv=argv)
     port = h['proxy']['http_port'] if 'proxy' in h else 0
-    plan.add(f'runners (actions/runner {RUNNER_VERSION}, sha256 {RUNNER_SHA256[:16]}, fetched through the CI proxy):')
+    via = 'fetched through the CI proxy' if 'proxy' in h else 'fetched directly'
+    plan.add(f'runners (actions/runner {RUNNER_VERSION}, sha256 {RUNNER_SHA256[:16]}, {via}):')
     cache = os.path.join(base, 'state', 'cache', os.path.basename(RUNNER_URL))
-    rs = runners(inv)
-    for name, labels, cls in rs:
+    rs = _runners(inv)
+    for name, labels, cls, card in rs:
         rdir = os.path.join(data, 'actions-runner', name)
         if runner_complete(rdir):
             plan.add(f'  keep   {rdir}/ (runner app present)')
         else:
             plan.add(f'  unpack {RUNNER_URL} -> {rdir}/', kind='runner', path=rdir, cache=cache, port=port)
-        _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc), 0o600)
+        _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc, card), 0o600)
         plan.add(f'         labels {",".join(labels)}; work {os.path.join(data, "ci-work", name)} (at registration)')
     if plan.actions:  # nothing changed: a second apply is a no-op
         plan.add('systemd --user (timers, runners):')
         cmds = [['systemctl', '--user', 'daemon-reload'],
                 ['systemctl', '--user', 'enable', '--now', *[t for t in TIMERS if 'proxy' in h or 'proxy' not in t]],
-                ['systemctl', '--user', 'enable', *[f'ci-runner@{n}.service' for n, _, _ in rs]]]
+                ['systemctl', '--user', 'enable', *[f'ci-runner@{n}.service' for n, _, _, _ in rs]]]
         for c in cmds:
             plan.add(f'  run    {" ".join(c)}', kind='run', argv=c)
     plan.add('  (a runner starts at its registration: setup/register.sh, run by the lead)')
     return plan
+
+
+def _ours(state_path: str) -> frozenset[str]:
+    """The files an earlier apply wrote, from ``state/setup.json`` (none if it is absent)."""
+    try:
+        with open(state_path, encoding='utf-8') as f:
+            state = json.load(f)
+        return frozenset(m['path'] for a in state['applied'] for m in a['made'] if m.get('kind') == 'file')
+    except FileNotFoundError:
+        return frozenset()
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise ValueError(f'{state_path} is unreadable ({type(e).__name__}): fix it before planning') from None
 
 
 def wait_port(port: int, timeout: float = PROXY_WAIT, poll: float = 0.5) -> None:

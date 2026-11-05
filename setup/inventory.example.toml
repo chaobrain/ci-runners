@@ -34,19 +34,31 @@ http_port = 10809
 socks_port = 10808
 no_proxy = "localhost,127.0.0.1,<intranet suffix>"
 
-[hosts.h100]
+[hosts.h100]                                    # RUN-5: a standalone host (decision 11.3); its own
+                                                # inventory there says this = "h100"
 ssh = "<ssh alias of h100>"
 account = "<shared account>"
 home = "/home/<shared account>"
-data = "/home/<shared account>/<our subtree>"
-trusted = false                                 # GPU parts only (decision 3)
-remote = true                                   # driven over ssh from 3090b
+data = "/home/<shared account>/<our subtree>"   # the root of design §3.2 (RUN-5) on h100
+trusted = true                                  # CPU and GPU parts both run here (decision 11.3)
 cpu_slowdown = 2.7
-slots = 5                                       # one per card
-memory_max = "128G"
+slots = 2                                       # CPU slots; each card is its own slot
+memory_max = "512G"                             # ci.slice
 disk_min_gib = 50
 gpus = [0, 1, 2, 3, 4]
 max_temp_c = 80
 cpus = "0-43,88-131"                            # NUMA node 0
-pools = { h100 = 5 }
-files = { host_lock = "/tmp/<host lock>.lock", slot_lock = "/tmp/<slot lock>.lock", slot_queue = "/tmp/<slot lock>.queue" }
+python = "/<path to a Python 3.11 or later>"    # the system's is 3.10; export it as CI_RUNNERS_PYTHON
+                                                # (and CI_RUNNERS_ETC) to run setup/*.sh by hand
+orgsync = true                                  # the org snapshot timer (design §6.5)
+# no proxy table: GitHub is reached directly (decision 11.6)
+
+[hosts.h100.pools]                              # labels share nothing with the 3090 pools (§5.1)
+light = { count = 2, labels = ["h100-light"] }
+part = { count = 2, labels = ["h100-cpu"] }
+h100 = { per_card = true, labels = ["h100"] }   # runners h100-gpu<N>, labelled h100 and h100-gpu<N>
+
+[hosts.h100.files]                              # new files under state/: h100 has no brainspike files
+host_lock = "/home/<shared account>/<our subtree>/ci-runners/state/host.lock"
+slot_lock = "/home/<shared account>/<our subtree>/ci-runners/state/slot.lock"
+slot_queue = "/home/<shared account>/<our subtree>/ci-runners/state/slot.queue"

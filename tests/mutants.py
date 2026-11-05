@@ -28,6 +28,11 @@ INV = 'ci_runners/inventory.py'
 LCK = 'ci_runners/locks.py'
 HOK = 'ci_runners/hook.py'
 SET = 'ci_runners/setup.py'
+CLI = 'ci_runners/cli.py'
+HKS = 'hooks/job-started.sh'
+HKC = 'hooks/job-completed.sh'
+PLN = 'setup/plan.sh'
+UNS = 'setup/uninstall.sh'
 PRX = 'ci_runners/proxy.py'
 CLA = 'ci_runners/claim.py'
 OUT = 'ci_runners/outcome.py'
@@ -266,7 +271,7 @@ MUTANTS = [
     (REA, "            if os.path.islink(d) or not os.path.isdir(d):", "            if not os.path.isdir(d):",
      [f'{TE}.Reap.test_a_linked_owner_or_repository_is_not_walked']),
     (UNI, "[ \"$role\" = \"$1\" ] ||", "true ||", [f'{TK}.Uninstall.test_another_roles_inventory_is_refused']),
-    (SET, "    if not isinstance(client, str) or not CLIENT.fullmatch(client):", "    if False:",
+    (SET, "        if not isinstance(v, str) or not CLIENT.fullmatch(v):", "        if False:",
      [f'{TU}.Setup.test_the_proxy_client_is_one_absolute_path']),
     (UNI, "[ -z \"$left\" ] || {", "true || {", [f'{TK}.Uninstall.test_a_unit_still_active_removes_nothing']),
     (UNI, " and os.path.dirname(m['path']) == unit_dir", "", [f'{TK}.Uninstall.test_each_unit_is_disabled_and_only_setups_files_go']),
@@ -408,7 +413,7 @@ MUTANTS = [
     (LCH, 'if ! [[ $release =~ ^(hook|v[0-9]+\\.[0-9]+\\.[0-9]+)$ ]]; then', 'if ! [[ $release =~ ^(hook|v[0-9]+\\.[0-9]+\\.[0-9]+) ]]; then',
      [f'{TA}.Launcher.test_a_bad_stamp_is_refused']),
     (LCH, 'if ! [[ $release =~ ^(hook|v[0-9]+\\.[0-9]+\\.[0-9]+)$ ]]; then', 'if false; then', [f'{TA}.Launcher.test_a_bad_stamp_is_refused']),
-    (LCH, 'ci_run=$HOME/data/ci-runners/releases/$release/bin/ci-run', 'ci_run=$HOME/data/ci-runners/releases/hook/bin/ci-run',
+    (LCH, 'ci_run=$rel/$release/bin/ci-run', 'ci_run=$rel/hook/bin/ci-run',
      [f'{TA}.Launcher.test_the_stamped_release_runs']),
     (LCH, '[ "$cmd" = part ] || [ "$cmd" = salvage ] || exit 2', 'exit 2', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, 'then next=fallback; retry_on="[\\"self-hosted\\",\\"$cls\\"]"', 'then next=fallback; retry_on="[\\"self-hosted\\"]"',
@@ -424,6 +429,62 @@ MUTANTS = [
     (APT, '  record:\n    description: "the part record, for salvage"\n    value: ${{ steps.part.outputs.record }}\n',
      "  record: {description: the part record, for salvage, value: '${{ steps.part.outputs.record }}'}\n",
      [f'{TA}.Actions.test_no_flow_mappings']),
+    # RUN-5: h100 as a standalone host (no proxy, its own python, labelled pools, a shared account)
+    (INV, "    if type(per_card) is not bool or per_card == ('count' in v):", "    if type(per_card) is not bool:",
+     [f'{TI}.Load.test_pools_as_tables']),
+    (INV, "all(isinstance(x, str) and LABEL.match(x) for x in labels)", "all(isinstance(x, str) for x in labels)",
+     [f'{TI}.Load.test_pools_as_tables']),
+    (INV, " and len(set(labels)) == len(labels)", "", [f'{TI}.Load.test_pools_as_tables']),
+    (INV, " and ('labels' not in v or bool(labels))", "", [f'{TI}.Load.test_pools_as_tables']),
+    (INV, "            if isinstance(v, dict) and v.get('per_card') and not h['gpus']:", "            if False:",
+     [f'{TI}.Load.test_pools_as_tables']),
+    (INV, "    'python': (_abs, False),", "    'python': (_str, False),", [f'{TI}.Load.test_python_and_orgsync']),
+    (INV, "'extra_events', 'labels'})", "'extra_events', 'labels', 'python'})",
+     [f'{TI}.Deny.test_labels_are_public_and_the_python_is_not']),
+    (SET, "        if os.path.lexists(path) and path not in ours:", "        if False:",
+     [f'{TU}.Standalone.test_another_users_unit_stops_the_plan']),
+    (SET, "        return frozenset(m['path'] for a in state['applied'] for m in a['made'] if m.get('kind') == 'file')",
+     "        return frozenset(m['path'] for a in state['applied'] for m in a['made'])",
+     [f'{TU}.Standalone.test_another_users_unit_stops_the_plan']),
+    (SET, "    except (OSError, ValueError, KeyError, TypeError) as e:\n        raise ValueError(",
+     "    except (OSError, ValueError, KeyError, TypeError) as e:\n        return frozenset()\n        raise ValueError(",
+     [f'{TU}.Standalone.test_another_users_unit_stops_the_plan']),
+    (SET, "    if r.returncode != 0:\n        raise ValueError(f'python", "    if False:\n        raise ValueError(f'python",
+     [f'{TU}.Standalone.test_the_python_must_be_3_11_or_later']),
+    (SET, "    if not os.path.isfile(path) or not os.access(path, os.X_OK):", "    if False:",
+     [f'{TU}.Standalone.test_the_python_must_be_3_11_or_later']),
+    (SET, "    if h.get('python'):\n        check_python(python)", "    if False:\n        check_python(python)",
+     [f'{TU}.Standalone.test_the_python_must_be_3_11_or_later']),
+    (SET, "    if etc != os.path.join(base, 'etc'):", "    if False:", [f'{TU}.Standalone.test_etc_must_be_beside_the_data']),
+    (SET, "'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else ''", "'PROXY_ORDER': PROXY_ORDER",
+     [f'{TU}.Standalone.test_plan_without_a_proxy']),
+    (SET, "        if not v:  # an empty value takes its line with it", "        if False:",
+     [f'{TU}.Standalone.test_plan_without_a_proxy']),
+    (SET, "    if card is not None:", "    if card:", [f'{TU}.Standalone.test_runners_labels_and_cards']),
+    (SET, "    if h.get('python'):\n        lines.append(", "    if False:\n        lines.append(",
+     [f'{TU}.Standalone.test_runners_labels_and_cards']),
+    (SET, "labels = list(spec.get('labels') or dict.fromkeys([pool, inv.this]))", "labels = [pool, inv.this]",
+     [f'{TU}.Standalone.test_runners_labels_and_cards']),
+    (SET, "[*labels, f'{inv.this}-gpu{card}']", "labels", [f'{TU}.Standalone.test_runners_labels_and_cards']),
+    (SET, "    if len(set(names)) != len(names):", "    if False:", [f'{TU}.Standalone.test_runners_labels_and_cards']),
+    (SET, " or d == unit_dir):", "):", [f'{TU}.Standalone.test_the_accounts_unit_directory_keeps_its_mode']),
+    (CLI, "        if 'proxy' not in h:  # GitHub", "        if False:  # GitHub", [f'{TU}.Standalone.test_proxy_check_without_a_proxy']),
+    (HKS, '/*) [ -f "$py" ] && [ -x "$py" ] || py=/usr/bin/python3 ;;', '/*) ;;',
+     [f'{TH}.Started.test_the_wrappers_run_the_inventorys_python']),
+    (HKS, '*) py=/usr/bin/python3 ;; esac', '*) ;; esac', [f'{TH}.Started.test_the_wrappers_run_the_inventorys_python']),
+    (HKS, 'exec /usr/bin/timeout -k 5 65 "$py" -I', 'exec /usr/bin/timeout -k 5 65 /usr/bin/python3 -I',
+     [f'{TH}.Started.test_the_wrappers_run_the_inventorys_python']),
+    (HKC, '/*) [ -f "$py" ] && [ -x "$py" ] || py=/usr/bin/python3 ;;', '/*) ;;',
+     [f'{TH}.Started.test_the_wrappers_run_the_inventorys_python']),
+    (HKC, 'exec "$py" -I', 'exec /usr/bin/python3 -I', [f'{TH}.Started.test_the_wrappers_run_the_inventorys_python']),
+    (LCH, 'if [[ $etc == /* ]]; then', 'if [[ -n $etc ]]; then', [f'{TA}.Launcher.test_the_release_is_found_beside_ci_runners_etc']),
+    (REG, '  dir=$data/actions-runner/$r\n  labels=', '  dir=$HOME/data/actions-runner/$r\n  labels=',
+     [f'{TK}.Register.test_another_data_root_and_no_proxy']),
+    (REG, 'case $etc in /*) ;; *) echo', 'case $etc in *) ;; /*) echo', [f'{TK}.Register.test_another_data_root_and_no_proxy']),
+    (UNS, '"$base/state/setup.json"', '"$HOME/data/ci-runners/state/setup.json"',
+     [f'{TK}.Uninstall.test_the_state_and_the_release_follow_ci_runners_etc']),
+    (PLN, 'ci_run=$base/releases/hook/bin/ci-run', 'ci_run=$HOME/data/ci-runners/releases/hook/bin/ci-run',
+     [f'{TK}.Uninstall.test_the_state_and_the_release_follow_ci_runners_etc']),
 ]
 
 

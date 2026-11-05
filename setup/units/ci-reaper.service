@@ -3,6 +3,8 @@ Description=ci-runners: reap what stopped jobs left behind
 
 [Service]
 Type=oneshot
-ExecStart=%h/data/ci-runners/releases/hook/bin/ci-run reap
+ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run reap
+Environment=CI_RUNNERS_ETC=@CI_ETC@
+Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
 NoNewPrivileges=yes
 TimeoutStartSec=5min

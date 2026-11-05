@@ -96,6 +96,20 @@ class Launcher(unittest.TestCase):
         r = self.launch('part', '--id', 'x y')
         self.assertEqual((r.returncode, r.stdout), (0, 'v1.2.3 part --id x y\n'))
 
+    def test_the_release_is_found_beside_ci_runners_etc(self):
+        """h100's data root is not ~/data: the runner's CI_RUNNERS_ETC names it."""
+        self.stamp('hook')
+        self.stub('hook')
+        b = pathlib.Path(self.tmp.name) / 'sub' / 'ci-runners' / 'releases' / 'hook' / 'bin'
+        b.mkdir(parents=True)
+        (b / 'ci-run').write_text('#!/bin/sh\necho "sub $*"\n')
+        (b / 'ci-run').chmod(0o755)
+        etc = pathlib.Path(self.tmp.name) / 'sub' / 'ci-runners' / 'etc'
+        self.assertEqual(self.launch('part', '--id', 'x', CI_RUNNERS_ETC=str(etc)).stdout, 'sub part --id x\n')
+        self.assertEqual(self.launch('part', '--id', 'x', CI_RUNNERS_ETC='sub/ci-runners/etc').stdout,
+                         'hook part --id x\n')  # not absolute: the default
+        self.assertEqual(self.launch('part', '--id', 'x').stdout, 'hook part --id x\n')
+
     def test_a_bad_stamp_is_refused(self):
         self.stub('hook')
         self.stub('v1.2.3')  # so that v1.2.3/../.. resolves

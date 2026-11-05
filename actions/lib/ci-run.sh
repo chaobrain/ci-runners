@@ -1,8 +1,9 @@
 #!/bin/bash
 # actions/lib/ci-run.sh CMD ARGS...: what every action runs (design §9). On one of our
 # runners it executes the host layer of this action's release, named in actions/RELEASE
-# (stamped at release; `hook` on main, the hook's release): ~/data/ci-runners/releases/
-# <release>/bin/ci-run. On a GitHub-hosted runner (public consumers' claim) it runs the
+# (stamped at release; `hook` on main, the hook's release): <data>/ci-runners/releases/
+# <release>/bin/ci-run, where <data>/ci-runners/etc is the runner's CI_RUNNERS_ETC (its
+# .env sets it; ~/data without it). On a GitHub-hosted runner (public consumers' claim) it runs the
 # package of this action's own checkout, with --hosted (Python 3.11 or later: an
 # ubuntu-24.04 image). If the release is not installed here, a part ends `unavailable`
 # and goes to its fallback on another runner of its class; any other command fails.
@@ -19,7 +20,9 @@ if ! [[ $release =~ ^(hook|v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
   echo "::error::ci-runners: bad RELEASE '$release'"
   exit 2
 fi
-ci_run=$HOME/data/ci-runners/releases/$release/bin/ci-run
+etc=${CI_RUNNERS_ETC:-}
+if [[ $etc == /* ]]; then rel=$(dirname "$etc")/releases; else rel=$HOME/data/ci-runners/releases; fi
+ci_run=$rel/$release/bin/ci-run
 if [ -x "$ci_run" ]; then
   exec "$ci_run" "$cmd" "$@"
 fi

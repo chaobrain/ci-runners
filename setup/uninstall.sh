@@ -6,7 +6,11 @@
 # runner settings) and deletes etc/.
 set -eu
 [ $# -eq 1 ] || { echo "usage: $0 ROLE" >&2; exit 2; }
-ci_run=$HOME/data/ci-runners/releases/hook/bin/ci-run
+etc=${CI_RUNNERS_ETC:-$HOME/data/ci-runners/etc}  # <data>/ci-runners/etc (design §3.2)
+case $etc in /*) ;; *) echo "$0: CI_RUNNERS_ETC must be an absolute path" >&2; exit 2 ;; esac
+export CI_RUNNERS_ETC=$etc
+base=$(dirname "$etc"); data=$(dirname "$base")
+ci_run=$base/releases/hook/bin/ci-run
 role=$("$ci_run" role)
 [ "$role" = "$1" ] || { echo "uninstall.sh: this host's inventory is for $role, not $1" >&2; exit 2; }
 units="$("$ci_run" runners | awk '{print "ci-runner@" $1 ".service"}') ci-proxy-check.timer ci-reaper.timer ci-proxy.service"
@@ -19,7 +23,7 @@ for u in $units; do
 done
 [ -z "$left" ] || { echo "uninstall.sh: still active:$left; nothing removed" >&2; exit 1; }
 unit_dir=$HOME/.config/systemd/user
-/usr/bin/python3 -I - "$HOME/data/ci-runners/state/setup.json" "$unit_dir" <<'PY'
+/usr/bin/python3 -I - "$base/state/setup.json" "$unit_dir" <<'PY'
 import json, os, sys
 state, unit_dir = sys.argv[1], sys.argv[2]
 with open(state) as f:

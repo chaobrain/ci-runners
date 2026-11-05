@@ -246,6 +246,9 @@ class Claim(unittest.TestCase):
         c = self.claim(call)
         self.assertEqual((c.run, c.reason), (False, 'claimed by a local run'))  # the claim on page 2 counts
         self.assertEqual(len(urls), 2)
+        pages[1] = [self.status('success', 'github-actions[bot]')] + [self.status('pending', 'bob')] * 99
+        pages[2] = [self.status('pending', 'alice', age=60)]
+        self.assertEqual(self.claim(call).reason, 'green')  # page 1, the newest, counts too
         with self.assertRaises(github.ApiError):
             github.statuses(lambda *a, **k: {'message': 'x'}, 'https://x/y?per_page=100', 't')
 

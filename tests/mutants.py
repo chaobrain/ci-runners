@@ -280,6 +280,7 @@ MUTANTS = [
      [f'{TQ}.ClaimMain.test_a_skip_writes_run_false']),
     (GHB, "e.code < 500 and e.code != 429", "e.code < 500", [f'{TQ}.Claim.test_api_retries_server_errors_only']),
     (GHB, "        if len(got) < PAGE:\n            break", "        break", [f'{TQ}.Claim.test_statuses_are_read_page_by_page']),
+    (GHB, "        out += got\n", "        out = got\n", [f'{TQ}.Claim.test_statuses_are_read_page_by_page']),
     (GHB, "        if not isinstance(got, list):\n            raise ApiError", "        if False:\n            raise ApiError",
      [f'{TQ}.Claim.test_statuses_are_read_page_by_page']),
     (GHB, "        if a.hosted:\n            actors, bot", "        if False:\n            actors, bot",

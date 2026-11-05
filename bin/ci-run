@@ -1,0 +1,5 @@
+#!/bin/sh
+# ci-run: see ci_runners/cli.py. Runs the installed package with the system Python,
+# isolated (-I), so a job's environment cannot change what runs.
+root=$(dirname "$(dirname "$(readlink -f "$0")")")
+exec "${CI_RUNNERS_PYTHON:-/usr/bin/python3}" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.cli import main; sys.exit(main(sys.argv[1:]))' "$root" "$@"

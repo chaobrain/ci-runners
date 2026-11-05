@@ -1,0 +1,7 @@
+# Every runner, proxy and part of ci-runners on this host (design §7, "Memory").
+[Unit]
+Description=ci-runners
+
+[Slice]
+MemoryMax=@CI_MEMORY_MAX@
+MemorySwapMax=0

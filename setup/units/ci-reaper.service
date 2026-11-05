@@ -1,0 +1,8 @@
+[Unit]
+Description=ci-runners: reap what stopped jobs left behind
+
+[Service]
+Type=oneshot
+ExecStart=%h/data/ci-runners/releases/hook/bin/ci-run reap
+NoNewPrivileges=yes
+TimeoutStartSec=5min

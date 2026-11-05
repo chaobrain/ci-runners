@@ -1,0 +1,316 @@
+"""Host setup as the runner account (design §5.2, §5.3): ``plan`` prints every change,
+``apply`` makes exactly an approved plan. Neither needs sudo.
+
+``plan`` reads the inventory (``etc/inventory.toml``), the project registry
+(``etc/projects/*.toml``: ``name`` and ``memory_max``) and the installed release
+(``releases/hook``: hook scripts and unit templates), and lists:
+
+- directories (§3.2), with ``etc/`` mode 700;
+- the hook scripts, the rendered units and slices, each with its sha256 and a diff
+  against the file in place;
+- the CI proxy's node configs, made from the source configs (``proxy.config``) with
+  their local ports replaced by the CI ports; their content is withheld (secrets);
+- the runner app, checked by sha256, extracted once per runner directory;
+- each runner's ``.env``;
+- the ``systemctl --user`` commands.
+
+Registration is not in the plan: the lead runs ``setup/register.sh`` with a fresh
+token. ``apply --plan FILE`` refuses unless a fresh plan is identical (by sha256) and
+records what it made in ``state/setup.json``; a second run is a no-op.
+"""
+from __future__ import annotations
+
+import difflib
+import glob
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tarfile
+import tomllib
+import urllib.request
+
+from ci_runners import inventory
+
+RUNNER_VERSION = '2.338.2'
+RUNNER_SHA256 = 'baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40'
+RUNNER_URL = (f'https://github.com/actions/runner/releases/download/v{RUNNER_VERSION}/'
+              f'actions-runner-linux-x64-{RUNNER_VERSION}.tar.gz')
+UNITS = ('ci-runner@.service', 'ci-proxy.service', 'ci-proxy-check.service', 'ci-proxy-check.timer',
+         'ci-reaper.service', 'ci-reaper.timer', 'ci.slice')
+TIMERS = ('ci-proxy-check.timer', 'ci-reaper.timer')
+
+
+def runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str]]:
+    """``(name, labels, class)`` of this host's runners: ``<role>-<pool>-<i>``, labelled
+    with the pool (the class) and the host role (design §5.1). A remote host's runners
+    are not here: they live on the host that drives it (RUN-2)."""
+    out = []
+    for pool, n in inv.host['pools'].items():
+        for i in range(1, n + 1):
+            out.append((f'{inv.this}-{pool}-{i}', [pool, inv.this], pool))
+    return out
+
+
+def render(template: str, subs: dict[str, str]) -> str:
+    for k, v in subs.items():
+        template = template.replace(f'@{k}@', v)
+    if '@' in ''.join(line for line in template.splitlines() if not line.lstrip().startswith('#')):
+        raise ValueError('a unit template has an unknown @KEY@')
+    return template
+
+
+def node_config(src: dict, http_port: int, socks_port: int) -> dict:
+    """A node config with its inbounds replaced by the CI instance's local ports. Pure."""
+    out = dict(src)
+    out['inbounds'] = [
+        {'tag': 'socks', 'listen': '127.0.0.1', 'port': socks_port, 'protocol': 'socks',
+         'settings': {'udp': True}},
+        {'tag': 'http', 'listen': '127.0.0.1', 'port': http_port, 'protocol': 'http'},
+    ]
+    out.pop('log', None)
+    return out
+
+
+def env_file(inv: inventory.Inventory, cls: str, etc: str) -> str:
+    """A runner's ``.env`` (design §5.3)."""
+    h = inv.host
+    hooks = os.path.join(h['data'], 'ci-runners', 'hooks')
+    lines = []
+    if 'proxy' in h:
+        p = h['proxy']
+        lines += [f'https_proxy=http://127.0.0.1:{p["http_port"]}', f'http_proxy=http://127.0.0.1:{p["http_port"]}',
+                  f'no_proxy={p["no_proxy"]}']
+    lines += [f'ACTIONS_RUNNER_HOOK_JOB_STARTED={hooks}/job-started.sh',
+              f'ACTIONS_RUNNER_HOOK_JOB_COMPLETED={hooks}/job-completed.sh',
+              f'CI_RUNNER_CLASS={cls}', f'CI_RUNNERS_ETC={etc}', 'LANG=C.UTF-8']
+    return '\n'.join(lines) + '\n'
+
+
+class Plan:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self.actions: list[dict] = []
+
+    def add(self, line: str, **action) -> None:
+        self.lines.append(line)
+        if action:
+            self.actions.append(action)
+
+    def text(self) -> str:
+        return '\n'.join(self.lines) + '\n'
+
+    def digest(self) -> str:
+        return hashlib.sha256(self.text().encode()).hexdigest()
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _file(plan: Plan, path: str, content: str, mode: int, secret: bool = False, note: str = '') -> None:
+    data = content.encode()
+    try:
+        with open(path, 'rb') as f:
+            old = f.read()
+    except OSError:
+        old = None
+    try:
+        old_mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        old_mode = None
+    if old == data and old_mode == mode:
+        plan.add(f'  keep   {path}{note}')
+        return
+    verb = 'write' if old is None else 'update'
+    plan.add(f'  {verb:6} {path} mode {mode:o} sha256 {_sha(data)[:16]}{note}', kind='file', path=path,
+             content=content, mode=mode)
+    if secret:
+        plan.add('         (content withheld: it holds secrets)')
+    elif old is not None:
+        for d in difflib.unified_diff(old.decode(errors='replace').splitlines(), content.splitlines(),
+                                      'in place', 'planned', lineterm='', n=1):
+            plan.add(f'         {d}')
+    else:
+        for line in content.splitlines():
+            plan.add(f'         | {line}')
+
+
+def build(etc: str) -> Plan:
+    """The plan for this host, from ``etc`` and the installed release
+    (``$CI_RUNNERS_RELEASE`` instead, to preview a plan before the account exists).
+    Pure but for reading files."""
+    with open(os.path.join(etc, 'inventory.toml'), encoding='utf-8') as f:
+        inv = inventory.load(f.read())
+    h = inv.host
+    if h.get('remote'):
+        raise ValueError(f'{inv.this} is driven remotely: nothing is set up on it here (RUN-2)')
+    data, home = h['data'], h['home']
+    base = os.path.join(data, 'ci-runners')
+    release = os.path.realpath(os.environ.get('CI_RUNNERS_RELEASE') or os.path.join(base, 'releases', 'hook'))
+    plan = Plan()
+    plan.add(f'# ci-runners setup plan for {inv.this}, release {os.path.basename(release)}')
+    plan.add('directories:')
+    dirs = [(base, 0o755), (os.path.join(base, 'releases'), 0o755), (os.path.join(base, 'hooks'), 0o755),
+            (etc, 0o700), (os.path.join(base, 'state'), 0o700), (os.path.join(base, 'logs'), 0o700),
+            (os.path.join(data, 'actions-runner'), 0o700), (os.path.join(data, 'ci-work'), 0o700),
+            (os.path.join(home, '.config', 'systemd', 'user'), 0o755)]
+    if 'proxy' in h:
+        dirs += [(os.path.join(etc, 'proxy'), 0o700), (os.path.join(etc, 'proxy', 'nodes'), 0o700)]
+    for d, mode in dirs:
+        if os.path.isdir(d) and os.stat(d).st_mode & 0o777 == mode:
+            plan.add(f'  keep   {d}/')
+        else:
+            plan.add(f'  mkdir  {d}/ mode {mode:o}', kind='mkdir', path=d, mode=mode)
+    plan.add('hooks:')
+    for name in ('job-started.sh', 'job-completed.sh'):
+        with open(os.path.join(release, 'hooks', name)) as f:
+            _file(plan, os.path.join(base, 'hooks', name), f.read(), 0o755)
+    plan.add('units:')
+    subs = {'CI_MEMORY_MAX': h['memory_max'], 'PROXY_CLIENT': h.get('proxy', {}).get('client', '/bin/false')}
+    unit_dir = os.path.join(home, '.config', 'systemd', 'user')
+    for name in UNITS:
+        if name.startswith('ci-proxy') and 'proxy' not in h:
+            continue
+        with open(os.path.join(release, 'setup', 'units', name)) as f:
+            _file(plan, os.path.join(unit_dir, name), render(f.read(), subs), 0o644)
+    with open(os.path.join(release, 'setup', 'units', 'ci-project.slice')) as f:
+        tmpl = f.read()
+    projects = []
+    for path in sorted(glob.glob(os.path.join(etc, 'projects', '*.toml'))):
+        with open(path, 'rb') as f:
+            p = tomllib.load(f)
+        name, mem = p.get('name'), p.get('hosts', {}).get(inv.this, {}).get('memory_max')
+        if not isinstance(name, str) or not isinstance(mem, str):
+            raise ValueError(f'{path}: name and hosts.{inv.this}.memory_max are required')
+        projects.append(name)
+        _file(plan, os.path.join(unit_dir, f'ci-{name}.slice'),
+              render(tmpl, {'PROJECT': name, 'PROJECT_MEMORY_MAX': mem}), 0o644)
+    if 'proxy' in h:
+        p = h['proxy']
+        plan.add('CI proxy:')
+        with open(os.path.join(p['config'], 'routing.json'), encoding='utf-8') as f:
+            _file(plan, os.path.join(etc, 'proxy', 'routing.json'), f.read(), 0o600, secret=True)
+        for node in p['nodes']:
+            with open(os.path.join(p['config'], f'{node}.json'), encoding='utf-8') as f:
+                cfg = node_config(json.load(f), p['http_port'], p['socks_port'])
+            _file(plan, os.path.join(etc, 'proxy', 'nodes', f'{node}.json'), json.dumps(cfg, indent=1) + '\n',
+                  0o600, secret=True,
+                  note=f' (inbounds 127.0.0.1:{p["socks_port"]} socks, 127.0.0.1:{p["http_port"]} http)')
+        active = os.path.join(etc, 'proxy', 'active.json')
+        if os.path.lexists(active):
+            plan.add(f'  keep   {active} -> {os.readlink(active)}')
+        else:
+            plan.add(f'  link   {active} -> nodes/{p["nodes"][0]}.json', kind='symlink', path=active,
+                     target=f'nodes/{p["nodes"][0]}.json')
+    if plan.actions:
+        plan.add('systemd --user (units, CI proxy):')
+        plan.add('  run    systemctl --user daemon-reload', kind='run', argv=['systemctl', '--user', 'daemon-reload'])
+        if 'proxy' in h:
+            argv = ['systemctl', '--user', 'enable', '--now', 'ci-proxy.service']
+            plan.add(f'  run    {" ".join(argv)}', kind='run', argv=argv)
+    port = h['proxy']['http_port'] if 'proxy' in h else 0
+    plan.add(f'runners (actions/runner {RUNNER_VERSION}, sha256 {RUNNER_SHA256[:16]}, fetched through the CI proxy):')
+    cache = os.path.join(base, 'state', 'cache', os.path.basename(RUNNER_URL))
+    rs = runners(inv)
+    for name, labels, cls in rs:
+        rdir = os.path.join(data, 'actions-runner', name)
+        if os.path.exists(os.path.join(rdir, 'config.sh')):
+            plan.add(f'  keep   {rdir}/ (runner app present)')
+        else:
+            plan.add(f'  unpack {RUNNER_URL} -> {rdir}/', kind='runner', path=rdir, cache=cache, port=port)
+        _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc), 0o600)
+        plan.add(f'         labels {",".join(labels)}; work {os.path.join(data, "ci-work", name)} (at registration)')
+    if plan.actions:  # nothing changed: a second apply is a no-op
+        plan.add('systemd --user (timers, runners):')
+        cmds = [['systemctl', '--user', 'daemon-reload'],
+                ['systemctl', '--user', 'enable', '--now', *[t for t in TIMERS if 'proxy' in h or 'proxy' not in t]],
+                ['systemctl', '--user', 'enable', *[f'ci-runner@{n}.service' for n, _, _ in rs]]]
+        for c in cmds:
+            plan.add(f'  run    {" ".join(c)}', kind='run', argv=c)
+    plan.add('  (a runner starts at its registration: setup/register.sh, run by the lead)')
+    return plan
+
+
+def _unpack(path: str, cache: str, port: int) -> None:
+    if not os.path.exists(cache):
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        proxies = {'https': f'http://127.0.0.1:{port}'} if port else {}
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
+        with opener.open(RUNNER_URL, timeout=600) as r, open(cache + '.part', 'wb') as f:
+            while chunk := r.read(1 << 20):
+                f.write(chunk)
+        os.replace(cache + '.part', cache)
+    h = hashlib.sha256()
+    with open(cache, 'rb') as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    if h.hexdigest() != RUNNER_SHA256:
+        os.unlink(cache)
+        raise RuntimeError('the runner app does not match its sha256')
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    with tarfile.open(cache) as t:
+        t.extractall(path, filter='tar')
+
+
+def apply(etc: str, plan_file: str, run=subprocess.run) -> int:
+    with open(plan_file, encoding='utf-8') as f:
+        approved = f.read()
+    plan = build(etc)
+    if plan.text() != approved:
+        print(f'apply: the plan changed (approved {hashlib.sha256(approved.encode()).hexdigest()[:16]}, '
+              f'now {plan.digest()[:16]}): run plan.sh again and have it approved', file=sys.stderr)
+        return 1
+    state_path = os.path.join(os.path.dirname(etc), 'state', 'setup.json')
+    made = []
+    for a in plan.actions:
+        k = a['kind']
+        if k == 'mkdir':
+            os.makedirs(a['path'], exist_ok=True)
+            os.chmod(a['path'], a['mode'])
+        elif k == 'file':
+            tmp = a['path'] + '.ci-new'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.write(a['content'])
+            os.chmod(tmp, a['mode'])
+            os.replace(tmp, a['path'])
+        elif k == 'symlink':
+            os.symlink(a['target'], a['path'])
+        elif k == 'runner':
+            _unpack(a['path'], a['cache'], a['port'])
+        elif k == 'run':
+            run(a['argv'], check=True, timeout=300)
+        made.append({x: a[x] for x in ('kind', 'path', 'argv') if x in a})
+        print(f'apply: {k} {a.get("path") or " ".join(a.get("argv", []))}')
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        state = {'applied': []}
+    state['applied'].append({'plan': plan.digest(), 'made': made})
+    with open(state_path + '.new', 'w') as f:
+        json.dump(state, f, indent=1)
+    os.replace(state_path + '.new', state_path)
+    print(f'apply: {len(made)} change(s), plan {plan.digest()[:16]}')
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    etc = os.environ.get('CI_RUNNERS_ETC') or os.path.expanduser('~/data/ci-runners/etc')
+    if argv == ['runners']:
+        with open(os.path.join(etc, 'inventory.toml'), encoding='utf-8') as f:
+            inv = inventory.load(f.read())
+        for name, labels, cls in runners(inv):
+            print(name, ','.join(labels), cls)
+        return 0
+    if argv == ['plan']:
+        p = build(etc)
+        sys.stdout.write(p.text())
+        print(f'# plan sha256 {p.digest()}', file=sys.stderr)
+        return 0
+    if len(argv) == 3 and argv[0] == 'apply' and argv[1] == '--plan':
+        return apply(etc, argv[2])
+    print('usage: ci-run plan | ci-run apply --plan FILE', file=sys.stderr)
+    return 2

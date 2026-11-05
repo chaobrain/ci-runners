@@ -436,6 +436,19 @@ All are idempotent and run as the runner account. None needs sudo.
 | ssh (RUN-2) | a CI key pair in `etc/ssh/`; a CI-only `ssh_config` passed with `-F` (§5.4) |
 | unchanged | linger (already on), sudoers, crontab, the interactive proxy and shell files, brainspike's checkouts and envs |
 
+**3090b with a dedicated CI account (RUN-1b; proposed, for the lead's approval).** The
+3090b account holds a GitHub token with `admin:public_key`, so job code never runs as it
+(decision 4's preferred path, taken first). The runner account above is then a new,
+dedicated account with no sudo and no GitHub credential. A few one-time root steps come
+before `setup/plan.sh`, and the lead approves them with the plan:
+
+| change | detail |
+|---|---|
+| account | a new account with no password and no sudo; linger on; its `~/data` is a directory on the data disk |
+| shared lock and slot files | 3090b sets `fs.protected_regular = 2`. A second account therefore cannot open another account's files in `/tmp` with `O_CREAT`, which `host_lock.sh` (`>>`) and flock(1) do. brainspike's lock files become root-owned, with ACL entries giving both accounts `rw`. The queue directory gets ACL and default-ACL entries for the CI account. A `tmpfiles.d` file recreates both at boot, because `/tmp` is emptied then, and excludes them from age cleaning. Their paths do not change (D5). |
+| proxy client | a copy of the host's proxy client, and the source node configs (mode 600), are placed into the CI account's tree |
+| envs | the project's env is built as the CI account (consumers §2 step 3); nothing in the maintainer's tree is shared |
+
 **3090a, RUN-3**: as 3090b, with 5 runners (§5.1) and no ssh key to h100. Also:
 
 - 3090b's CI public key in `authorized_keys`, with `restrict`, for `place` and

@@ -18,6 +18,9 @@ POL = 'ci_runners/policy.py'
 REM = 'ci_runners/remote.py'
 INV = 'ci_runners/inventory.py'
 LCK = 'ci_runners/locks.py'
+HOK = 'ci_runners/hook.py'
+SET = 'ci_runners/setup.py'
+PRX = 'ci_runners/proxy.py'
 CLA = 'ci_runners/claim.py'
 OUT = 'ci_runners/outcome.py'
 GPU = 'ci_runners/gpus.py'
@@ -27,6 +30,9 @@ TP = 'tests.test_policy'
 TR = 'tests.test_remote_env'
 TI = 'tests.test_inventory'
 TX = 'tests.test_interop'
+TH = 'tests.test_hook'
+TU = 'tests.test_setup'
+TY = 'tests.test_proxy'
 TC = 'tests.test_claim'
 TO = 'tests.test_outcome'
 TG = 'tests.test_gpus'
@@ -174,6 +180,19 @@ MUTANTS = [
      [f'{TX}.SlotInterop.test_together_never_more_than_the_slot_count']),
     (SLO, "                        return True\n    except (OSError", "                        pass\n    except (OSError",
      [f'{TS}.Queue.test_flocked_reads_holders']),
+    # the hook, setup and the proxy check
+    (HOK, "    return (0 if d.accepted else 1), policy.line(d, digest)", "    return 0, policy.line(d, digest)",
+     [f'{TH}.Started.test_accept_and_refuse']),
+    (HOK, "except (OSError, ValueError, RecursionError) as e:", "except (OSError, ValueError) as e:",
+     [f'{TH}.Started.test_errors_refuse']),
+    (HOK, "    if len(data) > limit:", "    if False:", [f'{TH}.Started.test_an_oversized_event_is_refused']),
+    (SET, "    if plan.text() != approved:", "    if False:",
+     [f'{TU}.Setup.test_apply_refuses_a_plan_that_is_not_the_fresh_one']),
+    (SET, "    if secret:\n", "    if False:\n", [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
+    (SET, "            os.chmod(a['path'], a['mode'])\n        elif k == 'file':", "            pass\n        elif k == 'file':",
+     [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
+    (SET, "    out.pop('log', None)\n    return out", "    return src", [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
+    (PRX, "    if failures < threshold:", "    if failures <= threshold:", [f'{TY}.Step.test_three_failures_switch_to_the_next_node']),
     # the env allowlist
     (REM, "up.startswith(REFUSED_PREFIXES) or ", "", [f'{TR}.RemoteEnv.test_refused', f'{TR}.RemoteEnv.test_only_the_allowlist_passes']),
     (REM, "any(p in up for p in REFUSED_PARTS)", "any(p in name for p in REFUSED_PARTS)", [f'{TR}.RemoteEnv.test_refused']),

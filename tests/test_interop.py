@@ -53,9 +53,11 @@ class LockInterop(unittest.TestCase):
         self.procs = []
 
     def tearDown(self):
-        for p in self.procs:
-            if p.poll() is None:
-                p.kill()
+        for p in self.procs:  # the holder and its command: kill the whole session
+            try:
+                os.killpg(p.pid, 9)
+            except ProcessLookupError:
+                pass
             p.wait()
         shutil.rmtree(self.dir, ignore_errors=True)
 
@@ -63,9 +65,11 @@ class LockInterop(unittest.TestCase):
         """A holder that marks ``<tag>.in``, runs ``body``, waits for ``<tag>.go`` and
         marks ``<tag>.out``."""
         d = self.dir
-        script = f'touch {d}/{tag}.in; {body} while [ ! -e {d}/{tag}.go ]; do sleep 0.01; done; touch {d}/{tag}.out'
+        script = (f'touch {d}/{tag}.in; {body} while [ ! -e {d}/{tag}.go ] && [ -d {d} ]; do sleep 0.01; done; '
+                  f'touch {d}/{tag}.out')  # the loop ends with the test's directory
         argv = ([str(HOST_LOCK_SH)] if impl == 'sh' else [str(CI_LOCK)]) + [f'-{mode}', 'bash', '-c', script]
-        p = subprocess.Popen(argv, env=self.env, stderr=subprocess.DEVNULL)
+        p = subprocess.Popen(argv, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
         self.procs.append(p)
         return p
 

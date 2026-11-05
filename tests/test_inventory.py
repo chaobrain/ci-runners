@@ -72,6 +72,17 @@ class Deny(unittest.TestCase):
         for t in ('role-a', '120g', '/tmp/public.lock', 'chaobrain/x', 'github-actions[bot]', 'nd', 'localhost'):
             self.assertNotIn(inv.normalise(t), got)
 
+    def test_tokens_split_as_the_lint_reads_words(self):
+        doc = {'nodes': ['hk+node01', 'node=sg02', 'Tokyo#3x', '\u9999\u6e2f01']}
+        got = inv.deny_tokens(doc)
+        self.assertEqual(got, {'node01', 'node', 'sg02', 'tokyo', '\u9999\u6e2f01'})
+        for line in ('via hk+node01', 'node=sg02', '\u9999\u6e2f01 up'):
+            self.assertIn('denied', [f.kind for f in inv.scan(line, {inv.hash_token(t) for t in got})], line)
+        long = '/'.join(f'p{i}' for i in range(20))
+        (tok,) = inv.deny_tokens({'path': long})
+        self.assertEqual(tok, '/'.join(f'p{i}' for i in range(inv.MAX_PARTS)))
+        self.assertEqual([f.kind for f in inv.scan(f'x {long} y', {inv.hash_token(tok)})], ['denied'])
+
     def test_hash_is_salted_and_normalised(self):
         import hashlib
         self.assertNotEqual(inv.hash_token('acct1'), hashlib.sha256(b'acct1').hexdigest())
@@ -101,11 +112,14 @@ class Scan(unittest.TestCase):
         ip = '.'.join(['10', '6', '8', '1'])
         self.assertEqual(self.kinds(f'host {ip} up'), ['ipv4'])
         self.assertEqual(self.kinds(f'user@{ip}:22'), ['ipv4'])
+        self.assertEqual(self.kinds(f'host at {ip}.'), ['ipv4'])  # before a full stop
         for text in ('127.0.0.1', '0.0.0.0', '192.0.2.7', '198.51.100.1', '203.0.113.9', '1.2.3', 'v1.2.3.4',
                      '256.1.1.1', '1.2.3.4.5', 'python3.12.3.1'):
             self.assertEqual(self.kinds(text), [], text)
         self.assertEqual(self.kinds(H + 'someone/x'), ['home-path'])
         self.assertEqual(self.kinds('/Use' + 'rs/someone'), ['home-path'])
+        for name in ('runner-x', 'runner.x', 'runners', '\u00e9t\u00e9'):
+            self.assertEqual(self.kinds(H + name), ['home-path'], name)
         for text in (H + 'runner/work', H + '<user>/data', '~/data/actions-runner', '/home', H):
             self.assertEqual(self.kinds(text), [], text)
         self.assertEqual(self.kinds('t=' + 'gh' + 'p_' + 'A' * 36), ['github-token'])
@@ -126,7 +140,7 @@ class Scan(unittest.TestCase):
             (p / 'acct1.txt').write_text('\n')
             (p / 'blob.bin').write_bytes(b'\0secret-alias')
             got = sorted(str(f) for f in inv.lint(d, self.DENY))
-        self.assertEqual(got, ['acct1.txt:0: denied', 'leak.md:2: denied'])
+        self.assertEqual(got, ['<the name of tracked file 1>:0: denied', 'leak.md:2: denied'])  # never the name
 
     def test_cli(self):
         with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()), \

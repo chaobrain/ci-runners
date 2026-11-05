@@ -28,6 +28,10 @@ PRIVATE_EVENTS = frozenset({'pull_request', 'push', 'workflow_dispatch', 'schedu
 PUBLIC_EVENTS = frozenset({'pull_request', 'push', 'workflow_dispatch'})
 #: events the workflow bot may trigger, in a private repository only
 BOT_EVENTS = frozenset({'workflow_dispatch', 'repository_dispatch'})
+#: the events a private repository's ``extra_events`` may add: those whose payload
+#: carries the pull request the fork check reads, and the merge queue's
+EXTRA_EVENTS = frozenset({'pull_request_target', 'pull_request_review', 'pull_request_review_comment',
+                          'merge_group'})
 
 #: the reason codes ``decide`` returns; the hook prints one of them and nothing else
 REASONS = ('ok', 'runner-class', 'self', 'repository', 'repository-id', 'payload', 'paused', 'event', 'fork',
@@ -119,8 +123,8 @@ def load(data: bytes | str) -> Policy:
         if type(paused) is not bool:
             raise PolicyError(f'policy: {name}: paused must be a boolean')
         extra = r.get('extra_events', [])
-        if not isinstance(extra, list) or not all(isinstance(e, str) and _EVENT.match(e) for e in extra):
-            raise PolicyError(f'policy: {name}: extra_events must be a list of event names')
+        if not isinstance(extra, list) or not all(isinstance(e, str) and e in EXTRA_EVENTS for e in extra):
+            raise PolicyError(f'policy: {name}: extra_events must name events of {sorted(EXTRA_EVENTS)}')
         if extra and vis == 'public':
             raise PolicyError(f'policy: {name}: a public repository takes no extra events')
         if name in repos:
@@ -152,6 +156,10 @@ def _actors(env: Mapping[str, str], event: dict, name: str) -> list[str | None]:
         out.append(_login(pr.get('user') if isinstance(pr, dict) else None, 'login'))
     if name == 'push':
         out.append(_login(event.get('pusher'), 'name'))
+    if name == 'workflow_run':  # the run that triggered this one
+        wr = event.get('workflow_run')
+        for key in ('actor', 'triggering_actor'):
+            out.append(_login(wr.get(key) if isinstance(wr, dict) else None, 'login'))
     return out
 
 

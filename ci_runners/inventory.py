@@ -149,8 +149,10 @@ MIN_TOKEN = 4
 
 _SALT = b'ci-runners/deny/1\0'
 _SEP = r'./:@~\[\]_-'
-_SEPS = re.compile(f'[{re.escape(_SEP)}]+')
-_CANDIDATE = re.compile(r'[A-Za-z0-9' + re.escape(_SEP) + r']+')
+#: a word the lint reads: letters and digits of any script, joined by separators; a part
+#: is a run of letters and digits
+_WORD = re.compile(r'(?:[^\W_]|[' + re.escape(_SEP) + r'])+')
+_PART = re.compile(r'[^\W_]+')
 #: the longest run of parts a candidate substring may span; deny tokens are shorter
 MAX_PARTS = 16
 
@@ -185,8 +187,11 @@ def deny_tokens(*docs: Mapping[str, object]) -> set[str]:
     out = set()
     for doc in docs:
         for s in _strings(doc):
-            for piece in re.split(r'[\s,]+', s):
-                t = normalise(piece)
+            for m in _WORD.finditer(s):  # split where the lint splits words
+                t = normalise(m.group())
+                spans = [p.span() for p in _PART.finditer(t)]
+                if len(spans) > MAX_PARTS:  # the lint spans at most MAX_PARTS parts: deny the head
+                    t = t[:spans[MAX_PARTS - 1][1]]
                 if len(t) >= MIN_TOKEN and t not in _COMMON:
                     out.add(t)
     return out
@@ -207,8 +212,8 @@ def read_deny(text: str) -> frozenset[str]:
 # ------------------------------------------------------------------ the lint
 
 _PATTERNS = {
-    'ipv4': re.compile(r'(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\w.])'),
-    'home-path': re.compile(r'/(?:home|Users)/(?!runner\b)(?=[A-Za-z0-9_])[A-Za-z0-9_.-]+'),
+    'ipv4': re.compile(r'(?<![\w.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?!\w|\.\d)'),
+    'home-path': re.compile(r'/(?:home|Users)/(?!runner(?![\w.-]))(?=\w)[\w.-]+'),
     'github-token': re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})'),
     'private-key': re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----'),
 }
@@ -219,9 +224,9 @@ _PUBLIC_IP = re.compile(r'127\.|0\.0\.0\.0$|192\.0\.2\.|198\.51\.100\.|203\.0\.1
 
 def _candidates(text: str) -> Iterator[str]:
     """Every substring of a word that starts and ends on part boundaries, lower case."""
-    for m in _CANDIDATE.finditer(text):
+    for m in _WORD.finditer(text):
         word = m.group()
-        spans = [p.span() for p in re.finditer(f'[^{re.escape(_SEP)}]+', word)]
+        spans = [p.span() for p in _PART.finditer(word)]
         for i, (a, _) in enumerate(spans):
             for _, b in spans[i:i + MAX_PARTS]:
                 yield word[a:b].lower()
@@ -272,8 +277,9 @@ def lint(root: str, deny: frozenset[str] | set[str], files: Iterable[str] | None
     """Scan every tracked file under ``root`` (binary files, with a NUL in their first
     8 KiB, are skipped). File names are scanned as well as contents."""
     out = []
-    for rel in tracked_files(root) if files is None else files:
-        out += [Finding(rel, 0, f.kind) for f in scan(rel, deny)]
+    for n, rel in enumerate(tracked_files(root) if files is None else files, 1):
+        # a finding in a name must not print the name: it says which file, by number
+        out += [Finding(f'<the name of tracked file {n}>', 0, f.kind) for f in scan(rel, deny)]
         try:
             with open(os.path.join(root, rel), 'rb') as f:
                 data = f.read()

@@ -2,5 +2,5 @@
  "action": "completed",
  "repository": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false},
  "sender": {"login": "alice", "type": "User"},
- "workflow_run": {"event": "push", "head_repository": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false}, "repository": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false}}
+ "workflow_run": {"event": "push", "head_repository": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false}, "repository": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false}, "actor": {"login": "alice"}, "triggering_actor": {"login": "alice"}}
 }

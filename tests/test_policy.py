@@ -99,8 +99,14 @@ class Refused(unittest.TestCase):
             'pull_request': {**event('pr_fork')['pull_request'],
                              'base': event('pr_public_same_repo')['pull_request']['base']}}), 'fork')
 
-    def test_a_workflow_run_of_a_fork(self):
+    def test_a_workflow_run_of_a_fork_or_an_outsider(self):
         self.assertEqual(reason(P, env(event='workflow_run'), event('workflow_run_fork')), 'fork')
+        for key in ('actor', 'triggering_actor'):
+            ev = event('workflow_run_same')
+            ev['workflow_run'][key] = {'login': 'mallory'}
+            self.assertEqual(reason(P, env(event='workflow_run'), ev), 'actor', key)
+            del ev['workflow_run'][key]
+            self.assertEqual(reason(P, env(event='workflow_run'), ev), 'actor', key)
 
     def test_pull_request_target_is_refused_unless_listed_and_then_still_not_from_a_fork(self):
         self.assertEqual(reason(P, env(event='pull_request_target'), event('pr_target_same_repo')), 'event')
@@ -111,6 +117,9 @@ class Refused(unittest.TestCase):
         self.assertEqual(reason(P_TARGET, env(event='pull_request_target'), event('pr_target_same_repo')), 'ok')
         self.assertEqual(reason(P_TARGET, env(event='pull_request_target', actor='mallory'),
                                 event('pr_target_fork')), 'fork')
+        ev = event('pr_target_same_repo')
+        ev['pull_request']['user']['login'] = 'mallory'
+        self.assertEqual(reason(P_TARGET, env(event='pull_request_target'), ev), 'actor')  # its author counts
 
     def test_other_events(self):
         self.assertEqual(reason(P, env(event='issue_comment'), event('issue_comment')), 'event')
@@ -146,6 +155,8 @@ class Refused(unittest.TestCase):
         ev = event('push')
         del ev['repository']
         self.assertEqual(reason(P, env(event='push'), ev), 'payload')
+        ev = {**event('schedule'), 'repository': event('pr_public_same_repo')['repository']}
+        self.assertEqual(reason(P, env(event='schedule'), ev), 'repository-id')  # a schedule naming another
         self.assertEqual(reason(P, env(event='push'), [ev]), 'payload')
         self.assertEqual(reason(P, env(event='push'), None), 'payload')
 
@@ -220,8 +231,10 @@ class Load(unittest.TestCase):
             'id zero': POLICY.replace('id = 1001', 'id = 0'),
             'visibility': POLICY.replace('visibility = "public"', 'visibility = "internal"'),
             'paused as str': POLICY.replace('paused = true', 'paused = "yes"'),
-            'public extra events': POLICY.replace('id = 2002\n', 'id = 2002\nextra_events = ["status"]\n'),
+            'public extra events': POLICY.replace('id = 2002\n', 'id = 2002\nextra_events = ["pull_request_target"]\n'),
             'extra event malformed': POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["a b"]\n'),
+            'extra event unchecked': POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["issue_comment"]\n'),
+            'extra event check_suite': POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["check_suite"]\n'),
             'listed twice': POLICY + '[repositories."Chaobrain/Brainspike"]\nid = 9\nvisibility = "private"\n',
             'repo key': POLICY + '[repositories."brainspike"]\nid = 9\nvisibility = "private"\n',
             'repo unknown key': POLICY.replace('id = 1001\n', 'id = 1001\nactors = ["x"]\n'),

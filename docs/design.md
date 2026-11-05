@@ -203,7 +203,8 @@ setup/                plan.sh, apply.sh, install.sh, register.sh, uninstall.sh
 setup/units/          user unit templates: ci-runner@.service, ci-proxy.service,
                       ci-proxy-check.{service,timer}, ci-reaper.{service,timer}, slices
 setup/inventory.example.toml   the schema, with placeholder values
-actions/              claim/, place/, part/, salvage/, compare/ (composite, action.yml)
+actions/              claim/, place/, part/, salvage/, compare/ (composite, action.yml);
+                      lib/ci-run.sh, the launcher; RELEASE, the release stamp
 .github/workflows/    gpu.yml (reusable); test.yml (this repo's tests, hosted only)
 tests/                unit tests; fixtures/ (sanitised): event payloads, journal and
                       watchdog lines, nvidia-smi CSV, boot ids, systemctl output, JUnit
@@ -375,6 +376,10 @@ A part is retried at most once (the registry may set 0). A second infrastructure
 is the consumer's verdict to make (brainspike: error).
 
 ### 4.5 `salvage` and `compare`
+
+`compare` ships with RUN-2, where its first consumer (the h100 verify part) is; `gpu.yml`
+(§4.6) ships with RUN-4, its first public consumer. `v1.0.0` has `claim`, `place`,
+`part` and `salvage`.
 
 - `salvage` runs on `light`. It reads a part record over ssh and returns the same
   outputs as `part`, or `lost` if the record never finished.
@@ -729,9 +734,13 @@ These are starting values, tuned from RUN-1's measured runs.
 - **Tags.** Releases are immutable `vMAJOR.MINOR.PATCH` tags, plus a moving major tag
   `v1`. Consumers pin `@v1`; a canary pins the exact tag. Rulesets reserve tag changes
   for the lead (D1).
-- **Release stamp.** At release, each action's `action.yml` is stamped with its
-  release. The action calls `~/data/ci-runners/releases/<that release>/bin/ci-run`, so
-  `@v1.4.0` always runs 1.4.0's host layer. A host keeps every release that a major tag
+- **Release stamp.** At release, `actions/RELEASE` is stamped with the release (on
+  `main` it reads `hook`, the release the hook runs). Every action calls
+  `actions/lib/ci-run.sh`, which runs
+  `~/data/ci-runners/releases/<that release>/bin/ci-run`, so `@v1.4.0` always runs
+  1.4.0's host layer; one file is stamped, not every `action.yml`. A host without the
+  release ends a part `unavailable` (to its fallback). On a GitHub-hosted runner only
+  `claim` runs, from the action's own checkout, with `--hosted`. A host keeps every release that a major tag
   points at or pointed at in the last 14 days.
 - **Hook and policy.** These are host-level and not pinned by consumers. A new release
   of the hook must accept every major still installed.

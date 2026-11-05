@@ -43,13 +43,19 @@ PROXY_WAIT = 60  # s: the CI proxy's start, before the runner app is fetched thr
 RUNNER_URL = (f'https://github.com/actions/runner/releases/download/v{RUNNER_VERSION}/'
               f'actions-runner-linux-x64-{RUNNER_VERSION}.tar.gz')
 UNITS = ('ci-runner@.service', 'ci-proxy.service', 'ci-proxy-check.service', 'ci-proxy-check.timer',
-         'ci-reaper.service', 'ci-reaper.timer', 'ci.slice')
+         'ci-reaper.service', 'ci-reaper.timer', 'ci-orgsync.service', 'ci-orgsync.timer', 'ci.slice')
 RUNNER_FILES = ('config.sh', 'run.sh', os.path.join('bin', 'Runner.Listener'))
 # what goes into a unit file: one word each, so nothing can add a line
 PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,39}')
 CLIENT = re.compile(r'/[A-Za-z0-9._/-]+')
 MEMORY = re.compile(r'[1-9][0-9]*[KMGT]?|[1-9][0-9]?%|infinity')
-TIMERS = ('ci-proxy-check.timer', 'ci-reaper.timer')
+TIMERS = ('ci-proxy-check.timer', 'ci-reaper.timer', 'ci-orgsync.timer')
+
+
+def timers(h: dict) -> list[str]:
+    """The timers this host enables: the proxy check only with a CI proxy, the org
+    snapshot only where the inventory sets ``orgsync`` (design §6.5)."""
+    return [t for t in TIMERS if ('proxy' in h or 'proxy' not in t) and (h.get('orgsync') or 'orgsync' not in t)]
 
 
 def runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str]]:
@@ -186,7 +192,7 @@ def build(etc: str) -> Plan:
     subs = {'CI_MEMORY_MAX': h['memory_max'], 'PROXY_CLIENT': h.get('proxy', {}).get('client', '/bin/false')}
     unit_dir = os.path.join(home, '.config', 'systemd', 'user')
     for name in UNITS:
-        if name.startswith('ci-proxy') and 'proxy' not in h:
+        if name.startswith('ci-proxy') and 'proxy' not in h or name.startswith('ci-orgsync') and not h.get('orgsync'):
             continue
         with open(os.path.join(release, 'setup', 'units', name)) as f:
             _file(plan, os.path.join(unit_dir, name), render(f.read(), subs), 0o644)
@@ -242,7 +248,7 @@ def build(etc: str) -> Plan:
     if plan.actions:  # nothing changed: a second apply is a no-op
         plan.add('systemd --user (timers, runners):')
         cmds = [['systemctl', '--user', 'daemon-reload'],
-                ['systemctl', '--user', 'enable', '--now', *[t for t in TIMERS if 'proxy' in h or 'proxy' not in t]],
+                ['systemctl', '--user', 'enable', '--now', *timers(h)],
                 ['systemctl', '--user', 'enable', *[f'ci-runner@{n}.service' for n, _, _ in rs]]]
         for c in cmds:
             plan.add(f'  run    {" ".join(c)}', kind='run', argv=c)

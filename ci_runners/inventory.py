@@ -76,6 +76,7 @@ HOST_KEYS = {
     'files': (lambda v: isinstance(v, dict) and set(v) == {'host_lock', 'slot_lock', 'slot_queue'}
               and all(_abs(p) for p in v.values()), True),  # brainspike's lock and slot files (D5)
     'proxy': (lambda v: isinstance(v, dict), False),
+    'orgsync': (lambda v: type(v) is bool, False),  # runs ci-orgsync.timer: the org snapshot (§6.5)
 }
 PROXY_KEYS = {
     'client': (_abs, True),

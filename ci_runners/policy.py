@@ -1,5 +1,8 @@
 """The pre-job hook's decision: may this job run on this runner (design §6.2, §6.3)?
 
+A schema 2 policy may take its actors and private repositories from the org snapshot
+(``etc/org.json``, design §6.5): ``with_snapshot`` merges them in, or refuses a stale one.
+
 ``decide`` is a pure function of the policy, the job's environment and its event
 payload. It reads only what it is given, prints nothing and returns a fixed reason
 code, so that no payload text and no inventory reaches a public job log (T9, T10).
@@ -10,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import re
 import tomllib
 from collections.abc import Mapping
@@ -35,16 +39,27 @@ EXTRA_EVENTS = frozenset({'pull_request_target', 'pull_request_review', 'pull_re
 
 #: the reason codes ``decide`` returns; the hook prints one of them and nothing else
 REASONS = ('ok', 'runner-class', 'self', 'repository', 'repository-id', 'payload', 'paused', 'event', 'fork',
-           'actor', 'bot', 'policy', 'timeout', 'error')  # the last three: the hook could not decide
+           'actor', 'bot', 'stale', 'policy', 'timeout', 'error')  # from 'stale' on: the hook could not decide
+
+#: the org snapshot's schema, its age bound's range (minutes) and how far ahead of the
+#: host's clock its time may be (seconds)
+SNAPSHOT_SCHEMA = 1
+MAX_AGE_RANGE = (10, 1440)
+CLOCK_SKEW = 300
 
 _REPO = re.compile(r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}\Z')
 _LOGIN = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?\Z')
 _EVENT = re.compile(r'[a-z_]{1,50}\Z')
 _DIGITS = re.compile(r'[0-9]{1,20}\Z')
+_ORG = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\Z')
 
 
 class PolicyError(ValueError):
     """The policy file is malformed; the hook then refuses every job."""
+
+
+class StaleSnapshot(PolicyError):
+    """The org snapshot is older than the policy allows; the hook refuses every job."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -58,11 +73,32 @@ class Repo:
 
 
 @dataclasses.dataclass(frozen=True)
+class Org:
+    """A schema 2 policy's ``[org]`` table (design §6.5)."""
+    name: str  # the org, lower case: the snapshot's repositories must be its own
+    members: bool  # the snapshot's members join the actors
+    private_repositories: bool  # the snapshot's repositories join the repositories, as private
+    max_age_minutes: int
+
+
+@dataclasses.dataclass(frozen=True)
+class Snapshot:
+    """``etc/org.json``, written by ``ci-orgsync`` (design §6.5)."""
+    org: str
+    fetched_at: float  # Unix time of the fetch
+    members: frozenset[str]  # lower-case human logins
+    repos: Mapping[str, int]  # lower-case ``owner/name`` -> id, private repositories only
+    digest: str = ''
+
+
+@dataclasses.dataclass(frozen=True)
 class Policy:
     actors: frozenset[str]  # allowlisted logins, lower case
     repos: Mapping[str, Repo]  # by lower-case ``owner/name``
     bot: str = 'github-actions[bot]'
     digest: str = ''  # sha256 of the policy file, printed (shortened) with every decision
+    org: Org | None = None  # schema 2: merge the org snapshot (``with_snapshot``)
+    snapshot_digest: str = ''  # set by ``with_snapshot``; printed beside the policy's
 
 
 @dataclasses.dataclass(frozen=True)
@@ -86,11 +122,13 @@ def load(data: bytes | str) -> Policy:
         doc = tomllib.loads(raw.decode('utf-8'))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise PolicyError(f'policy: not TOML: {e}') from None
-    if doc.get('schema') != 1:
-        raise PolicyError('policy: schema must be 1')
-    unknown = set(doc) - {'schema', 'bot', 'actors', 'repositories'}
+    schema = doc.get('schema')
+    if type(schema) is not int or schema not in (1, 2):
+        raise PolicyError('policy: schema must be 1 or 2')
+    unknown = set(doc) - {'schema', 'bot', 'actors', 'repositories'} - ({'org'} if schema == 2 else set())
     if unknown:
         raise PolicyError(f'policy: unknown keys {sorted(unknown)}')
+    org = _load_org(doc['org']) if 'org' in doc else None
     bot = _ascii_lower(doc.get('bot', 'github-actions[bot]'), _LOGIN)
     if bot is None or not bot.endswith('[bot]'):
         raise PolicyError('policy: bot must be a bot login')
@@ -136,7 +174,87 @@ def load(data: bytes | str) -> Policy:
         if name in repos:
             raise PolicyError(f'policy: {name} is listed twice')
         repos[name] = Repo(name, rid, vis, paused, frozenset(extra), bot_dispatch)
-    return Policy(frozenset(actors), repos, bot, hashlib.sha256(raw).hexdigest())
+    return Policy(frozenset(actors), repos, bot, hashlib.sha256(raw).hexdigest(), org)
+
+
+def _load_org(t: object) -> Org:
+    if not isinstance(t, dict):
+        raise PolicyError('policy: org must be a table')
+    unknown = set(t) - {'name', 'members', 'private_repositories', 'max_age_minutes'}
+    if unknown:
+        raise PolicyError(f'policy: org: unknown keys {sorted(unknown)}')
+    name = _ascii_lower(t.get('name'), _ORG)
+    if name is None:
+        raise PolicyError('policy: org: name must be an org login')
+    members, repos = t.get('members', False), t.get('private_repositories', False)
+    if type(members) is not bool or type(repos) is not bool:
+        raise PolicyError('policy: org: members and private_repositories must be booleans')
+    age = t.get('max_age_minutes', 60)
+    lo, hi = MAX_AGE_RANGE
+    if type(age) is not int or not lo <= age <= hi:
+        raise PolicyError(f'policy: org: max_age_minutes must be an integer from {lo} to {hi}')
+    return Org(name, members, repos, age)
+
+
+def load_snapshot(data: bytes | str) -> Snapshot:
+    """Parse ``org.json`` (schema 1). Raises PolicyError on anything unexpected: a
+    malformed snapshot refuses every job rather than widen or narrow the lists."""
+    raw = data.encode() if isinstance(data, str) else data
+    try:
+        doc = json.loads(raw.decode('utf-8'))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise PolicyError('org snapshot: not JSON') from None
+    if not isinstance(doc, dict) or set(doc) != {'schema', 'org', 'fetched_at', 'members', 'repositories'}:
+        raise PolicyError('org snapshot: not a schema 1 snapshot')
+    if type(doc['schema']) is not int or doc['schema'] != SNAPSHOT_SCHEMA:
+        raise PolicyError('org snapshot: not a schema 1 snapshot')
+    org = _ascii_lower(doc['org'], _ORG)
+    t = doc['fetched_at']
+    if org is None or type(t) not in (int, float) or not 0 < t < 1e11:
+        raise PolicyError('org snapshot: org or fetched_at malformed')
+    if not isinstance(doc['members'], list) or not isinstance(doc['repositories'], dict):
+        raise PolicyError('org snapshot: members must be a list and repositories a table')
+    members = set()
+    for m in doc['members']:
+        login = _ascii_lower(m, _LOGIN)
+        if login is None or login.endswith('[bot]'):
+            raise PolicyError('org snapshot: a member is not a human login')
+        members.add(login)
+    repos = {}
+    for key, rid in doc['repositories'].items():
+        name = _ascii_lower(key, _REPO)
+        if name is None or not name.startswith(org + '/') or type(rid) is not int or rid <= 0:
+            raise PolicyError("org snapshot: a repository is not one of the org's, with a positive id")
+        repos[name] = rid
+    return Snapshot(org, float(t), frozenset(members), repos, hashlib.sha256(raw).hexdigest())
+
+
+def with_snapshot(policy: Policy, snap: Snapshot, now: float) -> Policy:
+    """``policy`` with the org snapshot merged in, by its ``[org]`` table (design §6.5):
+
+    - the snapshot's members join ``actors`` if ``members``;
+    - each snapshot repository that the policy does not list joins ``repos`` as private
+      if ``private_repositories``. A listed one keeps the policy's entry, so the lead
+      can pause it, and a public one is never made private.
+
+    Raises StaleSnapshot when the snapshot is older than ``max_age_minutes`` or more
+    than ``CLOCK_SKEW`` seconds in the future, and PolicyError when it is another
+    org's. A policy without ``[org]`` is returned as it is. Pure.
+    """
+    org = policy.org
+    if org is None:
+        return policy
+    if snap.org != org.name:
+        raise PolicyError('org snapshot: another org')
+    if not now - org.max_age_minutes * 60 <= snap.fetched_at <= now + CLOCK_SKEW:
+        raise StaleSnapshot('org snapshot: stale')
+    actors = policy.actors | snap.members if org.members else policy.actors
+    repos = dict(policy.repos)
+    if org.private_repositories:
+        for name, rid in snap.repos.items():
+            if name != SELF and name not in repos:
+                repos[name] = Repo(name, rid, 'private')
+    return dataclasses.replace(policy, actors=frozenset(actors), repos=repos, snapshot_digest=snap.digest)
 
 
 def _repo_matches(r: object, repo: Repo) -> bool:
@@ -232,8 +350,10 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
     return Decision(True, 'ok')
 
 
-def line(decision: Decision, policy_digest: str) -> str:
-    """The one line the hook prints: ``ci-runners: accepted|refused <reason> policy=<hash>``."""
+def line(decision: Decision, policy_digest: str, snapshot_digest: str = '') -> str:
+    """The one line the hook prints: ``ci-runners: accepted|refused <reason> policy=<hash>``,
+    and `` org=<hash>`` when the org snapshot was merged."""
     verdict = 'accepted' if decision.accepted else 'refused'
     reason = decision.reason if decision.reason in REASONS else 'unknown'
-    return f'ci-runners: {verdict} {reason} policy={policy_digest[:12] or "none"}'
+    org = f' org={snapshot_digest[:12]}' if snapshot_digest else ''
+    return f'ci-runners: {verdict} {reason} policy={policy_digest[:12] or "none"}{org}'

@@ -5,7 +5,8 @@
 ``statuses: write``) against ``GITHUB_API_URL`` through the host's ``https_proxy``.
 Each API call gets 30 s and 3 tries (design §8). On a self-hosted runner the actor
 allowlist and the bot come from this host's policy; on a GitHub-hosted runner there is
-no allowlist, so only the bot's statuses count.
+no allowlist, so only the bot's statuses count. A schema 2 policy's allowlist includes
+the org snapshot's members, as the hook's does (design §6.5).
 """
 from __future__ import annotations
 
@@ -105,7 +106,13 @@ def main(argv: list[str], etc: str, call: Callable | None = None) -> int:
         else:
             with open(os.path.join(etc, 'policy.toml'), 'rb') as f:
                 pol = policy.load(f.read(1 << 20))
-            actors, bot = pol.actors, pol.bot
+            if pol.org is not None:  # the hook's merge (design §6.5): the same allowlist
+                with open(os.path.join(etc, 'org.json'), 'rb') as f:
+                    data = f.read((4 << 20) + 1)
+                if len(data) > 4 << 20:
+                    raise ValueError('org.json: larger than 4 MiB')
+                pol = policy.with_snapshot(pol, policy.load_snapshot(data), time.time())
+            actors, bot = policy.actors_for(pol, env.get('GITHUB_REPOSITORY', '')), pol.bot
         c = run_claim(env, context=a.context, sha=sha, wait_seconds=a.wait_seconds, lapse_minutes=a.local_lapse_minutes,
                       description=a.pending_description, actors=actors, bot=bot, hosted=a.hosted, call=call or api)
     except (OSError, ValueError, ApiError) as e:

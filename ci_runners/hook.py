@@ -1,8 +1,8 @@
 """The runner hooks (design §6.3): ``job-started`` decides, ``job-completed`` cleans up.
 
 Run by ``hooks/job-started.sh`` and ``hooks/job-completed.sh`` with the system Python,
-isolated (``-I``). ``job-started`` reads only local files (the policy, the inventory,
-``GITHUB_EVENT_PATH``), does no network I/O, bounds itself at 60 s and prints one line,
+isolated (``-I``). ``job-started`` reads only local files (the policy, with a schema 2
+policy the org snapshot ``org.json``, and ``GITHUB_EVENT_PATH``), does no network I/O, bounds itself at 60 s and prints one line,
 ``ci-runners: accepted|refused <reason> policy=<hash>``; details go to the host's
 ``logs/hook-<date>.log`` only. Any error refuses the job. ``job-completed`` stops the job's
 part scopes and always exits 0, within 120 s.
@@ -16,10 +16,12 @@ import signal
 import stat
 import subprocess
 import sys
+import time
 
 from ci_runners import policy
 
 MAX_POLICY = 1 << 20
+MAX_SNAPSHOT = 4 << 20
 MAX_EVENT = 64 << 20
 START_BOUND, COMPLETE_BOUND = 60, 120
 
@@ -60,7 +62,7 @@ def _log(etc: str, record: dict) -> None:
 def started(env: dict[str, str]) -> tuple[int, str]:
     """The decision as ``(exit status, printed line)``; never raises."""
     etc = env.get('CI_RUNNERS_ETC', '')
-    digest = ''
+    digest = snap_digest = ''
     detail: dict = {'runner': env.get('RUNNER_NAME', ''), 'repository': env.get('GITHUB_REPOSITORY', ''),
                     'event': env.get('GITHUB_EVENT_NAME', ''), 'actor': env.get('GITHUB_ACTOR', ''),
                     'triggering_actor': env.get('GITHUB_TRIGGERING_ACTOR', ''), 'run': env.get('GITHUB_RUN_ID', ''),
@@ -70,11 +72,18 @@ def started(env: dict[str, str]) -> tuple[int, str]:
             raise policy.PolicyError('CI_RUNNERS_ETC is not set')
         try:
             pol = policy.load(_read(os.path.join(etc, 'policy.toml'), MAX_POLICY))
+            digest = pol.digest
+            if pol.org is not None:
+                snap = policy.load_snapshot(_read(os.path.join(etc, 'org.json'), MAX_SNAPSHOT))
+                pol = policy.with_snapshot(pol, snap, time.time())
+                snap_digest = pol.snapshot_digest
+        except policy.StaleSnapshot as e:
+            detail['error'] = str(e)
+            d = policy.Decision(False, 'stale')
         except (OSError, ValueError) as e:
             detail['error'] = f'policy: {e}'
             d = policy.Decision(False, 'policy')
         else:
-            digest = pol.digest
             try:
                 event = json.loads(_read(env.get('GITHUB_EVENT_PATH', ''), MAX_EVENT))
             except (OSError, ValueError, RecursionError) as e:
@@ -86,9 +95,9 @@ def started(env: dict[str, str]) -> tuple[int, str]:
     except Exception as e:  # noqa: BLE001 - any failure refuses
         detail['error'] = f'{type(e).__name__}: {e}'
         d = policy.Decision(False, 'error')
-    detail.update(accepted=d.accepted, reason=d.reason, policy=digest[:12])
+    detail.update(accepted=d.accepted, reason=d.reason, policy=digest[:12], org=snap_digest[:12])
     _log(etc or '.', detail)
-    return (0 if d.accepted else 1), policy.line(d, digest)
+    return (0 if d.accepted else 1), policy.line(d, digest, snap_digest)
 
 
 def _job_scopes(env: dict[str, str]) -> list[str]:

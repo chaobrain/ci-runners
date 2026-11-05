@@ -1,15 +1,20 @@
 #!/bin/sh
 # setup/install.sh --tag TAG --expect SHA | --commit SHA  [--rollback]: install a
-# release of chaobrain/ci-runners into ~/data/ci-runners/releases/<TAG or main-<sha12>>/,
+# release of chaobrain/ci-runners into <data>/ci-runners/releases/<TAG or main-<sha12>>/,
 # read-only, then point releases/hook at it (design §5.2, §9). A tag must resolve to
 # SHA, the commit the lead released (an annotated tag by its peeled commit). What
 # running jobs use is never moved: an existing release is kept only if it is a real
 # directory of that same commit, and refused otherwise. The hook moves only forward:
 # to a higher tag, or from a main commit (the bootstrap) to anything; back needs
-# --rollback. Network through $https_proxy.
+# --rollback. Network through $https_proxy, if set. <data>/ci-runners/etc is
+# $CI_RUNNERS_ETC, else ~/data/ci-runners/etc.
 set -eu
 repo=https://github.com/chaobrain/ci-runners
-rel=$HOME/data/ci-runners/releases
+etc=${CI_RUNNERS_ETC:-$HOME/data/ci-runners/etc}  # <data>/ci-runners/etc (design §3.2)
+case $etc in /*) ;; *) echo "$0: CI_RUNNERS_ETC must be an absolute path" >&2; exit 2 ;; esac
+export CI_RUNNERS_ETC=$etc
+base=$(dirname "$etc"); data=$(dirname "$base")
+rel=$base/releases
 usage() { echo "usage: $0 --tag TAG --expect SHA | --commit SHA  [--rollback]" >&2; exit 2; }
 die() { echo "install.sh: $*" >&2; exit 1; }
 back=

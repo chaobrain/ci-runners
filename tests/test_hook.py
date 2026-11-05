@@ -67,7 +67,7 @@ class Started(unittest.TestCase):
         for what, (env, reason) in cases.items():
             code, line = hook.started(env)
             self.assertEqual((code, line.split()[2]), (1, reason), what)
-        (self.etc / 'policy.toml').write_text('schema = 2\n')
+        (self.etc / 'policy.toml').write_text('schema = 3\n')
         self.assertEqual(hook.started(self.env)[1].split()[1:3], ['refused', 'policy'])
 
     def test_an_oversized_event_is_refused(self):
@@ -145,6 +145,40 @@ class Started(unittest.TestCase):
                            text=True, timeout=60)
         self.assertEqual(r.returncode, 0)
 
+    def test_the_wrappers_run_the_interpreter_setup_wrote(self):
+        """The installed hook runs the inventory's python (h100: the system's is 3.10),
+        written in by setup; a job's environment cannot choose another (CI_RUNNERS_PYTHON
+        is ignored, so /bin/true cannot admit a job)."""
+        from ci_runners import setup
+        rel = self.base / 'releases'
+        rel.mkdir()
+        os.symlink(ROOT, rel / 'hook')
+        hooks = self.base / 'hooks'
+        hooks.mkdir()
+        mark = self.base / 'ran'
+        fake = self.base / 'py' / 'python3'
+        fake.parent.mkdir()
+        fake.write_text(f'#!/bin/sh\necho "$@" >> {mark}\nexec {sys.executable} "$@"\n')
+        fake.chmod(0o755)
+        for n in ('job-started.sh', 'job-completed.sh'):
+            (hooks / n).write_text(setup.hook_text((ROOT / 'hooks' / n).read_text(), str(fake)))
+        (self.etc / 'policy.toml').write_text('schema = 1\n')  # refuses every job
+        trap = self.base / 'trap'  # a job may put its own dirname and readlink first in PATH
+        for tool in ('dirname', 'readlink'):
+            (trap / tool).parent.mkdir(exist_ok=True)
+            (trap / tool).write_text('#!/bin/sh\necho /nowhere\n')
+            (trap / tool).chmod(0o755)
+        for n, code in (('job-started.sh', 1), ('job-completed.sh', 0)):
+            for py in ('/bin/true', str(fake), ''):
+                if mark.exists():
+                    mark.unlink()
+                r = subprocess.run(['sh', str(hooks / n)], env={**self.env, 'PATH': f'{trap}:/usr/bin:/bin',
+                                                                  'CI_RUNNERS_PYTHON': py},
+                                   capture_output=True, text=True, timeout=60, cwd=self.base)
+                self.assertEqual(r.returncode, code, (n, py, r.stdout, r.stderr))
+                self.assertTrue(mark.read_text().startswith('-I -c '), (n, py))
+        with self.assertRaises(ValueError):
+            setup.hook_text('#!/bin/sh\nexec python3 -I\n', str(fake))
 
 if __name__ == '__main__':
     unittest.main()

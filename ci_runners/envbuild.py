@@ -25,8 +25,8 @@ when every step has passed does the link ``<data>/ci-runners/envs/<project>`` mo
 kept for parts that still use them; older ones are removed. ``--dry-run`` reads the spec
 and prints the steps without running them.
 
-The token, ``GH_TOKEN`` (else ``$CI_RUNNERS_ETC/envbuild.token``), needs Contents: read
-on the repository and its private upstreams. It reaches git through its environment,
+The token is the maintainer's ``GH_TOKEN``, set for the one run and never stored on the
+host; it needs Contents: read on the repository and its private upstreams. It reaches git through its environment,
 never through an argv.
 """
 from __future__ import annotations
@@ -245,15 +245,12 @@ def _git_env(token: str) -> dict[str, str]:
 
 
 def _token(etc: str) -> str:
-    t = os.environ.get('GH_TOKEN', '')
+    """The maintainer's ``GH_TOKEN``, for this run only. No token is ever read from a file
+    on the host: one that can read private repositories' contents must not rest on h100's
+    shared account (design §3.3, T14). ``etc`` is unused, kept for the call's shape."""
+    t = os.environ.get('GH_TOKEN', '').strip()
     if not t:
-        try:
-            with open(os.path.join(etc, 'envbuild.token'), encoding='utf-8') as f:
-                t = f.read(4096).strip()
-        except OSError:
-            t = ''
-    if not t:
-        raise SpecError('no token: set GH_TOKEN or write etc/envbuild.token')
+        raise SpecError('no token: run with GH_TOKEN set in your own shell, for this build only')
     return t
 
 

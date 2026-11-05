@@ -106,8 +106,9 @@ allowlist edit is needed.
    branch's head, builds the env into `envs/<p>-<stamp>/`, links `envs/<p>` to it only
    once every step has passed, and keeps the two builds before it. It prints the
    registry lines to add: `env` and the spec's `variables`. Rerun it after a dependency
-   change has merged. Its token (`GH_TOKEN`, else `etc/envbuild.token`) needs Contents:
-   read on the repository and on any private upstream.
+   change has merged. The maintainer runs it with their own `GH_TOKEN` (Contents: read on
+   the repository and on any private upstream) set for that one command; no such token
+   is ever stored on h100.
 3. Add the workflow below, pinning `@v1`.
 4. Canary and done as in §2, steps 5 and 6.
 

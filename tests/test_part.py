@@ -133,6 +133,17 @@ class Execute(Host):
         self.assertEqual(out['retry-on'], ['self-hosted', 'part', 'other'])
         self.assertFalse(os.path.exists(os.path.join(self.path(out), 'work', 'ran')))
 
+    def test_a_labelled_pool_names_its_labels_in_the_record(self):
+        """h100 (RUN-5): its CPU pool's runners carry `h100-cpu`, not `part`; a retry goes there."""
+        self.inv = inventory.load(self.inv_text.replace('disk_min_gib = 0', 'disk_min_gib = 100000000').replace(
+            'pools = { light = 1, part = 1 }', 'pools = { light = 1, part = { count = 1, labels = ["hb-cpu"] } }'))
+        (self.etc / 'projects' / 'p.toml').write_text((self.etc / 'projects' / 'p.toml').read_text().replace(
+            '[fallback]\npart = ["self-hosted", "part", "other"]\n', ''))
+        code, out = self.execute()
+        self.assertEqual((out['outcome'], out['retry-on']), ('unavailable', ['self-hosted', 'hb-cpu']))
+        rec = json.loads(pathlib.Path(self.path(out), 'record.json').read_text())
+        self.assertEqual(rec['pool_labels'], ['hb-cpu'])
+
     def test_a_held_slot_makes_the_part_wait_then_unavailable(self):
         fd = os.open(self.slot, os.O_WRONLY)
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -338,6 +349,16 @@ class Pure(unittest.TestCase):
         self.assertEqual(out['outcome'], 'oom')
         out = part.finish('/r', {**self.REC, 'attempt': 2}, {'rc': 137, 'oom_kills': 1, 'boot_end': 'b1'})
         self.assertEqual((out['outcome'], out['next']), ('oom', 'none'))  # the second end is the consumer's
+
+    def test_a_pool_with_its_own_labels_retries_on_them(self):
+        """h100 (RUN-5): `part` is not a label of h100's CPU runners; `h100-cpu` is."""
+        rec = {**self.REC, 'host': 'h100', 'pool_labels': ['h100-cpu']}
+        self.assertEqual(part.finish('/r', rec, {'rc': 0, 'boot_end': 'b2'})['retry-on'], ['self-hosted', 'h100-cpu'])
+        self.assertEqual(part.finish('/r', rec, None)['retry-on'], ['self-hosted', 'h100-cpu'])
+        out = part.finish('/r', rec, None, unavailable='low disk')
+        self.assertEqual((out['next'], out['retry-on']), ('fallback', ['self-hosted', 'h100-cpu']))
+        out = part.finish('/r', {**rec, 'fallback': ['self-hosted', 'x']}, None, unavailable='low disk')
+        self.assertEqual(out['retry-on'], ['self-hosted', 'x'])  # the registry's fallback still wins
 
     def test_reboot_stopped_and_lost(self):
         self.assertEqual(part.finish('/r', self.REC, {'rc': 0, 'boot_end': 'b2'})['retry-on'],

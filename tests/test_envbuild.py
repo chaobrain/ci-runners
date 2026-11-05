@@ -238,6 +238,19 @@ files = {{ host_lock = "{t}/h.lock", slot_lock = "{t}/s.lock", slot_queue = "{t}
         with mock.patch.dict(os.environ, {'PATH': '/usr/bin:/bin'}, clear=True), redirect_stderr(io.StringIO()):
             self.assertEqual(envbuild.main(['build', 'p'], self.inv, str(self.etc), call=self.api), 2)
 
+    def test_a_token_file_on_the_host_is_never_read(self):
+        """A Contents-read token must not rest on h100's shared account (design §3.3)."""
+        (self.etc / 'envbuild.token').write_text('STORED-TKN\n')
+        seen = []
+
+        def call(method, url, token, body=None):
+            seen.append(token)
+            return self.api(method, url, token, body)
+        with mock.patch.dict(os.environ, {'PATH': '/usr/bin:/bin'}, clear=True), redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(envbuild.main(['build', 'p'], self.inv, str(self.etc), call=call), 2)
+        self.assertEqual(seen, [])  # refused before any call: the stored token was not used
+        self.assertIn('no token', err.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()

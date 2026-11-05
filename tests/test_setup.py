@@ -113,6 +113,32 @@ no_proxy = "localhost,127.0.0.1"
         self.assertEqual(self.apply(text), 0)  # the approved plan again: nothing left to do
         self.assertEqual(self.ran, [])
 
+    def test_a_hung_or_missing_python_is_refused(self):
+        def hung(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, kw.get('timeout', 60))
+        with self.assertRaisesRegex(ValueError, 'did not answer'):
+            setup.check_python(sys.executable, run=hung)
+        with self.assertRaisesRegex(ValueError, 'not an executable'):
+            setup.check_python('/nonexistent/python3')
+
+    def test_a_failed_apply_records_what_it_made(self):
+        """An apply that fails half way (a systemctl call here; on h100 the runner download)
+        still records the files it wrote, so the next plan owns its units instead of
+        refusing them as another user's."""
+        text = setup.build(str(self.etc)).text()
+
+        def failing(argv, **_kw):
+            if 'enable' in argv:
+                raise subprocess.CalledProcessError(1, argv)
+        f = pathlib.Path(self.tmp.name) / 'plan.txt'
+        f.write_text(text)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(subprocess.CalledProcessError):
+            setup.apply(str(self.etc), str(f), run=failing)
+        st = json.loads((self.data / 'ci-runners' / 'state' / 'setup.json').read_text())
+        made = {m.get('path') for a in st['applied'] for m in a['made']}
+        self.assertIn(str(self.home / '.config/systemd/user/ci-reaper.timer'), made)
+        setup.build(str(self.etc))  # no refusal of our own units
+
     def test_apply_refuses_a_plan_that_is_not_the_fresh_one(self):
         text = setup.build(str(self.etc)).text()
         self.assertEqual(self.apply(text.replace('mode 700', 'mode 777', 1)), 1)
@@ -239,8 +265,24 @@ no_proxy = "localhost,127.0.0.1"
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('nothing listens on the CI proxy port', r.stderr)
 
+    def test_the_org_snapshot_timer_only_where_the_inventory_asks(self):
+        text = setup.build(str(self.etc)).text()
+        self.assertNotIn('ci-orgsync', text)
+        inv = self.etc / 'inventory.toml'
+        inv.write_text(inv.read_text().replace('max_temp_c = 80\n', 'max_temp_c = 80\norgsync = true\n'))
+        plan = setup.build(str(self.etc))
+        self.assertIn('ci-orgsync.service', plan.text())
+        enable = [a['argv'] for a in plan.actions if a.get('kind') == 'run' and '--now' in a['argv']
+                  and 'ci-reaper.timer' in a['argv']]
+        self.assertEqual(enable, [['systemctl', '--user', 'enable', '--now', 'ci-proxy-check.timer', 'ci-reaper.timer',
+                                   'ci-orgsync.timer']])
+        self.assertEqual(setup.timers({}), ['ci-reaper.timer'])
+        self.assertEqual(setup.timers({'orgsync': True}), ['ci-reaper.timer', 'ci-orgsync.timer'])
+
     def test_runner_names_and_labels(self):
         inv = inventory.load((self.etc / 'inventory.toml').read_text())
+        self.assertNotIn('CI_RUNNER_POOL_LABELS', setup.env_file(inv, 'part', '/e'))  # its class is its label
+        self.assertIsNone(inventory.pool_labels(inv, 'part'))
         self.assertEqual(setup.runners(inv), [('hb-light-1', ['light', 'hb'], 'light'),
                                               ('hb-part-1', ['part', 'hb'], 'part'),
                                               ('hb-part-2', ['part', 'hb'], 'part')])
@@ -249,6 +291,185 @@ no_proxy = "localhost,127.0.0.1"
         self.assertEqual(setup.render('a=@X@\n# @NOTE@ in a comment\n', {'X': '1'}), 'a=1\n# @NOTE@ in a comment\n')
         with self.assertRaises(ValueError):
             setup.render('a=@Y@\n', {'X': '1'})
+
+    def test_a_proxy_host_keeps_its_runner_unit(self):
+        """The 3090 hosts: the runner unit is today's, with ~/data spelled out."""
+        self.apply(setup.build(str(self.etc)).text())
+        got = (self.home / '.config' / 'systemd' / 'user' / 'ci-runner@.service').read_text()
+        d = self.data
+        self.assertEqual([x for x in got.splitlines() if not x.startswith('#')], [  # v1.0.0's, but for the paths
+            '[Unit]', 'Description=ci-runners: GitHub Actions runner %i', 'After=ci-proxy.service',
+            'Wants=ci-proxy.service', '', '[Service]', f'WorkingDirectory={d}/actions-runner/%i',
+            f'ExecStart={d}/actions-runner/%i/run.sh', 'NoNewPrivileges=yes', 'KillMode=mixed', 'KillSignal=SIGTERM',
+            'TimeoutStopSec=5min', 'Restart=always', 'RestartSec=30', 'Slice=ci.slice', '', '[Install]',
+            'WantedBy=default.target'])
+        reaper = (self.home / '.config' / 'systemd' / 'user' / 'ci-reaper.service').read_text()
+        self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run reap\n', reaper)
+        self.assertIn(f'Environment=CI_RUNNERS_ETC={self.etc}\n', reaper)
+        self.assertIn('Environment=CI_RUNNERS_PYTHON=/usr/bin/python3\n', reaper)
+
+
+class Standalone(unittest.TestCase):
+    """h100 with RUN-5 (decision 11.3, 11.6): no CI proxy, its own interpreter, labelled
+    pools and a runner per card, on a shared account whose unit directory may hold
+    another user's ci-* unit."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.home, self.data = t / 'home', t / 'home' / 'sub'
+        self.etc = self.data / 'ci-runners' / 'etc'
+        for d in (self.etc / 'projects', self.data / 'ci-runners' / 'releases'):
+            d.mkdir(parents=True)
+        os.symlink(ROOT, self.data / 'ci-runners' / 'releases' / 'hook')
+        self.inv = self.etc / 'inventory.toml'
+        self.inv.write_text(f'''schema = 1
+this = "hx"
+[hosts.hx]
+ssh = "alias-x"
+account = "acct-x"
+home = "{self.home}"
+data = "{self.data}"
+trusted = true
+cpu_slowdown = 2.7
+slots = 2
+memory_max = "512G"
+disk_min_gib = 50
+gpus = [0, 3]
+max_temp_c = 80
+cpus = "0-43,88-131"
+python = "{sys.executable}"
+orgsync = true
+files = {{ host_lock = "/tmp/h.lock", slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
+[hosts.hx.pools]
+light = {{ count = 1, labels = ["hx-light"] }}
+part = {{ count = 1, labels = ["hx-cpu"] }}
+h100 = {{ per_card = true, labels = ["h100"] }}
+''')
+        self.units = self.home / '.config' / 'systemd' / 'user'
+        self.ran = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_(self, argv, **_kw):
+        self.ran.append(argv)
+
+    def apply(self, text):
+        f = pathlib.Path(self.tmp.name) / 'plan.txt'
+        f.write_text(text)
+        def unpack(path, _cache, port):
+            os.makedirs(path, exist_ok=True)
+            for f in setup.RUNNER_FILES:
+                pathlib.Path(path, f).parent.mkdir(parents=True, exist_ok=True)
+                pathlib.Path(path, f).write_text('#!/bin/sh\n')
+            self.unpacked.append((path, port))
+        with mock.patch.object(setup, '_unpack', unpack), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return setup.apply(str(self.etc), str(f), run=self.run_)
+
+    def test_runners_labels_and_cards(self):
+        inv = inventory.load(self.inv.read_text())
+        self.assertEqual(setup.runners(inv), [('hx-light-1', ['hx-light'], 'light'), ('hx-part-1', ['hx-cpu'], 'part'),
+                                              ('hx-gpu0', ['h100', 'hx-gpu0'], 'h100'),
+                                              ('hx-gpu3', ['h100', 'hx-gpu3'], 'h100')])
+        self.assertEqual(setup.env_file(inv, 'h100', '/e', 3).splitlines(),
+                         [f'ACTIONS_RUNNER_HOOK_JOB_STARTED={self.data}/ci-runners/hooks/job-started.sh',
+                          f'ACTIONS_RUNNER_HOOK_JOB_COMPLETED={self.data}/ci-runners/hooks/job-completed.sh',
+                          'CI_RUNNER_CLASS=h100', 'CI_RUNNERS_ETC=/e', 'CI_RUNNER_POOL_LABELS=h100', 'CI_RUNNER_CARD=3',
+                          f'CI_RUNNERS_PYTHON={sys.executable}', 'LANG=C.UTF-8'])
+        self.assertIn('CI_RUNNER_CARD=0\n', setup.env_file(inv, 'h100', '/e', 0))  # card 0 is a card
+        self.assertNotIn('CI_RUNNER_CARD', setup.env_file(inv, 'part', '/e'))
+        self.assertIn('CI_RUNNER_POOL_LABELS=hx-cpu\n', setup.env_file(inv, 'part', '/e'))
+        self.assertEqual((inventory.pool_labels(inv, 'part'), inventory.pool_labels(inv, 'nope')), (['hx-cpu'], None))
+        two = inventory.load(self.inv.read_text().replace('h100 = {', 'gpu = { per_card = true }\nh100 = {'))
+        with self.assertRaisesRegex(ValueError, 'same name'):
+            setup.runners(two)  # both per-card pools would name their runners hx-gpu0, hx-gpu3
+
+    def test_plan_without_a_proxy(self):
+        self.unpacked = []
+        text = setup.build(str(self.etc)).text()
+        for no in ('ci-proxy', '_proxy=', 'through the CI proxy', 'socks'):
+            self.assertNotIn(no, text)
+        for want in ('labels hx-light;', 'labels hx-cpu;', 'labels h100,hx-gpu0;', 'labels h100,hx-gpu3;',
+                     '| CI_RUNNER_CARD=3', f'| CI_RUNNERS_PYTHON={sys.executable}', '| MemoryMax=512G',
+                     'fetched directly', 'run    systemctl --user enable --now ci-reaper.timer ci-orgsync.timer\n'):
+            self.assertIn(want, text)
+        self.assertEqual(self.apply(text), 0)
+        self.assertEqual(sorted(p.name for p in self.units.iterdir()),
+                         ['ci-orgsync.service', 'ci-orgsync.timer', 'ci-reaper.service', 'ci-reaper.timer',
+                          'ci-runner@.service', 'ci.slice'])
+        orgsync = (self.units / 'ci-orgsync.service').read_text()
+        self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run org-sync\n', orgsync)
+        self.assertIn(f'Environment=CI_RUNNERS_PYTHON={sys.executable}\n', orgsync)
+        hook = (self.data / 'ci-runners' / 'hooks' / 'job-started.sh').read_text()
+        self.assertIn(f'\npy={sys.executable}\n', hook)  # written in: no job's environment picks it
+        self.assertNotIn('CI_RUNNERS_PYTHON', hook)
+        runner = (self.units / 'ci-runner@.service').read_text()
+        self.assertNotIn('ci-proxy', runner)
+        self.assertIn('Description=ci-runners: GitHub Actions runner %i\n\n[Service]', runner)
+        self.assertIn(f'ExecStart={self.data}/actions-runner/%i/run.sh\n', runner)
+        reaper = (self.units / 'ci-reaper.service').read_text()
+        self.assertIn(f'Environment=CI_RUNNERS_PYTHON={sys.executable}\n', reaper)
+        self.assertIn(f'Environment=CI_RUNNERS_ETC={self.etc}\n', reaper)
+        self.assertEqual([port for _, port in self.unpacked], [0, 0, 0, 0])  # no proxy to wait for
+        self.assertEqual(setup.build(str(self.etc)).actions, [])  # a second run is a no-op
+
+    def test_another_users_unit_stops_the_plan(self):
+        self.units.mkdir(parents=True)
+        for name in ('ci-reaper.service', 'ci-runner@.service'):
+            (self.units / name).write_text('[Service]\nExecStart=/bin/true\n')
+            with self.assertRaisesRegex(ValueError, 'no apply of ci-runners wrote it'):
+                setup.build(str(self.etc))
+            (self.units / name).unlink()
+        (self.units / 'other.service').write_text('x')  # not a name setup writes: left alone
+        self.unpacked = []
+        text = setup.build(str(self.etc)).text()
+        self.assertEqual(self.apply(text), 0)
+        self.assertEqual((self.units / 'other.service').read_text(), 'x')
+        (self.units / 'ci-reaper.service').write_text('changed\n')  # ours: planned as an update
+        self.assertIn(f'update {self.units}/ci-reaper.service', setup.build(str(self.etc)).text())
+        (self.data / 'ci-runners' / 'state' / 'setup.json').write_text('{not json')
+        with self.assertRaisesRegex(ValueError, 'unreadable'):
+            setup.build(str(self.etc))
+
+    def test_the_python_must_be_3_11_or_later(self):
+        old = pathlib.Path(self.tmp.name) / 'py310'
+        old.write_text('#!/bin/sh\nexit 1\n')  # what a 3.10 answers to the version check
+        old.chmod(0o755)
+        for bad, why in ((str(old), '3.11 or later'), ('/nonexistent/python3', 'not an executable'),
+                         ('python3', 'python is malformed')):
+            self.inv.write_text(self.inv.read_text().replace(f'python = "{sys.executable}"', f'python = "{bad}"'))
+            with self.assertRaisesRegex((ValueError, inventory.InventoryError), why, msg=bad):
+                setup.build(str(self.etc))
+            self.inv.write_text(self.inv.read_text().replace(f'python = "{bad}"', f'python = "{sys.executable}"'))
+        self.assertIn('python', setup.build(str(self.etc)).text())
+
+    def test_the_accounts_unit_directory_keeps_its_mode(self):
+        """On a shared account the unit directory is not ours: an existing one is kept as is."""
+        self.units.mkdir(parents=True, mode=0o700)
+        os.chmod(self.units, 0o700)
+        text = setup.build(str(self.etc)).text()
+        self.assertIn(f'keep   {self.units}/', text)
+        self.unpacked = []
+        self.assertEqual(self.apply(text), 0)
+        self.assertEqual(self.units.stat().st_mode & 0o777, 0o700)
+
+    def test_etc_must_be_beside_the_data(self):
+        """The units and the launcher find etc/ at <data>/ci-runners/etc: a plan for an etc
+        elsewhere would install units that read another inventory."""
+        other = pathlib.Path(self.tmp.name) / 'elsewhere' / 'etc'
+        other.mkdir(parents=True)
+        (other / 'inventory.toml').write_text(self.inv.read_text())
+        with self.assertRaisesRegex(ValueError, 'the etc directory must be'):
+            setup.build(str(other))
+
+    def test_proxy_check_without_a_proxy(self):
+        from ci_runners import cli
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {'CI_RUNNERS_ETC': str(self.etc)}), contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(['proxy-check']), 0)
+        self.assertIn('no CI proxy', out.getvalue())
 
 
 if __name__ == '__main__':

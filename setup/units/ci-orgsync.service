@@ -1,0 +1,10 @@
+[Unit]
+Description=ci-runners: the org snapshot (members, private repositories)
+
+[Service]
+Type=oneshot
+ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run org-sync
+Environment=CI_RUNNERS_ETC=@CI_ETC@
+Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
+NoNewPrivileges=yes
+TimeoutStartSec=5min

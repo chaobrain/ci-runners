@@ -33,6 +33,13 @@ _ROLE = re.compile(r'[a-z0-9][a-z0-9-]{0,30}\Z')
 _POOL = re.compile(r'[a-z][a-z0-9-]{0,30}\Z')
 _SIZE = re.compile(r'[1-9][0-9]{0,5}[KMGT]\Z')
 _CPUS = re.compile(r'[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*\Z')
+#: a runner label the inventory gives (design §5.1): GitHub's own are added at registration
+LABEL = re.compile(r'[a-z0-9][a-z0-9-]{0,39}\Z')
+#: labels a pool may not give itself: GitHub's own, and the 3090 pools' classes, which a
+#: job of another host's policy asks for (design §5.1: h100's labels share nothing with them)
+RESERVED_LABELS = frozenset({'self-hosted', 'linux', 'x64', 'light', 'part', 'compile', 'nightly', 'gpu'})
+#: what a pool's runners run with, besides the count (RUN-5)
+POOL_KEYS = frozenset({'count', 'labels', 'per_card'})
 
 
 class InventoryError(ValueError):
@@ -56,6 +63,24 @@ def _num(v: object) -> bool:
     return type(v) in (int, float) and v > 0
 
 
+def _pool(v: object) -> bool:
+    """A pool: a runner count, or a table (RUN-5) of ``count``, ``labels`` (the runners'
+    labels instead of ``<pool>, <role>``) and ``per_card`` (one runner per card of the
+    host's ``gpus``, with no ``count``)."""
+    if _int(v, 1):
+        return True
+    if not isinstance(v, dict) or not v or set(v) - POOL_KEYS:
+        return False
+    per_card = v.get('per_card', False)
+    if type(per_card) is not bool or per_card == ('count' in v):
+        return False
+    if 'count' in v and not _int(v['count'], 1):
+        return False
+    labels = v.get('labels', [])
+    return (isinstance(labels, list) and len(labels) <= 8 and len(set(labels)) == len(labels)
+            and all(isinstance(x, str) and LABEL.match(x) and x not in RESERVED_LABELS for x in labels) and ('labels' not in v or bool(labels)))
+
+
 #: per host: key -> (check, required). Paths are absolute.
 HOST_KEYS = {
     'ssh': (_str, True),             # how a trusted host reaches this one (place, salvage)
@@ -71,11 +96,15 @@ HOST_KEYS = {
     'gpus': (lambda v: isinstance(v, list) and all(_int(i) for i in v), True),
     'max_temp_c': (lambda v: _int(v, 1), True),
     'cpus': (lambda v: isinstance(v, str) and bool(_CPUS.match(v)), False),  # taskset list
-    'pools': (lambda v: isinstance(v, dict) and all(isinstance(k, str) and _POOL.match(k) and _int(n, 1)
-                                                    for k, n in v.items()), True),
+    'pools': (lambda v: isinstance(v, dict) and bool(v) and all(isinstance(k, str) and _POOL.match(k) and _pool(n)
+                                                                for k, n in v.items()), True),
     'files': (lambda v: isinstance(v, dict) and set(v) == {'host_lock', 'slot_lock', 'slot_queue'}
               and all(_abs(p) for p in v.values()), True),  # brainspike's lock and slot files (D5)
-    'proxy': (lambda v: isinstance(v, dict), False),
+    'proxy': (lambda v: isinstance(v, dict), False),  # none: GitHub is reached directly (h100, decision 11.6)
+    'python': (_abs, False),         # the host layer's interpreter, 3.11 or later; else /usr/bin/python3
+    'orgsync': (lambda v: type(v) is bool, False),  # runs ci-orgsync.timer: the org snapshot (§6.5)
+    'watchdog_log': (_abs, False),   # the GPU watchdog's log (h100; design §4.4 thermal)
+    'watchdog_notice': (_abs, False),  # the watchdog's notice file (h100 health gate, §5.4 phase 1)
 }
 PROXY_KEYS = {
     'client': (_abs, True),
@@ -131,10 +160,23 @@ def load(text: str) -> Inventory:
         _check_table(f'hosts.{role}', h, HOST_KEYS)
         if 'proxy' in h:
             _check_table(f'hosts.{role}.proxy', h['proxy'], PROXY_KEYS)
+        for pool, v in h['pools'].items():
+            if isinstance(v, dict) and v.get('per_card') and not h['gpus']:
+                raise InventoryError(f'hosts.{role}.pools.{pool}: per_card on a host without gpus')
     this = doc.get('this')
     if this not in hosts:
         raise InventoryError('inventory: this names no host')
     return Inventory(this, hosts)
+
+
+def pool_labels(inv: 'Inventory', pool: str) -> list[str] | None:
+    """The labels a pool of this host gives its runners (RUN-5, design §5.1), or None
+    where it gives none and the runners carry ``<pool>, <role>``. A per-card pool's runners
+    carry also their card's ``<role>-gpu<N>``, which is not the pool's."""
+    v = inv.host['pools'].get(pool)
+    if isinstance(v, dict) and v.get('labels'):
+        return list(v['labels'])
+    return None
 
 
 # ------------------------------------------------------------------ deny list
@@ -142,7 +184,7 @@ def load(text: str) -> Inventory:
 #: string values that are not inventory: they appear in the design or in brainspike's
 #: scripts already. Every other string value of the inventory and the policy is denied.
 PUBLIC_KEYS = frozenset({'this', 'memory_max', 'cpus', 'host_lock', 'slot_lock', 'slot_queue', 'bot', 'visibility',
-                         'extra_events'})
+                         'extra_events', 'labels'})
 #: tokens too common to deny; a value that is one of them is left out, with a short one
 _COMMON = frozenset({'localhost', 'home', 'data', 'true', 'false', 'none'})
 MIN_TOKEN = 4

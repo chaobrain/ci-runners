@@ -305,7 +305,7 @@ defaults to `/usr/bin/python3`.
 | repository and actor allowlists, per-class event rules | `etc/policy.toml` | no, but never published |
 | project registry (env names, caps, env allowlist, upstream list, status context) | `etc/projects/<p>.toml` | no |
 | integrity manifests | `etc/manifests/<p>/<remote>.json` on 3090b | no; tamper-relevant, so only on trusted hosts |
-| the env-build token (RUN-5): fine-grained, Contents read on the repositories whose envs are built | `GH_TOKEN` of the maintainer's shell, or `etc/envbuild.token` on h100, mode 600 | yes |
+| the env-build token (RUN-5): fine-grained, Contents read on the repositories whose envs are built | `GH_TOKEN` of the maintainer's shell, for one `ci-run env build`; never stored on h100, since co-users of the account could read every private repository with it | yes |
 | the org-sync token (RUN-5): fine-grained, read-only, org Members and repository Metadata | `etc/orgsync.token` on h100, mode 600, minted by the lead | yes, though it reads only the member list and the private repositories' names (T14) |
 | the org snapshot (RUN-5): member logins, private repository names and ids | `etc/org.json` on h100, written by `ci-orgsync` | no, but never published |
 
@@ -548,7 +548,9 @@ could be given to a 3090b runner and be refused there, and brainspike's `[light]
 could land on h100. So h100's light and CPU runners carry only `h100-light` and
 `h100-cpu`. Their runner class (`CI_RUNNER_CLASS`) is still `light` and `part`, which is
 what the hook and the executor read. `setup` takes the labels from the inventory's pool
-entry where it gives them (RUN-5). On h100 the `part` class runs CPU parts only: the
+entry where it gives them (RUN-5). The `h100` pool is `per_card`: one runner per card,
+named `h100-gpu<N>` rather than `<role>-<pool>-<i>`, labelled `h100` and `h100-gpu<N>`,
+with `CI_RUNNER_CARD=<N>` in its `.env`. On h100 the `part` class runs CPU parts only: the
 executor refuses `gpus > 0` there (`unavailable`), so only the `h100` runners lease
 cards.
 
@@ -668,13 +670,13 @@ system `python3` is 3.10.
 |---|---|
 | directories | §3.2 (RUN-5) under our subtree; `etc/` mode 700 |
 | runner app | the pinned release, checked by sha256, into 9 runner directories (§5.1) |
-| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON`. No proxy lines. |
+| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON` (for the launcher and the units; the hooks have the interpreter written into them by setup, so a job's environment never chooses it); `CI_RUNNER_POOL_LABELS`, the pool's own labels (`h100-light`, `h100-cpu`, `h100`), for a retry's `retry-on`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card. No proxy lines. |
 | `ci-runner@.service` | as on 3090b, without `After=`/`Wants=ci-proxy.service` |
 | `ci-orgsync.{service,timer}` | every 10 min: the org snapshot (§6.5) |
 | `ci-reaper.timer` | as on 3090b |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 512G of 2 TB) and `ci-<project>.slice` |
 | lock and slot files | new ones under `state/`: h100 has no brainspike files to share (D5 does not apply) |
-| unit names | every unit file starts with `ci-`; `plan.sh` refuses if a unit of that name exists and is not ours (another user of the account may have one) |
+| unit names | every unit file starts with `ci-` (`ci.slice` included); `uninstall.sh` stops and removes only the units an `apply` recorded in `state/setup.json`; `plan.sh` refuses if a unit of that name exists and no earlier `apply` wrote it (another user of the account may have one). The unit directory exists (mode 700) and is the account's: setup never changes its mode. |
 | unchanged | the shared account's shell files, crontab, `authorized_keys`, other users' files, envs and units; no proxy, no ssh key |
 
 There is no root step: the shared account has no sudo for us, and none is needed.
@@ -685,7 +687,8 @@ There is no root step: the shared account has no sudo for us, and none is needed
 executor of §4.3 runs a part there, as on 3090b. It keeps these pieces of this section,
 run locally: the health gate (phase 1, without the package temperature probe if the
 inventory gives none), the sampler and early stop (phase 5), thermal and reboot
-classification (phase 6), CPU pinning to the inventory's `cpus`, and D7. The integrity
+classification (phase 6), CPU pinning to the inventory's `cpus`, and D7. Each `h100-gpu<N>`
+runner runs its parts on card N alone: setup writes `CI_RUNNER_CARD=<N>` into its `.env`. The integrity
 check (phase 2), the archive transport (phase 3), the env allowlist and the draw
 (phase 8) do not apply (decision 11.5). The rest of this section is RUN-2's.
 
@@ -824,9 +827,12 @@ following every page, and writes `etc/org.json`: `{schema: 1, fetched_at, member
 renames it, mode 600. A failed or partial fetch leaves the old snapshot in place. 30 s
 per call, 3 tries.
 
-`policy.toml` schema 2 adds `[org]`: `members = true` (the snapshot's members join
-`actors`), `private_repositories = true` (each snapshot repository joins `repositories`
-as private) and `max_age_minutes = 60`. A repository written in `policy.toml` keeps its
+`policy.toml` schema 2 adds `[org]`: `name`, `members = true`, `private_repositories =
+true` (each snapshot repository joins `repositories` as private) and `max_age_minutes =
+60`. With `members`, the snapshot's members may act **only in the org's private
+repositories of the snapshot**: a repository written by hand is open to them only if it
+is private and the snapshot holds it with the same id. A public repository written by
+hand (the GPU path of decision 2) keeps the hand-kept `actors` alone. A repository written in `policy.toml` keeps its
 own entry, so `paused`, `extra_events` and `bot_dispatch` stay the lead's. A public
 repository is never added from the snapshot: the call asks only for private ones, and a
 snapshot entry already listed as public is ignored. Schema 1 is read as before (3090b).

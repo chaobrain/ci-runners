@@ -1,0 +1,12 @@
+{
+ "action": "synchronize",
+ "number": 7,
+ "repository": {"id": true, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false},
+ "sender": {"login": "alice", "type": "User"},
+ "pull_request": {
+  "number": 7,
+  "user": {"login": "alice", "type": "User"},
+  "head": {"ref": "feature", "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "repo": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false}},
+  "base": {"ref": "main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "repo": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false}}
+ }
+}

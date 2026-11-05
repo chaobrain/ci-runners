@@ -1,0 +1,52 @@
+# The host inventory, schema 1 (design §3.3). This file holds placeholders only: the
+# real one is ~/data/ci-runners/etc/inventory.toml on each host, in a mode-700
+# directory, and is never committed. `python -m ci_runners.inventory check FILE`
+# validates it; `... deny FILE etc/policy.toml` prints the hashes for tests/deny.sha256.
+# Every string value except `this`, `memory_max`, `cpus` and the `files` paths is
+# treated as inventory by the deny list.
+schema = 1
+this = "3090b"                                  # the role of the host that reads it
+
+[hosts.3090b]
+ssh = "<ssh alias of 3090b>"                    # how a trusted host reaches it
+account = "<unix account>"
+home = "/home/<unix account>"
+data = "/home/<unix account>/data"
+trusted = true                                  # may run checks, CPU and compile parts
+cpu_slowdown = 1.0                              # per-core time against the reference host
+slots = 2                                       # host CI slots (design §7)
+memory_max = "120G"                             # ci.slice
+disk_min_gib = 50
+gpus = [0, 1]
+max_temp_c = 80
+pools = { light = 2, part = 4, compile = 1 }
+
+[hosts.3090b.files]                             # the lock and slot files in use today (D5)
+host_lock = "/tmp/<host lock>.lock"
+slot_lock = "/tmp/<slot lock>.lock"
+slot_queue = "/tmp/<slot lock>.queue"
+
+[hosts.3090b.proxy]                             # the CI proxy instance (decision 5, §12 item 4)
+client = "/<path to the proxy client>"
+config = "/<path to the CI instance's config template>"
+nodes = ["<node 1>", "<node 2>"]                # allowed nodes, in switch order
+http_port = 10809
+socks_port = 10808
+no_proxy = "localhost,127.0.0.1,<intranet suffix>"
+
+[hosts.h100]
+ssh = "<ssh alias of h100>"
+account = "<shared account>"
+home = "/home/<shared account>"
+data = "/home/<shared account>/<our subtree>"
+trusted = false                                 # GPU parts only (decision 3)
+remote = true                                   # driven over ssh from 3090b
+cpu_slowdown = 2.7
+slots = 5                                       # one per card
+memory_max = "128G"
+disk_min_gib = 50
+gpus = [0, 1, 2, 3, 4]
+max_temp_c = 80
+cpus = "0-43,88-131"                            # NUMA node 0
+pools = { h100 = 5 }
+files = { host_lock = "/tmp/<host lock>.lock", slot_lock = "/tmp/<slot lock>.lock", slot_queue = "/tmp/<slot lock>.queue" }

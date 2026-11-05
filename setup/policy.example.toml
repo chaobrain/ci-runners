@@ -1,0 +1,16 @@
+# The hook's policy, schema 1 (design §6.2). Placeholders only: the real one is
+# ~/data/ci-runners/etc/policy.toml on 3090b (master) and 3090a (copy). The hook refuses
+# every job if this file does not parse.
+schema = 1
+bot = "github-actions[bot]"                     # accepted for dispatch events, private only
+actors = ["a-member", "another-member"]       # the actor allowlist (placeholders)
+
+[repositories."chaobrain/brainspike"]
+id = 1                                          # the repository id, checked on every job
+visibility = "private"
+# paused = true                                 # refuse every job of this repository
+# extra_events = ["pull_request_target"]        # private only, by the lead
+
+[repositories."chaobrain/brainevent"]
+id = 2
+visibility = "public"                           # gpu and h100 runners only (decision 2)

@@ -1,0 +1,12 @@
+{
+ "action": "synchronize",
+ "number": 7,
+ "repository": {"id": 2002, "full_name": "chaobrain/brainevent", "name": "brainevent", "private": false, "fork": false},
+ "sender": {"login": "alice", "type": "User"},
+ "pull_request": {
+  "number": 7,
+  "user": {"login": "alice", "type": "User"},
+  "head": {"ref": "feature", "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "repo": {"id": 2002, "full_name": "chaobrain/brainevent", "name": "brainevent", "private": false, "fork": false}},
+  "base": {"ref": "main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "repo": {"id": 2002, "full_name": "chaobrain/brainevent", "name": "brainevent", "private": false, "fork": false}}
+ }
+}

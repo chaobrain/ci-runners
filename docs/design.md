@@ -1,7 +1,7 @@
 # ci-runners: design (contract)
 
-Status: approved by the lead on 2026-11-05 (#1). RUN-1 is next. No code exists yet. Consumers onboard
-through [consumers.md](consumers.md).
+Status: approved by the lead on 2026-11-05 (#1). RUN-1 is in progress: RUN-1a holds the package's
+pure decisions. Consumers onboard through [consumers.md](consumers.md).
 
 This repository becomes public (D1). Hosts appear here under role names: **3090b**,
 **3090a** and **h100**. Real host names and ssh aliases, accounts, paths under a home
@@ -121,11 +121,23 @@ semantics beyond `claim`.
 ## 2. GitHub facts (checked 2026-11-05) and what they mean here
 
 The org is on GitHub Free ("plan": "free", 12 seats). Its base permission is `write` on
-every repository. ci-runners is private, with Actions access `none`.
+every repository.
+
+Settings applied by the lead on 2026-11-05 (D1, §12 items 1 and 9), read back from the
+API the same day:
+
+- ci-runners is public.
+- Ruleset "protect main": the default branch cannot be deleted or pushed non-fast-forward.
+- Ruleset "protect release tags": `refs/tags/v*` cannot be created, updated or deleted.
+- Both rulesets are active, and their only bypass is the organization admin role
+  (`OrganizationAdmin`, `always`; the org has 2 admins).
+- `Default` runner group: `visibility: selected`, with chaobrain/brainspike as its only
+  repository; `allows_public_repositories: false`; `restricted_to_workflows: false`.
+  Free accepts `selected`.
 
 | fact | source | consequence |
 |---|---|---|
-| An org has one Default runner group. Only Team can create more. | docs: runner groups ("organizations using the GitHub Team plan"); API: one group, `Default`, `visibility: all`, `allows_public_repositories: false`, `restricted_to_workflows: false`; 0 runners | Every org runner is open to every private org repository (11 today), so the hook's repository allowlist is the per-repository boundary. Whether Free allows setting Default to `selected` is untested (it would be a settings change). |
+| An org has one Default runner group. Only Team can create more. | docs: runner groups ("organizations using the GitHub Team plan"); API: one group, `Default`, `visibility: all`, `allows_public_repositories: false`, `restricted_to_workflows: false`; 0 runners | Every org runner would be open to every private org repository (11 on 2026-11-05). `Default` is now restricted to the selected repositories (above), and the hook's repository allowlist stays the per-repository boundary. |
 | By default, only private repositories can use a runner group. | docs; API default `allows_public_repositories: false` | Public repositories reach no org runner unless the flag is turned on. See below. |
 | A public caller can use only public reusable workflows. A private caller can use public ones, and private ones whose repository grants Actions access. | docs: "Reusing workflow configurations", access table | Public consumers need ci-runners public (D1). Decided in §12 item 1. |
 | Rulesets and branch protection exist only for public repositories on Free. | API: private ci-runners returns 403 "Upgrade to GitHub Pro or make this repository public"; public brainstate has an active ruleset | D1 |

@@ -239,6 +239,20 @@ no_proxy = "localhost,127.0.0.1"
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('nothing listens on the CI proxy port', r.stderr)
 
+    def test_the_org_snapshot_timer_only_where_the_inventory_asks(self):
+        text = setup.build(str(self.etc)).text()
+        self.assertNotIn('ci-orgsync', text)
+        inv = self.etc / 'inventory.toml'
+        inv.write_text(inv.read_text().replace('max_temp_c = 80\n', 'max_temp_c = 80\norgsync = true\n'))
+        plan = setup.build(str(self.etc))
+        self.assertIn('ci-orgsync.service', plan.text())
+        enable = [a['argv'] for a in plan.actions if a.get('kind') == 'run' and '--now' in a['argv']
+                  and 'ci-reaper.timer' in a['argv']]
+        self.assertEqual(enable, [['systemctl', '--user', 'enable', '--now', 'ci-proxy-check.timer', 'ci-reaper.timer',
+                                   'ci-orgsync.timer']])
+        self.assertEqual(setup.timers({}), ['ci-reaper.timer'])
+        self.assertEqual(setup.timers({'orgsync': True}), ['ci-reaper.timer', 'ci-orgsync.timer'])
+
     def test_runner_names_and_labels(self):
         inv = inventory.load((self.etc / 'inventory.toml').read_text())
         self.assertEqual(setup.runners(inv), [('hb-light-1', ['light', 'hb'], 'light'),

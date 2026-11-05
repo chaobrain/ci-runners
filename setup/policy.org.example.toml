@@ -1,0 +1,19 @@
+# The hook's policy, schema 2, as on h100 (design §6.5, decision 11.2). Placeholders
+# only: the real one is <data>/ci-runners/etc/policy.toml on h100. The org's members join
+# the actors, and its private repositories join the repositories, from etc/org.json,
+# which ci-orgsync.timer refreshes every 10 min. A stale snapshot refuses every job.
+schema = 2
+bot = "github-actions[bot]"
+actors = []                                     # members come from the snapshot
+[org]
+name = "chaobrain"
+members = true
+private_repositories = true
+max_age_minutes = 60
+
+# A repository listed here keeps this entry over the snapshot's, so the lead can pause
+# one, or let its bot dispatch:
+# [repositories."chaobrain/a-private-repo"]
+# id = 1
+# visibility = "private"
+# paused = true

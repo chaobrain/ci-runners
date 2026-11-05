@@ -1,8 +1,15 @@
 """The fair slot queue (design §7, rules 1, 2 and 4)."""
 from __future__ import annotations
 
+import os
+import pathlib
+import shutil
+import subprocess
+import tempfile
+import time
 import unittest
 
+from ci_runners import slots
 from ci_runners.slots import Ticket as T
 from ci_runners.slots import grants, queue_full
 
@@ -39,6 +46,41 @@ class Grants(unittest.TestCase):
         self.assertTrue(queue_full(1, 1))
         self.assertFalse(queue_full(0, 1))
         self.assertTrue(queue_full(0, 0))
+
+
+
+@unittest.skipUnless(shutil.which('flock') and os.path.exists('/proc/locks'), 'Linux with flock(1) only')
+class Queue(unittest.TestCase):
+    def test_flocked_reads_holders(self):
+        with tempfile.TemporaryDirectory() as d:
+            a, b = pathlib.Path(d) / 'a.lock', pathlib.Path(d) / 'b.lock'
+            a.touch()
+            b.touch()
+            self.assertFalse(slots._flocked(str(a)))
+            hold = subprocess.Popen(['flock', '-x', str(a), 'sleep', '30'], start_new_session=True)
+            try:
+                for _ in range(200):
+                    if slots._flocked(str(a)):
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(slots._flocked(str(a)))
+                self.assertFalse(slots._flocked(str(b)))
+            finally:
+                os.killpg(hold.pid, 9)
+                hold.wait()
+
+    def test_tickets_share_the_counter_and_dead_ones_go(self):
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05)
+            dead = os.path.join(q.queue, '000000000007.ticket')
+            os.makedirs(q.queue)
+            with open(dead, 'w') as f:
+                f.write('7 999999999 1 /x cmd\n')  # no such pid
+            q.take_ticket('p', 'cmd')
+            self.assertEqual(q.seq, 8)
+            self.assertTrue(q.ticket.endswith('000000000008.wait'))
+            self.assertEqual(q.waiting(), [T(8, 'p')])
+            self.assertFalse(os.path.exists(dead))
 
 
 if __name__ == '__main__':

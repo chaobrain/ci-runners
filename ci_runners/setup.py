@@ -25,6 +25,8 @@ import glob
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -39,6 +41,10 @@ RUNNER_URL = (f'https://github.com/actions/runner/releases/download/v{RUNNER_VER
               f'actions-runner-linux-x64-{RUNNER_VERSION}.tar.gz')
 UNITS = ('ci-runner@.service', 'ci-proxy.service', 'ci-proxy-check.service', 'ci-proxy-check.timer',
          'ci-reaper.service', 'ci-reaper.timer', 'ci.slice')
+RUNNER_FILES = ('config.sh', 'run.sh', os.path.join('bin', 'Runner.Listener'))
+# what goes into a unit file: one word each, so nothing can add a line
+PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,39}')
+MEMORY = re.compile(r'[1-9][0-9]*[KMGT]?|[1-9][0-9]?%|infinity')
 TIMERS = ('ci-proxy-check.timer', 'ci-reaper.timer')
 
 
@@ -168,6 +174,8 @@ def build(etc: str) -> Plan:
         with open(os.path.join(release, 'hooks', name)) as f:
             _file(plan, os.path.join(base, 'hooks', name), f.read(), 0o755)
     plan.add('units:')
+    if not isinstance(h['memory_max'], str) or not MEMORY.fullmatch(h['memory_max']):
+        raise ValueError(f'memory_max must match {MEMORY.pattern}')
     subs = {'CI_MEMORY_MAX': h['memory_max'], 'PROXY_CLIENT': h.get('proxy', {}).get('client', '/bin/false')}
     unit_dir = os.path.join(home, '.config', 'systemd', 'user')
     for name in UNITS:
@@ -184,6 +192,8 @@ def build(etc: str) -> Plan:
         name, mem = p.get('name'), p.get('hosts', {}).get(inv.this, {}).get('memory_max')
         if not isinstance(name, str) or not isinstance(mem, str):
             raise ValueError(f'{path}: name and hosts.{inv.this}.memory_max are required')
+        if not PROJECT_NAME.fullmatch(name) or not MEMORY.fullmatch(mem):
+            raise ValueError(f'{path}: name must match {PROJECT_NAME.pattern} and memory_max {MEMORY.pattern}')
         projects.append(name)
         _file(plan, os.path.join(unit_dir, f'ci-{name}.slice'),
               render(tmpl, {'PROJECT': name, 'PROJECT_MEMORY_MAX': mem}), 0o644)
@@ -216,7 +226,7 @@ def build(etc: str) -> Plan:
     rs = runners(inv)
     for name, labels, cls in rs:
         rdir = os.path.join(data, 'actions-runner', name)
-        if os.path.exists(os.path.join(rdir, 'config.sh')):
+        if runner_complete(rdir):
             plan.add(f'  keep   {rdir}/ (runner app present)')
         else:
             plan.add(f'  unpack {RUNNER_URL} -> {rdir}/', kind='runner', path=rdir, cache=cache, port=port)
@@ -249,15 +259,38 @@ def _unpack(path: str, cache: str, port: int) -> None:
     if h.hexdigest() != RUNNER_SHA256:
         os.unlink(cache)
         raise RuntimeError('the runner app does not match its sha256')
-    os.makedirs(path, mode=0o700, exist_ok=True)
+    # extract beside it, then move in: an interrupted unpack never looks complete
+    tmp = path + '.ci-new'
+    if os.path.lexists(tmp):
+        shutil.rmtree(tmp)
+    os.makedirs(tmp, mode=0o700)
     with tarfile.open(cache) as t:
-        t.extractall(path, filter='tar')
+        t.extractall(tmp, filter='tar')
+    if not runner_complete(tmp):
+        raise RuntimeError('the runner app is incomplete after extraction')
+    if not os.path.lexists(path):
+        os.rename(tmp, path)
+        return
+    for n in os.listdir(tmp):
+        dst = os.path.join(path, n)
+        if os.path.isdir(dst) and not os.path.islink(dst):
+            shutil.rmtree(dst)
+        os.replace(os.path.join(tmp, n), dst)
+    os.rmdir(tmp)
+
+
+def runner_complete(path: str) -> bool:
+    """The runner app is all there: its configure script and its listener."""
+    return all(os.path.isfile(os.path.join(path, f)) for f in RUNNER_FILES)
 
 
 def apply(etc: str, plan_file: str, run=subprocess.run) -> int:
     with open(plan_file, encoding='utf-8') as f:
         approved = f.read()
     plan = build(etc)
+    if not plan.actions:
+        print(f'apply: nothing to change (plan {plan.digest()[:16]})')
+        return 0
     if plan.text() != approved:
         print(f'apply: the plan changed (approved {hashlib.sha256(approved.encode()).hexdigest()[:16]}, '
               f'now {plan.digest()[:16]}): run plan.sh again and have it approved', file=sys.stderr)
@@ -271,9 +304,12 @@ def apply(etc: str, plan_file: str, run=subprocess.run) -> int:
             os.chmod(a['path'], a['mode'])
         elif k == 'file':
             tmp = a['path'] + '.ci-new'
-            with open(tmp, 'w', encoding='utf-8') as f:
+            if os.path.lexists(tmp):
+                os.unlink(tmp)  # a leftover, or a planted link: removed, never followed
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 f.write(a['content'])
-            os.chmod(tmp, a['mode'])
+                os.fchmod(f.fileno(), a['mode'])
             os.replace(tmp, a['path'])
         elif k == 'symlink':
             os.symlink(a['target'], a['path'])

@@ -409,14 +409,26 @@ All are idempotent and run as the runner account. None needs sudo.
 - `setup/apply.sh <host> --plan <file>` applies exactly an approved plan. It refuses if
   the plan's hash differs from a fresh `plan.sh` output. It writes a state file, and a
   second run is a no-op.
-- `setup/install.sh <tag>` installs a release into `releases/<tag>/` after checking
-  that the tag resolves to the commit the lead released. It never moves what running
-  jobs use (§9).
-- `setup/register.sh <runner>` is run by the lead with a fresh registration token. It
-  calls the runner app's `config.sh --url https://github.com/chaobrain --runnergroup
-  Default --labels ... --work ~/data/ci-work/<name> --unattended`. Auto-update stays on.
-- `setup/uninstall.sh <host>` reverses `apply` from its state file: it stops units,
-  removes runners (the lead deregisters them) and leaves `etc/` for the lead to delete.
+- `setup/install.sh --tag <tag> --expect <sha>` installs a release into
+  `releases/<tag>/` after checking that the tag resolves to the commit the lead
+  released (an annotated tag by its peeled commit, matched by exact ref name).
+  `--commit <sha>` installs `releases/main-<sha12>/`, the bootstrap before the first
+  tag. It never moves what running jobs use (§9): an existing release is kept only if
+  it is a real directory holding that commit, and is refused otherwise. `releases/hook`
+  moves only forward (to a higher tag, or from a main commit to anything); moving back
+  needs `--rollback`.
+- `setup/register.sh <runner>...` is run by the lead with a fresh registration token on
+  stdin. It calls the runner app's `config.sh --url https://github.com/chaobrain
+  --runnergroup Default --labels ... --work ~/data/ci-work/<name> --unattended` under
+  `env -i`, with the token in `ACTIONS_RUNNER_INPUT_TOKEN` (never in an argv, never
+  stored) and only the proxy's three variables read from `.env` as data. It refuses
+  while any runner of the account is active, since job code runs as that account and
+  could read the token from the environment of `config.sh`. It starts the runners
+  once all are configured. Auto-update stays on.
+- `setup/uninstall.sh <host>` reverses `apply` from its state file: it disables each
+  unit on its own, removes only the unit files the state file records (nothing if a
+  unit is still active), leaves the runners for the lead to deregister, and leaves
+  `etc/` for the lead to delete.
 
 ### 5.3 System changes per host (the lead approves the plan before it runs)
 
@@ -429,8 +441,8 @@ All are idempotent and run as the runner account. None needs sudo.
 | `.env` per runner | `https_proxy`, `http_proxy`, `no_proxy` (localhost, the intranet); `ACTIONS_RUNNER_HOOK_JOB_STARTED` and `..._COMPLETED` pointing at `~/data/ci-runners/hooks/`; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC` |
 | `ci-runner@.service` (template) | `ExecStart=%h/data/actions-runner/%i/run.sh`; `After=` and `Wants=ci-proxy.service`; `NoNewPrivileges=yes`; `KillMode=mixed`; `Restart=always`, `RestartSec=30`; `Slice=ci.slice`; enabled per instance |
 | `ci-proxy.service` | a separate instance of the host's proxy client, with its own config copy and node (inventory) and its own local ports. The interactive proxy is left alone (§12 item 4). `Restart=always`. |
-| `ci-proxy-check.timer` | every 2 min, a request to `api.github.com` through the CI proxy. After 3 failures it switches to the next allowed node and restarts the proxy. State goes to `state/proxy`. |
-| `ci-reaper.timer` | every 10 min: stops part scopes whose job is gone (a scope outlives a stopped runner), removes stale work directories, part records over 14 days, stale tickets and leases, and (RUN-2) orphaned h100 job directories |
+| `ci-proxy-check.timer` | every 2 min, a request to `api.github.com` through the CI proxy. Any HTTP answer counts as working (a 403 or 429 is GitHub's rate limit on the shared egress, not the node). After 3 failures in a row it switches to the next allowed node and restarts the proxy. State goes to `state/proxy.json`. |
+| `ci-reaper.timer` | every 10 min: stops part scopes whose job is gone (a scope outlives a stopped runner), removes stale work directories, the part records of runs with nothing changed for 14 days, daily hook logs (`logs/hook-<date>.log`) over 14 days, stale tickets and leases, and (RUN-2) orphaned h100 job directories |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 120G of 188G) and `ci-<project>.slice` per project |
 | lock and slot files | none new: the inventory names brainspike's current files (D5) |
 | ssh (RUN-2) | a CI key pair in `etc/ssh/`; a CI-only `ssh_config` passed with `-F` (§5.4) |
@@ -448,6 +460,27 @@ before `setup/plan.sh`, and the lead approves them with the plan:
 | shared lock and slot files | 3090b sets `fs.protected_regular = 2`. A second account therefore cannot open another account's files in `/tmp` with `O_CREAT`, which `host_lock.sh` (`>>`) and flock(1) do. brainspike's lock files become root-owned, with ACL entries giving both accounts `rw`. The queue directory gets ACL and default-ACL entries for the CI account. A `tmpfiles.d` file recreates both at boot, because `/tmp` is emptied then, and excludes them from age cleaning. Their paths do not change (D5). |
 | proxy client | a copy of the host's proxy client, and the source node configs (mode 600), are placed into the CI account's tree |
 | envs | the project's env is built as the CI account (consumers §2 step 3); nothing in the maintainer's tree is shared |
+
+**What a dedicated account does not close (for the lead's decision).** Job code runs as
+the CI account, and that account owns the host layer: `releases/`, `hooks/`,
+`etc/policy.toml`, each runner's `.env`, the runner app and the user units. Read-only
+mode bits do not stop an owner. So one accepted job, or a dependency it installs, can
+turn the hook off for every later job on the host (T1–T3 then rest on GitHub's own
+settings alone, §2). It cannot reach the maintainer's token, files or sudo. Two further
+facts:
+
+- the runner prints `Run '<hook path>'` in every job's log, refused jobs included, so
+  the hook's path (and with it the account's home) is in public logs once a public
+  repository uses the runners. Role-named paths (`/home/<ci account>/...`) are the
+  mitigation; the account's name is chosen to be generic.
+- registration tokens and the hook's log are readable by any job of the account.
+
+Options: (a) accept the gap for RUN-1 (private consumers whose code the lead reviews;
+the exit is (b) or (c)); (b) a root-owned host layer: `releases/`, `hooks/`, `etc/`, the
+`.env` files and the units owned by root (or the maintainer) and read-only to the CI
+account, with system units running as the CI account (`User=`), which moves setup to
+sudo; (c) ephemeral runners (`--ephemeral`) re-created from a root-owned template after
+each job. Recommendation: (a) now, (b) before a public repository uses the runners.
 
 **3090a, RUN-3**: as 3090b, with 5 runners (§5.1) and no ssh key to h100. Also:
 
@@ -568,7 +601,7 @@ the policy lists them for a private repository.
 ### 6.3 The hook (`job-started`)
 
 `python -I` reads the inventory, the policy and `GITHUB_EVENT_PATH` as JSON, and does
-no network I/O. It bounds itself at 60 s. It applies §6.2 to the runner's class
+no network I/O. It bounds itself at 60 s (an alarm; if that fails, its wrapper kills it at 65 s, which refuses). It applies §6.2 to the runner's class
 (`CI_RUNNER_CLASS`) and checks that the event's repository id matches
 `GITHUB_REPOSITORY_ID`. It also removes stale work directories of this runner.
 
@@ -589,9 +622,10 @@ bound).
 | T6 | Users of the shared h100 account steal credentials, tamper with envs or results, read our source, or kill our processes. | none of our credentials there; manifest; archive of one sha, deleted afterwards; GPU parts only; keyed 10 % verify; kills end as thermal or lost and are retried. Reading the snapshot is accepted, as S7 accepted it. |
 | T7 | Our job code harms other users of the shared account. | only allowlisted actors' code; per-job directories; kill by scope; the lead tells the host's admin what runs there |
 | T8 | Secrets leak to h100 through the environment. | env allowlist with refused patterns; `env -i`; CI-only `ssh_config`; a test dumps the remote environ (RUN-2) |
-| T9 | The hook's output leaks inventory in public logs. | a reason code only; the inventory lint |
+| T9 | The hook's output leaks inventory in public logs. | a reason code only; the inventory lint. The runner itself logs the hook's path (§5.3): the CI account's name is generic |
 | T10 | A hostile event payload targets the hook. | JSON parsing in `python -I`; no shell interpolation; fixtures with hostile strings |
 | T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the bot's and allowlisted actors' statuses; consumers audit merges (brainspike: daily) |
+| T13 | An accepted job (or its dependency) edits the host layer it owns: the hook, the policy, `.env` or the units, so later jobs pass unchecked. | private consumers only until the host layer is root-owned (§5.3, option (b)); the policy's hash in every hook line shows drift; the hook writes its log without following links or blocking on FIFOs |
 | T12 | A burst of refused jobs blocks our runners. | refusal in under 10 s (RUN-1 acceptance); repo-level public runners do not share pools with private ones; the lead can pause a repository in the policy |
 
 ## 7. Scheduling and fairness
@@ -645,7 +679,7 @@ Rules:
 | h100 unreachable or quarantined | no part placed there | fallback order of the project |
 | slot or lease starvation | a part waits | `queue-timeout-minutes`, then `unavailable` and fallback |
 | disk low (under 50 GiB free in `~/data`) | | `unavailable` before the command |
-| hook hangs | the job blocks in "Set up runner" | the hook's own 60 s bound, then refusal |
+| hook hangs | the job blocks in "Set up runner" | the hook's own 60 s bound, then the fixed refusal line; the wrapper's `timeout` at 65 s |
 | GitHub down | nothing is assigned | the consumer's local path (brainspike: local runs, decision 2) |
 
 | bound | value |

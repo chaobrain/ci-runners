@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import urllib.error
 import urllib.request
 from collections.abc import Sequence
 
@@ -25,14 +26,18 @@ def step(state: dict, ok: bool, nodes: Sequence[str], threshold: int = THRESHOLD
     return {'node': nxt, 'failures': 0}, nxt
 
 
-def probe(http_port: int, timeout: float = 20) -> bool:
-    """One request through the CI proxy's HTTP port."""
+def probe(http_port: int, timeout: float = 20, url: str = URL) -> bool:
+    """One request through the CI proxy's HTTP port. Any HTTP answer from the far end
+    means the proxy works: a 403 or 429 (the unauthenticated rate limit, shared by
+    everyone behind the node's egress) is GitHub's, not the node's."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler(
         {'https': f'http://127.0.0.1:{http_port}', 'http': f'http://127.0.0.1:{http_port}'}))
     try:
-        with opener.open(URL, timeout=timeout) as r:
-            return r.status == 200
-    except OSError:
+        with opener.open(url, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except OSError:  # no tunnel, refused, reset, timed out
         return False
 
 

@@ -4,12 +4,15 @@ nothing. On a fake host tree; the systemctl commands are recorded, not run."""
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
 import pathlib
+import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 from ci_runners import inventory, setup
 
@@ -58,8 +61,9 @@ no_proxy = "localhost,127.0.0.1"
         (self.etc / 'projects' / 'p.toml').write_text('name = "p"\n[hosts.hb]\nmemory_max = "80G"\n')
         for name in ('hb-light-1', 'hb-part-1', 'hb-part-2'):  # the runner app is in place: no download
             d = self.data / 'actions-runner' / name
-            d.mkdir(parents=True)
-            (d / 'config.sh').write_text('#!/bin/sh\n')
+            for f in setup.RUNNER_FILES:
+                (d / f).parent.mkdir(parents=True, exist_ok=True)
+                (d / f).write_text('#!/bin/sh\n')
         self.ran = []
 
     def tearDown(self):
@@ -99,6 +103,9 @@ no_proxy = "localhost,127.0.0.1"
         again = setup.build(str(self.etc))
         self.assertEqual(again.actions, [])  # a second run is a no-op
         self.assertNotIn('run    ', again.text())
+        self.ran.clear()
+        self.assertEqual(self.apply(text), 0)  # the approved plan again: nothing left to do
+        self.assertEqual(self.ran, [])
 
     def test_apply_refuses_a_plan_that_is_not_the_fresh_one(self):
         text = setup.build(str(self.etc)).text()
@@ -113,6 +120,56 @@ no_proxy = "localhost,127.0.0.1"
         text = setup.build(str(self.etc)).text()
         self.assertIn('-CI_RUNNER_CLASS=compile', text)
         self.assertIn('+CI_RUNNER_CLASS=part', text)
+
+    def test_a_planted_link_is_not_followed(self):
+        victim = pathlib.Path(self.tmp.name) / 'victim'
+        victim.write_text('kept\n')
+        env = self.data / 'actions-runner' / 'hb-part-1' / '.env'
+        os.symlink(victim, str(env) + '.ci-new')
+        self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+        self.assertEqual(victim.read_text(), 'kept\n')
+        self.assertFalse(env.is_symlink())
+        self.assertIn('CI_RUNNER_CLASS=part', env.read_text())
+        self.assertEqual(env.stat().st_mode & 0o777, 0o600)
+
+    def test_project_names_and_memory_are_single_words(self):
+        for name, mem in (('p\nExecStart=/bin/x', '80G'), ('P', '80G'), ('p', '80G\nx=1'), ('p', '-1')):
+            (self.etc / 'projects' / 'p.toml').write_text(
+                f'name = {json.dumps(name)}\n[hosts.hb]\nmemory_max = {json.dumps(mem)}\n')
+            with self.assertRaises(ValueError, msg=(name, mem)):
+                setup.build(str(self.etc))
+
+    def test_the_runner_app_is_checked_and_unpacked_whole(self):
+        t = pathlib.Path(self.tmp.name)
+        app = t / 'app'
+        for f in setup.RUNNER_FILES:
+            (app / f).parent.mkdir(parents=True, exist_ok=True)
+            (app / f).write_text('x')
+        cache = t / 'cache' / 'runner.tgz'
+        cache.parent.mkdir()
+        with tarfile.open(cache, 'w:gz') as tf:
+            for f in setup.RUNNER_FILES:
+                tf.add(app / f, arcname=f)
+        with self.assertRaisesRegex(RuntimeError, 'sha256'):
+            setup._unpack(str(t / 'r1'), str(cache), 0)  # the real digest: this stand-in does not match
+        self.assertFalse(cache.exists())  # a bad download is not kept
+        self.assertFalse((t / 'r1').exists())
+        with tarfile.open(cache, 'w:gz') as tf:
+            tf.add(app / 'config.sh', arcname='config.sh')  # no listener
+        with mock.patch.object(setup, 'RUNNER_SHA256', hashlib.sha256(cache.read_bytes()).hexdigest()):
+            with self.assertRaisesRegex(RuntimeError, 'incomplete'):
+                setup._unpack(str(t / 'r1'), str(cache), 0)
+        self.assertFalse(setup.runner_complete(str(t / 'r1')))
+        with tarfile.open(cache, 'w:gz') as tf:
+            for f in setup.RUNNER_FILES:
+                tf.add(app / f, arcname=f)
+        (t / 'r2').mkdir()
+        (t / 'r2' / '.env').write_text('kept')
+        with mock.patch.object(setup, 'RUNNER_SHA256', hashlib.sha256(cache.read_bytes()).hexdigest()):
+            setup._unpack(str(t / 'r2'), str(cache), 0)
+        self.assertTrue(setup.runner_complete(str(t / 'r2')))
+        self.assertEqual((t / 'r2' / '.env').read_text(), 'kept')
+        self.assertFalse((t / 'r2.ci-new').exists())
 
     def test_runner_names_and_labels(self):
         inv = inventory.load((self.etc / 'inventory.toml').read_text())

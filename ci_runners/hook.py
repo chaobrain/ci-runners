@@ -4,7 +4,7 @@ Run by ``hooks/job-started.sh`` and ``hooks/job-completed.sh`` with the system P
 isolated (``-I``). ``job-started`` reads only local files (the policy, the inventory,
 ``GITHUB_EVENT_PATH``), does no network I/O, bounds itself at 60 s and prints one line,
 ``ci-runners: accepted|refused <reason> policy=<hash>``; details go to the host's
-``logs/hook.log`` only. Any error refuses the job. ``job-completed`` stops the job's
+``logs/hook-<date>.log`` only. Any error refuses the job. ``job-completed`` stops the job's
 part scopes and always exits 0, within 120 s.
 """
 from __future__ import annotations
@@ -13,6 +13,7 @@ import datetime
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 
@@ -36,13 +37,22 @@ def _read(path: str, limit: int) -> bytes:
 
 
 def _log(etc: str, record: dict) -> None:
-    """Append a JSON line to ``<data>/ci-runners/logs/hook.log`` (beside ``etc``)."""
+    """Append a JSON line to ``<data>/ci-runners/logs/hook-<UTC date>.log`` (beside ``etc``;
+    the reaper drops a day's file after 14 days)."""
     try:
         logs = os.path.join(os.path.dirname(os.path.abspath(etc)), 'logs')
         os.makedirs(logs, mode=0o700, exist_ok=True)
-        record['time'] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
-        with open(os.path.join(logs, 'hook.log'), 'a') as f:
-            f.write(json.dumps(record, sort_keys=True) + '\n')
+        now = datetime.datetime.now(datetime.timezone.utc)
+        record['time'] = now.isoformat(timespec='seconds')
+        # never block or follow a link: an earlier job of this account may have planted a FIFO
+        fd = os.open(os.path.join(logs, f'hook-{now:%Y-%m-%d}.log'),
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return
+            os.write(fd, (json.dumps(record, sort_keys=True) + '\n').encode())
+        finally:
+            os.close(fd)
     except OSError:
         pass  # the decision stands without its log line
 
@@ -115,8 +125,14 @@ def main(argv: list[str]) -> int:
     env = dict(os.environ)
     if argv == ['job-started']:
         signal.alarm(START_BOUND)
-        code, out = started(env)
-        signal.alarm(0)
+        try:
+            code, out = started(env)
+        except _Timeout:  # the bound hit outside started()'s own handler (its log line, say)
+            code, out = 1, policy.line(policy.Decision(False, 'timeout'), '')
+        except BaseException:  # noqa: BLE001 - whatever happens, one fixed line and a refusal
+            code, out = 1, policy.line(policy.Decision(False, 'error'), '')
+        finally:
+            signal.alarm(0)
         print(out, flush=True)
         return code
     if argv == ['job-completed']:

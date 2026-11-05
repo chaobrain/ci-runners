@@ -1,0 +1,7 @@
+{
+ "action": "created",
+ "repository": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false},
+ "sender": {"login": "alice", "type": "User"},
+ "issue": {"number": 7, "pull_request": {"url": "https://api.github.com/x"}},
+ "comment": {"body": "/run ci", "user": {"login": "alice"}}
+}

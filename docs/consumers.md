@@ -91,6 +91,67 @@ jobs:
   # without an artifact, merge the summaries, post myproj/ci.
 ```
 
+## 3a. The standard test CI on h100 (RUN-5)
+
+For any private chaobrain repository (design decision 11, §4.7). The hook already
+accepts every private repository of the org and every org member (design §6.5), so no
+allowlist edit is needed.
+
+**Onboarding.**
+
+1. Add `.github/ci-runners.toml` to the default branch (below).
+2. Ask a maintainer to add the registry entry (`etc/projects/<p>.toml` on h100, design
+   §4) and to run `ci-run env build <p>`, which builds the env from that file as the
+   default branch holds it. Rerun it after a dependency change has merged.
+3. Add the workflow below, pinning `@v1`.
+4. Canary and done as in §2, steps 5 and 6.
+
+**`.github/ci-runners.toml`** (schema 1):
+
+```toml
+schema = 1
+python = "3.12"                                   # conda python version of the env
+requirements = ["requirements-dev.txt"]           # pip -r, in order
+install = ["-e ."]                                # further pip arguments, after them
+[[upstream]]                                      # optional: editable sibling checkouts
+repository = "chaobrain/brainstate"
+ref = "origin/main"
+[variables]                                       # set in every part (registry RESERVED names refused)
+XLA_PYTHON_CLIENT_PREALLOCATE = "false"
+```
+
+**Workflow.**
+
+```yaml
+name: test
+on:
+  pull_request: {}
+  push: {branches: [main]}
+  workflow_dispatch: {}
+concurrency: {group: test-${{ github.event.pull_request.number || github.sha }}, cancel-in-progress: true}
+permissions: {contents: read}
+jobs:
+  test:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: chaobrain/ci-runners/.github/workflows/h100-test.yml@v1
+    permissions: {contents: read, statuses: write}
+    with:
+      project: myproj
+      cpu-command: python -m pytest -m "not gpu" --junitxml="$CI_RESULTS_DIR/cpu.xml"
+      gpu-command: python -m pytest -m gpu --junitxml="$CI_RESULTS_DIR/gpu.xml"
+      results: "*.xml"
+      timeout-minutes: 60
+```
+
+The command contract of §1 holds; the GPU part gets one card in `CUDA_VISIBLE_DEVICES`.
+The `myproj/ci` status is the verdict. A run by someone outside the org fails in "Set up
+runner" with `ci-runners: refused actor`.
+
+**What the shared account means for you.** h100's runners run on an account that other
+lab users share (design §6.1). They can read your checkout while a job runs and could
+alter a result. Don't send secrets to these jobs, and keep a repository whose code must
+not be seen off this CI.
+
 ## 4. A public consumer's workflow (sketch)
 
 CPU jobs stay on `ubuntu-latest`. Only the GPU part comes to our runners, through the

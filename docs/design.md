@@ -1,7 +1,8 @@
 # ci-runners: design (contract)
 
 Status: approved by the lead on 2026-11-05 (#1). RUN-1 is in progress: RUN-1a holds the package's
-pure decisions. Consumers onboard through [consumers.md](consumers.md).
+pure decisions. Consumers onboard through [consumers.md](consumers.md). Decision 11
+(2026-11-06) adds RUN-5, a standard test CI on h100 for every private repository.
 
 This repository becomes public (D1). Hosts appear here under role names: **3090b**,
 **3090a** and **h100**. Real host names and ssh aliases, accounts, paths under a home
@@ -85,6 +86,44 @@ brainspike's private `docs/specs/arch/ci.md` names them.
    3. "Hook path in job logs: accepted while only private brainspike uses the runners."
       In the same task as item 2, before a public consumer: the hook moves to a generic
       path such as `/opt/ci-runners`.
+
+## Lead decisions (2026-11-06): a standard test CI on h100 (RUN-5)
+
+The request: a standard self-hosted test CI that every chaobrain member can use, for
+every chaobrain repository's tests, on h100. These decisions supersede the items they
+name; where this section and an older one disagree, this section holds for RUN-5.
+
+11. **Standard test CI on h100 (RUN-5).**
+    1. **Private repositories only.** Every private chaobrain repository may use the h100
+       runners. Public repositories keep their CPU work on GitHub-hosted runners, and
+       their GPU path stays decision 2, §12 item 2 and RUN-4, unchanged.
+       `allows_public_repositories` stays off. `Default` goes from `selected` to every
+       private repository (supersedes §12 item 9; the lead makes the change).
+    2. **Allowlists synced from the org.** The actor allowlist is the org's members, and
+       the repository allowlist is the org's private repositories with their ids. A
+       timer on h100 fetches both every 10 min into a local snapshot (§6.5). The hook
+       still reads only local files. Outside collaborators and bots are on neither list.
+       A snapshot older than 60 min refuses every job (`stale`). Entries written by hand
+       in `policy.toml` still win, so the lead can pause a repository.
+    3. **Runners on h100's shared account; CPU and GPU parts both run there.** h100
+       becomes a local host (`remote = false`), like 3090b: runner processes, the hook,
+       the host layer and the user units live on the shared account, under our subtree,
+       except the units. This supersedes decision 3's option A and its safeguard 3 for
+       RUN-5. The ssh driver of §5.4 is not built for RUN-5; RUN-2 stays as designed for
+       a later h100 path driven from 3090b. The cost is stated in §6.1 and §6.4 (T6, T13,
+       T14), and the lead accepts it for private repositories.
+    4. **Envs prebuilt per repository.** A maintainer builds each repository's conda env
+       on h100 from the `.github/ci-runners.toml` of its default branch (consumers §1),
+       with `ci-run env build`. A pull request cannot change an env.
+    5. **No manifest and no verify draw on RUN-5.** Both guard against users of the shared
+       account. With the runners on that account, those users can edit the hook and the
+       results too, so the checks would only look like protection. Decision 3's
+       safeguards 1 and 3 apply only to a path driven from 3090b (RUN-2).
+    6. **h100 reaches GitHub directly.** Measured 2026-11-06: `api.github.com` answers
+       without a proxy. So h100 runs no CI proxy instance (decision 5 applies to the
+       3090 hosts).
+    7. **The exit path** is still decision 3, safeguard 4: a dedicated account from the
+       host's admin, which closes T6, T13 and T14 for h100.
 
 ## Decisions of this spec
 
@@ -189,6 +228,7 @@ refuses, reaches only its own GPU runners. §12 item 2 decides that path.
 AGENTS.md  README.md  docs/design.md  docs/consumers.md
 ci_runners/           stdlib-only Python: pure functions, thin I/O
   policy.py           hook decision: repository, actor, event, fork, runner class
+  orgsync.py          the org snapshot: members and private repositories (RUN-5, §6.5)
   claim.py            claim decision from a sha's statuses
   place.py            host and card choice from probe results
   outcome.py          outcome classification and the retry hint
@@ -205,7 +245,8 @@ setup/units/          user unit templates: ci-runner@.service, ci-proxy.service,
 setup/inventory.example.toml   the schema, with placeholder values
 actions/              claim/, place/, part/, salvage/, compare/ (composite, action.yml);
                       lib/ci-run.sh, the launcher; RELEASE, the release stamp
-.github/workflows/    gpu.yml (reusable); test.yml (this repo's tests, hosted only)
+.github/workflows/    gpu.yml (reusable, public consumers); h100-test.yml (reusable, the
+                      standard test CI, RUN-5); test.yml (this repo's tests, hosted only)
 tests/                unit tests; fixtures/ (sanitised): event payloads, journal and
                       watchdog lines, nvidia-smi CSV, boot ids, systemctl output, JUnit
 tests/test_no_inventory.py     no tracked file holds a denied token (hashed deny list)
@@ -234,6 +275,24 @@ h100, on the shared account: only `<our subtree>/ci-work/<run>-<attempt>-<job>/`
 job, deleted after it; the per-project conda envs and upstream sources that exist
 today; one `authorized_keys` line for the CI key. Nothing else.
 
+h100 with RUN-5 (decision 11.3), on the shared account. The layout of 3090b, rooted at
+our subtree instead of `~/data`:
+
+```
+<our subtree>/ci-runners/releases/<tag>/   installed host layer
+<our subtree>/ci-runners/hooks/            the hooks
+<our subtree>/ci-runners/etc/              inventory, policy, org.json, orgsync.token; mode 700
+<our subtree>/ci-runners/state/  logs/     as on 3090b
+<our subtree>/ci-runners/envs/<project>/   the projects' conda envs (decision 11.4)
+<our subtree>/actions-runner/<name>/       one runner each
+<our subtree>/ci-work/<name>/              its work directory
+~/.config/systemd/user/ci-*                the units: the one place outside our subtree
+```
+
+The hooks and the launcher run the inventory's `python` (3.11 or later; the system's
+is 3.10), passed to them as `CI_RUNNERS_PYTHON` in each runner's `.env`. Elsewhere it
+defaults to `/usr/bin/python3`.
+
 ### 3.3 Inventory: where it lives, what is secret
 
 | item | where | secret |
@@ -246,6 +305,8 @@ today; one `authorized_keys` line for the CI key. Nothing else.
 | repository and actor allowlists, per-class event rules | `etc/policy.toml` | no, but never published |
 | project registry (env names, caps, env allowlist, upstream list, status context) | `etc/projects/<p>.toml` | no |
 | integrity manifests | `etc/manifests/<p>/<remote>.json` on 3090b | no; tamper-relevant, so only on trusted hosts |
+| the org-sync token (RUN-5): fine-grained, read-only, org Members and repository Metadata | `etc/orgsync.token` on h100, mode 600, minted by the lead | yes, though it reads only the member list and the private repositories' names (T14) |
+| the org snapshot (RUN-5): member logins, private repository names and ids | `etc/org.json` on h100, written by `ci-orgsync` | no, but never published |
 
 3090b holds the master copy of `policy.toml` and `projects/`, and `setup/apply.sh`
 copies them to 3090a. Each hook log line carries the policy's hash, so drift shows.
@@ -378,7 +439,7 @@ is the consumer's verdict to make (brainspike: error).
 ### 4.5 `salvage` and `compare`
 
 `compare` ships with RUN-2, where its first consumer (the h100 verify part) is; `gpu.yml`
-(§4.6) ships with RUN-4, its first public consumer. `v1.0.0` has `claim`, `place`,
+(§4.6) ships with RUN-4, its first public consumer; `h100-test.yml` (§4.7) ships with RUN-5. `v1.0.0` has `claim`, `place`,
 `part` and `salvage`.
 
 - `salvage` runs on `light`. It reads a part record over ssh and returns the same
@@ -404,6 +465,37 @@ Inputs: `project`, `command`, `gpus` (1), `gpu-mem-mib`, `memory`, `context`,
 
 Permissions: `contents: read`, plus `statuses: write` for claim and verdict.
 
+### 4.7 Reusable workflow `h100-test.yml`: the standard test CI (RUN-5)
+
+For any private chaobrain repository. Every job runs on h100 runners, so a private
+caller spends none of its hosted Actions minutes.
+
+| input | default | meaning |
+|---|---|---|
+| `project` | required | registry key (§4.3) |
+| `cpu-command` | empty | the CPU part's command; empty skips the part |
+| `gpu-command` | empty | the GPU part's command; empty skips the part |
+| `gpus` | 1 | cards for the GPU part; only 1 is accepted on h100 (D7) |
+| `timeout-minutes` | 60 | each part's inner bound; the job's is this plus 15 |
+| `results` | empty | glob of JUnit XML under `CI_RESULTS_DIR` |
+| `context` | `<project>/ci` | the status context claim reads and the verdict posts |
+
+Jobs. Each one has the guard: `pull_request` only with
+`head.repo.full_name == github.repository`, and `push`, `workflow_dispatch`:
+
+1. `claim` on `[self-hosted, h100-light]` (§4.1);
+2. `cpu` on `[self-hosted, h100-cpu]`, `part` with `gpus: 0`;
+3. `gpu` on `[self-hosted, h100]`, `part` with `gpus: 1` (the executor picks the card,
+   §5.4 health gate);
+4. `retry`: each part whose `next` is `retry` or `fallback`, once, on its `retry-on`.
+   h100 is the only host, so `fallback` also stays there;
+5. `verdict` on `[self-hosted, h100-light]`, always: `salvage` for parts without an artifact,
+   then `context` is set to success, failure (a part `red`) or error (an infrastructure
+   end twice), and the parts' summaries are merged into the job summary.
+
+Permissions: `contents: read`, plus `statuses: write` for claim and verdict. A caller
+grants the same at the call site.
+
 ## 5. Hosts
 
 ### 5.1 Runner pools
@@ -421,10 +513,27 @@ label decides which repository classes the hook accepts (§6.3).
 | 3090a | `part` | 3 | `part`, `3090a` | CPU and GPU parts |
 | 3090a | `nightly` | 1 | `nightly`, `3090a` | nightlies, up to 600 min |
 | 3090b, 3090a (RUN-4) | `gpu` | 1 each | `gpu`, host | GPU-only parts, including public consumers' |
+| h100 (RUN-5) | `light` | 2 | `h100-light` | claim, verdict, salvage of `h100-test.yml` |
+| h100 (RUN-5) | `part` | 2 | `h100-cpu` | CPU parts of private consumers, pinned to the inventory's `cpus` |
+| h100 (RUN-5) | `h100` | 5 | `h100`, `h100-gpu<N>` | GPU parts on card N, run locally |
 
 Pool size is the host's slots plus one waiting seat per project allowed on the pool
 (§7). Runner names are `<host role>-<pool>-<i>`. All are org-level in Default (lead
 decision 1), except public consumers' GPU runners (§12 item 2).
+
+RUN-5's h100 runners replace the row "3090b (drives h100)" while RUN-2 is not built; the
+two never coexist on the same cards.
+
+**h100's labels share nothing with the 3090 pools.** GitHub gives a job to any runner
+that has all its labels, and the hosts keep separate policies: 3090b's lists brainspike
+alone. With plain `light` or `part` labels on h100, a job of another private repository
+could be given to a 3090b runner and be refused there, and brainspike's `[light]` jobs
+could land on h100. So h100's light and CPU runners carry only `h100-light` and
+`h100-cpu`. Their runner class (`CI_RUNNER_CLASS`) is still `light` and `part`, which is
+what the hook and the executor read. `setup` takes the labels from the inventory's pool
+entry where it gives them (RUN-5). On h100 the `part` class runs CPU parts only: the
+executor refuses `gpus > 0` there (`unavailable`), so only the `h100` runners lease
+cards.
 
 ### 5.2 Setup scripts
 
@@ -533,7 +642,35 @@ Envs and upstream sources are those of today, put under the manifest (§5.4). Th
 no units, no cron, no proxy change, no runner, no hook and no GitHub credential. Option
 A needs no GitHub access on h100: everything arrives from 3090b.
 
+**h100, RUN-5** (decision 11.3; the lead approves the plan, as for 3090b). Measured on
+2026-11-06 from the shared account: linger on; `systemctl --user` works; 2 TB of memory,
+176 CPUs, 5 cards; `api.github.com` answers directly; not in the docker group; the
+system `python3` is 3.10.
+
+| change | detail |
+|---|---|
+| directories | §3.2 (RUN-5) under our subtree; `etc/` mode 700 |
+| runner app | the pinned release, checked by sha256, into 9 runner directories (§5.1) |
+| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON`. No proxy lines. |
+| `ci-runner@.service` | as on 3090b, without `After=`/`Wants=ci-proxy.service` |
+| `ci-orgsync.{service,timer}` | every 10 min: the org snapshot (§6.5) |
+| `ci-reaper.timer` | as on 3090b |
+| slices | `ci.slice` `MemoryMax` (inventory; proposed 512G of 2 TB) and `ci-<project>.slice` |
+| lock and slot files | new ones under `state/`: h100 has no brainspike files to share (D5 does not apply) |
+| unit names | every unit file starts with `ci-`; `plan.sh` refuses if a unit of that name exists and is not ours (another user of the account may have one) |
+| unchanged | the shared account's shell files, crontab, `authorized_keys`, other users' files, envs and units; no proxy, no ssh key |
+
+There is no root step: the shared account has no sudo for us, and none is needed.
+
 ### 5.4 The h100 driver (option A)
+
+*RUN-5 (decision 11.3) does not build this driver.* With the runners on h100, the local
+executor of §4.3 runs a part there, as on 3090b. It keeps these pieces of this section,
+run locally: the health gate (phase 1, without the package temperature probe if the
+inventory gives none), the sampler and early stop (phase 5), thermal and reboot
+classification (phase 6), CPU pinning to the inventory's `cpus`, and D7. The integrity
+check (phase 2), the archive transport (phase 3), the env allowlist and the draw
+(phase 8) do not apply (decision 11.5). The rest of this section is RUN-2's.
 
 A `part` step on an `h100-gpu<N>` runner (on 3090b) runs these phases, all over one
 ssh control connection:
@@ -614,6 +751,7 @@ path of decision 3, safeguard 4.
 |---|---|---|---|---|
 | 3090b, 3090a | the maintainer's account | the maintainer's GitHub token where one is stored (3090b, 2026-11-05: `repo`, `workflow`, `admin:public_key`, `read:org`, `gist`; `admin:public_key` would let job code add an ssh key to the account), personal ssh keys to other hosts, all of that account's files; root through passwordless sudo | the hook's allowlists; `NoNewPrivileges=yes` (sudo refused, measured); no stored secrets; least-privilege `GITHUB_TOKEN`; per-job work directories; `admin:org` is granted only on the lead's laptop, never on a runner host | a dedicated CI account per host, without the token, with ssh keys only to the other CI accounts (needs a host admin) |
 | h100 | the shared account, driven from 3090b | our snapshot of the head, our envs, other users' files there (the account is in the docker group: effectively root) | option A: no GitHub credential there; env allowlist; archive transport; GPU parts only; manifest; keyed verify; kill by scope only | a dedicated account from the host's admin, then one runner per card there; retire the driver |
+| h100, RUN-5 | the shared account, runners on it (decision 11.3) | everything a co-user of the account can reach, and they can reach everything of ours: the runner credentials, the hook, the policy, each job's `GITHUB_TOKEN` while the job runs, the checkout of a private repository, the results and the statuses we post | private repositories only, of org members only (decision 11.1, 11.2); `GITHUB_TOKEN` with `contents: read`, plus `statuses: write` only in claim and verdict; per-job directories, deleted after the job; no other credential there but the read-only org-sync token; `NoNewPrivileges` | the same dedicated account (decision 11.7) |
 
 `InaccessiblePaths` (hiding the token directory from the runner) does not take effect in
 a user unit on 3090b (measured 2026-11-05), so it is not used.
@@ -622,7 +760,7 @@ a user unit on 3090b (measured 2026-11-05), so it is not used.
 
 | class | events accepted | actors | runner classes |
 |---|---|---|---|
-| private, allowlisted | `pull_request` (same repository), `push`, `workflow_dispatch`, `schedule`, `workflow_run`, `status`, `repository_dispatch` | `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR`, and for a pull request its author and for a push its pusher, all on the actor allowlist. The workflow bot is accepted only for `workflow_dispatch` and `repository_dispatch`, and only where the repository's `bot_dispatch` switch is on (off by default; decision 10.1). | all |
+| private, allowlisted (on h100: every private repository of the org snapshot, §6.5) | `pull_request` (same repository), `push`, `workflow_dispatch`, `schedule`, `workflow_run`, `status`, `repository_dispatch` | `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR`, and for a pull request its author and for a push its pusher, all on the actor allowlist (on h100: the org's members, §6.5). The workflow bot is accepted only for `workflow_dispatch` and `repository_dispatch`, and only where the repository's `bot_dispatch` switch is on (off by default; decision 10.1). | all |
 | public, allowlisted | `pull_request` with `head.repo.full_name == repository`, `push`, `workflow_dispatch` | as above, humans only (no bot) | `gpu`, `h100` |
 | any other repository, including ci-runners itself | none | none | none |
 
@@ -632,7 +770,7 @@ the policy lists them for a private repository.
 ### 6.3 The hook (`job-started`)
 
 `python -I` reads the inventory, the policy and `GITHUB_EVENT_PATH` as JSON, and does
-no network I/O. It bounds itself at 60 s (an alarm; if that fails, its wrapper kills it at 65 s, which refuses). It applies §6.2 to the runner's class
+no network I/O. On h100 it also reads the org snapshot (`etc/org.json`, §6.5). It bounds itself at 60 s (an alarm; if that fails, its wrapper kills it at 65 s, which refuses). It applies §6.2 to the runner's class
 (`CI_RUNNER_CLASS`) and checks that the event's repository id matches
 `GITHUB_REPOSITORY_ID`. It also removes stale work directories of this runner.
 
@@ -650,21 +788,48 @@ bound).
 | T3 | A new or unlisted org repository asks for our labels (Default is open to all private repositories). | the hook's repository allowlist; the repository id is checked against the name |
 | T4 | Someone moves `v1` in ci-runners to bad code. | D1 rulesets (only the lead can update or delete `v*` and `main`); the hook and h100 driver come from installed releases (D2) |
 | T5 | Job code from an allowlisted actor reads the maintainer's token or ssh keys (with `admin:public_key` it could add a persistent ssh key to the GitHub account), or uses sudo. | `NoNewPrivileges`; `admin:org` never on a runner host; dedicated CI accounts (exit path); the consumer reviews its own code |
-| T6 | Users of the shared h100 account steal credentials, tamper with envs or results, read our source, or kill our processes. | none of our credentials there; manifest; archive of one sha, deleted afterwards; GPU parts only; keyed 10 % verify; kills end as thermal or lost and are retried. Reading the snapshot is accepted, as S7 accepted it. |
+| T6 | (RUN-2; on RUN-5 an accepted gap, §6.1, decision 11.3) Users of the shared h100 account steal credentials, tamper with envs or results, read our source, or kill our processes. | none of our credentials there; manifest; archive of one sha, deleted afterwards; GPU parts only; keyed 10 % verify; kills end as thermal or lost and are retried. Reading the snapshot is accepted, as S7 accepted it. |
 | T7 | Our job code harms other users of the shared account. | only allowlisted actors' code; per-job directories; kill by scope; the lead tells the host's admin what runs there |
 | T8 | Secrets leak to h100 through the environment. | env allowlist with refused patterns; `env -i`; CI-only `ssh_config`; a test dumps the remote environ (RUN-2) |
 | T9 | The hook's output leaks inventory in public logs. | a reason code only; the inventory lint. The runner itself logs the hook's path (§5.3): the CI account's name is generic |
 | T10 | A hostile event payload targets the hook. | JSON parsing in `python -I`; no shell interpolation; fixtures with hostile strings |
 | T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the bot's and allowlisted actors' statuses; consumers audit merges (brainspike: daily) |
-| T13 | An accepted job (or its dependency) edits the host layer it owns: the hook, the policy, `.env` or the units, so later jobs pass unchecked. | private consumers only until the host layer is root-owned (§5.3, option (b)); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs |
+| T13 | (on RUN-5 also any co-user of h100's account, an accepted gap) An accepted job (or its dependency) edits the host layer it owns: the hook, the policy, `.env` or the units, so later jobs pass unchecked. | private consumers only until the host layer is root-owned (§5.3, option (b)); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs |
+| T14 | (RUN-5) A co-user of h100's shared account reads the org-sync token, or edits the snapshot. | the token is fine-grained and read-only (members, metadata): it shows the member list and the private repositories' names, nothing else. An edited snapshot is T13's case. |
 | T12 | A burst of refused jobs blocks our runners. | refusal in under 10 s (RUN-1 acceptance); repo-level public runners do not share pools with private ones; the lead can pause a repository in the policy |
+
+### 6.5 The org snapshot (RUN-5)
+
+`ci-orgsync` runs every 10 min on h100, as the runner account, with `etc/orgsync.token`.
+It reads `GET /orgs/chaobrain/members` and `GET /orgs/chaobrain/repos?type=private`,
+following every page, and writes `etc/org.json`: `{schema: 1, fetched_at, members:
+[login], repositories: {owner/name: id}}`, lower case. It writes a temporary file and
+renames it, mode 600. A failed or partial fetch leaves the old snapshot in place. 30 s
+per call, 3 tries.
+
+`policy.toml` schema 2 adds `[org]`: `members = true` (the snapshot's members join
+`actors`), `private_repositories = true` (each snapshot repository joins `repositories`
+as private) and `max_age_minutes = 60`. A repository written in `policy.toml` keeps its
+own entry, so `paused`, `extra_events` and `bot_dispatch` stay the lead's. A public
+repository is never added from the snapshot: the call asks only for private ones, and a
+snapshot entry already listed as public is ignored. Schema 1 is read as before (3090b).
+
+The hook refuses every job (`stale`) when the snapshot is older than `max_age_minutes`,
+and refuses with `policy` when the snapshot is missing, too large or malformed. It
+prints the hash of the policy and of the snapshot. `claim` takes its allowlist from the
+same merge.
+
+Org members are humans; a bot or an outside collaborator is not one, so both stay
+refused. A member who leaves the org is refused within 10 min, or 60 min if the fetch
+fails meanwhile.
 
 ## 7. Scheduling and fairness
 
 Shared resources, per host:
 
 - **CI slots** (full runs): 2 on 3090b and 2 on 3090a, the files brainspike uses today
-  (D5). On h100 each card is its own slot.
+  (D5). On h100 each card is its own slot. On h100 with RUN-5, CPU parts take the
+  host's own CPU slots (inventory `slots`, proposed 2), in files under `state/`.
 - **Host lock**: brainspike's `host_lock.sh` protocol exactly (`-s`, `-x`, `-l`, the
   turnstile and the shared marker), reimplemented in `ci-lock` and tested against the
   original. An `-x` request still waits for shared holders already in, so every
@@ -815,6 +980,31 @@ with brainspike's nightly files on a test night. With the proxy stopped on 3090a
 go to 3090b within the bounds. brainspike's CI-3 runs the nightly on the `nightly`
 pool.
 
+**RUN-5: the standard test CI on h100** (decision 11). Sub-PRs: the org snapshot and
+policy schema 2; h100 as a local host in setup (no proxy, the inventory's `python` and
+labels); the local health gate, sampler and early stop; `h100-test.yml` and
+`ci-run env build`; then `v1.1.0`. *Acceptance:*
+
+1. Unit tests, each failing on a mutant: a snapshot member's push is accepted; an outside
+   collaborator, a non-member and a bot are refused; a public repository, and a private
+   one whose id differs from the snapshot's, are refused; a stale, a missing and a
+   malformed snapshot are refused; schema 1 decides as before; a hot card is refused
+   with a cool card's label; the early stop; a watchdog kill line counts only with our
+   PID and our card's bus.
+2. The lead-approved plan is applied on h100, and its 9 runners are online at org level.
+   They return within 5 min after `systemctl --user restart`.
+3. In a live job, `sudo -n true` fails. A job from a public repository, one from a
+   non-member and one from a fork pull request each fail in "Set up runner" in under
+   10 s, and print no inventory. A job of another private repository given
+   `[self-hosted, light]` is not taken by an h100 runner.
+4. A member added to the org can run within 10 min. A snapshot made older than 60 min
+   refuses with `stale`.
+5. A canary private repository: a failing CPU test and a failing GPU test each end red in
+   their own part, and only there. A part OOM-killed ends `oom` and is retried; a stopped
+   runner ends `lost` and is salvaged; a forced hot reading stops the part as `thermal`,
+   retried on a cool card.
+6. Five heads of the canary run end to end, with their statuses and summaries right.
+
 **RUN-4: the first public-repo GPU consumer**, brainevent (§12 item 5).
 *Acceptance:* the lead registers its repository-level GPU runners (§12 item 2). The hook refuses:
 
@@ -900,7 +1090,8 @@ here):
 8. **Manifest cost.** Every file is hashed before each part if RUN-2 measures the check
    at 60 s or less. Otherwise the check covers every `.py`, `.pth` and metadata file
    plus a rotating 10 % of the rest (lead, 2026-11-05).
-9. **Default group's repository access.** `Default` is restricted to the onboarded
+9. **Default group's repository access.** (Superseded for RUN-5 by decision 11.1:
+   every private repository.) `Default` is restricted to the onboarded
    private repositories (`selected`) when RUN-1 starts, as defence in depth. If Free
    refuses that, the hook alone is the boundary. The lead makes this change (lead,
    2026-11-05).

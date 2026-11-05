@@ -51,6 +51,8 @@ cpus = "0-43,88-131"                            # NUMA node 0
 python = "/<path to a Python 3.11 or later>"    # the system's is 3.10; export it as CI_RUNNERS_PYTHON
                                                 # (and CI_RUNNERS_ETC) to run setup/*.sh by hand
 orgsync = true                                  # the org snapshot timer (design §6.5)
+watchdog_log = "/<path to the GPU watchdog's log>"
+watchdog_notice = "/<path to the watchdog's notice file>"   # leave out if the host has none
 # no proxy table: GitHub is reached directly (decision 11.6)
 
 [hosts.h100.pools]                              # labels share nothing with the 3090 pools (§5.1)

@@ -143,6 +143,11 @@ class Launcher(unittest.TestCase):
         self.assertIn('next=none\n', self.out.read_text())
         self.assertEqual(sorted(str(p.relative_to(temp)) for p in temp.rglob('*')), ['ci-runners', 'ci-runners/x', 'ci-runners/x/outcome.json'])
         self.assertEqual(self.launch('place', '--parts', '[]').returncode, 2)  # only a part has a fallback
+        for own, want in (('h100-cpu', '["self-hosted","h100-cpu"]'), ('a,b-1', '["self-hosted","a","b-1"]'),
+                          ('bad label', '["self-hosted","part"]'), ('x"]', '["self-hosted","part"]')):
+            self.out.write_text('')
+            self.launch('part', '--id', 'y', CI_RUNNER_CLASS='part', CI_RUNNER_POOL_LABELS=own)
+            self.assertIn(f'retry-on={want}\n', self.out.read_text(), own)
 
     def test_a_hosted_runner_runs_only_claim_from_the_checkout(self):
         r = self.launch('part', '--id', 'x', RUNNER_ENVIRONMENT='github-hosted')

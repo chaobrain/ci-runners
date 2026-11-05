@@ -30,7 +30,11 @@ echo "::error::ci-runners: release $release is not installed on this host"
 [ "$cmd" = part ] || [ "$cmd" = salvage ] || exit 2
 reason="release $release is not installed on this host"
 cls=${CI_RUNNER_CLASS:-}
+own=${CI_RUNNER_POOL_LABELS:-}  # the pool's own labels (h100), else its class
 if [[ $cls =~ ^[a-z]+$ ]]; then next=fallback; retry_on="[\"self-hosted\",\"$cls\"]"; else next=none; retry_on='[]'; fi
+if [[ $cls =~ ^[a-z]+$ && $own =~ ^[a-z0-9][a-z0-9-]*(,[a-z0-9][a-z0-9-]*)*$ ]]; then
+  retry_on="[\"self-hosted\",\"${own//,/\",\"}\"]"
+fi
 { echo "outcome=unavailable"; echo "reason=$reason"; echo "next=$next"; echo "retry-on=$retry_on"; } >> "${GITHUB_OUTPUT:-/dev/null}"
 id=
 while [ $# -gt 1 ]; do [ "$1" = --id ] && { id=$2; break; }; shift; done  # the first --id: the action passes it before --command

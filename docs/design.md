@@ -670,7 +670,8 @@ There is no root step: the shared account has no sudo for us, and none is needed
 executor of §4.3 runs a part there, as on 3090b. It keeps these pieces of this section,
 run locally: the health gate (phase 1, without the package temperature probe if the
 inventory gives none), the sampler and early stop (phase 5), thermal and reboot
-classification (phase 6), CPU pinning to the inventory's `cpus`, and D7. The integrity
+classification (phase 6), CPU pinning to the inventory's `cpus`, and D7. Each `h100-gpu<N>`
+runner runs its parts on card N alone: setup writes `CI_RUNNER_CARD=<N>` into its `.env`. The integrity
 check (phase 2), the archive transport (phase 3), the env allowlist and the draw
 (phase 8) do not apply (decision 11.5). The rest of this section is RUN-2's.
 

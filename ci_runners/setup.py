@@ -65,7 +65,7 @@ def _runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str, int | 
     out = []
     for pool, v in inv.host['pools'].items():
         spec = v if isinstance(v, dict) else {'count': v}
-        labels = list(spec.get('labels') or dict.fromkeys([pool, inv.this]))
+        labels = inventory.pool_labels(inv, pool) or list(dict.fromkeys([pool, inv.this]))
         if spec.get('per_card'):
             for card in inv.host['gpus']:
                 out.append((f'{inv.this}-gpu{card}', [*labels, f'{inv.this}-gpu{card}'], pool, card))
@@ -138,6 +138,9 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
     lines += [f'ACTIONS_RUNNER_HOOK_JOB_STARTED={hooks}/job-started.sh',
               f'ACTIONS_RUNNER_HOOK_JOB_COMPLETED={hooks}/job-completed.sh',
               f'CI_RUNNER_CLASS={cls}', f'CI_RUNNERS_ETC={etc}']
+    own = inventory.pool_labels(inv, cls)
+    if own:  # the launcher's retry-on when this host lacks the release
+        lines.append(f'CI_RUNNER_POOL_LABELS={",".join(own)}')
     if card is not None:
         lines.append(f'CI_RUNNER_CARD={card}')
     if h.get('python'):

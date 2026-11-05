@@ -100,6 +100,8 @@ HOST_KEYS = {
     'proxy': (lambda v: isinstance(v, dict), False),  # none: GitHub is reached directly (h100, decision 11.6)
     'python': (_abs, False),         # the host layer's interpreter, 3.11 or later; else /usr/bin/python3
     'orgsync': (lambda v: type(v) is bool, False),  # the org snapshot timer runs here (RUN-5, design §6.5)
+    'watchdog_log': (_abs, False),   # the GPU watchdog's log (h100; design §4.4 thermal)
+    'watchdog_notice': (_abs, False),  # the watchdog's notice file (h100 health gate, §5.4 phase 1)
 }
 PROXY_KEYS = {
     'client': (_abs, True),
@@ -162,6 +164,16 @@ def load(text: str) -> Inventory:
     if this not in hosts:
         raise InventoryError('inventory: this names no host')
     return Inventory(this, hosts)
+
+
+def pool_labels(inv: 'Inventory', pool: str) -> list[str] | None:
+    """The labels a pool of this host gives its runners (RUN-5, design §5.1), or None
+    where it gives none and the runners carry ``<pool>, <role>``. A per-card pool's runners
+    carry also their card's ``<role>-gpu<N>``, which is not the pool's."""
+    v = inv.host['pools'].get(pool)
+    if isinstance(v, dict) and v.get('labels'):
+        return list(v['labels'])
+    return None
 
 
 # ------------------------------------------------------------------ deny list

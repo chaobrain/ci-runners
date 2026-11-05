@@ -297,10 +297,12 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
     attempt = int(rec.get('attempt', 1))
     h = outcome.hint(o.kind, attempt=attempt, retries=int(rec.get('retries', 1)))
     cls, role = str(rec.get('class', '')), str(rec.get('host', ''))
+    own = [str(x) for x in rec.get('pool_labels') or ()]  # the pool's labels name its host already (RUN-5)
     if h.next == 'retry':
-        retry_on = ['self-hosted', cls, role] if h.where == 'same-host' else ['self-hosted', cls]
+        retry_on = ['self-hosted', *own] if own else ['self-hosted', cls, role] if h.where == 'same-host' \
+            else ['self-hosted', cls]
     elif h.next == 'fallback':
-        retry_on = list(rec.get('fallback') or ['self-hosted', cls])
+        retry_on = list(rec.get('fallback') or ['self-hosted', *(own or [cls])])
     else:
         retry_on = []
     end = float((ex or {}).get('end_epoch') or time.time())
@@ -454,6 +456,8 @@ class Executor:
             'attempt': attempt, 'retries': proj.retries, 'fallback': fallback, 'inputs': dataclasses.asdict(a),
             'start_epoch': time.time(), 'boot_start': boot_id(), 'executor': os.getpid(),
             'release': self.release}
+        if inventory.pool_labels(self.inv, cls):
+            rec['pool_labels'] = inventory.pool_labels(self.inv, cls)
         _write_json(os.path.join(record, 'record.json'), rec)
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(sig, self._on_signal)

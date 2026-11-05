@@ -241,6 +241,8 @@ no_proxy = "localhost,127.0.0.1"
 
     def test_runner_names_and_labels(self):
         inv = inventory.load((self.etc / 'inventory.toml').read_text())
+        self.assertNotIn('CI_RUNNER_POOL_LABELS', setup.env_file(inv, 'part', '/e'))  # its class is its label
+        self.assertIsNone(inventory.pool_labels(inv, 'part'))
         self.assertEqual(setup.runners(inv), [('hb-light-1', ['light', 'hb'], 'light'),
                                               ('hb-part-1', ['part', 'hb'], 'part'),
                                               ('hb-part-2', ['part', 'hb'], 'part')])
@@ -334,10 +336,12 @@ h100 = {{ per_card = true, labels = ["h100"] }}
         self.assertEqual(setup.env_file(inv, 'h100', '/e', 3).splitlines(),
                          [f'ACTIONS_RUNNER_HOOK_JOB_STARTED={self.data}/ci-runners/hooks/job-started.sh',
                           f'ACTIONS_RUNNER_HOOK_JOB_COMPLETED={self.data}/ci-runners/hooks/job-completed.sh',
-                          'CI_RUNNER_CLASS=h100', 'CI_RUNNERS_ETC=/e', 'CI_RUNNER_CARD=3',
+                          'CI_RUNNER_CLASS=h100', 'CI_RUNNERS_ETC=/e', 'CI_RUNNER_POOL_LABELS=h100', 'CI_RUNNER_CARD=3',
                           f'CI_RUNNERS_PYTHON={sys.executable}', 'LANG=C.UTF-8'])
         self.assertIn('CI_RUNNER_CARD=0\n', setup.env_file(inv, 'h100', '/e', 0))  # card 0 is a card
         self.assertNotIn('CI_RUNNER_CARD', setup.env_file(inv, 'part', '/e'))
+        self.assertIn('CI_RUNNER_POOL_LABELS=hx-cpu\n', setup.env_file(inv, 'part', '/e'))
+        self.assertEqual((inventory.pool_labels(inv, 'part'), inventory.pool_labels(inv, 'nope')), (['hx-cpu'], None))
         two = inventory.load(self.inv.read_text().replace('h100 = {', 'gpu = { per_card = true }\nh100 = {'))
         with self.assertRaisesRegex(ValueError, 'same name'):
             setup.runners(two)  # both per-card pools would name their runners hx-gpu0, hx-gpu3

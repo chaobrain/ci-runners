@@ -237,7 +237,10 @@ class Load(unittest.TestCase):
     def test_malformed_policies(self):
         bad = {
             'no schema': POLICY.replace('schema = 1', ''),
-            'schema 2': POLICY.replace('schema = 1', 'schema = 2'),
+            'schema 3': POLICY.replace('schema = 1', 'schema = 3'),
+            'schema as str': POLICY.replace('schema = 1', 'schema = "1"'),
+            'schema as bool': POLICY.replace('schema = 1', 'schema = true'),
+            'org in schema 1': POLICY + '[org]\nname = "chaobrain"\n',
             'unknown key': POLICY + 'allow_all = true\n',
             'a bot as actor': POLICY.replace('"Carol"', '"dependabot[bot]"'),
             'a human as bot': 'bot = "alice"\n' + POLICY,
@@ -264,6 +267,11 @@ class Load(unittest.TestCase):
         for what, text in bad.items():
             with self.assertRaises(policy.PolicyError, msg=what):
                 policy.load(text)
+
+
+    def test_the_org_example_loads(self):
+        p = policy.load((ROOT / 'setup' / 'policy.org.example.toml').read_bytes())
+        self.assertEqual(p.org, policy.Org('chaobrain', True, True, 60))
 
 
 class Line(unittest.TestCase):

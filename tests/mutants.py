@@ -44,6 +44,7 @@ GHB = 'ci_runners/github.py'
 PRT = 'ci_runners/part.py'
 RGY = 'ci_runners/registry.py'
 REA = 'ci_runners/reaper.py'
+ORS = 'ci_runners/orgsync.py'
 LCH = 'actions/lib/ci-run.sh'
 APT = 'actions/part/action.yml'
 REG = 'setup/register.sh'
@@ -66,6 +67,7 @@ TT = 'tests.test_part'
 TE = 'tests.test_reaper'
 TK = 'tests.test_scripts'
 TA = 'tests.test_actions'
+TZ = 'tests.test_orgsync'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
@@ -103,7 +105,7 @@ MUTANTS = [
     (POL, "        if type(bot_dispatch) is not bool:", "        if False:", [f'{TP}.Load.test_malformed_policies']),
     (POL, "        if type(bot_dispatch) is not bool:", "        if not isinstance(bot_dispatch, int):", [f'{TP}.Load.test_malformed_policies']),
     (POL, "        if type(paused) is not bool:", "        if not isinstance(paused, int):", [f'{TP}.Load.test_malformed_policies']),
-    (POL, "        elif login not in policy.actors:", "        elif False:", [f'{TP}.Refused.test_unlisted_actors']),
+    (POL, "        elif login not in policy.actors and not (repo.org_members", "        elif False and not (repo.org_members", [f'{TP}.Refused.test_unlisted_actors']),
     (POL, ", _ascii_lower(env.get('GITHUB_TRIGGERING_ACTOR'), _LOGIN)]", "]", [f'{TP}.Refused.test_unlisted_actors']),
     (POL, "        out.append(_login(event['sender'], 'login'))", "        pass", [f'{TP}.Refused.test_unlisted_actors']),
     (POL, "        out.append(_login(event.get('pusher'), 'name'))", "        pass", [f'{TP}.Refused.test_unlisted_actors']),
@@ -118,7 +120,8 @@ MUTANTS = [
     (POL, "    if 'pull_request' in event or name.startswith('pull_request'):\n        pr = event.get('pull_request')\n        out",
      "    if name == 'pull_request':\n        pr = event.get('pull_request')\n        out",
      [f'{TP}.Refused.test_pull_request_target_is_refused_unless_listed_and_then_still_not_from_a_fork']),
-    (POL, "if login is None or login.endswith('[bot]'):", "if login is None:", [f'{TP}.Load.test_malformed_policies']),
+    (POL, "if login is None or login.endswith('[bot]'):\n            raise PolicyError('policy: an actor",
+     "if login is None:\n            raise PolicyError('policy: an actor", [f'{TP}.Load.test_malformed_policies']),
     (POL, "        if name == SELF:\n            raise", "        if False:\n            raise",
      [f'{TP}.Load.test_malformed_policies']),
     (POL, "if extra and vis == 'public':", "if False:", [f'{TP}.Load.test_malformed_policies']),
@@ -216,7 +219,7 @@ MUTANTS = [
     (SLO, "                        return True\n    except (OSError", "                        pass\n    except (OSError",
      [f'{TS}.Queue.test_flocked_reads_holders']),
     # the hook, setup and the proxy check
-    (HOK, "    return (0 if d.accepted else 1), policy.line(d, digest)", "    return 0, policy.line(d, digest)",
+    (HOK, "    return (0 if d.accepted else 1), policy.line(d, digest, snap_digest)", "    return 0, policy.line(d, digest, snap_digest)",
      [f'{TH}.Started.test_accept_and_refuse']),
     (HOK, "except (OSError, ValueError, RecursionError) as e:", "except (OSError, ValueError) as e:",
      [f'{TH}.Started.test_errors_refuse']),
@@ -498,6 +501,83 @@ MUTANTS = [
      [f'{TK}.Uninstall.test_the_state_and_the_release_follow_ci_runners_etc']),
     (PLN, 'ci_run=$base/releases/hook/bin/ci-run', 'ci_run=$HOME/data/ci-runners/releases/hook/bin/ci-run',
      [f'{TK}.Uninstall.test_the_state_and_the_release_follow_ci_runners_etc']),
+    # the org snapshot (design §6.5): policy schema 2, the merge, the hook, claim and ci-orgsync
+    (POL, "    if type(schema) is not int or schema not in (1, 2):", "    if schema not in (1, 2):",
+     [f'{TP}.Load.test_malformed_policies']),
+    (POL, " - ({'org'} if schema == 2 else set())", " - {'org'}", [f'{TP}.Load.test_malformed_policies']),
+    (POL, "    if type(members) is not bool or type(repos) is not bool:", "    if False:",
+     [f'{TZ}.LoadOrg.test_malformed_org_tables']),
+    (POL, "    if type(age) is not int or not lo <= age <= hi:", "    if not lo <= age <= hi:",
+     [f'{TZ}.LoadOrg.test_malformed_org_tables']),
+    (POL, "    if type(doc['schema']) is not int or doc['schema'] != SNAPSHOT_SCHEMA:",
+     "    if doc['schema'] != SNAPSHOT_SCHEMA:", [f'{TZ}.LoadSnapshot.test_malformed_snapshots']),
+    (POL, "        if login is None or login.endswith('[bot]'):\n            raise PolicyError('org snapshot",
+     "        if login is None:\n            raise PolicyError('org snapshot", [f'{TZ}.LoadSnapshot.test_malformed_snapshots']),
+    (POL, "not name.startswith(org + '/') or type(rid) is not int", "not name.startswith(org) or type(rid) is not int",
+     [f'{TZ}.LoadSnapshot.test_malformed_snapshots']),
+    (POL, "or type(rid) is not int or rid <= 0:", "or rid <= 0:", [f'{TZ}.LoadSnapshot.test_malformed_snapshots']),
+    (POL, "    if snap.org != org.name:", "    if False:", [f'{TZ}.Merge.test_another_orgs_snapshot']),
+    (POL, "    if not now - org.max_age_minutes * 60 <= snap.fetched_at <= now + CLOCK_SKEW:",
+     "    if not now - org.max_age_minutes * 60 <= snap.fetched_at:", [f'{TZ}.Merge.test_stale_or_future_snapshots']),
+    (POL, "    if not now - org.max_age_minutes * 60 <= snap.fetched_at <= now + CLOCK_SKEW:",
+     "    if not snap.fetched_at <= now + CLOCK_SKEW:", [f'{TZ}.Merge.test_stale_or_future_snapshots']),
+    (POL, "    if not now - org.max_age_minutes * 60 <= snap.fetched_at <= now + CLOCK_SKEW:",
+     "    if not now - 3600 <= snap.fetched_at <= now + CLOCK_SKEW:", [f'{TZ}.Merge.test_stale_or_future_snapshots']),
+    (POL, "    members = snap.members if org.members else frozenset()", "    members = snap.members",
+     [f'{TZ}.Merge.test_the_switches_are_honoured']),
+    (POL, "elif login not in policy.actors and not (repo.org_members and login in policy.members):",
+     "elif login not in policy.actors and login not in policy.members:",
+     [f'{TZ}.Merge.test_members_act_only_in_the_snapshots_private_repositories']),
+    (POL, "            if repo.visibility == 'private' and snap.repos.get(name) == repo.id and name != SELF:",
+     "            if snap.repos.get(name) == repo.id and name != SELF:",
+     [f'{TZ}.Merge.test_members_act_only_in_the_snapshots_private_repositories']),
+    (POL, "            if repo.visibility == 'private' and snap.repos.get(name) == repo.id and name != SELF:",
+     "            if repo.visibility == 'private' and name in snap.repos and name != SELF:",
+     [f'{TZ}.Merge.test_members_act_only_in_the_snapshots_private_repositories']),
+    (POL, "if repo is not None and repo.org_members else policy.actors", "if repo is not None else policy.actors",
+     [f'{TZ}.Merge.test_members_act_only_in_the_snapshots_private_repositories']),
+    (GHB, "            actors, bot = policy.actors_for(pol, env.get('GITHUB_REPOSITORY', '')), pol.bot",
+     "            actors, bot = pol.actors, pol.bot", [f'{TZ}.Hook.test_claim_takes_the_same_allowlist']),
+    (GHB, "                if len(data) > 4 << 20:", "                if False:",
+     [f'{TZ}.Hook.test_claim_takes_the_same_allowlist']),
+    (ORS, " or not m['login'].isascii():", ":", [f'{TZ}.Sync.test_strict_fields']),
+    (ORS, " or not r['full_name'].isascii()", "", [f'{TZ}.Sync.test_strict_fields']),
+    (ORS, "    return snapshot(org, members, repos, started)", "    return snapshot(org, members, repos, now())",
+     [f'{TZ}.Sync.test_strict_fields']),
+    (ORS, "raw.strip().decode('ascii') if raw.isascii() else ''", "raw.strip().decode('ascii')",
+     [f'{TZ}.Sync.test_main_writes_the_snapshot_and_keeps_it_on_failure']),
+    (ORS, "        if name.startswith('org.json.') and name.endswith('.tmp'):", "        if False:",
+     [f'{TZ}.Sync.test_write_does_not_follow_a_planted_link']),
+    (POL, "    if org.private_repositories:", "    if True:", [f'{TZ}.Merge.test_the_switches_are_honoured']),
+    (POL, "            if name != SELF and name not in repos:", "            if name not in repos:",
+     [f'{TZ}.Merge.test_public_repositories_stay_public_and_unlisted_ones_stay_out']),
+    (POL, "            if name != SELF and name not in repos:", "            if name != SELF:",
+     [f'{TZ}.Merge.test_a_listed_repository_keeps_the_policy_entry']),
+    (HOK, "            if pol.org is not None:\n                snap =", "            if False:\n                snap =",
+     [f'{TZ}.Hook.test_a_fresh_snapshot_accepts_a_member']),
+    (HOK, "            d = policy.Decision(False, 'stale')", "            d = policy.Decision(True, 'stale')",
+     [f'{TZ}.Hook.test_a_stale_missing_or_malformed_snapshot_refuses']),
+    (HOK, "'org.json'), MAX_SNAPSHOT))", "'org.json'), MAX_EVENT))", [f'{TZ}.Hook.test_an_oversized_snapshot_refuses']),
+    (GHB, "            if pol.org is not None:  # the hook's merge", "            if False:  # the hook's merge",
+     [f'{TZ}.Hook.test_claim_takes_the_same_allowlist']),
+    (ORS, "        if m.get('type', 'User') == 'User':", "        if True:", [f'{TZ}.Sync.test_snapshot_of_every_page']),
+    (ORS, "        if r.get('private') is True and name.startswith(org + '/'):", "        if name.startswith(org + '/'):",
+     [f'{TZ}.Sync.test_snapshot_of_every_page']),
+    (ORS, "        if r.get('private') is True and name.startswith(org + '/'):",
+     "        if r.get('private') and name.startswith(org + '/'):", [f'{TZ}.Sync.test_strict_fields']),
+    (ORS, "    if not logins:\n        raise SyncError", "    if False:\n        raise SyncError",
+     [f'{TZ}.Sync.test_a_bad_fetch_raises']),
+    (ORS, "        if len(got) < PAGE:\n            return out", "        return out", [f'{TZ}.Sync.test_snapshot_of_every_page']),
+    (ORS, "        out += got\n", "        out = got\n", [f'{TZ}.Sync.test_snapshot_of_every_page']),
+    (ORS, " | os.O_EXCL | os.O_NOFOLLOW", "", [f'{TZ}.Sync.test_write_does_not_follow_a_planted_link']),
+    (ORS, "        if not token or len(token) > MAX_TOKEN or any(c.isspace() for c in token):", "        if not token:",
+     [f'{TZ}.Sync.test_main_writes_the_snapshot_and_keeps_it_on_failure']),
+    (ORS, "        if pol.org is None:\n            print", "        if False:\n            print",
+     [f'{TZ}.Sync.test_main_without_org_does_nothing']),
+    (SET, " and (h.get('orgsync') or 'orgsync' not in t)]", "]",
+     [f'{TU}.Setup.test_the_org_snapshot_timer_only_where_the_inventory_asks']),
+    (SET, " or name.startswith('ci-orgsync') and not h.get('orgsync'):", ":",
+     [f'{TU}.Setup.test_the_org_snapshot_timer_only_where_the_inventory_asks']),
 ]
 
 

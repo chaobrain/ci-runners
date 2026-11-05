@@ -2,6 +2,7 @@
 
     ci-run proxy-check     one check of the CI proxy (ci-proxy-check.timer)
     ci-run reap            the reaper's pass (ci-reaper.timer)
+    ci-run org-sync        the org snapshot (ci-orgsync.timer; design §6.5)
     ci-run plan|apply ...  host setup (setup/plan.sh, setup/apply.sh)
     ci-run runners         this host's runners: name, labels, class
     ci-run role            this host's role
@@ -51,6 +52,9 @@ def main(argv: list[str]) -> int:
         from ci_runners import reaper
         print(reaper.reap(load_inventory().host['data']))
         return 0
+    if cmd == 'org-sync':
+        from ci_runners import orgsync
+        return orgsync.main(etc_dir())
     if cmd == 'claim':
         from ci_runners import github
         return github.main(args, etc_dir())

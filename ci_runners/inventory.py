@@ -99,7 +99,7 @@ HOST_KEYS = {
               and all(_abs(p) for p in v.values()), True),  # brainspike's lock and slot files (D5)
     'proxy': (lambda v: isinstance(v, dict), False),  # none: GitHub is reached directly (h100, decision 11.6)
     'python': (_abs, False),         # the host layer's interpreter, 3.11 or later; else /usr/bin/python3
-    'orgsync': (lambda v: type(v) is bool, False),  # the org snapshot timer runs here (RUN-5, design §6.5)
+    'orgsync': (lambda v: type(v) is bool, False),  # runs ci-orgsync.timer: the org snapshot (§6.5)
     'watchdog_log': (_abs, False),   # the GPU watchdog's log (h100; design §4.4 thermal)
     'watchdog_notice': (_abs, False),  # the watchdog's notice file (h100 health gate, §5.4 phase 1)
 }

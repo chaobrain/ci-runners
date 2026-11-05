@@ -239,6 +239,20 @@ no_proxy = "localhost,127.0.0.1"
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('nothing listens on the CI proxy port', r.stderr)
 
+    def test_the_org_snapshot_timer_only_where_the_inventory_asks(self):
+        text = setup.build(str(self.etc)).text()
+        self.assertNotIn('ci-orgsync', text)
+        inv = self.etc / 'inventory.toml'
+        inv.write_text(inv.read_text().replace('max_temp_c = 80\n', 'max_temp_c = 80\norgsync = true\n'))
+        plan = setup.build(str(self.etc))
+        self.assertIn('ci-orgsync.service', plan.text())
+        enable = [a['argv'] for a in plan.actions if a.get('kind') == 'run' and '--now' in a['argv']
+                  and 'ci-reaper.timer' in a['argv']]
+        self.assertEqual(enable, [['systemctl', '--user', 'enable', '--now', 'ci-proxy-check.timer', 'ci-reaper.timer',
+                                   'ci-orgsync.timer']])
+        self.assertEqual(setup.timers({}), ['ci-reaper.timer'])
+        self.assertEqual(setup.timers({'orgsync': True}), ['ci-reaper.timer', 'ci-orgsync.timer'])
+
     def test_runner_names_and_labels(self):
         inv = inventory.load((self.etc / 'inventory.toml').read_text())
         self.assertNotIn('CI_RUNNER_POOL_LABELS', setup.env_file(inv, 'part', '/e'))  # its class is its label
@@ -353,11 +367,15 @@ h100 = {{ per_card = true, labels = ["h100"] }}
             self.assertNotIn(no, text)
         for want in ('labels hx-light;', 'labels hx-cpu;', 'labels h100,hx-gpu0;', 'labels h100,hx-gpu3;',
                      '| CI_RUNNER_CARD=3', f'| CI_RUNNERS_PYTHON={sys.executable}', '| MemoryMax=512G',
-                     'fetched directly', 'run    systemctl --user enable --now ci-reaper.timer\n'):
+                     'fetched directly', 'run    systemctl --user enable --now ci-reaper.timer ci-orgsync.timer\n'):
             self.assertIn(want, text)
         self.assertEqual(self.apply(text), 0)
         self.assertEqual(sorted(p.name for p in self.units.iterdir()),
-                         ['ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service', 'ci.slice'])
+                         ['ci-orgsync.service', 'ci-orgsync.timer', 'ci-reaper.service', 'ci-reaper.timer',
+                          'ci-runner@.service', 'ci.slice'])
+        orgsync = (self.units / 'ci-orgsync.service').read_text()
+        self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run org-sync\n', orgsync)
+        self.assertIn(f'Environment=CI_RUNNERS_PYTHON={sys.executable}\n', orgsync)
         runner = (self.units / 'ci-runner@.service').read_text()
         self.assertNotIn('ci-proxy', runner)
         self.assertIn('Description=ci-runners: GitHub Actions runner %i\n\n[Service]', runner)

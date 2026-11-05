@@ -41,18 +41,42 @@ inputs:
     description: the record of the attempt this one retries
     default: ''
 outputs:
-  outcome: {description: 'pass, red, oom, thermal, reboot, yielded, unavailable, lost or stopped', value: '${{ steps.part.outputs.outcome }}'}
-  reason: {description: why, value: '${{ steps.part.outputs.reason }}'}
-  next: {description: 'none, retry or fallback', value: '${{ steps.part.outputs.next }}'}
-  retry-on: {description: label array for the retry or the fallback, value: '${{ steps.part.outputs.retry-on }}'}
-  resume: {description: whether the retry resumes, value: '${{ steps.part.outputs.resume }}'}
-  host: {description: the host role, value: '${{ steps.part.outputs.host }}'}
-  gpus: {description: the cards leased, value: '${{ steps.part.outputs.gpus }}'}
-  queue-seconds: {description: time waiting for a slot or cards, value: '${{ steps.part.outputs.queue-seconds }}'}
-  run-seconds: {description: time running, value: '${{ steps.part.outputs.run-seconds }}'}
-  verify: {description: whether the keyed draw picked this part (h100), value: '${{ steps.part.outputs.verify }}'}
-  record: {description: the part record, for salvage, value: '${{ steps.part.outputs.record }}'}
-  attempt: {description: the attempt number, value: '${{ steps.part.outputs.attempt }}'}
+  outcome:
+    description: "pass, red, oom, thermal, reboot, yielded, unavailable, lost or stopped"
+    value: ${{ steps.part.outputs.outcome }}
+  reason:
+    description: "why"
+    value: ${{ steps.part.outputs.reason }}
+  next:
+    description: "none, retry or fallback"
+    value: ${{ steps.part.outputs.next }}
+  retry-on:
+    description: "label array for the retry or the fallback"
+    value: ${{ steps.part.outputs.retry-on }}
+  resume:
+    description: "whether the retry resumes"
+    value: ${{ steps.part.outputs.resume }}
+  host:
+    description: "the host role"
+    value: ${{ steps.part.outputs.host }}
+  gpus:
+    description: "the cards leased"
+    value: ${{ steps.part.outputs.gpus }}
+  queue-seconds:
+    description: "time waiting for a slot or cards"
+    value: ${{ steps.part.outputs.queue-seconds }}
+  run-seconds:
+    description: "time running"
+    value: ${{ steps.part.outputs.run-seconds }}
+  verify:
+    description: "whether the keyed draw picked this part (h100)"
+    value: ${{ steps.part.outputs.verify }}
+  record:
+    description: "the part record, for salvage"
+    value: ${{ steps.part.outputs.record }}
+  attempt:
+    description: "the attempt number"
+    value: ${{ steps.part.outputs.attempt }}
 runs:
   using: composite
   steps:

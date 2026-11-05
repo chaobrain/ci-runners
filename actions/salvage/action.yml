@@ -8,12 +8,24 @@ inputs:
     description: how long to wait for a part that still runs
     default: '0'
 outputs:
-  outcome: {description: as part, value: '${{ steps.salvage.outputs.outcome }}'}
-  reason: {description: as part, value: '${{ steps.salvage.outputs.reason }}'}
-  next: {description: as part, value: '${{ steps.salvage.outputs.next }}'}
-  retry-on: {description: as part, value: '${{ steps.salvage.outputs.retry-on }}'}
-  record: {description: as part, value: '${{ steps.salvage.outputs.record }}'}
-  attempt: {description: as part, value: '${{ steps.salvage.outputs.attempt }}'}
+  outcome:
+    description: "as part"
+    value: ${{ steps.salvage.outputs.outcome }}
+  reason:
+    description: "as part"
+    value: ${{ steps.salvage.outputs.reason }}
+  next:
+    description: "as part"
+    value: ${{ steps.salvage.outputs.next }}
+  retry-on:
+    description: "as part"
+    value: ${{ steps.salvage.outputs.retry-on }}
+  record:
+    description: "as part"
+    value: ${{ steps.salvage.outputs.record }}
+  attempt:
+    description: "as part"
+    value: ${{ steps.salvage.outputs.attempt }}
 runs:
   using: composite
   steps:

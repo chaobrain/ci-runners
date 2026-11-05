@@ -43,6 +43,14 @@ class Actions(unittest.TestCase):
             self.assertEqual(passed, want, name)
             self.assertLessEqual(passed, flags(modules[name], name), name)
 
+    def test_no_flow_mappings(self):
+        """A flow mapping (``{description: a, b, value: ...}``) reads a comma in the text as
+        a new key, and the runner refuses the whole action; block style only."""
+        for name in ACTIONS:
+            for n, line in enumerate((ROOT / 'actions' / name / 'action.yml').read_text().splitlines(), 1):
+                bare = re.sub(r'\$\{\{.*?\}\}|\'[^\']*\'|"[^"]*"', '', line)
+                self.assertNotRegex(bare, r'[{}]', f'{name}/action.yml:{n}')
+
     def test_the_launcher_and_the_release_stamp(self):
         self.assertRegex((ROOT / 'actions' / 'RELEASE').read_text().strip(), r'\A(hook|v\d+\.\d+\.\d+)\Z')
         for name in ACTIONS:

@@ -409,6 +409,9 @@ MUTANTS = [
     (LCH, 'exec "$ci_run" "$cmd" "$@"', 'exec "$ci_run" "$@"', [f'{TA}.Launcher.test_the_stamped_release_runs']),
     (APT, ' --attempt-of "$IN_ATTEMPT_OF"', '', [f'{TA}.Actions.test_inputs_reach_their_flags']),
     (APT, '        IN_RESUME: ${{ inputs.resume }}\n', '', [f'{TA}.Actions.test_every_input_is_used_and_every_use_declared']),
+    (APT, '  record:\n    description: "the part record, for salvage"\n    value: ${{ steps.part.outputs.record }}\n',
+     "  record: {description: the part record, for salvage, value: '${{ steps.part.outputs.record }}'}\n",
+     [f'{TA}.Actions.test_no_flow_mappings']),
 ]
 
 

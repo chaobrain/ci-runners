@@ -54,6 +54,7 @@ class Repo:
     visibility: str  # ``private`` or ``public``
     paused: bool = False
     extra_events: frozenset[str] = frozenset()  # private only: events beyond PRIVATE_EVENTS
+    bot_dispatch: bool = False  # private only: the bot may start BOT_EVENTS (lead, 2026-11-05)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -112,7 +113,7 @@ def load(data: bytes | str) -> Policy:
             raise PolicyError('policy: a repository key is not owner/name')
         if name == SELF:
             raise PolicyError(f'policy: {SELF} may not be listed')
-        unknown = set(r) - {'id', 'visibility', 'paused', 'extra_events'}
+        unknown = set(r) - {'id', 'visibility', 'paused', 'extra_events', 'bot_dispatch'}
         if unknown:
             raise PolicyError(f'policy: {name}: unknown keys {sorted(unknown)}')
         rid, vis, paused = r.get('id'), r.get('visibility'), r.get('paused', False)
@@ -127,9 +128,14 @@ def load(data: bytes | str) -> Policy:
             raise PolicyError(f'policy: {name}: extra_events must name events of {sorted(EXTRA_EVENTS)}')
         if extra and vis == 'public':
             raise PolicyError(f'policy: {name}: a public repository takes no extra events')
+        bot_dispatch = r.get('bot_dispatch', False)
+        if type(bot_dispatch) is not bool:
+            raise PolicyError(f'policy: {name}: bot_dispatch must be a boolean')
+        if bot_dispatch and vis == 'public':
+            raise PolicyError(f'policy: {name}: a public repository takes no bot dispatch')
         if name in repos:
             raise PolicyError(f'policy: {name} is listed twice')
-        repos[name] = Repo(name, rid, vis, paused, frozenset(extra))
+        repos[name] = Repo(name, rid, vis, paused, frozenset(extra), bot_dispatch)
     return Policy(frozenset(actors), repos, bot, hashlib.sha256(raw).hexdigest())
 
 
@@ -218,8 +224,8 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
         if not isinstance(wr, dict) or not _repo_matches(wr.get('head_repository'), repo):
             return no('fork')
     for login in _actors(env, event, event_name):  # None (absent or malformed) is on no list
-        if login == policy.bot:
-            if public or event_name not in BOT_EVENTS:
+        if login == policy.bot:  # on no allowlist: passes only where the repository's switch is on
+            if public or not repo.bot_dispatch or event_name not in BOT_EVENTS:
                 return no('bot')
         elif login not in policy.actors:
             return no('actor')

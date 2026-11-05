@@ -177,7 +177,7 @@ MUTANTS = [
     (LCK, "if left <= 0 or not _wait_in_queue(fd, op, left):", "if not _wait_in_queue(fd, op, 1e6):",
      [f'{TX}.LockInterop.test_a_timeout']),
     (SLO, "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", "fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)",
-     [f'{TX}.SlotInterop.test_together_never_more_than_the_slot_count']),
+     [f'{TX}.SlotInterop.test_together_never_more_than_the_slot_count', f'{TS}.Queue.test_a_taken_slot_is_held_exclusively']),
     (SLO, "                        return True\n    except (OSError", "                        pass\n    except (OSError",
      [f'{TS}.Queue.test_flocked_reads_holders']),
     # the hook, setup and the proxy check

@@ -69,6 +69,20 @@ class Queue(unittest.TestCase):
                 os.killpg(hold.pid, 9)
                 hold.wait()
 
+    def test_a_taken_slot_is_held_exclusively(self):
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 1, poll=0.05)
+            q.take_ticket('p', 'cmd')
+            fd = q.try_take('p', {'p': 1}, 'p')
+            self.assertIsNotNone(fd)
+            try:
+                r = subprocess.run(['flock', '-n', '-s', q.slots[0], 'true'], timeout=10)
+                self.assertEqual(r.returncode, 1)  # ci_slot.sh's shared or exclusive try fails
+                self.assertFalse(os.path.exists(q.ticket))
+                self.assertEqual(q.held()[:2], ({'p': 1}, 0))
+            finally:
+                os.close(fd)
+
     def test_tickets_share_the_counter_and_dead_ones_go(self):
         with tempfile.TemporaryDirectory() as d:
             q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05)

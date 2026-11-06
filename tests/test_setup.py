@@ -433,6 +433,61 @@ h100 = {{ per_card = true, labels = ["h100"] }}
         with self.assertRaisesRegex(ValueError, 'unreadable'):
             setup.build(str(self.etc))
 
+    def test_adopt_takes_over_unrecorded_units(self):
+        """An older release wrote the units and kept no record: --adopt lists each and plans
+        it as usual; the apply needs --adopt too, then records them, so uninstall removes
+        them later. A link is never adopted."""
+        self.units.mkdir(parents=True)
+        reaper = self.units / 'ci-reaper.service'
+        reaper.write_text('[Service]\nExecStart=/old/ci-run reap\n')
+        os.chmod(reaper, 0o644)
+        with self.assertRaisesRegex(ValueError, 'or plan with --adopt'):
+            setup.build(str(self.etc))
+        text = setup.build(str(self.etc), adopt=True).text()
+        self.assertIn(f'  adopt  {reaper} (no apply recorded it; the lead names it ours)\n  update {reaper}', text)
+        self.assertEqual(text.count('  adopt  '), 1)
+        self.unpacked = []
+        with self.assertRaisesRegex(ValueError, 'or plan with --adopt'):
+            self.apply(text)  # applied without --adopt: refused
+        self.assertIn('/old/', reaper.read_text())
+        f = pathlib.Path(self.tmp.name) / 'adopt.txt'
+        f.write_text(text)
+        with mock.patch.object(setup, '_unpack', lambda path, cache, port: [
+                pathlib.Path(path, x).parent.mkdir(parents=True, exist_ok=True) or pathlib.Path(path, x).write_text('')
+                for x in setup.RUNNER_FILES]), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(setup.apply(str(self.etc), str(f), run=self.run_, adopt=True), 0)
+        self.assertNotIn('/old/', reaper.read_text())
+        self.assertIn(str(reaper), setup._ours(str(self.data / 'ci-runners' / 'state' / 'setup.json')))
+        self.assertNotIn('adopt', setup.build(str(self.etc)).text())  # ours now: no flag needed
+        # adopted as it is (already the planned content): the apply records it without writing
+        (self.data / 'ci-runners' / 'state' / 'setup.json').unlink()  # the record lost again
+        text = setup.build(str(self.etc), adopt=True).text()
+        self.assertIn(f'  adopt  {reaper} (no apply recorded it; the lead names it ours)\n  keep   {reaper}', text)
+        f.write_text(text)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(setup.apply(str(self.etc), str(f), run=self.run_, adopt=True), 0)
+        self.assertIn(str(reaper), setup._ours(str(self.data / 'ci-runners' / 'state' / 'setup.json')))
+        setup.build(str(self.etc))  # no flag needed now
+        (self.data / 'ci-runners' / 'state' / 'setup.json').unlink()  # the record lost again
+        link = self.units / 'ci-orgsync.timer'  # a name setup writes here (orgsync = true)
+        link.unlink()
+        os.symlink(reaper, link)
+        with self.assertRaisesRegex(ValueError, 'cannot be adopted'):
+            setup.build(str(self.etc), adopt=True)
+
+    def test_the_adopt_flag_reaches_plan_and_apply(self):
+        with mock.patch.object(setup, 'build', return_value=setup.Plan()) as b, contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()), mock.patch.dict(os.environ, {'CI_RUNNERS_ETC': '/e'}):
+            setup.main(['plan', '--adopt'])
+            setup.main(['plan'])
+        self.assertEqual([c.kwargs.get('adopt') for c in b.call_args_list], [True, False])
+        with mock.patch.object(setup, 'apply', return_value=0) as a, mock.patch.dict(os.environ, {'CI_RUNNERS_ETC': '/e'}):
+            setup.main(['apply', '--plan', 'f', '--adopt'])
+            setup.main(['apply', '--plan', 'f'])
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(setup.main(['apply', '--plan', 'f', '--other']), 2)
+        self.assertEqual([c.kwargs.get('adopt') for c in a.call_args_list], [True, False])
+
     def test_the_python_must_be_3_11_or_later(self):
         old = pathlib.Path(self.tmp.name) / 'py310'
         old.write_text('#!/bin/sh\nexit 1\n')  # what a 3.10 answers to the version check

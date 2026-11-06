@@ -713,7 +713,7 @@ indexes do not (decision 11.8); not in the docker group; the system `python3` is
 | `ci-reaper.timer` | as on 3090b |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 512G of 2 TB) and `ci-<project>.slice` |
 | lock and slot files | new ones under `state/`: h100 has no brainspike files to share (D5 does not apply) |
-| unit names | every unit file starts with `ci-` (`ci.slice` included); `uninstall.sh` stops and removes only the units an `apply` recorded in `state/setup.json`; `plan.sh` refuses if a unit of that name exists and no earlier `apply` wrote it (another user of the account may have one). The unit directory exists (mode 700) and is the account's: setup never changes its mode. |
+| unit names | every unit file starts with `ci-` (`ci.slice` included); `uninstall.sh` stops and removes only the units an `apply` recorded in `state/setup.json`; `plan.sh` refuses if a unit of that name exists and no earlier `apply` wrote it (another user of the account may have one). `plan.sh ROLE --adopt` instead lists each such unit as `adopt` and plans it as usual (a regular file of this account only), for units an older release wrote without a record; the lead approves the adoption with the plan, and `apply.sh` takes `--adopt` too. Never on a shared account without checking each listed file. The unit directory exists (mode 700) and is the account's: setup never changes its mode. |
 | unchanged | the shared account's shell files, crontab, `authorized_keys`, other users' files, envs and units; no proxy client |
 
 There is no root step on h100: the shared account has no sudo for us, and none is

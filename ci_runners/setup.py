@@ -20,7 +20,10 @@
 Units are rendered with the inventory's ``data`` (the root of §3.2, ``~/data`` on the 3090
 hosts, our subtree on h100) and ``python``. A ``ci-*`` unit file that exists but that no
 earlier ``apply`` wrote (``state/setup.json``) stops the plan: another user of a shared
-account may own it.
+account may own it. ``plan --adopt`` instead lists each such file as ``adopt`` (a regular
+file of this account only) and plans it as usual, for a host whose units an older release
+wrote without a record; the lead approves the adoption with the plan, and ``apply`` must
+be given ``--adopt`` too.
 
 Registration is not in the plan: the lead runs ``setup/register.sh`` with a fresh
 token. ``apply --plan FILE`` refuses unless a fresh plan is identical (by sha256) and
@@ -265,7 +268,7 @@ def _file(plan: Plan, path: str, content: str, mode: int, secret: bool = False, 
             plan.add(f'         | {line}')
 
 
-def build(etc: str) -> Plan:
+def build(etc: str, adopt: bool = False) -> Plan:
     """The plan for this host, from ``etc`` and the installed release
     (``$CI_RUNNERS_RELEASE`` instead, to preview a plan before the account exists).
     Pure but for reading files."""
@@ -320,8 +323,20 @@ def build(etc: str) -> Plan:
     def unit(name: str, content: str) -> None:
         path = os.path.join(unit_dir, name)
         if os.path.lexists(path) and path not in ours:
-            raise ValueError(f'{path} exists and no apply of ci-runners wrote it: another user\'s unit? '
-                             'Rename or remove it first')
+            if not adopt:
+                raise ValueError(f'{path} exists and no apply of ci-runners wrote it: another user\'s unit? '
+                                 'Rename or remove it first, or plan with --adopt if it is ours')
+            st = os.lstat(path)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                raise ValueError(f'{path} is not a regular file of this account: it cannot be adopted')
+            # the uid check tells nothing apart on a shared account: there the lead's reading
+            # of each listed file is the check (design §5.3)
+            plan.add(f'  adopt  {path} (no apply recorded it; the lead names it ours)')
+            n = len(plan.actions)
+            _file(plan, path, content, 0o644)
+            if len(plan.actions) == n:  # kept as it is: record it; a write or update records itself, once made
+                plan.actions.append({'kind': 'adopt', 'path': path})
+            return
         _file(plan, path, content, 0o644)
 
     for name in UNITS:
@@ -483,10 +498,10 @@ def runner_complete(path: str) -> bool:
     return all(os.path.isfile(os.path.join(path, f)) for f in RUNNER_FILES)
 
 
-def apply(etc: str, plan_file: str, run=subprocess.run) -> int:
+def apply(etc: str, plan_file: str, run=subprocess.run, adopt: bool = False) -> int:
     with open(plan_file, encoding='utf-8') as f:
         approved = f.read()
-    plan = build(etc)
+    plan = build(etc, adopt)
     if not plan.actions:
         print(f'apply: nothing to change (plan {plan.digest()[:16]})')
         return 0
@@ -521,6 +536,10 @@ def _apply_actions(plan: Plan, made: list, run) -> None:
             os.replace(tmp, a['path'])
         elif k == 'symlink':
             os.symlink(a['target'], a['path'])
+        elif k == 'adopt':  # recorded as a file of this apply's, so uninstall removes it
+            made.append({'kind': 'file', 'path': a['path']})
+            print(f'apply: adopt {a["path"]}')
+            continue
         elif k == 'wait':
             for port in a['ports']:
                 wait_port(port)
@@ -555,12 +574,12 @@ def main(argv: list[str]) -> int:
         for name, labels, cls in runners(inv):
             print(name, ','.join(labels), cls)
         return 0
-    if argv == ['plan']:
-        p = build(etc)
+    if argv in (['plan'], ['plan', '--adopt']):
+        p = build(etc, adopt=len(argv) == 2)
         sys.stdout.write(p.text())
         print(f'# plan sha256 {p.digest()}', file=sys.stderr)
         return 0
-    if len(argv) == 3 and argv[0] == 'apply' and argv[1] == '--plan':
-        return apply(etc, argv[2])
-    print('usage: ci-run plan | ci-run apply --plan FILE', file=sys.stderr)
+    if len(argv) in (3, 4) and argv[0] == 'apply' and argv[1] == '--plan' and argv[3:] in ([], ['--adopt']):
+        return apply(etc, argv[2], adopt=len(argv) == 4)
+    print('usage: ci-run plan [--adopt] | ci-run apply --plan FILE [--adopt]', file=sys.stderr)
     return 2

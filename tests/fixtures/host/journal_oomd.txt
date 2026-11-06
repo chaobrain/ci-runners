@@ -1,4 +1,0 @@
-Nov 05 00:07:34 host systemd[2103]: Started ci-brainspike-20261105-000734-4870627.scope - /usr/bin/nice -n 10 ionice -c2 -n7 bash -c scripts/local_ci.sh.
-Nov 05 03:19:46 host systemd[2103]: ci-brainspike-20261105-000734-4870627.scope: systemd-oomd killed 12 process(es) in this unit.
-Nov 05 03:19:47 host systemd[2103]: ci-brainspike-20261105-000734-4870627.scope: Failed with result 'oom-kill'.
-Nov 05 03:19:47 host systemd[2103]: ci-brainspike-20261105-000734-4870627.scope: Consumed 3h 12min 3.522s CPU time.

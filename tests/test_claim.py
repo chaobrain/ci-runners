@@ -14,8 +14,8 @@ def S(state, creator='alice', age_min=1.0):
     return claim.Status(state, creator, NOW - age_min * 60)
 
 
-def run(statuses, hosted=False, lapse=45):
-    c = claim.decide(statuses, actors=['Alice'], bot=BOT, now=NOW, lapse_minutes=lapse, hosted=hosted)
+def run(statuses, lapse=45):
+    c = claim.decide(statuses, actors=['Alice'], bot=BOT, now=NOW, lapse_minutes=lapse)
     return c.run, c.reason
 
 
@@ -51,11 +51,6 @@ class Decide(unittest.TestCase):
         self.assertEqual(run([S('success', 'mallory')]), (True, 'no verdict on this head'))
         self.assertEqual(run([S('success', 'mallory', 0), S('failure', BOT, 5)])[0], True)
         self.assertEqual(run([S('success', 'github-actions')])[0], True)  # not the bot
-
-    def test_on_a_hosted_runner_only_the_bot_counts(self):
-        self.assertEqual(run([S('success')], hosted=True), (True, 'no verdict on this head'))
-        self.assertEqual(run([S('pending')], hosted=True)[0], True)
-        self.assertEqual(run([S('success', BOT)], hosted=True), (False, 'green'))
 
     def test_the_bot_listed_as_an_actor_is_still_the_bot(self):
         c = claim.decide([S('failure', BOT)], actors=['alice', BOT], bot=BOT, now=NOW)

@@ -1,7 +1,0 @@
-{
- "ref": "refs/heads/main",
- "after": "cccccccccccccccccccccccccccccccccccccccc",
- "repository": {"id": 2002, "full_name": "chaobrain/brainevent", "name": "brainevent", "private": false, "fork": false},
- "pusher": {"name": "alice"},
- "sender": {"login": "alice", "type": "User"}
-}

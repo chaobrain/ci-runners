@@ -24,10 +24,9 @@ from collections.abc import Callable, Iterable, Mapping
 from ci_runners import github, inventory, part
 
 #: the outcomes a part's ``outcome.json`` may name (design §4.4)
-KINDS = frozenset({'pass', 'red', 'oom', 'thermal', 'reboot', 'yielded', 'unavailable', 'lost', 'stopped',
-                   'disagreement'})
+KINDS = frozenset({'pass', 'red', 'oom', 'thermal', 'reboot', 'unavailable', 'lost', 'stopped'})
 #: the outcomes that fail the head: the code is wrong, not the host
-FAILING = frozenset({'red', 'disagreement'})
+FAILING = frozenset({'red'})
 #: attempts per part: the first and one retry (design §4.4)
 MAX_ATTEMPT = 2
 ARTIFACT = re.compile(r'ci-part-([A-Za-z0-9][A-Za-z0-9_.-]{0,63})-([0-9]{1,2})\Z')
@@ -54,7 +53,7 @@ def decide(ends: Iterable[End]) -> Verdict:
     """The head's status from its parts' ends. Pure.
 
     - no part: error (a workflow with neither command set tests nothing);
-    - any part ``red`` or ``disagreement``: failure, naming those parts;
+    - any part ``red``: failure, naming those parts;
     - every part ``pass``: success;
     - else error, naming the parts whose infrastructure end stands.
     """

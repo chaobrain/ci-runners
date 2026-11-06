@@ -20,17 +20,28 @@ H = '/ho' + 'me/'  # a home-directory prefix
 class Load(unittest.TestCase):
     def test_the_example_loads(self):
         i = inv.load(EXAMPLE)
-        self.assertEqual(i.this, '3090b')
-        self.assertEqual(sorted(i.hosts), ['3090b', 'h100'])
-        self.assertEqual(i.host['pools'], {'light': 2, 'part': 4, 'compile': 1})
-        h = i.hosts['h100']
-        self.assertNotIn('remote', h)  # RUN-5: standalone (decision 11.3)
-        self.assertNotIn('proxy', h)
-        self.assertEqual(h['pools']['h100'], {'per_card': True, 'labels': ['h100']})
+        self.assertEqual(i.this, 'h100')
+        self.assertEqual(sorted(i.hosts), ['h100'])
+        self.assertEqual(i.host['pools']['h100'], {'per_card': True, 'labels': ['h100']})
+        self.assertNotIn('host_lock', i.host['files'])
+
+    def test_the_retired_keys_are_accepted_and_ignored(self):
+        """Decision 11.12: h100's inventory may still hold the first path's keys."""
+        old = EXAMPLE.replace('slots = 2', 'ssh = "<alias>"\ntrusted = true\nremote = false\ncpu_slowdown = 2.7\n'
+                              'slots = 2', 1).replace('slot_lock = ', 'host_lock = "/tmp/h.lock"\nslot_lock = ', 1)
+        old += '[hosts.h100.proxy]\nclient = "/x"\n'
+        i = inv.load(old)
+        self.assertEqual(i.host['cpu_slowdown'], 2.7)
+        self.assertEqual(inv.RETIRED_KEYS, {'ssh', 'trusted', 'remote', 'cpu_slowdown', 'proxy'})
+        with self.assertRaises(inv.InventoryError):  # only those: another key is still unknown
+            inv.load(EXAMPLE.replace('slots = 2', 'slowdown = 2.7\nslots = 2', 1))
+        with self.assertRaises(inv.InventoryError):
+            inv.load(EXAMPLE.replace('slot_lock = ', 'other_lock = "/tmp/o.lock"\nslot_lock = ', 1))
 
     def test_pools_as_tables(self):
         """RUN-5: a pool may give its labels, or have one runner per card."""
-        base = EXAMPLE.replace('pools = { light = 2, part = 4, compile = 1 }', 'pools = { @ }')
+        base = re.sub(r'\[hosts\.h100\.pools\].*\n(?:.*\n){3}', '', EXAMPLE).replace(
+            'max_temp_c = 80\n', 'max_temp_c = 80\npools = { @ }\n')
         self.assertIn('@', base)
         good = ('light = 2', 'light = { count = 2 }', 'light = { count = 1, labels = ["h100-light"] }',
                 'h100 = { per_card = true }', 'h100 = { per_card = true, labels = ["h100", "x-1"] }')
@@ -42,17 +53,16 @@ class Load(unittest.TestCase):
                'light = { count = 1, labels = ["a", "a"] }', 'light = { count = 1, labels = "a" }',
                'light = { count = 1, extra = 1 }', 'h100 = { per_card = 1 }', 'light = { count = true }',
                'light = { count = 1, labels = ["light"] }', 'light = { count = 1, labels = ["self-hosted"] }',
-               'h100 = { per_card = true, labels = ["gpu"] }')  # a 3090 class or GitHub's own label
+               'h100 = { per_card = true, labels = ["gpu"] }')  # a bare class or GitHub's own label
         for b in bad:
             with self.assertRaises(inv.InventoryError, msg=b):
                 inv.load(base.replace('@', b))
         with self.assertRaisesRegex(inv.InventoryError, 'without gpus'):
-            inv.load(base.replace('@', 'h100 = { per_card = true }').replace('gpus = [0, 1]', 'gpus = []', 1))
+            inv.load(base.replace('@', 'h100 = { per_card = true }').replace('gpus = [0, 1, 2, 3, 4]', 'gpus = []', 1))
         with self.assertRaises(inv.InventoryError):
-            inv.load(EXAMPLE.replace('pools = { light = 2, part = 4, compile = 1 }', 'pools = {}'))
+            inv.load(base.replace('{ @ }', '{}'))
 
     def test_python_and_orgsync(self):
-        inv.load(EXAMPLE.replace('this = "3090b"', 'this = "h100"'))
         for bad in ('python = "python3"', 'python = ""', 'python = 3', 'orgsync = "yes"'):
             key = bad.split(' ')[0]
             text = re.sub(rf'^(# )?{key} = .*$', bad, EXAMPLE, count=1, flags=re.M)
@@ -66,23 +76,19 @@ class Load(unittest.TestCase):
 
     def test_malformed_inventories(self):
         bad = {
-            'this unknown': EXAMPLE.replace('this = "3090b"', 'this = "3090c"'),
+            'this unknown': EXAMPLE.replace('this = "h100"', 'this = "h200"'),
             'unknown top key': 'extra = 1\n' + EXAMPLE,
-            'unknown host key': EXAMPLE.replace('max_temp_c = 80\npools = { light', 'max_temp_c = 80\nfoo = 1\npools = { light'),
-            'missing account': EXAMPLE.replace('account = "<unix account>"\n', ''),
-            'relative home': EXAMPLE.replace('home = "/home/<unix account>"', 'home = "~"'),
+            'unknown host key': EXAMPLE.replace('max_temp_c = 80\n', 'max_temp_c = 80\nfoo = 1\n'),
+            'missing account': EXAMPLE.replace('account = "<shared account>"\n', ''),
+            'relative home': EXAMPLE.replace('home = "/home/<shared account>"', 'home = "~"'),
             'slots zero': EXAMPLE.replace('slots = 2', 'slots = 0'),
             'slots bool': EXAMPLE.replace('slots = 2', 'slots = true'),
-            'memory': EXAMPLE.replace('memory_max = "120G"', 'memory_max = "120GB"'),
-            'gpus': EXAMPLE.replace('gpus = [0, 1]\n', 'gpus = [0, "1"]\n'),
+            'memory': EXAMPLE.replace('memory_max = "512G"', 'memory_max = "512GB"'),
+            'gpus': EXAMPLE.replace('gpus = [0, 1, 2, 3, 4]\n', 'gpus = [0, "1"]\n'),
             'cpus': EXAMPLE.replace('cpus = "0-43,88-131"', 'cpus = "0-43;rm"'),
-            'pool count': EXAMPLE.replace('compile = 1 }', 'compile = 0 }'),
-            'files keys': EXAMPLE.replace('slot_queue = "/tmp/<slot lock>.queue"\n\n', '\n'),
-            'proxy port': EXAMPLE.replace('http_port = 10809', 'http_port = 70000'),
-            'proxy no nodes': EXAMPLE.replace('nodes = ["<node 1>", "<node 2>"]', 'nodes = []'),
-            'proxy unknown': EXAMPLE.replace('socks_port = 10808', 'socks_port = 10808\nnode = "x"'),
+            'pool count': EXAMPLE.replace('light = { count = 2,', 'light = { count = 0,'),
+            'files keys': re.sub(r'slot_queue = .*\n', '', EXAMPLE),
             'role': EXAMPLE.replace('[hosts.h100]', '[hosts.H100]'),
-            'trusted str': EXAMPLE.replace('trusted = true', 'trusted = "yes"'),
             'not toml': '[[',
         }
         for what, text in bad.items():
@@ -199,7 +205,7 @@ class Scan(unittest.TestCase):
     def test_the_example_is_all_placeholders(self):
         doc = tomllib.loads(EXAMPLE)
         values = list(inv._strings(doc))
-        self.assertGreater(len(values), 10)
+        self.assertGreater(len(values), 5)
         for s in values:
             self.assertIn('<', s)  # every private value is a placeholder
 

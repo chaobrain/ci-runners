@@ -1,8 +1,7 @@
 """How a part ended, and what the consumer does next (design §4.4, D6, decision 8).
 
 ``classify`` is a pure function of the evidence the executor gathers after a part: the
-exit status, the scope's ``memory.events`` and journal, the boot ids, the GPU watchdog's
-log, the yield marker. ``hint`` maps an outcome to ``next``. Infrastructure ends are
+exit status, the scope's OOM kills, the boot ids, the GPU watchdog's log. ``hint`` maps an outcome to ``next``. Infrastructure ends are
 never reported as test failures.
 """
 from __future__ import annotations
@@ -13,11 +12,10 @@ from collections.abc import Iterable
 
 #: every outcome (design §4.4); CLASSIFIED are the ones ``classify`` returns, in
 #: precedence order, highest first; ``lost`` comes from a record that never finished
-#: and ``disagreement`` from ``compare``
-KINDS = ('pass', 'red', 'oom', 'thermal', 'reboot', 'yielded', 'unavailable', 'lost', 'stopped', 'disagreement')
-PRECEDENCE = ('stopped', 'reboot', 'thermal', 'oom', 'yielded', 'unavailable', 'lost', 'red', 'pass')
+KINDS = ('pass', 'red', 'oom', 'thermal', 'reboot', 'unavailable', 'lost', 'stopped')
+PRECEDENCE = ('stopped', 'reboot', 'thermal', 'oom', 'unavailable', 'lost', 'red', 'pass')
 #: outcomes after which nothing is retried
-FINAL = frozenset({'pass', 'red', 'stopped', 'disagreement'})
+FINAL = frozenset({'pass', 'red', 'stopped'})
 NEXT = ('none', 'retry', 'fallback')
 
 
@@ -65,26 +63,6 @@ def killed_ours(kills: Iterable[Kill], pids: Iterable[int], buses: Iterable[str]
     return [k for k in kills if k.bus in cards and any(p in ours for _, p in k.victims)]
 
 
-_OOM_UNIT = re.compile(r"A process of this unit has been killed by the OOM killer|Failed with result 'oom-kill'|"
-                       r'systemd-oomd killed \d+ process')
-_OOM_KERNEL = re.compile(r'oom-kill:.*task_memcg=(\S+?),task=')
-
-
-def journal_oom(journal: str, unit: str = '') -> bool:
-    """Whether a journal text holds an OOM kill of ``unit``. systemd's lines ("killed by
-    the OOM killer", "Failed with result 'oom-kill'", systemd-oomd's "killed N
-    process(es)") count when they name ``unit`` or name no scope at all (``journalctl -u
-    UNIT`` output); a kernel ``oom-kill:`` line counts when its ``task_memcg`` ends in
-    ``unit``. Empty ``unit``: any. Pure."""
-    for line in journal.splitlines():
-        if _OOM_UNIT.search(line) and (not unit or unit in line or '.scope' not in line):
-            return True
-        m = _OOM_KERNEL.search(line)
-        if m and (not unit or m.group(1).endswith('/' + unit) or m.group(1) == unit):
-            return True
-    return False
-
-
 def memory_oom_kills(events: str) -> int:
     """``oom_kill`` of a cgroup's ``memory.events`` text (0 if absent). Pure."""
     for line in events.splitlines():
@@ -106,16 +84,12 @@ class Evidence:
     boot_start: str = ''  # boot id at the start
     boot_end: str = ''  # boot id after
     oom_kills: int = 0  # memory.events oom_kill of the part's scope
-    journal: str = ''  # the scope's journal
-    unit: str = ''  # the scope's unit name
     watchdog: str = ''  # the GPU watchdog's log (h100)
     start: str = ''  # host-local start, as the watchdog writes times
     end: str = ''
     pids: tuple[int, ...] = ()  # the PIDs the sampler recorded for the scope
     buses: tuple[str, ...] = ()  # the bus ids of our cards
     early_stop: bool = False  # our own thermal stop (§5.4 phase 5)
-    yield_marker: float | None = None  # mtime of the reservation's yield marker
-    start_epoch: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -126,7 +100,7 @@ class Outcome:
 
 def classify(e: Evidence) -> Outcome:
     """The outcome of a part, by the precedence of design §4.4: stopped, reboot, thermal,
-    oom, yielded, unavailable, lost (no exit status), red, pass. Pure."""
+    oom, unavailable, lost (no exit status), red, pass. Pure."""
     if e.stopped:
         return Outcome('stopped', 'cancelled')
     if e.boot_start and e.boot_end and e.boot_start != e.boot_end:
@@ -136,10 +110,8 @@ def classify(e: Evidence) -> Outcome:
     hit = killed_ours(watchdog_kills(e.watchdog, e.start, e.end), e.pids, e.buses)
     if hit:
         return Outcome('thermal', f'the GPU watchdog killed our process on bus {hit[0].bus} at {hit[0].when}')
-    if e.oom_kills > 0 or journal_oom(e.journal, e.unit):
+    if e.oom_kills > 0:
         return Outcome('oom', 'the part\'s memory scope was OOM-killed')
-    if e.yield_marker is not None and e.yield_marker > e.start_epoch:
-        return Outcome('yielded', 'the host\'s reservation owner took the host')
     if e.unavailable:
         return Outcome('unavailable', e.unavailable)
     if e.rc is None:
@@ -181,4 +153,4 @@ def hint(kind: str, *, attempt: int = 1, retries: int = 1, remote: bool = False,
         return Hint('retry', where='same-host')
     if kind == 'lost':
         return Hint('retry', where='any')
-    return Hint('fallback')  # yielded, unavailable
+    return Hint('fallback')  # unavailable

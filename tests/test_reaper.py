@@ -36,19 +36,19 @@ class Reap(unittest.TestCase):
         os.utime(self.base / rel, (t, t))
 
     def test_a_run_counts_by_its_newest_file(self):
-        self.put('state/parts/chaobrain/brainspike/777-1/test/status.json', 1)   # still being written
-        self.put('state/parts/chaobrain/brainspike/700-1/test/status.json', 20)
-        self.put('state/parts/chaobrain/brainspike/700-1/test/log', 20)
+        self.put('state/parts/chaobrain/brainkit/777-1/test/status.json', 1)   # still being written
+        self.put('state/parts/chaobrain/brainkit/700-1/test/status.json', 20)
+        self.put('state/parts/chaobrain/brainkit/700-1/test/log', 20)
         self.put('state/parts/chaobrain/other/5-1/a/status.json', 20)
-        for d in ('state/parts/chaobrain/brainspike/777-1/test', 'state/parts/chaobrain/brainspike/777-1',
-                  'state/parts/chaobrain/brainspike/700-1/test', 'state/parts/chaobrain/brainspike/700-1',
+        for d in ('state/parts/chaobrain/brainkit/777-1/test', 'state/parts/chaobrain/brainkit/777-1',
+                  'state/parts/chaobrain/brainkit/700-1/test', 'state/parts/chaobrain/brainkit/700-1',
                   'state/parts/chaobrain/other/5-1/a', 'state/parts/chaobrain/other/5-1',
-                  'state/parts/chaobrain/other', 'state/parts/chaobrain/brainspike', 'state/parts/chaobrain'):
+                  'state/parts/chaobrain/other', 'state/parts/chaobrain/brainkit', 'state/parts/chaobrain'):
             self.age(d, 30)  # old directories: their files decide
         out = reaper.reap(str(self.data), now=self.now)
         self.assertEqual(out, 'reaper: removed 2 old entries')
-        self.assertTrue((self.base / 'state/parts/chaobrain/brainspike/777-1/test/status.json').exists())
-        self.assertFalse((self.base / 'state/parts/chaobrain/brainspike/700-1').exists())
+        self.assertTrue((self.base / 'state/parts/chaobrain/brainkit/777-1/test/status.json').exists())
+        self.assertFalse((self.base / 'state/parts/chaobrain/brainkit/700-1').exists())
         self.assertFalse((self.base / 'state/parts/chaobrain/other').exists())  # left empty, removed
 
     def test_dated_logs_go_after_14_days_and_nothing_else_there(self):

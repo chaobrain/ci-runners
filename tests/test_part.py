@@ -1,6 +1,6 @@
 """The executor and salvage (design §4.3-§4.5), on a fake host tree, without systemd:
 the supervisor runs directly (``scope=False``). The scope itself is checked live on
-3090b (RUN-1 acceptance 6)."""
+h100 (RUN-5)."""
 from __future__ import annotations
 
 import fcntl
@@ -31,19 +31,16 @@ class Host(unittest.TestCase):
         self.inv_text = f'''schema = 1
 this = "hb"
 [hosts.hb]
-ssh = "alias-x"
 account = "acct-x"
 home = "{t}"
 data = "{self.data}"
-trusted = true
-cpu_slowdown = 1.0
 slots = 1
 memory_max = "120G"
 disk_min_gib = 0
 gpus = [0, 1]
 max_temp_c = 80
 pools = {{ light = 1, part = 1 }}
-files = {{ host_lock = "{t}/locks/h.lock", slot_lock = "{self.slot}", slot_queue = "{t}/locks/s.queue" }}
+files = {{ slot_lock = "{self.slot}", slot_queue = "{t}/locks/s.queue" }}
 '''
         self.inv = inventory.load(self.inv_text)
         (self.etc / 'projects' / 'p.toml').write_text(
@@ -92,8 +89,9 @@ class Execute(Host):
         self.assertEqual(env['CI_SLOT_HELD'], str(self.slot))  # a part runner takes a slot by default
         self.assertEqual(pathlib.Path(rec, 'work', 'pwd.txt').read_text().strip(), str(self.ws))
         o = self.outputs()
-        self.assertEqual((o['outcome'], o['next'], o['retry-on'], o['verify'], o['attempt']),
-                         ('pass', 'none', '[]', 'false', '1'))
+        self.assertEqual((o['outcome'], o['next'], o['retry-on'], o['attempt']), ('pass', 'none', '[]', '1'))
+        self.assertNotIn('verify', o)
+        self.assertNotIn('CI_HOST_LOCK', env)  # the host lock is retired (decision 11.12)
         self.assertEqual(json.loads(pathlib.Path(rec, 'outcome.json').read_text())['outcome'], 'pass')
         self.assertIn('### part `unit`', pathlib.Path(rec, 'summary.md').read_text())
         self.assertEqual(o['summary'], 'org/repo/77-1/unit-1/summary.md')
@@ -149,13 +147,13 @@ class Execute(Host):
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             code, out = self.execute(command='touch "$CI_PART_DIR/ran"')
+            light = self.execute({**self.env, 'CI_RUNNER_CLASS': 'light'}, command='true', id='unit2')[1]
         finally:
             os.close(fd)
         self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no CI slot'))
         self.assertEqual(os.listdir(self.slot.parent / 's.queue') and
                          [n for n in os.listdir(self.slot.parent / 's.queue') if n.endswith('.wait')], [])
-        code, out = self.execute(command='true', slot='none', id='unit2')  # a part that takes no slot does not wait
-        self.assertEqual(out['outcome'], 'pass')
+        self.assertEqual(light['outcome'], 'pass')  # light takes no slot: it runs while the slot is held
 
     def test_the_slot_is_held_while_the_command_runs(self):
         code, out = self.execute(command='flock -n "$CI_SLOT_HELD" true && echo free > "$CI_PART_DIR/probe" || '
@@ -175,21 +173,14 @@ class Execute(Host):
         with self.assertRaises(part.Refused):
             self.execute(attempt_of='hb:../../etc')
 
-    def test_an_older_local_ticket_keeps_its_turn(self):
+    def test_an_older_ticket_keeps_its_turn(self):
         q = self.slot.parent / 's.queue'
         q.mkdir()
-        (q / '000000000001.ticket').write_text(f'1 {os.getpid()} {int(time.time())} /x local_ci.sh\n')  # ci_slot.sh's
+        (self.etc / 'projects' / 'q.toml').write_text(
+            (self.etc / 'projects' / 'p.toml').read_text().replace('name = "p"', 'name = "q"'))
+        (q / '000000000001.wait').write_text(f'1 {os.getpid()} {int(time.time())} /x ci-slot project=q cmd\n')
         _, out = self.execute(command='true')
         self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no CI slot'))
-
-    def test_two_default_projects_are_refused(self):
-        original = (self.etc / 'projects' / 'p.toml').read_text()
-        for n in ('p', 'q'):
-            text = original.replace('name = "p"', f'name = "{n}"')
-            (self.etc / 'projects' / f'{n}.toml').write_text(text.replace('[hosts.hb]\n', '[hosts.hb]\ndefault = true\n'))
-        _, out = self.execute(command='true')
-        self.assertEqual(out['outcome'], 'unavailable')
-        self.assertIn('both the default project', out['reason'])
 
     def test_the_command_cannot_rewrite_its_record(self):
         _, out = self.execute(command='echo "{}" > "$CI_PART_DIR/../record.json" 2>/dev/null; '
@@ -206,11 +197,11 @@ class Execute(Host):
         self.inv = inventory.load(self.inv_text.replace('slots = 1\n', 'slots = 2\n'))
         (self.slot.parent / 's.2.lock').write_text('')
 
-    def test_a_local_holder_counts_as_the_default_project(self):
+    def test_a_holder_without_a_record_counts_for_no_project(self):
         self.two_slots()
         (self.etc / 'projects' / 'p.toml').write_text(
             (self.etc / 'projects' / 'p.toml').read_text().replace('[hosts.hb]\n', '[hosts.hb]\nmax_slots = 1\n'))
-        fd = os.open(self.slot, os.O_WRONLY)  # a local run holds slot 1, with no project
+        fd = os.open(self.slot, os.O_WRONLY)  # someone holds slot 1, with no holder record
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             code, out = self.execute(command='true')
@@ -234,7 +225,7 @@ class Execute(Host):
             return subprocess.run(argv, **kw)
         ex = part.Executor(self.inv, str(self.etc), self.env, release=str(ROOT), scope=False, poll=0.1, run=run)
         code, out = ex.execute(part.Inputs(project='p', id='g', timeout_minutes=1, queue_timeout_minutes=0.02, gpus=1,
-                                           gpu_mem_mib=6000, slot='none',
+                                           gpu_mem_mib=6000,
                                            command='echo $CUDA_VISIBLE_DEVICES > "$CI_PART_DIR/cards"'))
         self.assertEqual((out['outcome'], out['gpus']), ('pass', '0'))  # card 1 has too little free
         self.assertEqual(pathlib.Path(self.path(out), 'work', 'cards').read_text().strip(), '0')
@@ -410,10 +401,7 @@ class Pure(unittest.TestCase):
                      'MemorySwapMax=0', 'OOMPolicy=continue'):
             self.assertIn(want, argv)
         self.assertEqual(argv[-1], 'sup')
-        self.assertEqual(part.command_argv('c', compile_part=False, lock='none', lock_bin='L', host_lock='H'),
-                         ['nice', '-n', '10', 'ionice', '-c', '2', '-n', '7', 'bash', '-c', 'c'])
-        self.assertEqual(part.command_argv('c', compile_part=True, lock='s', lock_bin='L', host_lock='H')[2:3], ['0'])
-        self.assertIn('-s', part.command_argv('c', compile_part=True, lock='s', lock_bin='L', host_lock='H'))
+        self.assertEqual(part.command_argv('c'), ['nice', '-n', '10', 'ionice', '-c', '2', '-n', '7', 'bash', '-c', 'c'])
         self.assertEqual(part.unit_name('a b', 'x', '7-1-1'), 'ci-part-a_b-x-7-1-1.scope')
 
     def test_oom_policy_only_where_systemd_takes_it(self):
@@ -454,10 +442,10 @@ class Pure(unittest.TestCase):
 
     def test_outputs_are_one_line_each(self):
         with tempfile.NamedTemporaryFile('r') as f:
-            part.write_outputs({'outcome': 'pass', 'retry-on': ['a', 'b'], 'verify': False}, f.name)
+            part.write_outputs({'outcome': 'pass', 'retry-on': ['a', 'b']}, f.name)
             text = f.read()
         self.assertIn('retry-on=["a", "b"]\n', text)
-        self.assertIn('verify=false\n', text)
+        self.assertNotIn('verify', text)
         with self.assertRaises(ValueError):
             part.write_outputs({'reason': 'a\nb'}, '/dev/null')
 
@@ -498,7 +486,7 @@ class Registry(unittest.TestCase):
                'ci var': ({'hosts': {'hb': {'memory_max': '2G', 'variables': {'CI_RESUME': '1'}}}}, 'p'),
                'PATH var': ({'hosts': {'hb': {'memory_max': '2G', 'variables': {'PATH': '/x'}}}}, 'p'),
                'LD var': ({'hosts': {'hb': {'memory_max': '2G', 'variables': {'LD_BIND_NOW': '1'}}}}, 'p'),
-               'default as str': ({'hosts': {'hb': {'memory_max': '2G', 'default': 'yes'}}}, 'p'),
+               'default retired': ({'hosts': {'hb': {'memory_max': '2G', 'default': True}}}, 'p'),
                'multi-line var': ({'hosts': {'hb': {'memory_max': '2G', 'variables': {'A': 'x\ny'}}}}, 'p'),
                'fallback': ({'fallback': {'part': []}}, 'p')}
         for what, (change, stem) in bad.items():

@@ -1,2 +1,0 @@
-Nov 05 00:07:34 host systemd[2103]: Started ci-p-A.scope - bash -c true.
-Nov 05 00:09:01 host systemd[2103]: ci-p-A.scope: Consumed 1min 3.522s CPU time.

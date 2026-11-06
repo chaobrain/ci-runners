@@ -10,6 +10,8 @@ Wants=ci-tunnel.service
 ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run bridge
 Environment=CI_RUNNERS_ETC=@CI_ETC@
 Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
+# the tunnel table's digest: a changed allowlist or port changes this file (setup restarts it)
+Environment=CI_TUNNEL=@TUNNEL_DIGEST@
 NoNewPrivileges=yes
 Restart=always
 RestartSec=5

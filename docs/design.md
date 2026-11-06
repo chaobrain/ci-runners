@@ -706,7 +706,7 @@ indexes do not (decision 11.8); not in the docker group; the system `python3` is
 | `ci-runner@.service` | as on 3090b, with `After=`/`Wants=ci-bridge.service` instead of the CI proxy |
 | `ci-tunnel.service` | `ssh -F etc/tunnel/ssh_config -N -D 127.0.0.1:<socks port>` to the egress account (decision 11.8): batch mode, the egress host's key pinned in `etc/tunnel/known_hosts`, `ExitOnForwardFailure`, keep-alive every 30 s (a dead link ends after 90 s); `Restart=always` after 10 s |
 | `ci-bridge.service` | `ci-run bridge`: HTTP CONNECT on 127.0.0.1:<http port>, to `tunnel.allow` names on port 443 only (anything else: 403), handed to the tunnel as SOCKS5 with the name; at most 256 connections; one journal line per connection (name, result) |
-| `etc/tunnel/` | the key pair, `ssh_config` and `known_hosts`, placed by the lead before the plan; `plan.sh` refuses without them, or with the key readable by others |
+| `etc/tunnel/` | the key pair, `ssh_config` and `known_hosts`, placed by the lead before the plan; `plan.sh` refuses without them, with the key or the directory readable by others, with a link in place of a file, or with an `ssh_config` that sets anything but `Host egress`, its `HostName`, `User` and `Port` (the unit fixes every other option, among them the key, the pinned host key with no global or DNS source, and no agent, gateway port or local command). A changed tunnel table changes the bridge's unit, and the plan then restarts both units. The runner app is fetched only once the tunnel's port answers (ssh binds it after authenticating). |
 | `ci-orgsync.{service,timer}` | not on h100 (decision 11.9): the workstation pushes the snapshot |
 | `ci-reaper.timer` | as on 3090b |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 512G of 2 TB) and `ci-<project>.slice` |
@@ -951,7 +951,7 @@ Rules:
 | thermal kill or early stop (h100) | the part's processes die, or we stop them | `thermal`: one retry on a cool card, else fallback |
 | OOM | the scope is killed | `oom`: one retry with `resume` on a host with headroom |
 | h100 unreachable or quarantined | no part placed there | fallback order of the project |
-| h100's tunnel down (RUN-5) | the runners stay online (their own traffic is direct, `no_proxy`); a checkout or a package download in a job fails, and that part ends red | ssh's keep-alive ends a dead link in 90 s, and systemd restarts it after 10 s; the bridge answers 502 meanwhile |
+| h100's tunnel down (RUN-5) | the runners stay online (their own traffic is direct, `no_proxy`); a checkout or a package download in a job fails, and that part ends red | ssh's keep-alive ends a dead link in 90 s, and systemd restarts it after 10 s. The bridge answers 502 while ssh is down; before ssh has found the link dead, a connection may get its 200 and close at once (OpenSSH answers SOCKS before the channel opens), logged as `closed, 0 bytes down` |
 | the workstation down, or its push failing (RUN-5) | the snapshot ages | every h100 job refused `stale` after 60 min, until the push is back |
 | slot or lease starvation | a part waits | `queue-timeout-minutes`, then `unavailable` and fallback |
 | disk low (under 50 GiB free in `~/data`) | | `unavailable` before the command |

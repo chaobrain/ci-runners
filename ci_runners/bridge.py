@@ -6,6 +6,11 @@ The name goes to the tunnel as a SOCKS5 domain name, so it resolves on the egres
 local DNS answers for blocked names cannot be trusted. Anything but ``CONNECT
 <allowed name>:443`` gets 403; a tunnel that refuses or is down gives 502. One journal
 line per connection: the name and the result. ``ci-bridge.service`` runs it.
+
+OpenSSH's dynamic forwarding may answer a SOCKS request before the egress host has
+opened the channel, so a name the egress account refuses, or a link ssh has not yet
+found dead, can show as a tunnel that closes at once: the log reads ``closed, 0 bytes
+down`` right after ``open``.
 """
 from __future__ import annotations
 
@@ -33,8 +38,8 @@ class Refused(Exception):
 def target(head: bytes, allow: Collection[str]) -> str:
     """The allowed name a request head asks for. Raises Refused. Pure.
 
-    Only ``CONNECT <name>:443 HTTP/1.x`` passes, with ``<name>`` on ``allow`` exactly
-    (lower case; no address literal, no trailing dot, no user part)."""
+    Only ``CONNECT <name>:443 HTTP/1.x`` passes, with ``<name>``, lower-cased, on
+    ``allow`` exactly and a DNS name (no address literal, no trailing dot, no user part)."""
     line = head.split(b'\r\n', 1)[0]
     try:
         method, authority, version = line.decode('ascii').split(' ')
@@ -142,6 +147,9 @@ class Bridge:
                 ur, uw = await _socks(host, self.socks_port)
             except Refused as e:
                 await self._answer(w, e.status, str(e))
+                return
+            except Exception as e:  # never leave a client without an answer
+                await self._answer(w, 502, f'{type(e).__name__}')
                 return
             self.log(f'bridge: {host}:{PORT} open')
             w.write(b'HTTP/1.1 200 Connection established\r\n\r\n')

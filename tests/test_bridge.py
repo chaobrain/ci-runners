@@ -48,7 +48,8 @@ class FakeTunnel:
     echoes what it reads, upper-cased."""
 
     def __init__(self, rep: int = 0):
-        self.rep, self.asked, self.hold = rep, [], False
+        self.rep, self.asked, self.hold, self.early = rep, [], False, False
+        self.bound = bytes([1, 0, 0, 0, 0, 0, 0])  # ATYP 1, 0.0.0.0:0
 
     async def handle(self, r, w):
         assert await r.readexactly(3) == b'\x05\x01\x00'
@@ -57,7 +58,10 @@ class FakeTunnel:
         name = await r.readexactly(n)
         port = int.from_bytes(await r.readexactly(2), 'big')
         self.asked.append((atyp, name.decode(), port))
-        w.write(bytes([5, self.rep, 0, 1, 0, 0, 0, 0, 0, 0]))
+        w.write(bytes([5, self.rep, 0]) + self.bound)
+        if self.early:  # OpenSSH: success first, then the egress host refuses the channel
+            w.close()
+            return
         if self.rep == 0:
             while data := await r.read(1024):
                 w.write(data.upper())
@@ -114,6 +118,36 @@ class Serve(unittest.IsolatedAsyncioTestCase):
         w.close()
         self.assertTrue(any('closed after' in line for line in self.logged), self.logged)
         self.assertEqual(self.b.tasks, set())
+
+    async def test_every_bound_address_form_is_read_whole(self):
+        for bound in (bytes([3, 7]) + b'ssh.lan' + b'\x01\xbb', bytes([4]) + bytes(16) + b'\x00\x00'):
+            self.tunnel.bound = bound
+            status, got = await self.ask(b'CONNECT github.com:443 HTTP/1.1\r\n\r\n', b'abc')
+            self.assertEqual((status, got), (200, b'ABC'), bound)  # no reply byte left in the stream
+        self.tunnel.bound = bytes([9, 0, 0])
+        self.assertEqual((await self.ask(b'CONNECT github.com:443 HTTP/1.1\r\n\r\n'))[0], 502)
+
+    async def test_a_head_that_never_comes(self):
+        with mock.patch.object(bridge, 'HEAD_TIMEOUT', 0.2):
+            r, w = await asyncio.open_connection('127.0.0.1', self.port)
+            w.write(b'CONNECT github.com:443 HTTP/1.1\r\n')  # and nothing more
+            status = await asyncio.wait_for(r.readuntil(b'\r\n\r\n'), 10)
+            w.close()
+        self.assertEqual(int(status.split(b' ')[1]), 408)
+        self.assertEqual(self.tunnel.asked, [])
+
+    async def test_an_openssh_refusal_shows_as_an_empty_tunnel(self):
+        self.tunnel.early = True
+        r, w = await asyncio.open_connection('127.0.0.1', self.port)
+        w.write(b'CONNECT pypi.org:443 HTTP/1.1\r\n\r\n')
+        self.assertIn(b' 200 ', await asyncio.wait_for(r.readuntil(b'\r\n\r\n'), 10))
+        self.assertEqual(await asyncio.wait_for(r.read(), 10), b'')  # closed at once
+        w.close()
+        for _ in range(50):
+            if 'bridge: pypi.org:443 closed, 0 bytes down' in self.logged:
+                break
+            await asyncio.sleep(0.02)
+        self.assertIn('bridge: pypi.org:443 closed, 0 bytes down', self.logged)
 
     async def test_a_refused_name_never_reaches_the_tunnel(self):
         self.assertEqual((await self.ask(b'CONNECT example.com:443 HTTP/1.1\r\n\r\n'))[0], 403)

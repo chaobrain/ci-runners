@@ -117,7 +117,7 @@ PROXY_KEYS = {
 }
 _PORT = (lambda v: _int(v, 1) and v < 65536, True)
 #: a DNS name the bridge passes (the bridge's own check, lower case, two labels or more)
-NAME = re.compile(r'[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+\Z')
+NAME = re.compile(r'(?=.{1,253}\Z)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+\Z')
 _DIRECT = re.compile(r'\.?[a-z0-9][a-z0-9.-]{0,252}\Z|[0-9a-f:.]{2,39}\Z')
 TUNNEL_KEYS = {
     'socks_port': _PORT,  # ci-tunnel's SOCKS5 on 127.0.0.1
@@ -204,7 +204,19 @@ def pool_labels(inv: 'Inventory', pool: str) -> list[str] | None:
 #: string values that are not inventory: they appear in the design or in brainspike's
 #: scripts already. Every other string value of the inventory and the policy is denied.
 PUBLIC_KEYS = frozenset({'this', 'memory_max', 'cpus', 'host_lock', 'slot_lock', 'slot_queue', 'bot', 'visibility',
-                         'extra_events', 'labels', 'allow', 'direct'})
+                         'extra_events', 'labels'})
+#: ``tunnel.direct`` values the repository holds (the example, the tests): public, so not
+#: denied. Every other ``direct`` value is denied, as any inventory value is. The bridge's
+#: ``tunnel.allow`` is not denied at all: the egress host resolves those names on the
+#: internet, so they are public by construction (decision 11.8).
+#: the policy's ``[org] name`` is the org's, public as the repository is.
+PUBLIC_DIRECT = frozenset({'localhost', '127.0.0.1', '::1', 'api.github.com', '.actions.githubusercontent.com',
+                           '.blob.core.windows.net'})
+
+
+def _tunnel_key(path: tuple) -> str | None:
+    """``allow`` or ``direct`` for the path of a host's tunnel key, else None."""
+    return path[3] if len(path) == 4 and path[0] == 'hosts' and path[2] == 'tunnel' else None
 #: tokens too common to deny; a value that is one of them is left out, with a short one
 _COMMON = frozenset({'localhost', 'home', 'data', 'true', 'false', 'none'})
 MIN_TOKEN = 4
@@ -229,14 +241,15 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(_SALT + normalise(token).encode()).hexdigest()
 
 
-def _strings(doc: object, key: str = '') -> Iterator[str]:
+def _strings(doc: object, path: tuple = ()) -> Iterator[str]:
     if isinstance(doc, dict):
         for k, v in doc.items():
-            if k not in PUBLIC_KEYS:
-                yield from _strings(v, k)
+            if k not in PUBLIC_KEYS and _tunnel_key((*path, k)) != 'allow' and (*path, k) != ('org', 'name'):
+                yield from _strings(v, (*path, k))
     elif isinstance(doc, list):
         for v in doc:
-            yield from _strings(v, key)
+            if not (_tunnel_key(path) == 'direct' and v in PUBLIC_DIRECT):
+                yield from _strings(v, path)
     elif isinstance(doc, str):
         yield doc
 

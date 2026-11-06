@@ -36,6 +36,7 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -66,8 +67,8 @@ PROXY_ORDER = 'After=ci-proxy.service\nWants=ci-proxy.service'
 BRIDGE_ORDER = 'After=ci-bridge.service\nWants=ci-bridge.service'
 #: the lead's files in etc/tunnel/ (design §5.3): the key first, which no one else may read
 TUNNEL_FILES = ('id_ed25519', 'ssh_config', 'known_hosts')
-#: the ssh_config's host the tunnel unit names
-TUNNEL_HOST = re.compile(r'^Host egress$', re.M)
+#: etc/tunnel/ssh_config: ``Host egress`` and only where it is (the unit fixes the rest)
+SSH_CONFIG_LINE = re.compile(r'\s*(?:#.*)?|\s*(?:HostName|User|Port)[ \t=]+[A-Za-z0-9._-]+\s*|Host egress\s*')
 
 
 def _runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str, int | None]]:
@@ -144,21 +145,34 @@ def render(template: str, subs: dict[str, str]) -> str:
 def check_tunnel(etc: str) -> None:
     """Refuse unless ``etc/tunnel/`` holds the lead's three files, as regular files of
     this account, the key and the directory readable by no one else, and ``ssh_config``
-    names ``Host egress``."""
+    says only ``Host egress`` with its ``HostName`` and, if it likes, ``User`` and
+    ``Port``: the unit fixes every other option, and an option that accumulates or adds a
+    forward or a command could not be fixed there."""
     d = os.path.join(etc, 'tunnel')
-    st = os.lstat(d) if os.path.lexists(d) else None
-    if st is None or not os.path.isdir(d) or os.path.islink(d) or st.st_mode & 0o077 or st.st_uid != os.getuid():
+    try:
+        st = os.lstat(d)
+    except OSError:
+        st = None
+    if st is None or not stat.S_ISDIR(st.st_mode) or st.st_mode & 0o077 or st.st_uid != os.getuid():
         raise ValueError(f'{d} must be a directory of this account, mode 700, holding {", ".join(TUNNEL_FILES)}')
     for name in TUNNEL_FILES:
         path = os.path.join(d, name)
-        st = os.lstat(path) if os.path.lexists(path) else None
-        if st is None or not os.path.isfile(path) or os.path.islink(path) or st.st_uid != os.getuid():
+        try:
+            st = os.lstat(path)
+        except OSError:
+            st = None
+        if st is None or not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
             raise ValueError(f'{path} must be a regular file of this account (the lead places it)')
         if name == 'id_ed25519' and st.st_mode & 0o077:
             raise ValueError(f'{path} is readable by others: chmod 600 it')
-    with open(os.path.join(d, 'ssh_config'), encoding='utf-8') as f:
-        if not TUNNEL_HOST.search(f.read()):
-            raise ValueError(f'{d}/ssh_config has no "Host egress" (the tunnel unit connects to it)')
+    with open(os.path.join(d, 'ssh_config'), encoding='utf-8', errors='replace') as f:
+        lines = f.read().splitlines()
+    bad = [i for i, line in enumerate(lines, 1) if not SSH_CONFIG_LINE.fullmatch(line)]
+    if bad:
+        raise ValueError(f'{d}/ssh_config line {bad[0]}: only Host egress, HostName, User and Port may be set there')
+    if [line.strip() for line in lines if line.startswith('Host ')] != ['Host egress'] or not any(
+            line.strip().startswith('HostName') for line in lines):
+        raise ValueError(f'{d}/ssh_config must have one "Host egress" with its HostName')
 
 
 def node_config(src: dict, http_port: int, socks_port: int) -> dict:
@@ -298,7 +312,9 @@ def build(etc: str) -> Plan:
     plan.add('units:')
     subs = {'CI_MEMORY_MAX': h['memory_max'], 'PROXY_CLIENT': client, 'CI_DATA': data, 'CI_ETC': etc,
             'CI_PYTHON': python, 'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else BRIDGE_ORDER if 'tunnel' in h else '',
-            'TUNNEL_SOCKS': str(h['tunnel']['socks_port']) if 'tunnel' in h else ''}
+            'TUNNEL_SOCKS': str(h['tunnel']['socks_port']) if 'tunnel' in h else '',
+            # the bridge reads its table once: a changed table changes its unit, which restarts it
+            'TUNNEL_DIGEST': _sha(json.dumps(h['tunnel'], sort_keys=True).encode())[:16] if 'tunnel' in h else ''}
     ours = _ours(os.path.join(base, 'state', 'setup.json'))
 
     def unit(name: str, content: str) -> None:
@@ -353,6 +369,10 @@ def build(etc: str) -> Plan:
                  f'{len(t["allow"])} names on port 443: {", ".join(t["allow"])}')
     egress = (['ci-proxy.service'] if 'proxy' in h else ['ci-tunnel.service', 'ci-bridge.service'] if 'tunnel' in h
               else [])
+    # egress units already running with an older file: enable --now leaves them as they are
+    stale = 'tunnel' in h and any(a['kind'] == 'file' and os.path.dirname(a['path']) == unit_dir
+                                  and os.path.basename(a['path']) in egress and os.path.exists(a['path'])
+                                  for a in plan.actions)
     if plan.actions:
         plan.add({'proxy': 'systemd --user (units, CI proxy):', 'tunnel': 'systemd --user (units, egress):'}.get(
             next((k for k in ('proxy', 'tunnel') if k in h), ''), 'systemd --user (units):'))
@@ -360,17 +380,26 @@ def build(etc: str) -> Plan:
         if egress:
             argv = ['systemctl', '--user', 'enable', '--now', *egress]
             plan.add(f'  run    {" ".join(argv)}', kind='run', argv=argv)
+        if stale:
+            argv = ['systemctl', '--user', 'restart', *egress]
+            plan.add(f'  run    {" ".join(argv)}', kind='run', argv=argv)
     port = h['proxy']['http_port'] if 'proxy' in h else h['tunnel']['http_port'] if 'tunnel' in h else 0
     via = ('fetched through the CI proxy' if 'proxy' in h else 'fetched through the egress bridge' if 'tunnel' in h
            else 'fetched directly')
     plan.add(f'runners (actions/runner {RUNNER_VERSION}, sha256 {RUNNER_SHA256[:16]}, {via}):')
     cache = os.path.join(base, 'state', 'cache', os.path.basename(RUNNER_URL))
     rs = _runners(inv)
+    waited = 'tunnel' not in h
     for name, labels, cls, card in rs:
         rdir = os.path.join(data, 'actions-runner', name)
         if runner_complete(rdir):
             plan.add(f'  keep   {rdir}/ (runner app present)')
         else:
+            if not waited:  # the bridge listens at once; the tunnel's port, only once ssh is in
+                t = h['tunnel']
+                plan.add(f'  wait   127.0.0.1:{t["socks_port"]} (tunnel), 127.0.0.1:{t["http_port"]} (bridge)',
+                         kind='wait', ports=[t['socks_port'], t['http_port']])
+                waited = True
             plan.add(f'  unpack {RUNNER_URL} -> {rdir}/', kind='runner', path=rdir, cache=cache, port=port)
         _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc, card), 0o600)
         plan.add(f'         labels {",".join(labels)}; work {os.path.join(data, "ci-work", name)} (at registration)')
@@ -492,6 +521,9 @@ def _apply_actions(plan: Plan, made: list, run) -> None:
             os.replace(tmp, a['path'])
         elif k == 'symlink':
             os.symlink(a['target'], a['path'])
+        elif k == 'wait':
+            for port in a['ports']:
+                wait_port(port)
         elif k == 'runner':
             _unpack(a['path'], a['cache'], a['port'])
         elif k == 'run':

@@ -1,2 +1,0 @@
-Nov 05 03:19:46 host systemd[2103]: Started ci-other.scope.
-Nov 05 03:19:47 host systemd[2103]: A process of this unit has been killed by the OOM killer.

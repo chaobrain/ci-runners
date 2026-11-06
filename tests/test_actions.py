@@ -1,6 +1,6 @@
 """The actions (design §4, §9): each passes exactly its declared inputs to the matching
 ``ci-run`` command, and the launcher runs the release the action names, on our
-runners, or the action's own checkout on a GitHub-hosted runner."""
+runners only."""
 from __future__ import annotations
 
 import pathlib
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-ACTIONS = ('claim', 'place', 'part', 'salvage', 'verdict')
+ACTIONS = ('claim', 'part', 'verdict')
 
 
 def declared(text: str, section: str) -> list[str]:
@@ -35,7 +35,7 @@ class Actions(unittest.TestCase):
             self.assertEqual(used, ins, name)
 
     def test_inputs_reach_their_flags(self):
-        modules = {'claim': 'github', 'place': 'probe', 'part': 'part', 'salvage': 'part', 'verdict': 'verdict'}
+        modules = {'claim': 'github', 'part': 'part', 'verdict': 'verdict'}
         skip = {'token'}  # claim's token travels as GITHUB_TOKEN
         for name in ACTIONS:
             text = (ROOT / 'actions' / name / 'action.yml').read_text()
@@ -82,7 +82,6 @@ class Launcher(unittest.TestCase):
         self.out.write_text('')
         self.repo = pathlib.Path(self.tmp.name) / 'repo'
         shutil.copytree(ROOT / 'actions', self.repo / 'actions')
-        (self.repo / 'bin').symlink_to(ROOT / 'bin')  # the checkout's own package, for hosted claim
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -141,33 +140,34 @@ class Launcher(unittest.TestCase):
         self.stub('hook')
         temp = pathlib.Path(self.tmp.name) / 'runner-temp'
         r = self.launch('part', '--id', 'x', '--command', '--id', '--timeout-minutes', '5', RUNNER_TEMP=str(temp),
-                        CI_RUNNER_CLASS='part')  # a command that reads '--id' is not the id
+                        CI_RUNNER_CLASS='part', CI_RUNNER_POOL_LABELS='h100-cpu')  # a command that reads '--id' is not the id
         self.assertEqual(r.returncode, 0)
         out = self.out.read_text()
         self.assertIn('outcome=unavailable\n', out)
         self.assertIn('next=fallback\n', out)
-        self.assertIn('retry-on=["self-hosted","part"]\n', out)  # its own class, not light
+        self.assertIn('retry-on=["self-hosted","h100-cpu"]\n', out)  # its own pool's labels
         self.assertNotIn(str(self.home), out + r.stdout)  # no home path reaches the job
         art = json.loads((temp / 'ci-runners' / 'x' / 'outcome.json').read_text())  # what the action uploads
-        self.assertEqual((art['outcome'], art['next'], art['retry-on']), ('unavailable', 'fallback', ['self-hosted', 'part']))
+        self.assertEqual((art['outcome'], art['next'], art['retry-on']),
+                         ('unavailable', 'fallback', ['self-hosted', 'h100-cpu']))
         self.out.write_text('')
-        self.launch('part', '--id', '../x', RUNNER_TEMP=str(temp))  # no class: no fallback; a bad id: no artifact
+        self.launch('part', '--id', '../x', RUNNER_TEMP=str(temp))  # no pool labels: no fallback; a bad id: no artifact
         self.assertIn('next=none\n', self.out.read_text())
         self.assertEqual(sorted(str(p.relative_to(temp)) for p in temp.rglob('*')), ['ci-runners', 'ci-runners/x', 'ci-runners/x/outcome.json'])
-        self.assertEqual(self.launch('place', '--parts', '[]').returncode, 2)  # only a part has a fallback
+        self.assertEqual(self.launch('verdict', '--parts', 'cpu').returncode, 2)  # only a part has a fallback
         for own, want in (('h100-cpu', '["self-hosted","h100-cpu"]'), ('a,b-1', '["self-hosted","a","b-1"]'),
-                          ('bad label', '["self-hosted","part"]'), ('x"]', '["self-hosted","part"]')):
+                          ('bad label', '[]'), ('x"]', '[]')):
             self.out.write_text('')
             self.launch('part', '--id', 'y', CI_RUNNER_CLASS='part', CI_RUNNER_POOL_LABELS=own)
             self.assertIn(f'retry-on={want}\n', self.out.read_text(), own)
 
-    def test_a_hosted_runner_runs_only_claim_from_the_checkout(self):
-        r = self.launch('part', '--id', 'x', RUNNER_ENVIRONMENT='github-hosted')
-        self.assertEqual(r.returncode, 2)
-        self.assertIn('runs on our runners only', r.stdout)
-        r = self.launch('claim', '--context', 'p/ci', '--sha', 'a' * 40, RUNNER_ENVIRONMENT='github-hosted')
-        self.assertEqual(r.returncode, 2)  # the checkout's claim ran with --hosted: no policy read, the token missing
-        self.assertIn('GITHUB_TOKEN', r.stderr)
+    def test_a_hosted_runner_has_no_path_of_its_own(self):
+        """Decision 11.12: the hosted claim is retired; every action needs our host layer."""
+        self.stamp('v1.2.3')
+        for cmd in ('claim', 'part'):
+            r = self.launch(cmd, '--context', 'p/ci', RUNNER_ENVIRONMENT='github-hosted')
+            self.assertIn('is not installed on this host', r.stdout, cmd)
+        self.assertEqual(self.launch('claim', '--context', 'p/ci', RUNNER_ENVIRONMENT='github-hosted').returncode, 2)
 
 
 if __name__ == '__main__':

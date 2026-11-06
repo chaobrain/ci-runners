@@ -37,10 +37,10 @@ class Parse(unittest.TestCase):
         self.assertEqual(gpus.cool_cards([1, 0], {0: ('a', 50.0, 0.0), 1: ('b', 50.0, 0.0)}, 80), [0, 1])
 
     def test_taskset_where_the_inventory_gives_cpus(self):
-        argv = part.command_argv('c', compile_part=False, lock='none', lock_bin='L', host_lock='H', cpus='0-43,88-131')
+        argv = part.command_argv('c', cpus='0-43,88-131')
         self.assertEqual(argv[:3], ['taskset', '-c', '0-43,88-131'])
         self.assertEqual(argv[-3:], ['bash', '-c', 'c'])
-        self.assertNotIn('taskset', part.command_argv('c', compile_part=False, lock='none', lock_bin='L', host_lock='H'))
+        self.assertNotIn('taskset', part.command_argv('c'))
 
 
 class Watch(unittest.TestCase):
@@ -187,7 +187,6 @@ class H100(Host):
         kw.setdefault('timeout_minutes', 1)
         kw.setdefault('queue_timeout_minutes', 0.02)
         kw.setdefault('gpus', 1)
-        kw.setdefault('slot', 'none')
         kw.setdefault('command', 'touch "$CI_PART_DIR/ran"')
         ex = part.Executor(self.inv, str(self.etc), env or self.env, release=str(ROOT), scope=False, poll=0.05,
                            run=self.run_fake, procs=procs, clock=clock, sample_s=sample_s)

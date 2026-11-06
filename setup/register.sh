@@ -4,8 +4,9 @@
 # Run by the lead, as the runner account, with a fresh registration token on stdin.
 # The token is never stored and never on a command line: config.sh reads it from
 # ACTIONS_RUNNER_INPUT_TOKEN (and clears it), in an environment that holds only that,
-# PATH, HOME, LANG and the CI proxy's three variables where the host has a CI proxy. No runner of the account may be
-# running meanwhile, since job code runs as the same account. Auto-update stays on.
+# PATH, HOME, LANG and the runner's three proxy variables where the host has the egress
+# tunnel. No runner of the account may be running meanwhile, since job code runs as the
+# same account. Auto-update stays on.
 set -eu
 [ $# -ge 1 ] || { echo "usage: $0 RUNNER... < token" >&2; exit 2; }
 etc=${CI_RUNNERS_ETC:-$HOME/data/ci-runners/etc}  # <data>/ci-runners/etc (design §3.2)

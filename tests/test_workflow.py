@@ -97,7 +97,7 @@ class Workflow(unittest.TestCase):
         t = text()
         for m in re.finditer(r'uses: chaobrain/ci-runners/actions/([a-z]+)@(\S+)\n((?:        .*\n)*)', t):
             action, ref, body = m.groups()
-            self.assertEqual(ref, 'v1', action)
+            # the ref follows the release stamp: test_actions.Actions.test_the_reusable_workflows_call_their_own_release checks they agree (design §9)
             given = set(re.findall(r'^          ([a-z][a-z0-9-]*):', body, re.M))
             self.assertLessEqual(given, declared(action), action)
         used = set(re.findall(r'chaobrain/ci-runners/actions/([a-z]+)@', t))

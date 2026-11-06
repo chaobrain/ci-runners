@@ -51,9 +51,9 @@ MERGED = policy.with_snapshot(P2, snap(), NOW)
 
 
 def retarget(ev, name: str, rid: int):
-    """``ev`` with every repository object of brainspike made ``name``/``rid``."""
+    """``ev`` with every repository object of brainkit made ``name``/``rid``."""
     if isinstance(ev, dict):
-        if ev.get('full_name') == 'chaobrain/brainspike':
+        if ev.get('full_name') == 'chaobrain/brainkit':
             return {**ev, 'full_name': name, 'id': rid, 'name': name.split('/')[1]}
         return {k: retarget(v, name, rid) for k, v in ev.items()}
     return ev
@@ -79,11 +79,10 @@ class Merge(unittest.TestCase):
         self.assertEqual(reason(MERGED, env(event='pull_request', actor='eve'), ev), 'ok')
 
     def test_members_act_only_in_the_snapshots_private_repositories(self):
-        # a hand-listed public repository keeps the hand-kept actors alone
-        ev = push(name='chaobrain/brainevent', rid=2002)
-        self.assertEqual(reason(MERGED, env('chaobrain/brainevent', '2002', cls='h100'), ev), 'actor')
+        # a hand-listed public repository is never opened to members, and is refused anyway
+        self.assertEqual(policy.actors_for(MERGED, 'chaobrain/brainevent'), frozenset({'alice'}))
         self.assertEqual(reason(MERGED, env('chaobrain/brainevent', '2002', actor='alice', cls='h100'),
-                                push('alice', 'chaobrain/brainevent', 2002)), 'ok')
+                                push('alice', 'chaobrain/brainevent', 2002)), 'repository')
         # a hand-listed private repository: open to members only if the snapshot holds it with its id
         text = POLICY2 + ('[repositories."chaobrain/handkept"]\nid = 6006\nvisibility = "private"\n'
                           '[repositories."chaobrain/moved"]\nid = 7007\nvisibility = "private"\n')
@@ -123,7 +122,7 @@ class Merge(unittest.TestCase):
     def test_public_repositories_stay_public_and_unlisted_ones_stay_out(self):
         self.assertEqual(MERGED.repos['chaobrain/brainevent'].visibility, 'public')
         self.assertEqual(reason(MERGED, env('chaobrain/brainevent', '2002'), push(name='chaobrain/brainevent', rid=2002)),
-                         'runner-class')
+                         'repository')
         self.assertEqual(reason(MERGED, env('chaobrain/other', '7007'), push(name='chaobrain/other', rid=7007)),
                          'repository')
         self.assertEqual(reason(MERGED, env('chaobrain/ci-runners', '9009'), push(name='chaobrain/ci-runners', rid=9009)),
@@ -163,7 +162,7 @@ class Merge(unittest.TestCase):
             policy.with_snapshot(P2, other, NOW)
 
     def test_a_policy_without_org_is_unchanged(self):
-        p = policy.load(POLICY2.replace('schema = 2', 'schema = 1').split('[org]')[0]
+        p = policy.load(POLICY2.split('[org]')[0]
                         + POLICY2.split('max_age_minutes = 60\n')[1])
         self.assertIs(policy.with_snapshot(p, snap(), NOW), p)
 
@@ -273,8 +272,8 @@ class Hook(unittest.TestCase):
         finally:
             hook.MAX_SNAPSHOT = saved
 
-    def test_schema_1_reads_no_snapshot(self):
-        (self.etc / 'policy.toml').write_text('schema = 1\nactors = ["dave"]\n[repositories."chaobrain/newproj"]\n'
+    def test_a_policy_without_org_reads_no_snapshot(self):
+        (self.etc / 'policy.toml').write_text('schema = 2\nactors = ["dave"]\n[repositories."chaobrain/newproj"]\n'
                                               'id = 5005\nvisibility = "private"\n')
         (self.etc / 'org.json').write_text('not json')  # never read
         code, line = hook.started(self.env)
@@ -399,7 +398,7 @@ class Sync(unittest.TestCase):
 
     def test_main_without_org_does_nothing(self):
         with tempfile.TemporaryDirectory() as d:
-            (pathlib.Path(d) / 'policy.toml').write_text('schema = 1\n')
+            (pathlib.Path(d) / 'policy.toml').write_text('schema = 2\n')
             self.assertEqual(orgsync.main(d, lambda *a: self.fail('no call')), 0)
             self.assertFalse((pathlib.Path(d) / 'org.json').exists())
 
@@ -510,7 +509,7 @@ class Push(unittest.TestCase):
         self.assertEqual(self.receive(self.doc())[0], 0)
 
     def test_receive_needs_an_org_policy(self):
-        (self.etc / 'policy.toml').write_text('schema = 1\n')
+        (self.etc / 'policy.toml').write_text('schema = 2\n')
         rc, err = self.receive(self.doc())
         self.assertEqual(rc, 1)
         self.assertIn('no [org] table', err)

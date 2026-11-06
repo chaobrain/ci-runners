@@ -1,6 +1,6 @@
 """The hook's decision (design §6.2, §6.3), on sanitised event payloads, hostile ones
 included: a fork head, a bot actor, an unlisted repository, ``pull_request_target`` and
-a public repository on a ``part`` runner (RUN-1 acceptance 1)."""
+a public repository, which no runner class takes (decision 11.12)."""
 from __future__ import annotations
 
 import dataclasses
@@ -14,9 +14,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 EVENTS = ROOT / 'tests' / 'fixtures' / 'events'
 
 POLICY = """
-schema = 1
+schema = 2
 actors = ["alice", "Carol"]
-[repositories."chaobrain/brainspike"]
+[repositories."chaobrain/brainkit"]
 id = 1001
 visibility = "private"
 [repositories."chaobrain/brainevent"]
@@ -31,14 +31,26 @@ P = policy.load(POLICY)
 P_BOT = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nbot_dispatch = true\n'))
 P_TARGET = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["pull_request_target"]\n'))
 
-REPOS = {'chaobrain/brainspike': '1001', 'chaobrain/brainevent': '2002'}
+REPOS = {'chaobrain/brainkit': '1001', 'chaobrain/brainevent': '2002'}
+#: the public repository, as a payload names it
+PUBLIC = {'id': 2002, 'full_name': 'chaobrain/brainevent'}
 
 
 def event(name: str) -> dict:
     return json.loads((EVENTS / f'{name}.json').read_text())
 
 
-def env(repo='chaobrain/brainspike', event='pull_request', actor='alice', triggering=None, cls='part', rid=...):
+def public(name: str) -> dict:
+    """A same-repository payload of the public repository."""
+    ev = event(name)
+    ev['repository'] = dict(PUBLIC)
+    for side in ('head', 'base'):
+        if side in ev.get('pull_request', {}):
+            ev['pull_request'][side]['repo'] = dict(PUBLIC)
+    return ev
+
+
+def env(repo='chaobrain/brainkit', event='pull_request', actor='alice', triggering=None, cls='part', rid=...):
     e = {'GITHUB_REPOSITORY': repo, 'GITHUB_REPOSITORY_ID': REPOS.get(repo, '4004') if rid is ... else rid,
          'GITHUB_EVENT_NAME': event, 'GITHUB_ACTOR': actor, 'GITHUB_TRIGGERING_ACTOR': triggering or actor,
          'CI_RUNNER_CLASS': cls}
@@ -73,11 +85,6 @@ class Accepted(unittest.TestCase):
             self.assertEqual(reason(P_BOT, env(event=name, actor=bot), event('dispatch_bot')), 'ok', name)
             self.assertEqual(reason(P_BOT, env(event=name, actor='mallory'), event('dispatch_bot')), 'actor', name)
 
-    def test_a_public_repository_on_its_gpu_runners(self):
-        for cls in ('gpu', 'h100'):
-            self.assertEqual(reason(P, env('chaobrain/brainevent', cls=cls), event('pr_public_same_repo')), 'ok')
-            self.assertEqual(reason(P, env('chaobrain/brainevent', 'push', cls=cls), event('push_public')), 'ok')
-
     def test_hostile_strings_change_nothing_and_never_reach_the_line(self):
         ev = event('pr_hostile_strings')
         d = policy.decide(P, env(), ev)
@@ -97,10 +104,6 @@ class Refused(unittest.TestCase):
         ev = event('pr_same_repo')
         del ev['pull_request']
         self.assertEqual(reason(P, env(), ev), 'fork')  # a pull_request event without one
-        self.assertEqual(reason(P, env('chaobrain/brainevent', cls='gpu'), {
-            **event('pr_fork'), 'repository': event('pr_public_same_repo')['repository'],
-            'pull_request': {**event('pr_fork')['pull_request'],
-                             'base': event('pr_public_same_repo')['pull_request']['base']}}), 'fork')
 
     def test_a_workflow_run_of_a_fork_or_an_outsider(self):
         self.assertEqual(reason(P, env(event='workflow_run'), event('workflow_run_fork')), 'fork')
@@ -115,8 +118,6 @@ class Refused(unittest.TestCase):
         self.assertEqual(reason(P, env(event='pull_request_target'), event('pr_target_same_repo')), 'event')
         self.assertEqual(reason(P, env(event='pull_request_target', actor='mallory'), event('pr_target_fork')),
                          'event')
-        self.assertEqual(reason(P, env('chaobrain/brainevent', 'pull_request_target', cls='gpu'),
-                                event('pr_public_same_repo')), 'event')
         self.assertEqual(reason(P_TARGET, env(event='pull_request_target'), event('pr_target_same_repo')), 'ok')
         self.assertEqual(reason(P_TARGET, env(event='pull_request_target', actor='mallory'),
                                 event('pr_target_fork')), 'fork')
@@ -127,9 +128,6 @@ class Refused(unittest.TestCase):
     def test_other_events(self):
         self.assertEqual(reason(P, env(event='issue_comment'), event('issue_comment')), 'event')
         self.assertEqual(reason(P, env(event='Push'), event('push')), 'event')
-        for name in ('schedule', 'workflow_run', 'status', 'repository_dispatch'):  # private only
-            self.assertEqual(reason(P, env('chaobrain/brainevent', name, cls='gpu'), event('push_public')),
-                             'event', name)
 
     def test_an_unlisted_repository_and_this_one(self):
         ev = event('push')
@@ -138,7 +136,7 @@ class Refused(unittest.TestCase):
         self.assertEqual(reason(P, env('chaobrain/ci-runners', 'push', rid='5005'), ev), 'self')
         self.assertEqual(reason(P, env('Chaobrain/CI-Runners', 'push', rid='5005'), ev), 'self')
         self.assertEqual(reason(P, env(repo=None), event('push')), 'repository')
-        self.assertEqual(reason(P, env(repo='chaobrain/brainspike\n'), event('push')), 'repository')
+        self.assertEqual(reason(P, env(repo='chaobrain/brainkit\n'), event('push')), 'repository')
 
     def test_the_repository_id_is_checked_against_the_name(self):
         self.assertEqual(reason(P, env(rid='2002'), event('pr_same_repo')), 'repository-id')
@@ -148,7 +146,7 @@ class Refused(unittest.TestCase):
         for name in ('pr_kelvin_name', 'pr_bool_id', 'pr_string_id', 'pr_float_id'):
             self.assertEqual(reason(P, env(), event(name)), 'repository-id', name)
         ev = event('pr_same_repo')
-        ev['repository'] = event('pr_public_same_repo')['repository']
+        ev['repository'] = dict(PUBLIC)
         self.assertEqual(reason(P, env(), ev), 'repository-id')  # the payload names another repository
         ev = event('pr_same_repo')
         ev['repository']['id'] = 1002
@@ -158,15 +156,19 @@ class Refused(unittest.TestCase):
         ev = event('push')
         del ev['repository']
         self.assertEqual(reason(P, env(event='push'), ev), 'payload')
-        ev = {**event('schedule'), 'repository': event('pr_public_same_repo')['repository']}
+        ev = {**event('schedule'), 'repository': dict(PUBLIC)}
         self.assertEqual(reason(P, env(event='schedule'), ev), 'repository-id')  # a schedule naming another
         self.assertEqual(reason(P, env(event='push'), [ev]), 'payload')
         self.assertEqual(reason(P, env(event='push'), None), 'payload')
 
-    def test_a_public_repository_on_a_part_runner(self):
-        for cls in ('light', 'part', 'compile', 'nightly'):
-            self.assertEqual(reason(P, env('chaobrain/brainevent', cls=cls), event('pr_public_same_repo')),
-                             'runner-class', cls)
+    def test_a_public_repository_on_any_runner(self):
+        for cls in sorted(policy.CLASSES):
+            self.assertEqual(reason(P, env('chaobrain/brainevent', cls=cls), public('pr_same_repo')), 'repository', cls)
+            self.assertEqual(reason(P, env('chaobrain/brainevent', 'push', cls=cls), public('push')), 'repository', cls)
+
+    def test_the_retired_runner_classes(self):
+        for cls in ('compile', 'nightly', 'gpu'):
+            self.assertEqual(reason(P, env(cls=cls), event('pr_same_repo')), 'runner-class', cls)
 
     def test_an_unknown_runner_class(self):
         for cls in (None, '', 'PART', 'part ', 'h100-gpu0'):
@@ -174,7 +176,7 @@ class Refused(unittest.TestCase):
 
     def test_the_bot_dispatch_switch_is_off_by_default(self):
         bot = 'github-actions[bot]'
-        self.assertFalse(P.repos['chaobrain/brainspike'].bot_dispatch)
+        self.assertFalse(P.repos['chaobrain/brainkit'].bot_dispatch)
         for name in ('workflow_dispatch', 'repository_dispatch'):
             self.assertEqual(reason(P, env(event=name, actor=bot), event('dispatch_bot')), 'bot', name)
             self.assertEqual(reason(P, env(event=name, triggering=bot), event('dispatch_bot')), 'bot', name)
@@ -188,14 +190,11 @@ class Refused(unittest.TestCase):
         ev = event('pr_same_repo')
         ev['pull_request']['user']['login'] = bot
         self.assertEqual(reason(P, env(), ev), 'bot')  # a pull request the bot opened
-        ev = event('push_public')
-        self.assertEqual(reason(P, env('chaobrain/brainevent', 'workflow_dispatch', actor=bot, cls='gpu'),
-                                {**ev, 'sender': {'login': bot}}), 'bot')  # public: humans only
-        repos = dict(P.repos)  # even a public repository with the switch set (load refuses it) stays humans only
+        repos = dict(P.repos)  # a public repository with the switch set (load refuses it) is still refused
         repos['chaobrain/brainevent'] = dataclasses.replace(repos['chaobrain/brainevent'], bot_dispatch=True)
         self.assertEqual(reason(dataclasses.replace(P, repos=repos),
-                                env('chaobrain/brainevent', 'workflow_dispatch', actor=bot, cls='gpu'),
-                                {**ev, 'sender': {'login': bot}}), 'bot')
+                                env('chaobrain/brainevent', 'workflow_dispatch', actor=bot),
+                                {**public('push'), 'sender': {'login': bot}}), 'repository')
         self.assertEqual(reason(P, env(event='workflow_dispatch', actor='dependabot[bot]'),
                                 event('dispatch_member')), 'actor')  # another bot is just not listed
 
@@ -229,18 +228,20 @@ class Refused(unittest.TestCase):
 
 
 class Load(unittest.TestCase):
-    def test_the_example_loads(self):
-        p = policy.load((ROOT / 'setup' / 'policy.example.toml').read_bytes())
-        self.assertEqual(p.repos['chaobrain/brainevent'].visibility, 'public')
-        self.assertEqual(len(p.digest), 64)
+    def test_a_schema_1_policy_is_refused(self):
+        with self.assertRaises(policy.PolicyError):
+            policy.load(POLICY.replace('schema = 2', 'schema = 1'))
+        self.assertEqual(len(P.digest), 64)
 
     def test_malformed_policies(self):
         bad = {
-            'no schema': POLICY.replace('schema = 1', ''),
-            'schema 3': POLICY.replace('schema = 1', 'schema = 3'),
-            'schema as str': POLICY.replace('schema = 1', 'schema = "1"'),
-            'schema as bool': POLICY.replace('schema = 1', 'schema = true'),
-            'org in schema 1': POLICY + '[org]\nname = "chaobrain"\n',
+            'no schema': POLICY.replace('schema = 2', ''),
+            'schema 1': POLICY.replace('schema = 2', 'schema = 1'),
+            'schema 3': POLICY.replace('schema = 2', 'schema = 3'),
+            'schema as str': POLICY.replace('schema = 2', 'schema = "2"'),
+            'schema as bool': POLICY.replace('schema = 2', 'schema = true'),
+            'schema as float': POLICY.replace('schema = 2', 'schema = 2.0'),
+            'org in schema 1': POLICY.replace('schema = 2', 'schema = 1') + '[org]\nname = "chaobrain"\n',
             'unknown key': POLICY + 'allow_all = true\n',
             'a bot as actor': POLICY.replace('"Carol"', '"dependabot[bot]"'),
             'a human as bot': 'bot = "alice"\n' + POLICY,
@@ -258,8 +259,8 @@ class Load(unittest.TestCase):
             'extra event malformed': POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["a b"]\n'),
             'extra event unchecked': POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["issue_comment"]\n'),
             'extra event check_suite': POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["check_suite"]\n'),
-            'listed twice': POLICY + '[repositories."Chaobrain/Brainspike"]\nid = 9\nvisibility = "private"\n',
-            'repo key': POLICY + '[repositories."brainspike"]\nid = 9\nvisibility = "private"\n',
+            'listed twice': POLICY + '[repositories."Chaobrain/Brainkit"]\nid = 9\nvisibility = "private"\n',
+            'repo key': POLICY + '[repositories."brainkit"]\nid = 9\nvisibility = "private"\n',
             'repo unknown key': POLICY.replace('id = 1001\n', 'id = 1001\nactors = ["x"]\n'),
             'not toml': 'schema = = 1',
             'not utf-8': b'\xff\xfe',

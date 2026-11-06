@@ -1,6 +1,6 @@
-"""Host setup (design §5.2, §5.3): the plan lists every change and withholds secrets,
-apply makes exactly an approved plan and refuses another, and a second run changes
-nothing. On a fake host tree; the systemctl commands are recorded, not run."""
+"""Host setup (design §5.2, §5.3): the plan lists every change, apply makes exactly an
+approved plan and refuses another, and a second run changes nothing. On a fake host
+tree; the systemctl commands are recorded, not run."""
 from __future__ import annotations
 
 import contextlib
@@ -31,38 +31,22 @@ class Setup(unittest.TestCase):
         t = pathlib.Path(self.tmp.name)
         self.home, self.data = t / 'home', t / 'data'
         self.etc = self.data / 'ci-runners' / 'etc'
-        src = t / 'proxysrc'
-        for d in (self.home, self.etc / 'projects', src, self.data / 'ci-runners' / 'releases'):
+        for d in (self.home, self.etc / 'projects', self.data / 'ci-runners' / 'releases'):
             d.mkdir(parents=True)
         os.symlink(ROOT, self.data / 'ci-runners' / 'releases' / 'hook')
-        for n in ('n1', 'n2'):
-            (src / f'{n}.json').write_text(json.dumps({
-                'log': {'loglevel': 'warning'}, 'inbounds': [{'port': 10808, 'protocol': 'socks'}],
-                'outbounds': [{'protocol': 'vmess', 'settings': {'id': f'SECRET-ID-{n}'}}]}))
-        (src / 'routing.json').write_text('{"routing": {"rules": []}, "note": "SECRET-ROUTE"}')
         (self.etc / 'inventory.toml').write_text(f'''schema = 1
 this = "hb"
 [hosts.hb]
-ssh = "alias-x"
 account = "acct-x"
 home = "{self.home}"
 data = "{self.data}"
-trusted = true
-cpu_slowdown = 1.0
 slots = 2
 memory_max = "120G"
 disk_min_gib = 50
 gpus = [0, 1]
 max_temp_c = 80
 pools = {{ light = 1, part = 2 }}
-files = {{ host_lock = "/tmp/h.lock", slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
-[hosts.hb.proxy]
-client = "/usr/bin/proxy-client"
-config = "{src}"
-nodes = ["n1", "n2"]
-http_port = 20809
-socks_port = 20808
-no_proxy = "localhost,127.0.0.1"
+files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
 ''')
         (self.etc / 'projects' / 'p.toml').write_text('name = "p"\n[hosts.hb]\nmemory_max = "80G"\n')
         for name in ('hb-light-1', 'hb-part-1', 'hb-part-2'):  # the runner app is in place: no download
@@ -86,22 +70,17 @@ no_proxy = "localhost,127.0.0.1"
 
     def test_plan_apply_and_a_second_run(self):
         text = setup.build(str(self.etc)).text()
-        self.assertNotIn('SECRET', text)  # the proxy configs are withheld
-        self.assertIn('(content withheld: it holds secrets)', text)
-        for want in (f'mkdir  {self.etc}/ mode 700', 'inbounds 127.0.0.1:20808 socks, 127.0.0.1:20809 http',
+        for want in (f'mkdir  {self.etc}/ mode 700',
                      f'| ACTIONS_RUNNER_HOOK_JOB_STARTED={self.data}/ci-runners/hooks/job-started.sh',
-                     '| CI_RUNNER_CLASS=part', '| https_proxy=http://127.0.0.1:20809', '| MemoryMax=120G',
-                     '| MemoryMax=80G', 'labels part,hb', 'run    systemctl --user enable --now ci-proxy.service'):
+                     '| CI_RUNNER_CLASS=part', '| MemoryMax=120G', '| MemoryMax=80G', 'labels part,hb',
+                     'systemd --user (units):', 'fetched directly'):
             self.assertIn(want, text)
+        for gone in ('ci-proxy', 'ci-tunnel', 'wait   '):  # no egress on this host (decision 11.12)
+            self.assertNotIn(gone, text)
         self.assertEqual(self.apply(text), 0)
         self.assertEqual((self.etc.stat().st_mode & 0o777), 0o700)
-        node = json.loads((self.etc / 'proxy' / 'nodes' / 'n1.json').read_text())
-        self.assertEqual([i['port'] for i in node['inbounds']], [20808, 20809])
-        self.assertEqual(node['outbounds'][0]['settings']['id'], 'SECRET-ID-n1')
-        self.assertEqual(os.readlink(self.etc / 'proxy' / 'active.json'), 'nodes/n1.json')
-        self.assertEqual((self.etc / 'proxy' / 'nodes' / 'n1.json').stat().st_mode & 0o777, 0o600)
-        unit = (self.home / '.config' / 'systemd' / 'user' / 'ci-proxy.service').read_text()
-        self.assertIn('ExecStart=/usr/bin/proxy-client run -c', unit)
+        self.assertEqual(sorted(p.name for p in (self.home / '.config' / 'systemd' / 'user').glob('ci-*')),
+                         ['ci-p.slice', 'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service'])
         self.assertIn(['systemctl', '--user', 'enable', 'ci-runner@hb-light-1.service', 'ci-runner@hb-part-1.service',
                        'ci-runner@hb-part-2.service'], self.ran)
         state = json.loads((self.data / 'ci-runners' / 'state' / 'setup.json').read_text())
@@ -171,13 +150,18 @@ no_proxy = "localhost,127.0.0.1"
             with self.assertRaises(ValueError, msg=(name, mem)):
                 setup.build(str(self.etc))
 
-    def test_the_proxy_client_is_one_absolute_path(self):
+    def test_the_retired_keys_plan_nothing(self):
+        """Decision 11.12: the first path's keys (h100's inventory still holds some) and an
+        old proxy table are ignored, not set up: the plan is the same without them."""
         inv = self.etc / 'inventory.toml'
-        for bad in ('proxy-client', '/usr/bin/x -c /tmp/y', '/usr/bin/x\\nExecStartPre=/bin/y'):
-            inv.write_text(inv.read_text().replace('client = "/usr/bin/proxy-client"', f'client = "{bad}"'))
-            with self.assertRaises(ValueError, msg=bad):
-                setup.build(str(self.etc))
-            inv.write_text(inv.read_text().replace(f'client = "{bad}"', 'client = "/usr/bin/proxy-client"'))
+        before = setup.build(str(self.etc)).text()
+        text = inv.read_text().replace('slots = 2\n', 'ssh = "<alias>"\ntrusted = true\nremote = false\n'
+                                       'cpu_slowdown = 2.7\nslots = 2\n', 1)
+        text = text.replace('{ slot_lock = ', '{ host_lock = "/tmp/h.lock", slot_lock = ', 1)
+        self.assertNotEqual(text, inv.read_text())
+        self.assertIn('host_lock', text)
+        inv.write_text(text + '[hosts.hb.proxy]\nclient = "/usr/bin/x -c /tmp/y"\nhttp_port = 20809\n')
+        self.assertEqual(setup.build(str(self.etc)).text(), before)
 
     def test_the_runner_app_is_checked_and_unpacked_whole(self):
         t = pathlib.Path(self.tmp.name)
@@ -211,7 +195,7 @@ no_proxy = "localhost,127.0.0.1"
         self.assertEqual((t / 'r2' / '.env').read_text(), 'kept')
         self.assertFalse((t / 'r2.ci-new').exists())
 
-    def test_the_download_waits_for_the_proxy_to_listen(self):
+    def test_the_download_waits_for_the_forward_to_listen(self):
         t = pathlib.Path(self.tmp.name)
         app = t / 'app'
         for f in setup.RUNNER_FILES:
@@ -237,7 +221,7 @@ no_proxy = "localhost,127.0.0.1"
             port = s.getsockname()[1]
         servers = []
 
-        def late():  # the proxy starts listening a second after its unit started
+        def late():  # the forward starts listening a second after its unit started
             time.sleep(1)
             srv = http.server.HTTPServer(('127.0.0.1', port), H)
             servers.append(srv)
@@ -253,7 +237,7 @@ no_proxy = "localhost,127.0.0.1"
                 srv.server_close()
         self.assertTrue(setup.runner_complete(str(t / 'r')))
 
-    def test_a_proxy_that_never_listens_fails_within_the_bound(self):
+    def test_a_forward_that_never_listens_fails_within_the_bound(self):
         with socket.socket() as s:
             s.bind(('127.0.0.1', 0))
             port = s.getsockname()[1]  # bound, never listening
@@ -274,8 +258,7 @@ no_proxy = "localhost,127.0.0.1"
         self.assertIn('ci-orgsync.service', plan.text())
         enable = [a['argv'] for a in plan.actions if a.get('kind') == 'run' and '--now' in a['argv']
                   and 'ci-reaper.timer' in a['argv']]
-        self.assertEqual(enable, [['systemctl', '--user', 'enable', '--now', 'ci-proxy-check.timer', 'ci-reaper.timer',
-                                   'ci-orgsync.timer']])
+        self.assertEqual(enable, [['systemctl', '--user', 'enable', '--now', 'ci-reaper.timer', 'ci-orgsync.timer']])
         self.assertEqual(setup.timers({}), ['ci-reaper.timer'])
         self.assertEqual(setup.timers({'orgsync': True}), ['ci-reaper.timer', 'ci-orgsync.timer'])
 
@@ -292,14 +275,13 @@ no_proxy = "localhost,127.0.0.1"
         with self.assertRaises(ValueError):
             setup.render('a=@Y@\n', {'X': '1'})
 
-    def test_a_proxy_host_keeps_its_runner_unit(self):
-        """The 3090 hosts: the runner unit is today's, with ~/data spelled out."""
+    def test_a_host_without_a_tunnel_has_a_plain_runner_unit(self):
+        """The runner unit with the data root spelled out, and no order after an egress."""
         self.apply(setup.build(str(self.etc)).text())
         got = (self.home / '.config' / 'systemd' / 'user' / 'ci-runner@.service').read_text()
         d = self.data
-        self.assertEqual([x for x in got.splitlines() if not x.startswith('#')], [  # v1.0.0's, but for the paths
-            '[Unit]', 'Description=ci-runners: GitHub Actions runner %i', 'After=ci-proxy.service',
-            'Wants=ci-proxy.service', '', '[Service]', f'WorkingDirectory={d}/actions-runner/%i',
+        self.assertEqual([x for x in got.splitlines() if not x.startswith('#')], [
+            '[Unit]', 'Description=ci-runners: GitHub Actions runner %i', '', '[Service]', f'WorkingDirectory={d}/actions-runner/%i',
             f'ExecStart={d}/actions-runner/%i/run.sh', 'NoNewPrivileges=yes', 'KillMode=mixed', 'KillSignal=SIGTERM',
             'TimeoutStopSec=5min', 'Restart=always', 'RestartSec=30', 'Slice=ci.slice', '', '[Install]',
             'WantedBy=default.target'])
@@ -326,12 +308,9 @@ class Standalone(unittest.TestCase):
         self.inv.write_text(f'''schema = 1
 this = "hx"
 [hosts.hx]
-ssh = "alias-x"
 account = "acct-x"
 home = "{self.home}"
 data = "{self.data}"
-trusted = true
-cpu_slowdown = 2.7
 slots = 2
 memory_max = "512G"
 disk_min_gib = 50
@@ -340,7 +319,7 @@ max_temp_c = 80
 cpus = "0-43,88-131"
 python = "{sys.executable}"
 orgsync = true
-files = {{ host_lock = "/tmp/h.lock", slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
+files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
 [hosts.hx.pools]
 light = {{ count = 1, labels = ["hx-light"] }}
 part = {{ count = 1, labels = ["hx-cpu"] }}
@@ -519,14 +498,6 @@ h100 = {{ per_card = true, labels = ["h100"] }}
         with self.assertRaisesRegex(ValueError, 'the etc directory must be'):
             setup.build(str(other))
 
-    def test_proxy_check_without_a_proxy(self):
-        from ci_runners import cli
-        out = io.StringIO()
-        with mock.patch.dict(os.environ, {'CI_RUNNERS_ETC': str(self.etc)}), contextlib.redirect_stdout(out):
-            self.assertEqual(cli.main(['proxy-check']), 0)
-        self.assertIn('no CI proxy', out.getvalue())
-
-
 class Egress(unittest.TestCase):
     """h100's egress (decision 11.10): a tunnel table gives ci-tunnel, an ssh forward of the
     local http port to the egress proxy; the runners' proxy lines point at the forward;
@@ -571,7 +542,7 @@ direct = ["localhost", "127.0.0.1", "::1"]
             self.assertIn(want, text)
         self.assertNotIn('ci-proxy', text)
         self.assertNotIn('ci-bridge', text)
-        self.assertNotIn('remove', text)  # nothing recorded: nothing to remove
+        self.assertNotIn('  remove ', text)  # nothing recorded: nothing to remove
         self.assertNotIn('egress.example', text)  # the lead's files are not shown
         self.assertEqual(self.apply(text), 0)
         self.assertEqual(sorted(p.name for p in self.units.iterdir()),
@@ -705,10 +676,7 @@ direct = ["localhost", "127.0.0.1", "::1"]
                               ('http_port = 18182', 'http_port = 18182\nsocks_port = 18181', r"unknown keys \['socks_port'\]"),
                               ('http_port = 18182', 'http_port = 18182\nallow = ["github.com"]', r"unknown keys \['allow'\]"),
                               ('"::1"]', '"::1,example.com"]', 'direct is malformed'),
-                              ('"::1"]', '"::1", "a.org,b.org"]', 'direct is malformed'),  # one name each
-                              ('[hosts.hx.tunnel]', '[hosts.hx.proxy]\nclient = "/bin/x"\nconfig = "/c"\n'
-                               'nodes = ["n"]\nhttp_port = 1\nsocks_port = 2\nno_proxy = "localhost"\n'
-                               '[hosts.hx.tunnel]', 'a CI proxy and a tunnel')):
+                              ('"::1"]', '"::1", "a.org,b.org"]', 'direct is malformed')):  # one name each
             with self.assertRaisesRegex(inventory.InventoryError, why, msg=new):
                 inventory.load(good.replace(old, new))
         self.assertEqual(inventory.load(good).host['tunnel'],

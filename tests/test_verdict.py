@@ -37,10 +37,9 @@ class Decide(unittest.TestCase):
             v = verdict.decide([End('cpu', 'red'), End('gpu', other)])
             self.assertEqual(v.state, 'failure', other)
             self.assertIn('cpu red', v.description)
-        self.assertEqual(verdict.decide([End('gpu', 'disagreement')]).state, 'failure')
 
     def test_an_infrastructure_end_is_an_error_not_a_failure(self):
-        for kind in ('oom', 'thermal', 'reboot', 'yielded', 'unavailable', 'lost', 'stopped'):
+        for kind in ('oom', 'thermal', 'reboot', 'unavailable', 'lost', 'stopped'):
             v = verdict.decide([End('cpu', 'pass'), End('gpu', kind)])
             self.assertEqual(v.state, 'error', kind)
             self.assertEqual(v.description, f'infrastructure: gpu {kind}')
@@ -126,19 +125,16 @@ class Main(unittest.TestCase):
         self.inv = inventory.load(f'''schema = 1
 this = "hb"
 [hosts.hb]
-ssh = "alias-x"
 account = "acct-x"
 home = "{t}"
 data = "{t}/data"
-trusted = true
-cpu_slowdown = 1.0
 slots = 1
 memory_max = "120G"
 disk_min_gib = 0
 gpus = [0]
 max_temp_c = 80
 pools = {{ light = 1 }}
-files = {{ host_lock = "{t}/h.lock", slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
+files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
 ''')
         self.env = {'GITHUB_REPOSITORY': 'Org/Repo', 'GITHUB_RUN_ID': '77', 'GITHUB_RUN_ATTEMPT': '1',
                     'GITHUB_TOKEN': 'tok', 'GITHUB_STEP_SUMMARY': str(self.summary), 'GITHUB_OUTPUT': str(self.output)}

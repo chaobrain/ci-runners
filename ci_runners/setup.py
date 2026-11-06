@@ -8,18 +8,16 @@
 - directories (§3.2), with ``etc/`` mode 700;
 - the hook scripts, the rendered units and slices, each with its sha256 and a diff
   against the file in place;
-- the CI proxy's node configs, made from the source configs (``proxy.config``) with
-  their local ports replaced by the CI ports; their content is withheld (secrets). A
-  host with ``tunnel`` instead (h100, decision 11.10) gets ``ci-tunnel``, an ssh forward
-  to the egress host's proxy, and its ``.env`` points at the forward; the tunnel's key,
+- with a ``tunnel`` table (h100, decision 11.10), ``ci-tunnel``, an ssh forward to the
+  egress host's proxy, and each runner's ``.env`` points at the forward; the tunnel's key,
   ``ssh_config`` and ``known_hosts`` in ``etc/tunnel/`` are the lead's, checked but never
   written;
 - the runner app, checked by sha256, extracted once per runner directory;
 - each runner's ``.env``;
 - the ``systemctl --user`` commands.
 
-Units are rendered with the inventory's ``data`` (the root of §3.2, ``~/data`` on the 3090
-hosts, our subtree on h100) and ``python``. A ``ci-*`` unit file that exists but that no
+Units are rendered with the inventory's ``data`` (the root of §3.2: our subtree on h100)
+and ``python``. A ``ci-*`` unit file that exists but that no
 earlier ``apply`` wrote (``state/setup.json``) stops the plan: another user of a shared
 account may own it. ``plan --adopt`` instead lists each such file as ``adopt`` (a regular
 file of this account only) and plans it as usual, for a host whose units an older release
@@ -55,22 +53,19 @@ from ci_runners import inventory
 
 RUNNER_VERSION = '2.338.2'
 RUNNER_SHA256 = 'baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40'
-PROXY_WAIT = 60  # s: the CI proxy's start, before the runner app is fetched through it
+PORT_WAIT = 60  # s: the egress forward's start, before the runner app is fetched through it
 RUNNER_URL = (f'https://github.com/actions/runner/releases/download/v{RUNNER_VERSION}/'
               f'actions-runner-linux-x64-{RUNNER_VERSION}.tar.gz')
-UNITS = ('ci-runner@.service', 'ci-proxy.service', 'ci-proxy-check.service', 'ci-proxy-check.timer',
-         'ci-tunnel.service',
-         'ci-reaper.service', 'ci-reaper.timer', 'ci-orgsync.service', 'ci-orgsync.timer', 'ci.slice')
+UNITS = ('ci-runner@.service', 'ci-tunnel.service', 'ci-reaper.service', 'ci-reaper.timer', 'ci-orgsync.service', 'ci-orgsync.timer', 'ci.slice')
 RUNNER_FILES = ('config.sh', 'run.sh', os.path.join('bin', 'Runner.Listener'))
 # what goes into a unit file: one word each, so nothing can add a line
 PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,39}')
-CLIENT = re.compile(r'/[A-Za-z0-9._/-]+')
+PATH = re.compile(r'/[A-Za-z0-9._/-]+')
 MEMORY = re.compile(r'[1-9][0-9]*[KMGT]?|[1-9][0-9]?%|infinity')
-TIMERS = ('ci-proxy-check.timer', 'ci-reaper.timer', 'ci-orgsync.timer')
+TIMERS = ('ci-reaper.timer', 'ci-orgsync.timer')
 SYSTEM_PYTHON = '/usr/bin/python3'
-#: the runner unit's order after the CI proxy, where the host has one
-PROXY_ORDER = 'After=ci-proxy.service\nWants=ci-proxy.service'
-#: or after the ssh forward to the egress (h100, decision 11.10)
+#: the runner unit's order after the ssh forward to the egress (h100, decision 11.10); the
+#: template's key is still PROXY_ORDER, so that the rendered unit stays as it was
 TUNNEL_ORDER = 'After=ci-tunnel.service\nWants=ci-tunnel.service'
 #: the lead's files in etc/tunnel/ (design §5.3): the key first, which no one else may read
 TUNNEL_FILES = ('id_ed25519', 'ssh_config', 'known_hosts')
@@ -96,17 +91,16 @@ def _runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str, int | 
 
 
 def timers(h: dict) -> list[str]:
-    """The timers this host enables: the proxy check only with a CI proxy, the org
-    snapshot only where the inventory sets ``orgsync`` (design §6.5)."""
-    return [t for t in TIMERS if ('proxy' in h or 'proxy' not in t) and (h.get('orgsync') or 'orgsync' not in t)]
+    """The timers this host enables: the org snapshot only where the inventory sets
+    ``orgsync`` (design §6.5)."""
+    return [t for t in TIMERS if h.get('orgsync') or 'orgsync' not in t]
 
 
 def runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str]]:
     """``(name, labels, class)`` of this host's runners (design §5.1): ``<role>-<pool>-<i>``,
     labelled with the pool (the class) and the host role, or with the pool's own
     ``labels``; a ``per_card`` pool has one runner per card, ``<role>-gpu<N>``, labelled
-    also ``<role>-gpu<N>``. A remote host's runners are not here: they live on the host
-    that drives it (RUN-2)."""
+    also ``<role>-gpu<N>``."""
     return [(n, labels, cls) for n, labels, cls, _ in _runners(inv)]
 
 
@@ -182,18 +176,6 @@ def check_tunnel(etc: str) -> None:
         raise ValueError(f'{d}/ssh_config must have one "Host egress" with its HostName')
 
 
-def node_config(src: dict, http_port: int, socks_port: int) -> dict:
-    """A node config with its inbounds replaced by the CI instance's local ports. Pure."""
-    out = dict(src)
-    out['inbounds'] = [
-        {'tag': 'socks', 'listen': '127.0.0.1', 'port': socks_port, 'protocol': 'socks',
-         'settings': {'udp': True}},
-        {'tag': 'http', 'listen': '127.0.0.1', 'port': http_port, 'protocol': 'http'},
-    ]
-    out.pop('log', None)
-    return out
-
-
 def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = None) -> str:
     """A runner's ``.env`` (design §5.3): the runner app reads it into its environment,
     which its hooks and its jobs' steps inherit. A per-card runner names its card in
@@ -201,11 +183,7 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
     h = inv.host
     hooks = os.path.join(h['data'], 'ci-runners', 'hooks')
     lines = []
-    if 'proxy' in h:
-        p = h['proxy']
-        lines += [f'https_proxy=http://127.0.0.1:{p["http_port"]}', f'http_proxy=http://127.0.0.1:{p["http_port"]}',
-                  f'no_proxy={p["no_proxy"]}']
-    elif 'tunnel' in h:
+    if 'tunnel' in h:
         t = h['tunnel']
         lines += [f'https_proxy=http://127.0.0.1:{t["http_port"]}', f'http_proxy=http://127.0.0.1:{t["http_port"]}',
                   f'no_proxy={",".join(t["direct"])}']
@@ -244,7 +222,7 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _file(plan: Plan, path: str, content: str, mode: int, secret: bool = False, note: str = '') -> None:
+def _file(plan: Plan, path: str, content: str, mode: int) -> None:
     data = content.encode()
     try:
         with open(path, 'rb') as f:
@@ -256,14 +234,12 @@ def _file(plan: Plan, path: str, content: str, mode: int, secret: bool = False, 
     except OSError:
         old_mode = None
     if old == data and old_mode == mode:
-        plan.add(f'  keep   {path}{note}')
+        plan.add(f'  keep   {path}')
         return
     verb = 'write' if old is None else 'update'
-    plan.add(f'  {verb:6} {path} mode {mode:o} sha256 {_sha(data)[:16]}{note}', kind='file', path=path,
+    plan.add(f'  {verb:6} {path} mode {mode:o} sha256 {_sha(data)[:16]}', kind='file', path=path,
              content=content, mode=mode)
-    if secret:
-        plan.add('         (content withheld: it holds secrets)')
-    elif old is not None:
+    if old is not None:
         for d in difflib.unified_diff(old.decode(errors='replace').splitlines(), content.splitlines(),
                                       'in place', 'planned', lineterm='', n=1):
             plan.add(f'         {d}')
@@ -279,8 +255,6 @@ def build(etc: str, adopt: bool = False) -> Plan:
     with open(os.path.join(etc, 'inventory.toml'), encoding='utf-8') as f:
         inv = inventory.load(f.read())
     h = inv.host
-    if h.get('remote'):
-        raise ValueError(f'{inv.this} is driven remotely: nothing is set up on it here (RUN-2)')
     data, home = h['data'], h['home']
     base = os.path.join(data, 'ci-runners')
     release = os.path.realpath(os.environ.get('CI_RUNNERS_RELEASE') or os.path.join(base, 'releases', 'hook'))
@@ -291,8 +265,6 @@ def build(etc: str, adopt: bool = False) -> Plan:
             (etc, 0o700), (os.path.join(base, 'state'), 0o700), (os.path.join(base, 'logs'), 0o700),
             (os.path.join(data, 'actions-runner'), 0o700), (os.path.join(data, 'ci-work'), 0o700),
             (os.path.join(home, '.config', 'systemd', 'user'), 0o755)]
-    if 'proxy' in h:
-        dirs += [(os.path.join(etc, 'proxy'), 0o700), (os.path.join(etc, 'proxy', 'nodes'), 0o700)]
     unit_dir = os.path.join(home, '.config', 'systemd', 'user')
     for d, mode in dirs:
         if os.path.isdir(d) and (d == unit_dir or os.stat(d).st_mode & 0o777 == mode):
@@ -301,11 +273,10 @@ def build(etc: str, adopt: bool = False) -> Plan:
             plan.add(f'  mkdir  {d}/ mode {mode:o}', kind='mkdir', path=d, mode=mode)
     if not isinstance(h['memory_max'], str) or not MEMORY.fullmatch(h['memory_max']):
         raise ValueError(f'memory_max must match {MEMORY.pattern}')
-    client = h.get('proxy', {}).get('client', '/bin/false')
     python = python_of(inv)
-    for key, v in (('proxy.client', client), ('data', data), ('python', python), ('etc', etc)):
-        if not isinstance(v, str) or not CLIENT.fullmatch(v):
-            raise ValueError(f'{key} must be an absolute path matching {CLIENT.pattern}')
+    for key, v in (('data', data), ('python', python), ('etc', etc)):
+        if not isinstance(v, str) or not PATH.fullmatch(v):
+            raise ValueError(f'{key} must be an absolute path matching {PATH.pattern}')
     if etc != os.path.join(base, 'etc'):
         raise ValueError(f'the etc directory must be {os.path.join(base, "etc")}')
     if h.get('python'):
@@ -317,8 +288,8 @@ def build(etc: str, adopt: bool = False) -> Plan:
         with open(os.path.join(release, 'hooks', name)) as f:
             _file(plan, os.path.join(base, 'hooks', name), hook_text(f.read(), python), 0o755)
     plan.add('units:')
-    subs = {'CI_MEMORY_MAX': h['memory_max'], 'PROXY_CLIENT': client, 'CI_DATA': data, 'CI_ETC': etc,
-            'CI_PYTHON': python, 'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else TUNNEL_ORDER if 'tunnel' in h else '',
+    subs = {'CI_MEMORY_MAX': h['memory_max'], 'CI_DATA': data, 'CI_ETC': etc,
+            'CI_PYTHON': python, 'PROXY_ORDER': TUNNEL_ORDER if 'tunnel' in h else '',
             # the forward's ports are in its unit: a changed port changes the unit, which restarts it
             'TUNNEL_HTTP': str(h['tunnel']['http_port']) if 'tunnel' in h else '',
             'TUNNEL_EGRESS': str(h['tunnel']['egress_port']) if 'tunnel' in h else ''}
@@ -346,8 +317,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
         _file(plan, path, content, 0o644)
 
     for name in UNITS:
-        if (name.startswith('ci-proxy') and 'proxy' not in h or name.startswith('ci-orgsync') and not h.get('orgsync')
-                or name == 'ci-tunnel.service' and 'tunnel' not in h):
+        if name.startswith('ci-orgsync') and not h.get('orgsync') or name == 'ci-tunnel.service' and 'tunnel' not in h:
             continue
         with open(os.path.join(release, 'setup', 'units', name)) as f:
             unit(name, render(f.read(), subs))
@@ -364,23 +334,6 @@ def build(etc: str, adopt: bool = False) -> Plan:
             raise ValueError(f'{path}: name must match {PROJECT_NAME.pattern} and memory_max {MEMORY.pattern}')
         projects.append(name)
         unit(f'ci-{name}.slice', render(tmpl, {'PROJECT': name, 'PROJECT_MEMORY_MAX': mem}))
-    if 'proxy' in h:
-        p = h['proxy']
-        plan.add('CI proxy:')
-        with open(os.path.join(p['config'], 'routing.json'), encoding='utf-8') as f:
-            _file(plan, os.path.join(etc, 'proxy', 'routing.json'), f.read(), 0o600, secret=True)
-        for node in p['nodes']:
-            with open(os.path.join(p['config'], f'{node}.json'), encoding='utf-8') as f:
-                cfg = node_config(json.load(f), p['http_port'], p['socks_port'])
-            _file(plan, os.path.join(etc, 'proxy', 'nodes', f'{node}.json'), json.dumps(cfg, indent=1) + '\n',
-                  0o600, secret=True,
-                  note=f' (inbounds 127.0.0.1:{p["socks_port"]} socks, 127.0.0.1:{p["http_port"]} http)')
-        active = os.path.join(etc, 'proxy', 'active.json')
-        if os.path.lexists(active):
-            plan.add(f'  keep   {active} -> {os.readlink(active)}')
-        else:
-            plan.add(f'  link   {active} -> nodes/{p["nodes"][0]}.json', kind='symlink', path=active,
-                     target=f'nodes/{p["nodes"][0]}.json')
     if 'tunnel' in h:
         t = h['tunnel']
         plan.add('egress tunnel (the lead\'s files, checked):')
@@ -399,14 +352,13 @@ def build(etc: str, adopt: bool = False) -> Plan:
                 plan.add(f'  remove {path} (disable --now, then delete)', kind='remove', path=path)
             else:
                 plan.add(f'  forget {path} (already gone)', kind='remove', path=path)
-    egress = (['ci-proxy.service'] if 'proxy' in h else ['ci-tunnel.service'] if 'tunnel' in h else [])
+    egress = ['ci-tunnel.service'] if 'tunnel' in h else []
     # egress units already running with an older file: enable --now leaves them as they are
     stale = 'tunnel' in h and any(a['kind'] == 'file' and os.path.dirname(a['path']) == unit_dir
                                   and os.path.basename(a['path']) in egress and os.path.exists(a['path'])
                                   for a in plan.actions)
     if plan.actions:
-        plan.add({'proxy': 'systemd --user (units, CI proxy):', 'tunnel': 'systemd --user (units, egress):'}.get(
-            next((k for k in ('proxy', 'tunnel') if k in h), ''), 'systemd --user (units):'))
+        plan.add('systemd --user (units, egress):' if 'tunnel' in h else 'systemd --user (units):')
         plan.add('  run    systemctl --user daemon-reload', kind='run', argv=['systemctl', '--user', 'daemon-reload'])
         if egress:
             argv = ['systemctl', '--user', 'enable', '--now', *egress]
@@ -414,9 +366,8 @@ def build(etc: str, adopt: bool = False) -> Plan:
         if stale:
             argv = ['systemctl', '--user', 'restart', *egress]
             plan.add(f'  run    {" ".join(argv)}', kind='run', argv=argv)
-    port = h['proxy']['http_port'] if 'proxy' in h else h['tunnel']['http_port'] if 'tunnel' in h else 0
-    via = ('fetched through the CI proxy' if 'proxy' in h else 'fetched through the egress tunnel' if 'tunnel' in h
-           else 'fetched directly')
+    port = h['tunnel']['http_port'] if 'tunnel' in h else 0
+    via = 'fetched through the egress tunnel' if 'tunnel' in h else 'fetched directly'
     plan.add(f'runners (actions/runner {RUNNER_VERSION}, sha256 {RUNNER_SHA256[:16]}, {via}):')
     cache = os.path.join(base, 'state', 'cache', os.path.basename(RUNNER_URL))
     rs = _runners(inv)
@@ -463,9 +414,9 @@ def _ours(state_path: str) -> frozenset[str]:
         raise ValueError(f'{state_path} is unreadable ({type(e).__name__}): fix it before planning') from None
 
 
-def wait_port(port: int, timeout: float = PROXY_WAIT, poll: float = 0.5) -> None:
+def wait_port(port: int, timeout: float = PORT_WAIT, poll: float = 0.5) -> None:
     """Wait until something listens on ``127.0.0.1:port``: ``systemctl enable --now``
-    returns once the CI proxy has started, before it listens."""
+    returns once the forward has started, before it listens."""
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -556,8 +507,6 @@ def _apply_actions(plan: Plan, made: list, run) -> None:
                 f.write(a['content'])
                 os.fchmod(f.fileno(), a['mode'])
             os.replace(tmp, a['path'])
-        elif k == 'symlink':
-            os.symlink(a['target'], a['path'])
         elif k == 'adopt':  # recorded as a file of this apply's, so uninstall removes it
             made.append({'kind': 'file', 'path': a['path']})
             print(f'apply: adopt {a["path"]}')

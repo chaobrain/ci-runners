@@ -87,6 +87,22 @@ class AllowFile(unittest.TestCase):
                      'pypi.org', 'files.pythonhosted.org', 'conda.anaconda.org'):
             self.assertTrue(bridge.allowed(name, allow), name)
 
+    def test_main_serves_a_good_file_on_a_good_port(self):
+        import tempfile
+        served = []
+
+        async def serve(port, allow):
+            served.append((port, allow))
+        with tempfile.NamedTemporaryFile('w', suffix='.allow') as f, mock.patch.object(bridge, 'serve', serve):
+            f.write('github.com\n.actions.githubusercontent.com\n')
+            f.flush()
+            with mock.patch('sys.stderr'):
+                self.assertEqual(bridge.main(['--port', '0', '--allow', f.name]), 2)
+                self.assertEqual(bridge.main(['--port', '65536', '--allow', f.name]), 2)
+            self.assertEqual(served, [])
+            self.assertEqual(bridge.main(['--port', '18443', '--allow', f.name]), 0)
+        self.assertEqual(served, [(18443, {'github.com', '.actions.githubusercontent.com'})])
+
     def test_main_refuses_a_bad_file(self):
         import tempfile
         with tempfile.NamedTemporaryFile('w', suffix='.allow') as f:
@@ -212,7 +228,7 @@ class Serve(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.ask(b'CONNECT github.com:443 HTTP/1.1\r\n\r\n'))[0], 502)
         self.fail = bridge.Refused(403, 'github.com resolves to no global address')
         self.assertEqual((await self.ask(b'CONNECT github.com:443 HTTP/1.1\r\n\r\n'))[0], 403)
-        self.fail = RuntimeError('anything else')
+        self.fail = KeyError('anything else')
         self.assertEqual((await self.ask(b'CONNECT github.com:443 HTTP/1.1\r\n\r\n'))[0], 502)
         self.assertFalse(any(' open' in line for line in self.logged), self.logged)
 

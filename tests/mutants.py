@@ -46,6 +46,7 @@ RGY = 'ci_runners/registry.py'
 REA = 'ci_runners/reaper.py'
 SMP = 'ci_runners/sampler.py'
 ORS = 'ci_runners/orgsync.py'
+BRG = 'ci_runners/bridge.py'
 LCH = 'actions/lib/ci-run.sh'
 APT = 'actions/part/action.yml'
 REG = 'setup/register.sh'
@@ -77,6 +78,7 @@ TB = 'tests.test_envbuild'
 TW = 'tests.test_workflow'
 TM = 'tests.test_thermal'
 TZ = 'tests.test_orgsync'
+TBR = 'tests.test_bridge'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
@@ -506,7 +508,7 @@ MUTANTS = [
     (INV, "            if isinstance(v, dict) and v.get('per_card') and not h['gpus']:", "            if False:",
      [f'{TI}.Load.test_pools_as_tables']),
     (INV, "    'python': (_abs, False),", "    'python': (_str, False),", [f'{TI}.Load.test_python_and_orgsync']),
-    (INV, "'extra_events', 'labels'})", "'extra_events', 'labels', 'python'})",
+    (INV, "'labels', 'allow', 'direct'})", "'labels', 'allow', 'direct', 'python'})",
      [f'{TI}.Deny.test_labels_are_public_and_the_python_is_not']),
     (SET, "        if os.path.lexists(path) and path not in ours:", "        if False:",
      [f'{TU}.Standalone.test_another_users_unit_stops_the_plan']),
@@ -523,7 +525,7 @@ MUTANTS = [
     (SET, "    if h.get('python'):\n        check_python(python)", "    if False:\n        check_python(python)",
      [f'{TU}.Standalone.test_the_python_must_be_3_11_or_later']),
     (SET, "    if etc != os.path.join(base, 'etc'):", "    if False:", [f'{TU}.Standalone.test_etc_must_be_beside_the_data']),
-    (SET, "'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else ''", "'PROXY_ORDER': PROXY_ORDER",
+    (SET, "'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else BRIDGE_ORDER if 'tunnel' in h else ''", "'PROXY_ORDER': PROXY_ORDER",
      [f'{TU}.Standalone.test_plan_without_a_proxy']),
     (SET, "        if not v:  # an empty value takes its line with it", "        if False:",
      [f'{TU}.Standalone.test_plan_without_a_proxy']),
@@ -548,7 +550,7 @@ MUTANTS = [
      [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, 'retry_on="[\\"self-hosted\\",\\"${own//,/\\",\\"}\\"]"', 'retry_on="[\\"self-hosted\\",\\"$own\\"]"',
      [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
-    (CLI, "        if 'proxy' not in h:  # GitHub", "        if False:  # GitHub", [f'{TU}.Standalone.test_proxy_check_without_a_proxy']),
+    (CLI, "        if 'proxy' not in h:  # h100", "        if False:  # h100", [f'{TU}.Standalone.test_proxy_check_without_a_proxy']),
     (HKS, 'exec /usr/bin/timeout -k 5 65 "$py" -I', 'exec /usr/bin/timeout -k 5 65 /usr/bin/python3 -I',
      [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
     (HKC, 'exec "$py" -I', 'exec /usr/bin/python3 -I', [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
@@ -676,7 +678,7 @@ MUTANTS = [
      [f'{TZ}.Sync.test_main_without_org_does_nothing']),
     (SET, " and (h.get('orgsync') or 'orgsync' not in t)]", "]",
      [f'{TU}.Setup.test_the_org_snapshot_timer_only_where_the_inventory_asks']),
-    (SET, " or name.startswith('ci-orgsync') and not h.get('orgsync'):", ":",
+    (SET, " or name.startswith('ci-orgsync') and not h.get('orgsync')\n", "\n",
      [f'{TU}.Setup.test_the_org_snapshot_timer_only_where_the_inventory_asks']),
     # PR-3 review: the hooks' interpreter is written in by setup; uninstall stops only our units
     (UNS, "for p in sorted({m['path'] for m in made if m['kind'] == 'file' and os.path.dirname(m['path']) == unit_dir}):",
@@ -707,6 +709,48 @@ MUTANTS = [
     (ENB, "    t = os.environ.get('GH_TOKEN', '').strip()\n",
      "    t = os.environ.get('GH_TOKEN', '').strip() or open(os.path.join(etc, 'envbuild.token')).read().strip()\n",
      [f'{TB}.Main.test_a_token_file_on_the_host_is_never_read']),
+    # h100's egress (decision 11.8)
+    (BRG, "    if method != 'CONNECT':", "    if False:", [f'{TBR}.Target.test_refusals']),
+    (BRG, "    if version not in ('HTTP/1.1', 'HTTP/1.0'):", "    if False:", [f'{TBR}.Target.test_refusals']),
+    (BRG, "    if not sep or port != str(PORT):", "    if not sep:", [f'{TBR}.Target.test_refusals']),
+    (BRG, "    if not NAME.match(host) or host not in allow:", "    if host not in allow:",
+     [f'{TBR}.Target.test_a_name_on_the_list_must_still_be_a_name']),
+    (BRG, "    if not NAME.match(host) or host not in allow:", "    if not NAME.match(host):",
+     [f'{TBR}.Target.test_refusals', f'{TBR}.Serve.test_a_refused_name_never_reaches_the_tunnel']),
+    (BRG, "        if ver != 5 or rep != 0:", "        if ver != 5:", [f'{TBR}.Serve.test_the_tunnel_refusing_gives_502']),
+    (BRG, "        if self.slots.locked():", "        if False:", [f'{TBR}.Serve.test_too_many_connections']),
+    (BRG, "                    await asyncio.wait(pending, timeout=LINGER)", "                    await asyncio.wait(pending)",
+     [f'{TBR}.Serve.test_a_side_left_open_is_closed_after_the_linger']),
+    (BRG, "            self.tasks.discard(task)", "            pass", [f'{TBR}.Serve.test_a_side_left_open_is_closed_after_the_linger']),
+    (BRG, "raise Refused(431, 'request head too large')", "raise Refused(408, 'request head too large')",
+     [f'{TBR}.Serve.test_a_head_too_large']),
+    (BRG, "    return b'\\x05\\x01\\x00\\x03'", "    return b'\\x05\\x01\\x00\\x01'", [f'{TBR}.Target.test_socks_request_by_name']),
+    (INV, "            if 'proxy' in h:\n                raise InventoryError", "            if False:\n                raise InventoryError",
+     [f'{TU}.Egress.test_the_tunnel_table']),
+    (INV, "            if h['tunnel']['socks_port'] == h['tunnel']['http_port']:", "            if False:",
+     [f'{TU}.Egress.test_the_tunnel_table']),
+    (INV, " and not n.replace('.', '').isdigit() for n in v)", " for n in v)", [f'{TU}.Egress.test_the_tunnel_table']),
+    (INV, "_DIRECT = re.compile(r'\\.?[a-z0-9][a-z0-9.-]{0,252}\\Z", "_DIRECT = re.compile(r'\\.?[a-z0-9][a-z0-9.,-]{0,252}\\Z",
+     [f'{TU}.Egress.test_the_tunnel_table']),
+    (INV, "'labels', 'allow', 'direct'})", "'labels'})", [f'{TU}.Egress.test_the_tunnel_table']),
+    (SET, "    if 'tunnel' in h:\n        check_tunnel(etc)", "    if False:\n        check_tunnel(etc)",
+     [f'{TU}.Egress.test_the_leads_files_are_required']),
+    (SET, "        if name == 'id_ed25519' and st.st_mode & 0o077:", "        if False:",
+     [f'{TU}.Egress.test_the_leads_files_are_required']),
+    (SET, "os.path.islink(d) or st.st_mode & 0o077 or", "os.path.islink(d) or", [f'{TU}.Egress.test_the_leads_files_are_required']),
+    (SET, "not os.path.isfile(path) or os.path.islink(path) or", "not os.path.isfile(path) or",
+     [f'{TU}.Egress.test_the_leads_files_are_required']),
+    (SET, "        if not TUNNEL_HOST.search(f.read()):", "        if False:", [f'{TU}.Egress.test_the_leads_files_are_required']),
+    (SET, "    elif 'tunnel' in h:\n        t = h['tunnel']\n        lines", "    elif False:\n        t = h['tunnel']\n        lines",
+     [f'{TU}.Egress.test_plan_with_a_tunnel']),
+    (SET, "PROXY_ORDER if 'proxy' in h else BRIDGE_ORDER if 'tunnel' in h else ''", "PROXY_ORDER if 'proxy' in h else ''",
+     [f'{TU}.Egress.test_plan_with_a_tunnel']),
+    (SET, "['ci-tunnel.service', 'ci-bridge.service'] if 'tunnel' in h", "['ci-tunnel.service'] if 'tunnel' in h",
+     [f'{TU}.Egress.test_plan_with_a_tunnel']),
+    (SET, "h['tunnel']['http_port'] if 'tunnel' in h else 0", "0 if 'tunnel' in h else 0", [f'{TU}.Egress.test_plan_with_a_tunnel']),
+    (SET, "                or name in ('ci-tunnel.service', 'ci-bridge.service') and 'tunnel' not in h):", "                ):",
+     [f'{TU}.Standalone.test_plan_without_a_proxy']),
+    (BRG, "    if not t:\n", "    if False:\n", [f'{TU}.Egress.test_bridge_command_without_a_tunnel']),
 ]
 
 

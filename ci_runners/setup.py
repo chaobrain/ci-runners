@@ -10,7 +10,9 @@
   against the file in place;
 - the CI proxy's node configs, made from the source configs (``proxy.config``) with
   their local ports replaced by the CI ports; their content is withheld (secrets). A
-  host without ``proxy`` (h100, decision 11.6) gets no CI proxy and no proxy lines;
+  host with ``tunnel`` instead (h100, decision 11.8) gets ``ci-tunnel`` and ``ci-bridge``,
+  and its ``.env`` points at the bridge; the tunnel's key, ``ssh_config`` and
+  ``known_hosts`` in ``etc/tunnel/`` are the lead's, checked but never written;
 - the runner app, checked by sha256, extracted once per runner directory;
 - each runner's ``.env``;
 - the ``systemctl --user`` commands.
@@ -49,6 +51,7 @@ PROXY_WAIT = 60  # s: the CI proxy's start, before the runner app is fetched thr
 RUNNER_URL = (f'https://github.com/actions/runner/releases/download/v{RUNNER_VERSION}/'
               f'actions-runner-linux-x64-{RUNNER_VERSION}.tar.gz')
 UNITS = ('ci-runner@.service', 'ci-proxy.service', 'ci-proxy-check.service', 'ci-proxy-check.timer',
+         'ci-tunnel.service', 'ci-bridge.service',
          'ci-reaper.service', 'ci-reaper.timer', 'ci-orgsync.service', 'ci-orgsync.timer', 'ci.slice')
 RUNNER_FILES = ('config.sh', 'run.sh', os.path.join('bin', 'Runner.Listener'))
 # what goes into a unit file: one word each, so nothing can add a line
@@ -59,6 +62,12 @@ TIMERS = ('ci-proxy-check.timer', 'ci-reaper.timer', 'ci-orgsync.timer')
 SYSTEM_PYTHON = '/usr/bin/python3'
 #: the runner unit's order after the CI proxy, where the host has one
 PROXY_ORDER = 'After=ci-proxy.service\nWants=ci-proxy.service'
+#: or after the egress bridge (h100, decision 11.8)
+BRIDGE_ORDER = 'After=ci-bridge.service\nWants=ci-bridge.service'
+#: the lead's files in etc/tunnel/ (design §5.3): the key first, which no one else may read
+TUNNEL_FILES = ('id_ed25519', 'ssh_config', 'known_hosts')
+#: the ssh_config's host the tunnel unit names
+TUNNEL_HOST = re.compile(r'^Host egress$', re.M)
 
 
 def _runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str, int | None]]:
@@ -132,6 +141,26 @@ def render(template: str, subs: dict[str, str]) -> str:
     return template
 
 
+def check_tunnel(etc: str) -> None:
+    """Refuse unless ``etc/tunnel/`` holds the lead's three files, as regular files of
+    this account, the key and the directory readable by no one else, and ``ssh_config``
+    names ``Host egress``."""
+    d = os.path.join(etc, 'tunnel')
+    st = os.lstat(d) if os.path.lexists(d) else None
+    if st is None or not os.path.isdir(d) or os.path.islink(d) or st.st_mode & 0o077 or st.st_uid != os.getuid():
+        raise ValueError(f'{d} must be a directory of this account, mode 700, holding {", ".join(TUNNEL_FILES)}')
+    for name in TUNNEL_FILES:
+        path = os.path.join(d, name)
+        st = os.lstat(path) if os.path.lexists(path) else None
+        if st is None or not os.path.isfile(path) or os.path.islink(path) or st.st_uid != os.getuid():
+            raise ValueError(f'{path} must be a regular file of this account (the lead places it)')
+        if name == 'id_ed25519' and st.st_mode & 0o077:
+            raise ValueError(f'{path} is readable by others: chmod 600 it')
+    with open(os.path.join(d, 'ssh_config'), encoding='utf-8') as f:
+        if not TUNNEL_HOST.search(f.read()):
+            raise ValueError(f'{d}/ssh_config has no "Host egress" (the tunnel unit connects to it)')
+
+
 def node_config(src: dict, http_port: int, socks_port: int) -> dict:
     """A node config with its inbounds replaced by the CI instance's local ports. Pure."""
     out = dict(src)
@@ -155,6 +184,10 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
         p = h['proxy']
         lines += [f'https_proxy=http://127.0.0.1:{p["http_port"]}', f'http_proxy=http://127.0.0.1:{p["http_port"]}',
                   f'no_proxy={p["no_proxy"]}']
+    elif 'tunnel' in h:
+        t = h['tunnel']
+        lines += [f'https_proxy=http://127.0.0.1:{t["http_port"]}', f'http_proxy=http://127.0.0.1:{t["http_port"]}',
+                  f'no_proxy={",".join(t["direct"])}']
     lines += [f'ACTIONS_RUNNER_HOOK_JOB_STARTED={hooks}/job-started.sh',
               f'ACTIONS_RUNNER_HOOK_JOB_COMPLETED={hooks}/job-completed.sh',
               f'CI_RUNNER_CLASS={cls}', f'CI_RUNNERS_ETC={etc}']
@@ -256,13 +289,16 @@ def build(etc: str) -> Plan:
         raise ValueError(f'the etc directory must be {os.path.join(base, "etc")}')
     if h.get('python'):
         check_python(python)
+    if 'tunnel' in h:
+        check_tunnel(etc)
     plan.add('hooks:')
     for name in ('job-started.sh', 'job-completed.sh'):
         with open(os.path.join(release, 'hooks', name)) as f:
             _file(plan, os.path.join(base, 'hooks', name), hook_text(f.read(), python), 0o755)
     plan.add('units:')
     subs = {'CI_MEMORY_MAX': h['memory_max'], 'PROXY_CLIENT': client, 'CI_DATA': data, 'CI_ETC': etc,
-            'CI_PYTHON': python, 'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else ''}
+            'CI_PYTHON': python, 'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else BRIDGE_ORDER if 'tunnel' in h else '',
+            'TUNNEL_SOCKS': str(h['tunnel']['socks_port']) if 'tunnel' in h else ''}
     ours = _ours(os.path.join(base, 'state', 'setup.json'))
 
     def unit(name: str, content: str) -> None:
@@ -273,7 +309,8 @@ def build(etc: str) -> Plan:
         _file(plan, path, content, 0o644)
 
     for name in UNITS:
-        if name.startswith('ci-proxy') and 'proxy' not in h or name.startswith('ci-orgsync') and not h.get('orgsync'):
+        if (name.startswith('ci-proxy') and 'proxy' not in h or name.startswith('ci-orgsync') and not h.get('orgsync')
+                or name in ('ci-tunnel.service', 'ci-bridge.service') and 'tunnel' not in h):
             continue
         with open(os.path.join(release, 'setup', 'units', name)) as f:
             unit(name, render(f.read(), subs))
@@ -307,14 +344,25 @@ def build(etc: str) -> Plan:
         else:
             plan.add(f'  link   {active} -> nodes/{p["nodes"][0]}.json', kind='symlink', path=active,
                      target=f'nodes/{p["nodes"][0]}.json')
+    if 'tunnel' in h:
+        t = h['tunnel']
+        plan.add('egress tunnel (the lead\'s files, checked):')
+        for name in TUNNEL_FILES:
+            plan.add(f'  keep   {os.path.join(etc, "tunnel", name)}')
+        plan.add(f'  socks5 127.0.0.1:{t["socks_port"]}, bridge 127.0.0.1:{t["http_port"]}, '
+                 f'{len(t["allow"])} names on port 443: {", ".join(t["allow"])}')
+    egress = (['ci-proxy.service'] if 'proxy' in h else ['ci-tunnel.service', 'ci-bridge.service'] if 'tunnel' in h
+              else [])
     if plan.actions:
-        plan.add('systemd --user (units, CI proxy):' if 'proxy' in h else 'systemd --user (units):')
+        plan.add({'proxy': 'systemd --user (units, CI proxy):', 'tunnel': 'systemd --user (units, egress):'}.get(
+            next((k for k in ('proxy', 'tunnel') if k in h), ''), 'systemd --user (units):'))
         plan.add('  run    systemctl --user daemon-reload', kind='run', argv=['systemctl', '--user', 'daemon-reload'])
-        if 'proxy' in h:
-            argv = ['systemctl', '--user', 'enable', '--now', 'ci-proxy.service']
+        if egress:
+            argv = ['systemctl', '--user', 'enable', '--now', *egress]
             plan.add(f'  run    {" ".join(argv)}', kind='run', argv=argv)
-    port = h['proxy']['http_port'] if 'proxy' in h else 0
-    via = 'fetched through the CI proxy' if 'proxy' in h else 'fetched directly'
+    port = h['proxy']['http_port'] if 'proxy' in h else h['tunnel']['http_port'] if 'tunnel' in h else 0
+    via = ('fetched through the CI proxy' if 'proxy' in h else 'fetched through the egress bridge' if 'tunnel' in h
+           else 'fetched directly')
     plan.add(f'runners (actions/runner {RUNNER_VERSION}, sha256 {RUNNER_SHA256[:16]}, {via}):')
     cache = os.path.join(base, 'state', 'cache', os.path.basename(RUNNER_URL))
     rs = _runners(inv)
@@ -359,7 +407,7 @@ def wait_port(port: int, timeout: float = PROXY_WAIT, poll: float = 0.5) -> None
                 return
         except OSError:
             if time.monotonic() >= deadline:
-                raise RuntimeError(f'nothing listens on the CI proxy port {port} after {timeout:g} s') from None
+                raise RuntimeError(f'nothing listens on the egress port {port} after {timeout:g} s') from None
             time.sleep(poll)
 
 

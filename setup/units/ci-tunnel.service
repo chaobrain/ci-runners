@@ -1,0 +1,16 @@
+# h100's egress (design decision 11.8): ssh with dynamic forwarding (SOCKS5 on
+# 127.0.0.1) to the egress host's restricted account. etc/tunnel/ssh_config names it
+# as "Host egress" (address, user); the key, the pinned host key and the forwarding
+# options are fixed here, so the config cannot loosen them. ci-bridge.service is in front.
+[Unit]
+Description=ci-runners: egress tunnel
+
+[Service]
+ExecStart=/usr/bin/ssh -F @CI_ETC@/tunnel/ssh_config -N -D 127.0.0.1:@TUNNEL_SOCKS@ -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile=@CI_ETC@/tunnel/id_ed25519 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=@CI_ETC@/tunnel/known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ControlMaster=no -o ControlPath=none -o ForwardAgent=no -o ForwardX11=no egress
+NoNewPrivileges=yes
+Restart=always
+RestartSec=10
+Slice=ci.slice
+
+[Install]
+WantedBy=default.target

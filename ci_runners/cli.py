@@ -2,6 +2,7 @@
 
     ci-run proxy-check     one check of the CI proxy (ci-proxy-check.timer)
     ci-run reap            the reaper's pass (ci-reaper.timer)
+    ci-run bridge          h100's egress bridge (ci-bridge.service; decision 11.8)
     ci-run org-sync        the org snapshot (ci-orgsync.timer; design §6.5)
     ci-run plan|apply ...  host setup (setup/plan.sh, setup/apply.sh)
     ci-run runners         this host's runners: name, labels, class
@@ -44,12 +45,15 @@ def main(argv: list[str]) -> int:
     if cmd == 'proxy-check':
         from ci_runners import proxy
         h = load_inventory().host
-        if 'proxy' not in h:  # GitHub is reached directly (h100, decision 11.6)
+        if 'proxy' not in h:  # h100: a tunnel instead, or nothing (decision 11.8)
             print('ci-run proxy-check: this host has no CI proxy; nothing to check')
             return 0
         p = h['proxy']
         print(proxy.check(h['data'], p['http_port'], p['nodes']))
         return 0
+    if cmd == 'bridge':
+        from ci_runners import bridge
+        return bridge.main(load_inventory().host)
     if cmd == 'reap':
         from ci_runners import reaper
         print(reaper.reap(load_inventory().host['data']))

@@ -64,6 +64,9 @@ TA = 'tests.test_actions'
 VRD = 'ci_runners/verdict.py'
 ENB = 'ci_runners/envbuild.py'
 WFL = '.github/workflows/h100-test.yml'
+#: the ref the workflow calls its actions at: @v1 on main, the release in a release (design §9)
+_STAMP = (pathlib.Path(__file__).resolve().parents[1] / 'actions' / 'RELEASE').read_text().strip()
+AREF = 'v1' if _STAMP == 'hook' else _STAMP
 AVD = 'actions/verdict/action.yml'
 TV = 'tests.test_verdict'
 TB = 'tests.test_envbuild'
@@ -411,8 +414,8 @@ MUTANTS = [
     (WFL, "contains(needs.gpu.outputs.retry-on, '\"h100-gpu') && ", "", [f'{TW}.Workflow.test_the_jobs_run_on_h100_only']),
     (WFL, "permissions:\n  contents: read\njobs:", "permissions:\n  contents: write\njobs:",
      [f'{TW}.Workflow.test_permissions_stay_minimal']),
-    (WFL, "          persist-credentials: false\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@v1\n        with:\n          project: ${{ inputs.project }}\n          id: cpu",
-     "          persist-credentials: true\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@v1\n        with:\n          project: ${{ inputs.project }}\n          id: cpu",
+    (WFL, f"          persist-credentials: false\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@{AREF}\n        with:\n          project: ${{{{ inputs.project }}}}\n          id: cpu",
+     f"          persist-credentials: true\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@{AREF}\n        with:\n          project: ${{{{ inputs.project }}}}\n          id: cpu",
      [f'{TW}.Workflow.test_checkouts_keep_no_credentials']),
     (WFL, "&& (( IN_TIMEOUT >= 1 && IN_TIMEOUT <= 240 ))", "&& true", [f'{TW}.Prep.test_refusals']),
     (WFL, "[[ $IN_PROJECT =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]]", "true", [f'{TW}.Prep.test_refusals']),

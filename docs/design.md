@@ -168,7 +168,7 @@ name; where this section and an older one disagree, this section holds for RUN-5
         `permitopen` takes literal names only. So the allowlist moves to the egress
         host, where no co-user of h100's account can change it:
         - **On the egress host,** `ci-egress.service` is a system unit that runs
-          `ci-run egress` as the egress account. It is an HTTP CONNECT proxy on that
+          `ci-run egress` as a dynamic user of its own. It is an HTTP CONNECT proxy on that
           host's 127.0.0.1. It passes only names on its allowlist (`setup/egress/allow`,
           installed root-owned), on port 443, and connects to them directly. It resolves
           a name itself and connects only to global addresses. It answers 200 only once
@@ -775,7 +775,7 @@ needed. The egress host takes one, made by the lead:
 | `authorized_keys` | one line for the tunnel key, restricted as decision 11.10 states: one `permitopen`, to the egress proxy's port |
 | the release | `setup/install.sh` run by root with `CI_RUNNERS_ETC=/opt/ci-runners/etc`, so the release is root-owned under `/opt/ci-runners/releases/` |
 | `/opt/ci-runners/etc/egress-allow` | a root-owned copy of the release's `setup/egress/allow`, mode 644 |
-| `ci-egress.service` | the release's `setup/egress/ci-egress.service` in `/etc/systemd/system/`, enabled: `ci-run egress` as the egress account on 127.0.0.1:<egress port>, at most 256 connections, one journal line per connection (name, result); hardened (no new privileges, a read-only system, no home, its own `/tmp`, IP and Unix sockets only, no capabilities) and capped at 512 MB |
+| `ci-egress.service` | the release's `setup/egress/ci-egress.service` in `/etc/systemd/system/`, enabled: `ci-run egress` as a dynamic user on 127.0.0.1:<egress port>, at most 256 connections, one journal line per connection (name, result); hardened (no new privileges, a read-only system, no home, its own `/tmp`, IP and Unix sockets only, no capabilities) and capped at 512 MB |
 | unchanged | the egress host's sshd configuration |
 
 **The maintainer's workstation, RUN-5** (decision 11.9), as the maintainer, not as a CI

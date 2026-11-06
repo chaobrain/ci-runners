@@ -731,7 +731,7 @@ direct = ["localhost", "127.0.0.1", "::1"]
 
     def test_the_egress_unit(self):
         unit = (ROOT / 'setup' / 'egress' / 'ci-egress.service').read_text()
-        for want in ('User=ci-tunnel\n', 'ExecStart=/opt/ci-runners/releases/hook/bin/ci-run egress --port 18443 '
+        for want in ('DynamicUser=yes\n', 'ExecStart=/opt/ci-runners/releases/hook/bin/ci-run egress --port 18443 '
                      '--allow /opt/ci-runners/etc/egress-allow\n', 'Environment=CI_RUNNERS_PYTHON=/usr/bin/python3\n',
                      'NoNewPrivileges=yes\n', 'ProtectSystem=strict\n', 'ProtectHome=yes\n', 'PrivateTmp=yes\n',
                      'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n', 'CapabilityBoundingSet=\n',

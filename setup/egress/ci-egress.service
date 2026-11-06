@@ -9,8 +9,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=ci-tunnel
-Group=ci-tunnel
+# a transient user of its own: the proxy needs no account, and the egress account's
+# key only reaches this port
+DynamicUser=yes
 ExecStart=/opt/ci-runners/releases/hook/bin/ci-run egress --port 18443 --allow /opt/ci-runners/etc/egress-allow
 Environment=CI_RUNNERS_PYTHON=/usr/bin/python3
 NoNewPrivileges=yes

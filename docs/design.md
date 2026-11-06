@@ -101,7 +101,8 @@ name; where this section and an older one disagree, this section holds for RUN-5
        private repository (supersedes §12 item 9; the lead makes the change).
     2. **Allowlists synced from the org.** The actor allowlist is the org's members, and
        the repository allowlist is the org's private repositories with their ids. A
-       timer on h100 fetches both every 10 min into a local snapshot (§6.5). The hook
+       timer fetches both every 10 min into a local snapshot on h100 (§6.5; where the
+       timer runs and whose login it uses: 11.9). The hook
        still reads only local files. Outside collaborators and bots are on neither list.
        A snapshot older than 60 min refuses every job (`stale`). Entries written by hand
        in `policy.toml` still win, so the lead can pause a repository.
@@ -121,9 +122,35 @@ name; where this section and an older one disagree, this section holds for RUN-5
        safeguards 1 and 3 apply only to a path driven from 3090b (RUN-2).
     6. **h100 reaches GitHub directly.** Measured 2026-11-06: `api.github.com` answers
        without a proxy. So h100 runs no CI proxy instance (decision 5 applies to the
-       3090 hosts).
+       3090 hosts). *Amended by 11.8: only part of GitHub answers directly.*
     7. **The exit path** is still decision 3, safeguard 4: a dedicated account from the
        host's admin, which closes T6, T13 and T14 for h100.
+    8. **h100's egress goes through an ssh tunnel (amends 11.6).** Measured again on
+       2026-11-06: `api.github.com` and `*.actions.githubusercontent.com` answer
+       directly, but `github.com` does not, `codeload.github.com` and the release
+       downloads fail often, and the package indexes (PyPI, conda) do not answer. So h100
+       gets a CI egress of two user units. `ci-tunnel.service` is an ssh connection with
+       dynamic forwarding (SOCKS5 on 127.0.0.1) to a restricted account on an egress
+       host. `ci-bridge.service` is an HTTP CONNECT proxy on 127.0.0.1 that passes only
+       allowlisted names on port 443 to the tunnel; the runner app, git, pip and conda
+       all speak HTTP CONNECT, and not all of them speak SOCKS. Both ends keep an
+       allowlist: the bridge's (inventory `tunnel.allow`), and the egress account's
+       `authorized_keys` line, `restrict,port-forwarding`, one `permitopen` per allowed
+       name on 443, `permitlisten` on the discard port only and `command` set to
+       `nologin`. The runners' `.env` points `https_proxy` at the bridge, with `no_proxy`
+       naming the hosts that answer directly, so the runner's own traffic does not hang
+       on the tunnel. Names resolve on the egress host (SOCKS5 with a domain name):
+       local DNS answers for blocked names cannot be trusted.
+    9. **The org snapshot is pushed from the maintainer's workstation (amends 11.2).** A
+       fine-grained token can be minted only in the web UI, and a token on h100's shared
+       account is readable by its co-users (T14). So no token lives on h100. A user timer
+       of the maintainer's account on the workstation fetches the snapshot every 10 min
+       with the maintainer's own GitHub login (`gh auth token`, read at each run, never
+       written elsewhere). It sends the snapshot over the maintainer's existing ssh access
+       to h100, where `ci-run org-sync --receive` reads it from stdin, checks it (§6.5)
+       and writes `etc/org.json`. A workstation that is down ages the snapshot: after
+       60 min every h100 job is refused `stale`, never let through. `ci-orgsync.timer`
+       stays for a host that holds its own token (inventory `orgsync`).
 
 ## Decisions of this spec
 
@@ -229,6 +256,7 @@ AGENTS.md  README.md  docs/design.md  docs/consumers.md
 ci_runners/           stdlib-only Python: pure functions, thin I/O
   policy.py           hook decision: repository, actor, event, fork, runner class
   orgsync.py          the org snapshot: members and private repositories (RUN-5, §6.5)
+  bridge.py           h100's egress: HTTP CONNECT to the ssh tunnel, allowlisted (11.8)
   claim.py            claim decision from a sha's statuses
   place.py            host and card choice from probe results
   outcome.py          outcome classification and the retry hint
@@ -241,7 +269,8 @@ bin/                  ci-run, ci-slot, ci-lock, ci-gpu: CLIs over the package
 hooks/                job-started.sh, job-completed.sh -> python -I -m ci_runners.hook
 setup/                plan.sh, apply.sh, install.sh, register.sh, uninstall.sh
 setup/units/          user unit templates: ci-runner@.service, ci-proxy.service,
-                      ci-proxy-check.{service,timer}, ci-reaper.{service,timer}, slices
+                      ci-proxy-check.{service,timer}, ci-reaper.{service,timer}, slices;
+                      ci-tunnel.service, ci-bridge.service (h100's egress, 11.8)
 setup/inventory.example.toml   the schema, with placeholder values
 actions/              claim/, place/, part/, salvage/, verdict/, compare/ (composite, action.yml);
                       lib/ci-run.sh, the launcher; RELEASE, the release stamp
@@ -281,7 +310,8 @@ our subtree instead of `~/data`:
 ```
 <our subtree>/ci-runners/releases/<tag>/   installed host layer
 <our subtree>/ci-runners/hooks/            the hooks
-<our subtree>/ci-runners/etc/              inventory, policy, org.json, orgsync.token; mode 700
+<our subtree>/ci-runners/etc/              inventory, policy, org.json; mode 700
+<our subtree>/ci-runners/etc/tunnel/       the tunnel's key, ssh_config, known_hosts (11.8); mode 700
 <our subtree>/ci-runners/state/  logs/     as on 3090b
 <our subtree>/ci-runners/envs/<project>/   the projects' conda envs (decision 11.4)
 <our subtree>/actions-runner/<name>/       one runner each
@@ -306,8 +336,10 @@ defaults to `/usr/bin/python3`.
 | project registry (env names, caps, env allowlist, upstream list, status context) | `etc/projects/<p>.toml` | no |
 | integrity manifests | `etc/manifests/<p>/<remote>.json` on 3090b | no; tamper-relevant, so only on trusted hosts |
 | the env-build token (RUN-5): fine-grained, Contents read on the repositories whose envs are built | `GH_TOKEN` of the maintainer's shell, for one `ci-run env build`; never stored on h100, since co-users of the account could read every private repository with it | yes |
-| the org-sync token (RUN-5): fine-grained, read-only, org Members and repository Metadata | `etc/orgsync.token` on h100, mode 600, minted by the lead | yes, though it reads only the member list and the private repositories' names (T14) |
-| the org snapshot (RUN-5): member logins, private repository names and ids | `etc/org.json` on h100, written by `ci-orgsync` | no, but never published |
+| the org-sync login (RUN-5, decision 11.9) | the maintainer's own GitHub login on the workstation, read by the push timer at each run; nothing on h100. A host that syncs itself (inventory `orgsync`) keeps a fine-grained read-only token in `etc/orgsync.token`, mode 600 | yes |
+| the org snapshot (RUN-5): member logins, private repository names and ids | `etc/org.json` on h100, written by `ci-run org-sync --receive` (or `ci-orgsync`) | no, but never published |
+| the tunnel key, its `ssh_config` and the egress host's pinned key (RUN-5, decision 11.8) | `etc/tunnel/` on h100, the key mode 600; the egress host, its address and account are inventory | yes: it opens the allowlisted forwards through the egress host (T15) |
+| the workstation's push units (RUN-5, decision 11.9): the ssh alias of h100 and its paths | the maintainer's `~/.config/systemd/user/` on the workstation | no, but never published |
 
 3090b holds the master copy of `policy.toml` and `projects/`, and `setup/apply.sh`
 copies them to 3090a. Each hook log line carries the policy's hash, so drift shows.
@@ -663,23 +695,37 @@ A needs no GitHub access on h100: everything arrives from 3090b.
 
 **h100, RUN-5** (decision 11.3; the lead approves the plan, as for 3090b). Measured on
 2026-11-06 from the shared account: linger on; `systemctl --user` works; 2 TB of memory,
-176 CPUs, 5 cards; `api.github.com` answers directly; not in the docker group; the
-system `python3` is 3.10.
+176 CPUs, 5 cards; `api.github.com` answers directly, `github.com` and the package
+indexes do not (decision 11.8); not in the docker group; the system `python3` is 3.10.
 
 | change | detail |
 |---|---|
 | directories | §3.2 (RUN-5) under our subtree; `etc/` mode 700 |
 | runner app | the pinned release, checked by sha256, into 9 runner directories (§5.1) |
-| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON` (for the launcher and the units; the hooks have the interpreter written into them by setup, so a job's environment never chooses it); `CI_RUNNER_POOL_LABELS`, the pool's own labels (`h100-light`, `h100-cpu`, `h100`), for a retry's `retry-on`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card. No proxy lines. |
-| `ci-runner@.service` | as on 3090b, without `After=`/`Wants=ci-proxy.service` |
-| `ci-orgsync.{service,timer}` | every 10 min: the org snapshot (§6.5) |
+| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON` (for the launcher and the units; the hooks have the interpreter written into them by setup, so a job's environment never chooses it); `CI_RUNNER_POOL_LABELS`, the pool's own labels (`h100-light`, `h100-cpu`, `h100`), for a retry's `retry-on`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card; `https_proxy` and `http_proxy` at the bridge, and `no_proxy` (inventory `tunnel.no_proxy`: localhost and the hosts that answer directly) |
+| `ci-runner@.service` | as on 3090b, with `After=`/`Wants=ci-bridge.service` instead of the CI proxy |
+| `ci-tunnel.service` | `ssh -F etc/tunnel/ssh_config -N -D 127.0.0.1:<socks port>` to the egress account (decision 11.8): batch mode, the egress host's key pinned in `etc/tunnel/known_hosts`, `ExitOnForwardFailure`, keep-alive every 30 s (a dead link ends after 90 s); `Restart=always` after 10 s |
+| `ci-bridge.service` | `ci-run bridge`: HTTP CONNECT on 127.0.0.1:<http port>, to `tunnel.allow` names on port 443 only (anything else: 403), handed to the tunnel as SOCKS5 with the name; at most 256 connections; one journal line per connection (name, result) |
+| `etc/tunnel/` | the key pair, `ssh_config` and `known_hosts`, placed by the lead before the plan; `plan.sh` refuses without them, or with the key readable by others |
+| `ci-orgsync.{service,timer}` | not on h100 (decision 11.9): the workstation pushes the snapshot |
 | `ci-reaper.timer` | as on 3090b |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 512G of 2 TB) and `ci-<project>.slice` |
 | lock and slot files | new ones under `state/`: h100 has no brainspike files to share (D5 does not apply) |
 | unit names | every unit file starts with `ci-` (`ci.slice` included); `uninstall.sh` stops and removes only the units an `apply` recorded in `state/setup.json`; `plan.sh` refuses if a unit of that name exists and no earlier `apply` wrote it (another user of the account may have one). The unit directory exists (mode 700) and is the account's: setup never changes its mode. |
-| unchanged | the shared account's shell files, crontab, `authorized_keys`, other users' files, envs and units; no proxy, no ssh key |
+| unchanged | the shared account's shell files, crontab, `authorized_keys`, other users' files, envs and units; no proxy client |
 
-There is no root step: the shared account has no sudo for us, and none is needed.
+There is no root step on h100: the shared account has no sudo for us, and none is
+needed. The egress host takes one, made by the lead (done 2026-11-06): a system account
+with no password, `nologin` as its shell, and one `authorized_keys` line for the tunnel
+key, restricted as decision 11.8 states. Its sshd configuration is unchanged.
+
+**The maintainer's workstation, RUN-5** (decision 11.9), as the maintainer, not as a CI
+account:
+
+| change | detail |
+|---|---|
+| `ci-orgsync-push.{service,timer}` | user units of the maintainer's account, every 10 min: `ci-run org-sync --fetch` from a checkout of a release, with the login from `gh auth token`, piped to `ssh <h100> <release>/bin/ci-run org-sync --receive`; `TimeoutStartSec=5min` |
+| unchanged | the maintainer's gh login and ssh access to h100 (both exist); nothing is stored |
 
 ### 5.4 The h100 driver (option A)
 
@@ -771,7 +817,7 @@ path of decision 3, safeguard 4.
 |---|---|---|---|---|
 | 3090b, 3090a | the maintainer's account | the maintainer's GitHub token where one is stored (3090b, 2026-11-05: `repo`, `workflow`, `admin:public_key`, `read:org`, `gist`; `admin:public_key` would let job code add an ssh key to the account), personal ssh keys to other hosts, all of that account's files; root through passwordless sudo | the hook's allowlists; `NoNewPrivileges=yes` (sudo refused, measured); no stored secrets; least-privilege `GITHUB_TOKEN`; per-job work directories; `admin:org` is granted only on the lead's laptop, never on a runner host | a dedicated CI account per host, without the token, with ssh keys only to the other CI accounts (needs a host admin) |
 | h100 | the shared account, driven from 3090b | our snapshot of the head, our envs, other users' files there (the account is in the docker group: effectively root) | option A: no GitHub credential there; env allowlist; archive transport; GPU parts only; manifest; keyed verify; kill by scope only | a dedicated account from the host's admin, then one runner per card there; retire the driver |
-| h100, RUN-5 | the shared account, runners on it (decision 11.3) | everything a co-user of the account can reach, and they can reach everything of ours: the runner credentials, the hook, the policy, each job's `GITHUB_TOKEN` while the job runs, the checkout of a private repository, the results and the statuses we post | private repositories only, of org members only (decision 11.1, 11.2); `GITHUB_TOKEN` with `contents: read`, plus `statuses: write` only in claim and verdict; per-job directories, deleted after the job; no other credential there but the read-only org-sync token; `NoNewPrivileges` | the same dedicated account (decision 11.7) |
+| h100, RUN-5 | the shared account, runners on it (decision 11.3) | everything a co-user of the account can reach, and they can reach everything of ours: the runner credentials, the hook, the policy, each job's `GITHUB_TOKEN` while the job runs, the checkout of a private repository, the results and the statuses we post | private repositories only, of org members only (decision 11.1, 11.2); `GITHUB_TOKEN` with `contents: read`, plus `statuses: write` only in claim and verdict; per-job directories, deleted after the job; no other credential there but the tunnel key, which opens only allowlisted HTTPS (T15); `NoNewPrivileges` | the same dedicated account (decision 11.7) |
 
 `InaccessiblePaths` (hiding the token directory from the runner) does not take effect in
 a user unit on 3090b (measured 2026-11-05), so it is not used.
@@ -815,7 +861,8 @@ bound).
 | T10 | A hostile event payload targets the hook. | JSON parsing in `python -I`; no shell interpolation; fixtures with hostile strings |
 | T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the bot's and allowlisted actors' statuses; consumers audit merges (brainspike: daily) |
 | T13 | (on RUN-5 also any co-user of h100's account, an accepted gap) An accepted job (or its dependency) edits the host layer it owns: the hook, the policy, `.env` or the units, so later jobs pass unchecked. | private consumers only until the host layer is root-owned (§5.3, option (b)); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs |
-| T14 | (RUN-5) A co-user of h100's shared account reads the org-sync token, or edits the snapshot. | the token is fine-grained and read-only (members, metadata): it shows the member list and the private repositories' names, nothing else. An edited snapshot is T13's case. |
+| T14 | (RUN-5) A co-user of h100's shared account reads the org-sync token, or edits the snapshot. | no token on h100 (decision 11.9): the snapshot arrives over the maintainer's ssh access, checked by `--receive` (§6.5). A host that syncs itself holds a fine-grained read-only token (members, metadata): it shows the member list and the private repositories' names, nothing else. An edited snapshot is T13's case. |
+| T15 | (RUN-5) A co-user of h100's shared account takes the tunnel key, or any local user of h100 uses the bridge or the SOCKS port on 127.0.0.1. | the egress account has no shell and no listening forward, and opens only the allowlisted names on port 443 (decision 11.8): HTTPS to GitHub and the package indexes, which job code reaches through the bridge anyway. They appear as the egress host's address. The lead revokes the key by deleting one line on the egress host. |
 | T12 | A burst of refused jobs blocks our runners. | refusal in under 10 s (RUN-1 acceptance); repo-level public runners do not share pools with private ones; the lead can pause a repository in the policy |
 
 ### 6.5 The org snapshot (RUN-5)
@@ -845,6 +892,14 @@ same merge.
 Org members are humans; a bot or an outside collaborator is not one, so both stay
 refused. A member who leaves the org is refused within 10 min, or 60 min if the fetch
 fails meanwhile.
+
+**The push (decision 11.9).** `ci-run org-sync --fetch --org <name>` takes the login from
+`GH_TOKEN`, makes the same document and prints it; it writes nothing. `ci-run org-sync
+--receive` reads at most 4 MiB from stdin and writes `etc/org.json` as above, but only if
+the document loads as the hook loads it, every repository in it belongs to the policy's
+`[org]` name, its `fetched_at` is no later than 5 min from now and no earlier than the
+snapshot in place (a replayed old snapshot cannot bring back a removed member). Anything
+else leaves the old snapshot, exits 1 and prints why.
 
 ## 7. Scheduling and fairness
 
@@ -896,6 +951,8 @@ Rules:
 | thermal kill or early stop (h100) | the part's processes die, or we stop them | `thermal`: one retry on a cool card, else fallback |
 | OOM | the scope is killed | `oom`: one retry with `resume` on a host with headroom |
 | h100 unreachable or quarantined | no part placed there | fallback order of the project |
+| h100's tunnel down (RUN-5) | the runners stay online (their own traffic is direct, `no_proxy`); a checkout or a package download in a job fails, and that part ends red | ssh's keep-alive ends a dead link in 90 s, and systemd restarts it after 10 s; the bridge answers 502 meanwhile |
+| the workstation down, or its push failing (RUN-5) | the snapshot ages | every h100 job refused `stale` after 60 min, until the push is back |
 | slot or lease starvation | a part waits | `queue-timeout-minutes`, then `unavailable` and fallback |
 | disk low (under 50 GiB free in `~/data`) | | `unavailable` before the command |
 | hook hangs | the job blocks in "Set up runner" | the hook's own 60 s bound, then the fixed refusal line; the wrapper's `timeout` at 65 s |
@@ -1006,14 +1063,18 @@ pool.
 **RUN-5: the standard test CI on h100** (decision 11). Sub-PRs: the org snapshot and
 policy schema 2; h100 as a local host in setup (no proxy, the inventory's `python` and
 labels); the local health gate, sampler and early stop; `h100-test.yml` and
-`ci-run env build`; then `v1.1.0`. *Acceptance:*
+`ci-run env build`; h100's egress (tunnel and bridge, decision 11.8); the snapshot push
+(decision 11.9); then `v1.1.0`. *Acceptance:*
 
 1. Unit tests, each failing on a mutant: a snapshot member's push is accepted; an outside
    collaborator, a non-member and a bot are refused; a public repository, and a private
    one whose id differs from the snapshot's, are refused; a stale, a missing and a
    malformed snapshot are refused; schema 1 decides as before; a hot card is refused
    with a cool card's label; the early stop; a watchdog kill line counts only with our
-   PID and our card's bus.
+   PID and our card's bus. The bridge refuses a name off its list, a port other than 443
+   and a request that is not CONNECT, and answers 502 when the tunnel refuses.
+   `--receive` refuses another org's snapshot, an older one than in place and one from
+   the future.
 2. The lead-approved plan is applied on h100, and its 9 runners are online at org level.
    They return within 5 min after `systemctl --user restart`.
 3. In a live job, `sudo -n true` fails. A job from a public repository, one from a
@@ -1021,7 +1082,9 @@ labels); the local health gate, sampler and early stop; `h100-test.yml` and
    10 s, and print no inventory. A job of another private repository given
    `[self-hosted, light]` is not taken by an h100 runner.
 4. A member added to the org can run within 10 min. A snapshot made older than 60 min
-   refuses with `stale`.
+   refuses with `stale`. From h100, `github.com` answers through the bridge; a name off
+   the bridge's list gets 403, and a forward to a name off the egress account's list is
+   refused there.
 5. A canary private repository: a failing CPU test and a failing GPU test each end red in
    their own part, and only there. A part OOM-killed ends `oom` and is retried; a stopped
    runner ends `lost` and is salvaged; a forced hot reading stops the part as `thermal`,

@@ -263,7 +263,7 @@ no_proxy = "localhost,127.0.0.1"
             r = subprocess.run([sys.executable, '-I', '-c', code], capture_output=True, text=True, timeout=20)
             self.assertLess(time.monotonic() - t0, 10)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn('nothing listens on the CI proxy port', r.stderr)
+        self.assertIn('nothing listens on the egress port', r.stderr)
 
     def test_the_org_snapshot_timer_only_where_the_inventory_asks(self):
         text = setup.build(str(self.etc)).text()
@@ -470,6 +470,145 @@ h100 = {{ per_card = true, labels = ["h100"] }}
         with mock.patch.dict(os.environ, {'CI_RUNNERS_ETC': str(self.etc)}), contextlib.redirect_stdout(out):
             self.assertEqual(cli.main(['proxy-check']), 0)
         self.assertIn('no CI proxy', out.getvalue())
+
+
+class Egress(unittest.TestCase):
+    """h100's egress (decision 11.8): a tunnel table gives ci-tunnel and ci-bridge, the
+    runners' proxy lines point at the bridge, and the lead's files in etc/tunnel/ are
+    checked, never written."""
+
+    TUNNEL = """[hosts.hx.tunnel]
+socks_port = 18181
+http_port = 18182
+allow = ["github.com", "pypi.org"]
+direct = ["localhost", "127.0.0.1", "::1", "api.github.com", ".actions.githubusercontent.com"]
+"""
+
+    setUp_ = Standalone.setUp
+    tearDown = Standalone.tearDown
+    run_ = Standalone.run_
+    apply_ = Standalone.apply
+
+    def apply(self, text):
+        with mock.patch.object(setup, 'wait_port', self.waited.append):
+            return self.apply_(text)
+
+    def setUp(self):
+        self.setUp_()
+        self.inv.write_text(self.inv.read_text().replace('orgsync = true\n', '').replace(
+            '[hosts.hx.pools]', self.TUNNEL + '[hosts.hx.pools]'))
+        self.waited = []
+        self.tun = self.etc / 'tunnel'
+        self.tun.mkdir(mode=0o700)
+        os.chmod(self.etc, 0o700)
+        for name in setup.TUNNEL_FILES:
+            (self.tun / name).write_text('Host egress\n  HostName egress.example\n' if name == 'ssh_config' else 'x\n')
+            os.chmod(self.tun / name, 0o600)
+
+    def test_plan_with_a_tunnel(self):
+        self.unpacked = []
+        text = setup.build(str(self.etc)).text()
+        for want in ('| https_proxy=http://127.0.0.1:18182', '| http_proxy=http://127.0.0.1:18182',
+                     '| no_proxy=localhost,127.0.0.1,::1,api.github.com,.actions.githubusercontent.com',
+                     'fetched through the egress bridge', f'keep   {self.tun}/id_ed25519',
+                     '2 names on port 443: github.com, pypi.org',
+                     'run    systemctl --user enable --now ci-tunnel.service ci-bridge.service\n'):
+            self.assertIn(want, text)
+        self.assertNotIn('ci-proxy', text)
+        self.assertNotIn('egress.example', text)  # the lead's files are not shown
+        self.assertEqual(self.apply(text), 0)
+        self.assertEqual(sorted(p.name for p in self.units.iterdir()),
+                         ['ci-bridge.service', 'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service',
+                          'ci-tunnel.service', 'ci.slice'])
+        tunnel = (self.units / 'ci-tunnel.service').read_text()
+        for want in (f'ExecStart=/usr/bin/ssh -F {self.etc}/tunnel/ssh_config -N -D 127.0.0.1:18181 ',
+                     f'-o IdentityFile={self.etc}/tunnel/id_ed25519 ', '-o StrictHostKeyChecking=yes ',
+                     f'-o UserKnownHostsFile={self.etc}/tunnel/known_hosts ', '-o ExitOnForwardFailure=yes ',
+                     '-o BatchMode=yes ', ' egress\n'):
+            self.assertIn(want, tunnel)
+        bridge = (self.units / 'ci-bridge.service').read_text()
+        self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run bridge\n', bridge)
+        runner = (self.units / 'ci-runner@.service').read_text()
+        self.assertIn('After=ci-bridge.service\nWants=ci-bridge.service\n', runner)
+        self.assertEqual([port for _, port in self.unpacked], [18182] * 4)  # the runner app through the bridge
+        self.assertEqual(self.waited, [18181, 18182])  # the tunnel's port first: it binds once ssh is in
+        self.assertEqual((self.tun / 'ssh_config').read_text(), 'Host egress\n  HostName egress.example\n')
+        self.assertEqual(setup.build(str(self.etc)).actions, [])
+        self.assertNotIn('systemctl --user restart', text)  # a first apply starts them
+
+    def test_a_changed_table_restarts_the_egress(self):
+        self.unpacked = []
+        self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+        self.inv.write_text(self.inv.read_text().replace('"github.com", "pypi.org"', '"github.com"'))
+        text = setup.build(str(self.etc)).text()
+        self.assertIn(f'update {self.units}/ci-bridge.service', text)
+        self.assertIn('run    systemctl --user restart ci-tunnel.service ci-bridge.service\n', text)
+        self.assertNotIn('  wait ', text)  # the runners are there: nothing to fetch
+
+    def test_the_leads_files_are_required(self):
+        def refused(why):
+            with self.assertRaisesRegex(ValueError, why):
+                setup.build(str(self.etc))
+        os.chmod(self.tun / 'id_ed25519', 0o644)
+        refused('readable by others')
+        os.chmod(self.tun / 'id_ed25519', 0o600)
+        os.chmod(self.tun, 0o755)
+        refused('mode 700')
+        os.chmod(self.tun, 0o700)
+        (self.tun / 'known_hosts').unlink()
+        refused('known_hosts must be a regular file')
+        os.symlink(self.tun / 'ssh_config', self.tun / 'known_hosts')  # a link to a regular file
+        refused('known_hosts must be a regular file')
+        (self.tun / 'known_hosts').unlink()
+        (self.tun / 'known_hosts').write_text('x\n')
+        for cfg, why in (('Host other\n  HostName h\n', 'line 1: only Host egress'),
+                         ('Host egress\n', 'with its HostName'),
+                         ('Host egress\n  HostName h\nHost egress\n  HostName i\n', 'one "Host egress"'),
+                         ('Host egress\n  HostName h\n  IdentityFile /tmp/k\n', 'line 3: only'),
+                         ('Host egress\n  HostName h\n  DynamicForward 0.0.0.0:1080\n', 'line 3: only'),
+                         ('Host egress\n  HostName h\n  ProxyCommand sh -c x\n', 'line 3: only'),
+                         ('Host egress\n  HostName h; x\n', 'line 2: only'),
+                         ('Match all\n  HostName h\n', 'line 1: only')):
+            (self.tun / 'ssh_config').write_text(cfg)
+            refused(why)
+        (self.tun / 'ssh_config').write_text('# the egress host\nHost egress\n  HostName h.example\n  User u\n  Port 22\n')
+        setup.build(str(self.etc))
+        real = self.tun / 'real_config'
+        (self.tun / 'ssh_config').rename(real)
+        os.symlink(real, self.tun / 'ssh_config')
+        refused('ssh_config must be a regular file')
+
+    def test_the_tunnel_table(self):
+        good = self.inv.read_text()
+        for old, new, why in (('http_port = 18182', 'http_port = 18181', 'the same'),
+                              ('"github.com", "pypi.org"', '"10.20.30"', 'allow is malformed'),
+                              ('"github.com", "pypi.org"', '', 'allow is malformed'),
+                              ('"github.com", "pypi.org"', '"GitHub.com"', 'allow is malformed'),
+                              ('"::1", ', '"::1,example.com", ', 'direct is malformed'),
+                              ('"::1", ', '"::1", "a.org,b.org", ', 'direct is malformed'),  # one name each
+                              ('http_port = 18182', 'http_port = 70000', 'http_port is malformed'),
+                              ('[hosts.hx.tunnel]', '[hosts.hx.proxy]\nclient = "/bin/x"\nconfig = "/c"\n'
+                               'nodes = ["n"]\nhttp_port = 1\nsocks_port = 2\nno_proxy = "localhost"\n'
+                               '[hosts.hx.tunnel]', 'a CI proxy and a tunnel')):
+            with self.assertRaisesRegex(inventory.InventoryError, why, msg=new):
+                inventory.load(good.replace(old, new))
+        self.assertEqual(inventory.load(good).host['tunnel']['allow'], ['github.com', 'pypi.org'])
+        self.assertEqual(inventory.deny_tokens(inventory.tomllib.loads(good)) & {'github.com', 'api.github.com'},
+                         set())  # public names: the repository may hold them
+        private = inventory.tomllib.loads(good.replace('"::1", ', '"::1", "mirror.lab.internal", "fd00::5", '))
+        self.assertLessEqual({'mirror.lab.internal', 'fd00::5'}, inventory.deny_tokens(private))  # inventory
+        self.assertIn('secret-name.org', inventory.deny_tokens({'other': {'allow': ['secret-name.org']}}))
+        self.assertEqual(inventory.deny_tokens({'org': {'name': 'chaobrain'}, 'x': {'name': 'secretorg'}}),
+                         {'secretorg'})  # the policy's org name is public; another name is not
+        self.assertIn('api.github.com', inventory.deny_tokens({'hosts': {'hx': {'other': ['api.github.com']}}}))
+
+    def test_bridge_command_without_a_tunnel(self):
+        from ci_runners import cli
+        self.inv.write_text(self.inv.read_text().replace(self.TUNNEL, ''))
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {'CI_RUNNERS_ETC': str(self.etc)}), contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(['bridge']), 2)
+        self.assertIn('no tunnel', err.getvalue())
 
 
 if __name__ == '__main__':

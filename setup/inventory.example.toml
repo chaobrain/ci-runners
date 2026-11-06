@@ -50,10 +50,20 @@ max_temp_c = 80
 cpus = "0-43,88-131"                            # NUMA node 0
 python = "/<path to a Python 3.11 or later>"    # the system's is 3.10; export it as CI_RUNNERS_PYTHON
                                                 # (and CI_RUNNERS_ETC) to run setup/*.sh by hand
-orgsync = true                                  # the org snapshot timer (design §6.5)
+# orgsync = true                                # only a host with its own token: h100's snapshot is
+                                                # pushed from the workstation (decision 11.9)
 watchdog_log = "/<path to the GPU watchdog's log>"
 watchdog_notice = "/<path to the watchdog's notice file>"   # leave out if the host has none
-# no proxy table: GitHub is reached directly (decision 11.6)
+
+[hosts.h100.tunnel]                             # the egress (decision 11.8); no proxy table
+socks_port = 18181                              # ci-tunnel's SOCKS5 on 127.0.0.1
+http_port = 18182                               # ci-bridge's HTTP CONNECT on 127.0.0.1
+allow = ["github.com", "codeload.github.com", "objects.githubusercontent.com",
+         "release-assets.githubusercontent.com", "raw.githubusercontent.com",
+         "pypi.org", "files.pythonhosted.org", "conda.anaconda.org", "repo.anaconda.com"]
+# no_proxy of the runners: public names only (these values are not denied in the repository)
+direct = ["localhost", "127.0.0.1", "::1", "api.github.com", ".actions.githubusercontent.com",
+          ".blob.core.windows.net"]
 
 [hosts.h100.pools]                              # labels share nothing with the 3090 pools (§5.1)
 light = { count = 2, labels = ["h100-light"] }

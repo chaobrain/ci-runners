@@ -100,7 +100,8 @@ HOST_KEYS = {
                                                                 for k, n in v.items()), True),
     'files': (lambda v: isinstance(v, dict) and set(v) == {'host_lock', 'slot_lock', 'slot_queue'}
               and all(_abs(p) for p in v.values()), True),  # brainspike's lock and slot files (D5)
-    'proxy': (lambda v: isinstance(v, dict), False),  # none: GitHub is reached directly (h100, decision 11.6)
+    'proxy': (lambda v: isinstance(v, dict), False),  # the CI proxy (3090 hosts, decision 5)
+    'tunnel': (lambda v: isinstance(v, dict), False),  # the ssh egress and its bridge (h100, decision 11.8)
     'python': (_abs, False),         # the host layer's interpreter, 3.11 or later; else /usr/bin/python3
     'orgsync': (lambda v: type(v) is bool, False),  # runs ci-orgsync.timer: the org snapshot (§6.5)
     'watchdog_log': (_abs, False),   # the GPU watchdog's log (h100; design §4.4 thermal)
@@ -113,6 +114,19 @@ PROXY_KEYS = {
     'http_port': (lambda v: _int(v, 1) and v < 65536, True),
     'socks_port': (lambda v: _int(v, 1) and v < 65536, True),
     'no_proxy': (_str, True),
+}
+_PORT = (lambda v: _int(v, 1) and v < 65536, True)
+#: a DNS name the bridge passes (the bridge's own check, lower case, two labels or more)
+NAME = re.compile(r'(?=.{1,253}\Z)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+\Z')
+_DIRECT = re.compile(r'\.?[a-z0-9][a-z0-9.-]{0,252}\Z|[0-9a-f:.]{2,39}\Z')
+TUNNEL_KEYS = {
+    'socks_port': _PORT,  # ci-tunnel's SOCKS5 on 127.0.0.1
+    'http_port': _PORT,   # ci-bridge's HTTP CONNECT on 127.0.0.1
+    # the names the bridge passes on port 443; not all numeric (no address literal)
+    'allow': (lambda v: isinstance(v, list) and bool(v) and all(
+        isinstance(n, str) and NAME.match(n) and not n.replace('.', '').isdigit() for n in v), True),
+    # what the runners reach without the bridge: their no_proxy, one name, suffix or address each
+    'direct': (lambda v: isinstance(v, list) and all(isinstance(n, str) and _DIRECT.match(n) for n in v), True),
 }
 
 
@@ -160,6 +174,12 @@ def load(text: str) -> Inventory:
         _check_table(f'hosts.{role}', h, HOST_KEYS)
         if 'proxy' in h:
             _check_table(f'hosts.{role}.proxy', h['proxy'], PROXY_KEYS)
+        if 'tunnel' in h:
+            _check_table(f'hosts.{role}.tunnel', h['tunnel'], TUNNEL_KEYS)
+            if 'proxy' in h:
+                raise InventoryError(f'hosts.{role}: a CI proxy and a tunnel; give one')
+            if h['tunnel']['socks_port'] == h['tunnel']['http_port']:
+                raise InventoryError(f'hosts.{role}.tunnel: socks_port and http_port are the same')
         for pool, v in h['pools'].items():
             if isinstance(v, dict) and v.get('per_card') and not h['gpus']:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: per_card on a host without gpus')
@@ -185,6 +205,18 @@ def pool_labels(inv: 'Inventory', pool: str) -> list[str] | None:
 #: scripts already. Every other string value of the inventory and the policy is denied.
 PUBLIC_KEYS = frozenset({'this', 'memory_max', 'cpus', 'host_lock', 'slot_lock', 'slot_queue', 'bot', 'visibility',
                          'extra_events', 'labels'})
+#: ``tunnel.direct`` values the repository holds (the example, the tests): public, so not
+#: denied. Every other ``direct`` value is denied, as any inventory value is. The bridge's
+#: ``tunnel.allow`` is not denied at all: the egress host resolves those names on the
+#: internet, so they are public by construction (decision 11.8).
+#: the policy's ``[org] name`` is the org's, public as the repository is.
+PUBLIC_DIRECT = frozenset({'localhost', '127.0.0.1', '::1', 'api.github.com', '.actions.githubusercontent.com',
+                           '.blob.core.windows.net'})
+
+
+def _tunnel_key(path: tuple) -> str | None:
+    """``allow`` or ``direct`` for the path of a host's tunnel key, else None."""
+    return path[3] if len(path) == 4 and path[0] == 'hosts' and path[2] == 'tunnel' else None
 #: tokens too common to deny; a value that is one of them is left out, with a short one
 _COMMON = frozenset({'localhost', 'home', 'data', 'true', 'false', 'none'})
 MIN_TOKEN = 4
@@ -209,14 +241,15 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(_SALT + normalise(token).encode()).hexdigest()
 
 
-def _strings(doc: object, key: str = '') -> Iterator[str]:
+def _strings(doc: object, path: tuple = ()) -> Iterator[str]:
     if isinstance(doc, dict):
         for k, v in doc.items():
-            if k not in PUBLIC_KEYS:
-                yield from _strings(v, k)
+            if k not in PUBLIC_KEYS and _tunnel_key((*path, k)) != 'allow' and (*path, k) != ('org', 'name'):
+                yield from _strings(v, (*path, k))
     elif isinstance(doc, list):
         for v in doc:
-            yield from _strings(v, key)
+            if not (_tunnel_key(path) == 'direct' and v in PUBLIC_DIRECT):
+                yield from _strings(v, path)
     elif isinstance(doc, str):
         yield doc
 

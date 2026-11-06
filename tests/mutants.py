@@ -808,6 +808,14 @@ MUTANTS = [
      "            if False:\n                raise ValueError(f'{path} is not a regular", [f'{TU}.Standalone.test_adopt_takes_over_unrecorded_units']),
     (SET, "            made.append({'kind': 'file', 'path': a['path']})", "            pass",
      [f'{TU}.Standalone.test_adopt_takes_over_unrecorded_units']),
+    (SET, "            if len(plan.actions) == n:", "            if False:", [f'{TU}.Standalone.test_adopt_takes_over_unrecorded_units']),
+    (SET, "        p = build(etc, adopt=len(argv) == 2)", "        p = build(etc, adopt=False)",
+     [f'{TU}.Standalone.test_the_adopt_flag_reaches_plan_and_apply']),
+    (SET, "        return apply(etc, argv[2], adopt=len(argv) == 4)", "        return apply(etc, argv[2], adopt=False)",
+     [f'{TU}.Standalone.test_the_adopt_flag_reaches_plan_and_apply']),
+    (PLN, 'exec "$ci_run" plan ${2:+"$2"}', 'exec "$ci_run" plan', [f'{TK}.Uninstall.test_the_state_and_the_release_follow_ci_runners_etc']),
+    ("setup/apply.sh", 'apply --plan "$3" ${4:+"$4"}', 'apply --plan "$3"', [f'{TK}.Uninstall.test_the_state_and_the_release_follow_ci_runners_etc']),
+    # (the uid check in adopt is not mutated: it needs a file of another account, so root)
     (SET, "    plan = build(etc, adopt)\n", "    plan = build(etc, True)\n", [f'{TU}.Standalone.test_adopt_takes_over_unrecorded_units']),
 ]
 

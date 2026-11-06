@@ -40,7 +40,6 @@ import re
 import shutil
 import socket
 import stat
-import stat
 import subprocess
 import sys
 import tarfile
@@ -330,7 +329,14 @@ def build(etc: str, adopt: bool = False) -> Plan:
             st = os.lstat(path)
             if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
                 raise ValueError(f'{path} is not a regular file of this account: it cannot be adopted')
-            plan.add(f'  adopt  {path} (no apply recorded it; the lead names it ours)', kind='adopt', path=path)
+            # the uid check tells nothing apart on a shared account: there the lead's reading
+            # of each listed file is the check (design §5.3)
+            plan.add(f'  adopt  {path} (no apply recorded it; the lead names it ours)')
+            n = len(plan.actions)
+            _file(plan, path, content, 0o644)
+            if len(plan.actions) == n:  # kept as it is: record it; a write or update records itself, once made
+                plan.actions.append({'kind': 'adopt', 'path': path})
+            return
         _file(plan, path, content, 0o644)
 
     for name in UNITS:

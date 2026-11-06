@@ -280,6 +280,16 @@ class Uninstall(unittest.TestCase):
         r = subprocess.run(['sh', str(ROOT / 'setup/apply.sh'), 'r', '--plan', 'f'], env=env, capture_output=True,
                            text=True, timeout=60)
         self.assertEqual(r.stdout, f'ran apply --plan f {sub / "etc"}\n')
+        r = subprocess.run(['sh', str(ROOT / 'setup/plan.sh'), 'r', '--adopt'], env=env, capture_output=True, text=True,
+                           timeout=60)
+        self.assertEqual(r.stdout, f'ran plan --adopt {sub / "etc"}\n')
+        r = subprocess.run(['sh', str(ROOT / 'setup/apply.sh'), 'r', '--plan', 'f', '--adopt'], env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.stdout, f'ran apply --plan f --adopt {sub / "etc"}\n')
+        for args in (['plan.sh', 'r', '--other'], ['apply.sh', 'r', '--plan', 'f', '--other']):
+            r = subprocess.run(['sh', str(ROOT / 'setup' / args[0]), *args[1:]], env=env, capture_output=True,
+                               text=True, timeout=60)
+            self.assertEqual(r.returncode, 2, args)
 
     def test_a_unit_still_active_removes_nothing(self):
         (self.out / 'active').write_text('ci-reaper.timer\n')

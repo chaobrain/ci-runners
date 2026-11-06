@@ -23,13 +23,17 @@ import json, os, sys
 state, unit_dir = sys.argv[1], sys.argv[2]
 with open(state) as f:
     made = [m for a in json.load(f)['applied'] for m in a['made']]
-names = sorted({os.path.basename(m['path']) for m in made
-                if m['kind'] == 'file' and os.path.dirname(m['path']) == unit_dir})
+files = set()  # in order: a later apply's remove takes a file off the record
+for m in made:
+    if m['kind'] == 'file':
+        files.add(m['path'])
+    elif m['kind'] == 'remove':
+        files.discard(m['path'])
+names = sorted({os.path.basename(p) for p in files if os.path.dirname(p) == unit_dir})
 for n in names:
     if n.endswith(('.timer', '.service')) and '@' not in n:
         print(n)
-runners = sorted({os.path.basename(os.path.dirname(m['path'])) for m in made
-                  if m['kind'] == 'file' and os.path.basename(m['path']) == '.env'})
+runners = sorted({os.path.basename(os.path.dirname(p)) for p in files if os.path.basename(p) == '.env'})
 if 'ci-runner@.service' in names:
     for r in runners:
         print(f'ci-runner@{r}.service')
@@ -48,7 +52,13 @@ import json, os, sys
 state, unit_dir = sys.argv[1], sys.argv[2]
 with open(state) as f:
     made = [m for a in json.load(f)['applied'] for m in a['made']]
-for p in sorted({m['path'] for m in made if m['kind'] == 'file' and os.path.dirname(m['path']) == unit_dir}):
+files = set()
+for m in made:
+    if m['kind'] == 'file':
+        files.add(m['path'])
+    elif m['kind'] == 'remove':
+        files.discard(m['path'])
+for p in sorted(p for p in files if os.path.dirname(p) == unit_dir):
     if os.path.lexists(p):
         os.unlink(p)
         print(f'uninstall.sh: removed {p}')

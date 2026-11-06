@@ -55,15 +55,13 @@ python = "/<path to a Python 3.11 or later>"    # the system's is 3.10; export i
 watchdog_log = "/<path to the GPU watchdog's log>"
 watchdog_notice = "/<path to the watchdog's notice file>"   # leave out if the host has none
 
-[hosts.h100.tunnel]                             # the egress (decision 11.8); no proxy table
-socks_port = 18181                              # ci-tunnel's SOCKS5 on 127.0.0.1
-http_port = 18182                               # ci-bridge's HTTP CONNECT on 127.0.0.1
-allow = ["github.com", "codeload.github.com", "objects.githubusercontent.com",
-         "release-assets.githubusercontent.com", "raw.githubusercontent.com",
-         "pypi.org", "files.pythonhosted.org", "conda.anaconda.org", "repo.anaconda.com"]
-# no_proxy of the runners: public names only (these values are not denied in the repository)
-direct = ["localhost", "127.0.0.1", "::1", "api.github.com", ".actions.githubusercontent.com",
-          ".blob.core.windows.net"]
+[hosts.h100.tunnel]                             # the egress (decision 11.10); no proxy table
+http_port = 18182                               # ci-tunnel's forward on 127.0.0.1: the runners' https_proxy
+egress_port = 18443                             # ci-egress.service on the egress host's 127.0.0.1
+# no_proxy of the runners: localhost, and a package mirror that answers directly. Every
+# GitHub name goes through the egress; its allowlist is the egress host's
+# (setup/egress/allow). Public names only here (these values are not denied in the repository).
+direct = ["localhost", "127.0.0.1", "::1"]
 
 [hosts.h100.pools]                              # labels share nothing with the 3090 pools (§5.1)
 light = { count = 2, labels = ["h100-light"] }

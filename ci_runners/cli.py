@@ -2,7 +2,7 @@
 
     ci-run proxy-check     one check of the CI proxy (ci-proxy-check.timer)
     ci-run reap            the reaper's pass (ci-reaper.timer)
-    ci-run bridge          h100's egress bridge (ci-bridge.service; decision 11.8)
+    ci-run egress --port P --allow FILE   the egress proxy (ci-egress.service on the egress host; 11.10)
     ci-run org-sync [--fetch --org NAME | --receive]   the org snapshot (§6.5, decision 11.9)
     ci-run plan|apply ...  host setup (setup/plan.sh, setup/apply.sh)
     ci-run runners         this host's runners: name, labels, class
@@ -51,9 +51,9 @@ def main(argv: list[str]) -> int:
         p = h['proxy']
         print(proxy.check(h['data'], p['http_port'], p['nodes']))
         return 0
-    if cmd == 'bridge':
+    if cmd == 'egress':  # on the egress host: no inventory there
         from ci_runners import bridge
-        return bridge.main(load_inventory().host)
+        return bridge.main(args)
     if cmd == 'reap':
         from ci_runners import reaper
         print(reaper.reap(load_inventory().host['data']))

@@ -1,13 +1,14 @@
-# h100's egress (design decision 11.8): ssh with dynamic forwarding (SOCKS5 on
-# 127.0.0.1) to the egress host's restricted account. etc/tunnel/ssh_config says only
-# "Host egress" with its HostName, User and Port (setup refuses anything else); the key,
-# the pinned host key, the forwarding and every option a config could loosen are fixed
-# here. ci-bridge.service is in front.
+# h100's egress (design decision 11.10): ssh forwarding 127.0.0.1:<http port> to the
+# egress proxy on the egress host's 127.0.0.1:<egress port>, the one forward the egress
+# account's key opens. The runners' https_proxy points at the local port.
+# etc/tunnel/ssh_config says only "Host egress" with its HostName, User and Port (setup
+# refuses anything else); the key, the pinned host key, the forwarding and every option a
+# config could loosen are fixed here.
 [Unit]
 Description=ci-runners: egress tunnel
 
 [Service]
-ExecStart=/usr/bin/ssh -F @CI_ETC@/tunnel/ssh_config -N -D 127.0.0.1:@TUNNEL_SOCKS@ -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile=@CI_ETC@/tunnel/id_ed25519 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=@CI_ETC@/tunnel/known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none -o VerifyHostKeyDNS=no -o CheckHostIP=no -o UpdateHostKeys=no -o GatewayPorts=no -o PermitLocalCommand=no -o IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o ForwardAgent=no -o ForwardX11=no -o ConnectTimeout=20 egress
+ExecStart=/usr/bin/ssh -F @CI_ETC@/tunnel/ssh_config -N -L 127.0.0.1:@TUNNEL_HTTP@:127.0.0.1:@TUNNEL_EGRESS@ -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile=@CI_ETC@/tunnel/id_ed25519 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=@CI_ETC@/tunnel/known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none -o VerifyHostKeyDNS=no -o CheckHostIP=no -o UpdateHostKeys=no -o GatewayPorts=no -o PermitLocalCommand=no -o IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o ForwardAgent=no -o ForwardX11=no -o ConnectTimeout=20 egress
 NoNewPrivileges=yes
 Restart=always
 RestartSec=10

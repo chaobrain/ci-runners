@@ -1,0 +1,32 @@
+# The egress proxy's allowlist (design decision 11.10): installed root-owned on the
+# egress host as /opt/ci-runners/etc/egress-allow. One entry per line: a name matches
+# itself only; ".example.com" matches every name below example.com, not example.com.
+# Port 443 only. Public names only: this file is in the repository.
+
+# GitHub
+github.com
+api.github.com
+codeload.github.com
+objects.githubusercontent.com
+objects-origin.githubusercontent.com
+raw.githubusercontent.com
+release-assets.githubusercontent.com
+github-releases.githubusercontent.com
+avatars.githubusercontent.com
+pkg-containers.githubusercontent.com
+pkg.github.com
+ghcr.io
+
+# the Actions service: broker, launch, run, token, pipelines*, run-actions-*,
+# results-receiver, artifactcache, ...; its storage accounts change names
+.actions.githubusercontent.com
+.blob.core.windows.net
+
+# package indexes
+pypi.org
+files.pythonhosted.org
+pypi.nvidia.com
+download.pytorch.org
+conda.anaconda.org
+repo.anaconda.com
+storage.googleapis.com

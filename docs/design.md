@@ -38,8 +38,8 @@ are listed with what replaced them.
 7. **Shared slots.** Host-level slots are shared by all projects, so several projects
    cannot oversubscribe a host (§7). *The host lock and the interoperation with
    brainspike's `ci_slot.sh` and `host_lock.sh` are retired by 11.12.*
-8. **Generic outcome classification, with fixtures.** The fixtures are journal OOM
-   lines, the h100 GPU watchdog's kill lines, boot-id changes and a stopped runner.
+8. **Generic outcome classification, with fixtures.** The fixtures are the scope's
+   OOM kills, the h100 GPU watchdog's kill lines, boot-id changes and a stopped runner.
    Thermal and OOM kills are retried per policy and are not reported as test failures.
 9. The choices of §12.
 10. **The RUN-1b plan review (lead, 2026-11-05):**
@@ -277,7 +277,7 @@ actions/              claim/, part/, verdict/ (composite, action.yml); lib/ci-ru
                       launcher; RELEASE, the release stamp
 .github/workflows/    h100-test.yml (reusable, the standard test CI); test.yml (this
                       repository's tests, hosted only)
-tests/                unit tests; fixtures/ (sanitised): event payloads, journal and
+tests/                unit tests; fixtures/ (sanitised): event payloads,
                       watchdog lines, nvidia-smi CSV, boot ids, JUnit; mutants.py
 tests/test_no_inventory.py     no tracked file holds a denied token (hashed deny list)
 ```
@@ -439,7 +439,7 @@ nonzero exit with an OOM kill is `oom`, not `red`.
 |---|---|---|
 | pass | exit 0 | none |
 | red | nonzero exit or the inner timeout, with no infrastructure cause | none |
-| oom | the scope's `memory.events` `oom_kill` > 0, the supervisor's own cap (decision 11.11), or a journal OOM line for the scope (fixtures) | retry once with `resume` |
+| oom | the scope's `memory.events` `oom_kill` > 0, or the supervisor's own cap (decision 11.11) | retry once with `resume` |
 | thermal | a watchdog kill line (`GPU <bus> still <t>C -> killed <user>:<pid>, ...`) within the part's window that names our card's bus and a PID the sampler recorded for our scope; or our own early stop (§5.4) | retry once on a cool card |
 | reboot | boot id differs from the one recorded at start | as thermal (the board powers off at 101 °C) |
 | unavailable | before the command: the health gate, no card fits, the queue timeout, the project's queue full, low disk, a multi-GPU part, an unknown inventory schema, a malformed registry entry | fallback: once, on a cool card or the same pool |

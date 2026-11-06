@@ -798,8 +798,8 @@ MUTANTS = [
      [f'{TBR}.Open.test_a_failing_connection_or_resolution_gives_502']),
     (BRG, "        raise Refused(502, f'{host} does not resolve') from None", "        infos = []",
      [f'{TBR}.Open.test_a_failing_connection_or_resolution_gives_502']),
-    (BRG, "            return await asyncio.wait_for(asyncio.open_connection(a, PORT), CONNECT_TIMEOUT)",
-     "            return await asyncio.wait_for(asyncio.open_connection(a, 80), CONNECT_TIMEOUT)",
+    (BRG, "            return await asyncio.wait_for(asyncio.open_connection(a, PORT), left)",
+     "            return await asyncio.wait_for(asyncio.open_connection(a, 80), left)",
      [f'{TBR}.Open.test_a_global_address_is_connected']),
     (BRG, "                host = target(head, self.allow)\n                ur, uw = await self.opener(host)",
      "                host = target(head, self.allow)\n                w.write(b'HTTP/1.1 200 Connection established\\r\\n\\r\\n')\n                ur, uw = await self.opener(host)",
@@ -861,8 +861,8 @@ MUTANTS = [
      "                elif False:\n                    out.discard(m['path'])", [f'{TU}.Egress.test_a_recorded_unit_the_plan_no_longer_holds_is_removed']),
     (SET, "        elif k == 'remove':\n            _remove_unit(a['path'], run)", "        elif k == 'remove':\n            pass",
      [f'{TU}.Egress.test_a_recorded_unit_the_plan_no_longer_holds_is_removed']),
-    (SET, "    if not os.path.lexists(path):\n        return\n    st = os.lstat(path)",
-     "    st = os.lstat(path)", [f'{TU}.Egress.test_a_recorded_unit_already_gone_is_only_forgotten']),
+    (SET, "        run(['systemctl', '--user', 'disable', name], check=False, timeout=300)\n        return\n    st = os.lstat(path)",
+     "        run(['systemctl', '--user', 'disable', name], check=False, timeout=300)\n    st = os.lstat(path)", [f'{TU}.Egress.test_a_recorded_unit_already_gone_is_only_forgotten']),
     (UNI, "    elif m['kind'] == 'remove':\n        files.discard(m['path'])\nnames",
      "    elif False:\n        files.discard(m['path'])\nnames", [f'{TU}.Egress.test_uninstall_skips_a_removed_unit',
                                                           'tests.test_scripts.Uninstall.test_a_unit_a_later_apply_removed_is_left_alone']),
@@ -895,6 +895,20 @@ MUTANTS = [
     ("setup/apply.sh", 'apply --plan "$3" ${4:+"$4"}', 'apply --plan "$3"', [f'{TK}.Uninstall.test_the_state_and_the_release_follow_ci_runners_etc']),
     # (the uid check in adopt is not mutated: it needs a file of another account, so root)
     (SET, "    plan = build(etc, adopt)\n", "    plan = build(etc, True)\n", [f'{TU}.Standalone.test_adopt_takes_over_unrecorded_units']),
+    # the review of the egress proxy
+    (BRG, "    return await asyncio.get_running_loop().getaddrinfo(host + '.', PORT, type=socket.SOCK_STREAM)",
+     "    return await asyncio.get_running_loop().getaddrinfo(host, PORT, type=socket.SOCK_STREAM)",
+     ['tests.test_bridge.Open.test_the_name_resolves_as_absolute']),
+    (BRG, "            return await asyncio.wait_for(asyncio.open_connection(a, PORT), left)",
+     "            return await asyncio.wait_for(asyncio.open_connection(a, PORT), CONNECT_TIMEOUT)",
+     ['tests.test_bridge.Open.test_one_deadline_for_all_addresses']),
+    (BRG, "    server = await asyncio.start_server(bridge.handle, '127.0.0.1', port, limit=MAX_HEAD)",
+     "    server = await asyncio.start_server(bridge.handle, '0.0.0.0', port)",
+     ['tests.test_bridge.Listen.test_serve_binds_loopback_with_the_head_limit']),
+    (BRG, "        self.tasks.add(task)", "        pass", ['tests.test_bridge.Serve.test_an_open_connection_is_held']),
+    (SET, "        run(['systemctl', '--user', 'stop', name], check=False, timeout=300)", "        pass",
+     ['tests.test_setup.Egress.test_a_recorded_unit_already_gone_is_only_forgotten']),
+    (INS, 'chmod 0555 "$rel/$id"', 'chmod u-w "$rel/$id"', ['tests.test_scripts.Install.test_an_annotated_tag_resolves_to_its_commit']),
 ]
 
 

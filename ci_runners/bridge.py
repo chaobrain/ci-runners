@@ -4,7 +4,7 @@ host's 127.0.0.1 that connects allowlisted names on port 443 directly.
 h100's ``ci-tunnel.service`` forwards its local port here over ssh (``-L``), and the
 egress account's key opens that one forward only; the runner app, git, pip and conda
 all speak HTTP CONNECT. ``ci-egress.service``, a system unit of the egress host, runs
-``ci-run egress --port P --allow FILE`` as the egress account.
+``ci-run egress --port P --allow FILE`` as a dynamic user of its own.
 
 The allowlist (``setup/egress/allow``, installed root-owned) holds one entry per line:
 a name, which matches itself only, or a suffix ``.example.com``, which matches every
@@ -15,8 +15,9 @@ allowlist lives here, where no co-user of h100's account can change it.
 
 Anything but ``CONNECT <allowed name>:443`` gets 403. The proxy resolves the name itself
 and connects only to global addresses: a name that resolves to none gets 403, a
-connection that fails gets 502. It answers 200 only once its connection is open. One
-journal line per connection: the name and the result.
+connection that fails gets 502. It answers 200 only once its connection is open. The
+journal gets a line when a connection is refused, and two when it is passed: when it
+opens and when it closes.
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ from ci_runners.inventory import NAME
 
 MAX_HEAD = 8192        # bytes of request head
 HEAD_TIMEOUT = 30      # s to send the head
-CONNECT_TIMEOUT = 30   # s to resolve the name and open the connection
+CONNECT_TIMEOUT = 30   # s to resolve the name and open the connection, all addresses together
 MAX_CONNECTIONS = 256
 LINGER = 300           # s the other direction may run on after one side has finished
 PORT = 443
@@ -112,12 +113,15 @@ def global_addresses(infos: list) -> list[str]:
 
 
 async def _resolve(host: str) -> list:
-    return await asyncio.get_running_loop().getaddrinfo(host, PORT, type=socket.SOCK_STREAM)
+    # absolute: a resolver's search list never extends an allowed name into another one
+    return await asyncio.get_running_loop().getaddrinfo(host + '.', PORT, type=socket.SOCK_STREAM)
 
 
 async def _open(host: str, resolve: Callable = _resolve) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """A connection to ``host:443`` on a global address. Raises Refused: 403 when the name
     resolves to no global address, 502 when it does not resolve or no address answers."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + CONNECT_TIMEOUT
     try:
         infos = await asyncio.wait_for(resolve(host), CONNECT_TIMEOUT)
     except (OSError, asyncio.TimeoutError):
@@ -126,8 +130,11 @@ async def _open(host: str, resolve: Callable = _resolve) -> tuple[asyncio.Stream
     if not addrs:
         raise Refused(403, f'{host} resolves to no global address')
     for a in addrs:
+        left = deadline - loop.time()
+        if left <= 0:
+            break
         try:
-            return await asyncio.wait_for(asyncio.open_connection(a, PORT), CONNECT_TIMEOUT)
+            return await asyncio.wait_for(asyncio.open_connection(a, PORT), left)
         except (OSError, asyncio.TimeoutError):
             continue
     raise Refused(502, f'{host}:{PORT} does not answer')

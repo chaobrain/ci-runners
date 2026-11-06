@@ -154,6 +154,53 @@ class Open(unittest.IsolatedAsyncioTestCase):
             await bridge._open('github.com', unresolved)
         self.assertEqual(cm.exception.status, 502)
 
+    async def test_one_deadline_for_all_addresses(self):
+        async def resolve(host):  # the lookup takes part of the deadline
+            await asyncio.sleep(0.2)
+            return info(GLOBAL6, '2606:4700::1111', '2606:4700::1001')
+
+        async def hang(host, port):
+            await asyncio.sleep(10)
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        with mock.patch.object(bridge, 'CONNECT_TIMEOUT', 0.3), mock.patch('asyncio.open_connection', side_effect=hang):
+            with self.assertRaises(bridge.Refused) as cm:
+                await bridge._open('github.com', resolve)
+        self.assertEqual(cm.exception.status, 502)
+        self.assertLess(loop.time() - t0, 0.45)  # 0.3 s in all: not the whole 0.3 s again per address
+
+    async def test_the_name_resolves_as_absolute(self):
+        loop = asyncio.get_running_loop()
+        asked = []
+
+        async def getaddrinfo(host, port, **kw):
+            asked.append((host, port))
+            return []
+        with mock.patch.object(loop, 'getaddrinfo', side_effect=getaddrinfo):
+            await bridge._resolve('github.com')
+        self.assertEqual(asked, [('github.com.', 443)])  # a search list never extends it
+
+
+class Listen(unittest.IsolatedAsyncioTestCase):
+    async def test_serve_binds_loopback_with_the_head_limit(self):
+        got = {}
+
+        class Server:
+            sockets = []
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *exc):
+                return False
+            async def serve_forever(self):
+                return None
+
+        async def start_server(cb, host, port, **kw):
+            got.update(host=host, port=port, **kw)
+            return Server()
+        with mock.patch('asyncio.start_server', side_effect=start_server):
+            await bridge.serve(18443, ['github.com'])
+        self.assertEqual((got['host'], got['port'], got['limit']), ('127.0.0.1', 18443, bridge.MAX_HEAD))
+
 
 class FarEnd:
     """An upstream that echoes what it reads, upper-cased."""
@@ -202,6 +249,19 @@ class Serve(unittest.IsolatedAsyncioTestCase):
             got = await asyncio.wait_for(r.readexactly(len(then)), 10)
         w.close()
         return int(status.split(b' ')[1]), got
+
+    async def test_an_open_connection_is_held(self):
+        self.gate = asyncio.Event()
+        r, w = await asyncio.open_connection('127.0.0.1', self.port)
+        w.write(b'CONNECT github.com:443 HTTP/1.1\r\n\r\n')
+        for _ in range(100):
+            if self.asked:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(len(self.b.tasks), 1)  # the loop holds tasks only weakly: the proxy holds it
+        self.gate.set()
+        await asyncio.wait_for(r.readuntil(b'\r\n\r\n'), 10)
+        w.close()
 
     async def test_an_allowed_connect_is_piped(self):
         status, got = await self.ask(b'CONNECT x.actions.githubusercontent.com:443 HTTP/1.1\r\n\r\n', b'hello')

@@ -578,8 +578,12 @@ def _apply_actions(plan: Plan, made: list, run) -> None:
 def _remove_unit(path: str, run) -> None:
     """Disable and stop a unit an earlier apply wrote, then delete its file: a regular
     file of this account only, checked again here; a link or another's file stops the
-    apply. An absent file is only forgotten."""
+    apply. An absent file is forgotten, but its unit is still stopped and disabled: it may
+    run on from memory, holding its port, with its wants link behind."""
     if not os.path.lexists(path):
+        name = os.path.basename(path)
+        run(['systemctl', '--user', 'stop', name], check=False, timeout=300)
+        run(['systemctl', '--user', 'disable', name], check=False, timeout=300)
         return
     st = os.lstat(path)
     if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():

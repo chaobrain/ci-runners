@@ -634,6 +634,9 @@ direct = ["localhost", "127.0.0.1", "::1"]
         self.ran.clear()
         self.assertEqual(self.apply(text), 0)
         self.assertNotIn(['systemctl', '--user', 'disable', '--now', 'ci-bridge.service'], self.ran)
+        # but its unit may run on from memory, holding its port: stopped and disabled anyway
+        self.assertIn(['systemctl', '--user', 'stop', 'ci-bridge.service'], self.ran)
+        self.assertIn(['systemctl', '--user', 'disable', 'ci-bridge.service'], self.ran)
         self.assertNotIn(str(bridge), setup._ours(str(state)))
 
     def test_a_link_in_place_of_a_recorded_unit_is_not_removed(self):

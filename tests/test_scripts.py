@@ -168,6 +168,7 @@ class Install(unittest.TestCase):
         self.assertEqual(self.hook(), 'v1.0.0')
         self.assertEqual((self.rel / 'v1.0.0/COMMIT').read_text(), SHA + '\n')
         self.assertFalse(os.access(self.rel / 'v1.0.0/ci_runners/__init__.py', os.W_OK))
+        self.assertEqual(os.stat(self.rel / 'v1.0.0').st_mode & 0o777, 0o555)  # a dynamic user can enter it
         self.assertEqual(self.install('--tag', 'v1.1.0', '--expect', SHA2).returncode, 0)  # lightweight
         self.assertEqual(self.hook(), 'v1.1.0')
         self.assertEqual(self.install('--tag', 'v2.0.0', '--expect', SHA).returncode, 1)  # no such tag

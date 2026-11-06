@@ -58,7 +58,9 @@ else
   [ -d "$tmp/ci_runners" ] || die "the archive of $sha has no ci_runners/"
   echo "$sha" > "$tmp/COMMIT"
   chmod -R a-w "$tmp"
-  chmod u+w "$tmp"; mv -T "$tmp" "$rel/$id"; chmod u-w "$rel/$id"
+  # readable by others: the code is public, and a root install serves the egress host's
+  # dynamic user (design §5.3)
+  chmod u+w "$tmp"; mv -T "$tmp" "$rel/$id"; chmod 0555 "$rel/$id"
   trap - EXIT
 fi
 ln -sfn "$id" "$rel/hook.new" && mv -T "$rel/hook.new" "$rel/hook"

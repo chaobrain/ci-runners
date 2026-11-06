@@ -52,6 +52,18 @@ class Actions(unittest.TestCase):
                 bare = re.sub(r'\$\{\{.*?\}\}|\'[^\']*\'|"[^"]*"', '', line)
                 self.assertNotRegex(bare, r'[{}]', f'{name}/action.yml:{n}')
 
+    def test_the_reusable_workflows_call_their_own_release(self):
+        """Design §9: a canary pinning a workflow at @vX.Y.Z runs that release's actions only
+        if the workflow names them so. On main (stamp ``hook``) the refs read @v1; a stamped
+        release names itself."""
+        stamp = (ROOT / 'actions' / 'RELEASE').read_text().strip()
+        want = 'v1' if stamp == 'hook' else stamp
+        refs = [(f.name, m.group(1), m.group(2)) for f in sorted((ROOT / '.github' / 'workflows').glob('*.yml'))
+                for m in re.finditer(r'chaobrain/ci-runners/actions/([a-z]+)@(\S+)', f.read_text())]
+        self.assertTrue(refs)
+        for name, action, ref in refs:
+            self.assertEqual(ref, want, f'{name}: actions/{action}@{ref} with RELEASE {stamp}')
+
     def test_the_launcher_and_the_release_stamp(self):
         self.assertRegex((ROOT / 'actions' / 'RELEASE').read_text().strip(), r'\A(hook|v\d+\.\d+\.\d+)\Z')
         for name in ACTIONS:

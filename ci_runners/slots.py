@@ -1,7 +1,7 @@
-"""The fair order of a host's CI slot queue (design §7, rules 1, 2 and 4).
+"""A host's CI slots and their fair queue (design §7, rules 1 and 2).
 
-Pure; the queue directory, the tickets and the slot locks are the host layer's
-(``ci-slot``, interoperating with brainspike's ``ci_slot.sh``, RUN-1b).
+``grants`` and ``queue_full`` are pure; ``SlotQueue`` keeps the queue directory, the
+tickets and the slot locks that the inventory's ``files`` name.
 """
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ import errno
 import fcntl
 import os
 import re
-import signal
-import sys
 import time
 from collections.abc import Mapping, Sequence
 
@@ -19,15 +17,14 @@ from collections.abc import Mapping, Sequence
 @dataclasses.dataclass(frozen=True)
 class Ticket:
     seq: int  # the queue's number: lower is older
-    project: str = ''  # empty: a ticket of brainspike's ci_slot.sh, which names none (rule 4)
+    project: str = ''  # empty: a ticket that names no project, which no cap admits
 
 
-def grants(waiting: Sequence[Ticket], held: Mapping[str, int], caps: Mapping[str, int], free: int,
-           default_project: str) -> list[int]:
+def grants(waiting: Sequence[Ticket], held: Mapping[str, int], caps: Mapping[str, int], free: int) -> list[int]:
     """The ``seq`` of the tickets that take the ``free`` slots now, in order.
 
-    A ticket without a project counts as ``default_project``. A ticket whose project
-    already holds its cap (``caps``; a project not listed has cap 0) is skipped. Each
+    A ticket whose project already holds its cap (``caps``; a project not listed has
+    cap 0) is skipped. Each
     free slot goes to the waiting project that holds the fewest slots, and among
     those to the oldest ticket. Pure.
     """
@@ -37,7 +34,7 @@ def grants(waiting: Sequence[Ticket], held: Mapping[str, int], caps: Mapping[str
     for _ in range(max(0, free)):
         best = None
         for t in queue:
-            p = t.project or default_project
+            p = t.project
             if t.seq in out or held.get(p, 0) >= caps.get(p, 0):
                 continue
             key = (held.get(p, 0), t.seq)
@@ -47,7 +44,7 @@ def grants(waiting: Sequence[Ticket], held: Mapping[str, int], caps: Mapping[str
             break
         t = best[1]
         out.append(t.seq)
-        p = t.project or default_project
+        p = t.project
         held[p] = held.get(p, 0) + 1
     return out
 
@@ -60,20 +57,13 @@ def queue_full(waiting: int, max_waiting: int) -> bool:
 
 # ------------------------------------------------------------------ the queue on disk
 #
-# The files are brainspike's ``ci_slot.sh``'s (D5): slot 1 is ``<lock>``, slot i >= 2
-# is ``<stem>.<i>.lock``; the queue directory holds ``seq``, ``seq.lock`` and its
-# tickets ``<seq, 12 digits>.ticket``: ``<seq> <pid> <start epoch> <cwd> <command>``.
-#
-# ``ci_slot.sh`` serves its tickets first come, first served: only the lowest live
-# ``.ticket`` tries the slots. A ``ci-slot`` ticket is ``<seq>.wait`` instead, with
-# ``ci-slot project=<p>`` before its command, so ``ci_slot.sh`` never waits behind it;
-# it shares the counter, so numbers stay in order. A ``ci-slot`` waiter tries the slots
-# only when ``grants`` names its ticket, counting ``ci_slot.sh``'s tickets and holders
-# as the default project's (rule 4). Both take a slot with a non-blocking ``flock`` on
-# the same files, so together they never hold more than the slot count. A holder of
-# ours writes ``holder.<i>`` (``<pid> <start> <project>``) beside the tickets.
+# Slot 1 is ``<lock>``, slot i >= 2 is ``<stem>.<i>.lock``; the queue directory holds
+# ``seq``, ``seq.lock`` and the tickets ``<seq, 12 digits>.wait``: ``<seq> <pid> <start
+# epoch> <cwd> ci-slot project=<p> <command>``. A waiter tries the slots only when
+# ``grants`` names its ticket, and takes one with a non-blocking ``flock``. A holder
+# writes ``holder.<i>`` (``<pid> <start> <project>``) beside the tickets.
 
-_TICKET = re.compile(r'([0-9]{12})\.(ticket|wait)\Z')
+_TICKET = re.compile(r'([0-9]{12})\.wait\Z')
 _TAG = re.compile(r'ci-slot project=([A-Za-z0-9_.-]+)(?:\s|\Z)')
 
 
@@ -94,7 +84,7 @@ def _boot_time() -> float | None:
 
 
 def alive(pid: int, start: float) -> bool:
-    """``ci_slot.sh``'s rule: ``pid`` runs (not a zombie, not stopped) and started no
+    """``pid`` runs (not a zombie, not stopped) and started no
     later than ``start`` (+2 s): a pid reused by a later process does not count."""
     try:
         with open(f'/proc/{pid}/stat') as f:
@@ -149,7 +139,7 @@ class SlotQueue:
     # -------------------------------------------------------------- tickets
 
     def take_ticket(self, project: str, cmd: str) -> str:
-        """Write our ticket after every queued one, under ``seq.lock`` as ``ci_slot.sh`` does."""
+        """Write our ticket after every queued one, under ``seq.lock``."""
         os.makedirs(self.queue, exist_ok=True)
         fd = os.open(os.path.join(self.queue, 'seq.lock'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)
         try:
@@ -181,8 +171,8 @@ class SlotQueue:
         return self.ticket
 
     def waiting(self) -> list[Ticket]:
-        """The live tickets of both kinds; a dead or malformed one is deleted, as
-        ``ci_slot.sh`` does (ours is never deleted here)."""
+        """The live tickets; a dead or malformed one is deleted (ours is never deleted
+        here)."""
         out = []
         try:
             names = sorted(os.listdir(self.queue))
@@ -208,12 +198,12 @@ class SlotQueue:
                     pass
                 continue
             tag = _TAG.search(parts[3]) if len(parts) > 3 else None
-            out.append(Ticket(int(m.group(1)), tag.group(1) if tag and m.group(2) == 'wait' else ''))
+            out.append(Ticket(int(m.group(1)), tag.group(1) if tag else ''))
         return out
 
     def held(self) -> tuple[dict[str, int], int, set[int]]:
         """``(slots held per project, free slots, indexes of free slots)``. A held slot
-        without a live holder record of ours is the default project's (key '')."""
+        without a live holder record counts under the key ''."""
         per: dict[str, int] = {}
         free = set()
         for i, path in enumerate(self.slots, 1):
@@ -233,16 +223,13 @@ class SlotQueue:
 
     # -------------------------------------------------------------- taking a slot
 
-    def try_take(self, project: str, caps: dict[str, int], default: str) -> int | None:
+    def try_take(self, project: str, caps: dict[str, int]) -> int | None:
         """One round: if ``grants`` names our ticket, try the free slots in order with a
         non-blocking flock. Returns the fd of the slot taken (inheritable), or None."""
         if not os.path.exists(self.ticket):  # deleted while we were stopped: re-queue
             self.take_ticket(project, 'requeued')
         per, nfree, _ = self.held()
-        held: dict[str, int] = {}
-        for p, n in per.items():
-            held[p or default] = held.get(p or default, 0) + n
-        if self.seq not in grants(self.waiting(), held, caps, nfree, default):
+        if self.seq not in grants(self.waiting(), per, caps, nfree):
             return None
         for i, path in enumerate(self.slots, 1):
             fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660) if not os.path.exists(path) \
@@ -266,29 +253,6 @@ class SlotQueue:
             return fd
         return None
 
-    def hold(self, project: str, caps: dict[str, int], default: str, cmd: list[str],
-             deadline: float | None = None) -> int:
-        """Queue, take a slot, then exec ``cmd`` holding it (the slot stays held until
-        the last process that inherited it ends). Returns only on a timeout (status 4)."""
-        def stop(signum, _frame):
-            sys.exit(128 + signum)  # runs the finally below: our ticket goes
-        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            signal.signal(sig, stop)
-        self.take_ticket(project, ' '.join(cmd))
-        try:
-            while True:
-                fd = self.try_take(project, caps, default)
-                if fd is not None:
-                    print(f'ci-slot: holding {self.slots[self._index(fd)]}', file=sys.stderr, flush=True)
-                    os.execvp(cmd[0], cmd)
-                if deadline is not None and time.time() >= deadline:
-                    print('ci-slot: queue timeout', file=sys.stderr)
-                    return 4
-                time.sleep(self.poll)
-        finally:
-            if self.ticket and os.path.exists(self.ticket):
-                os.unlink(self.ticket)
-
     def _index(self, fd: int) -> int:
         st = os.fstat(fd)
         for i, p in enumerate(self.slots):
@@ -299,33 +263,3 @@ class SlotQueue:
                 pass
         return 0
 
-
-def main(argv: list[str]) -> int:
-    """``ci-slot --lock PATH --slots N [--queue DIR] --project P --default P --cap P=N...
-    [--timeout S] CMD...``; the flags default to ``$LOCAL_CI_SLOT_LOCK``,
-    ``$LOCAL_CI_SLOTS`` and ``$LOCAL_CI_SLOT_QUEUE``."""
-    import argparse
-    ap = argparse.ArgumentParser(prog='ci-slot')
-    ap.add_argument('--lock', default=os.environ.get('LOCAL_CI_SLOT_LOCK'))
-    ap.add_argument('--slots', type=int, default=int(os.environ.get('LOCAL_CI_SLOTS', '2')))
-    ap.add_argument('--queue', default=os.environ.get('LOCAL_CI_SLOT_QUEUE'))
-    ap.add_argument('--project', required=True)
-    ap.add_argument('--default', required=True)
-    ap.add_argument('--cap', action='append', default=[], help='P=N, a project cap')
-    ap.add_argument('--poll', type=float, default=float(os.environ.get('LOCAL_CI_SLOT_POLL', '3')))
-    ap.add_argument('--timeout', type=float)
-    ap.add_argument('cmd', nargs=argparse.REMAINDER)
-    a = ap.parse_args(argv)
-    if not a.lock or not a.cmd:
-        ap.error('a slot lock and a command are required')
-    caps = {}
-    for c in a.cap:
-        p, _, n = c.partition('=')
-        caps[p] = int(n)
-    caps.setdefault(a.default, a.slots)  # rule 4: the default project's cap is the slot count
-    q = SlotQueue(a.lock, a.slots, a.queue, a.poll)
-    return q.hold(a.project, caps, a.default, a.cmd, time.time() + a.timeout if a.timeout else None)
-
-
-if __name__ == '__main__':
-    sys.exit(main(sys.argv[1:]))

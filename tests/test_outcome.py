@@ -1,6 +1,6 @@
-"""Outcome classification and retry hints (design §4.4, decision 8), on sanitised journal
-OOM lines (systemd-oomd included), the GPU watchdog's kill lines, ``memory.events``,
-boot-id changes and a stopped runner."""
+"""Outcome classification and retry hints (design §4.4, decision 8), on the GPU
+watchdog's sanitised kill lines, ``memory.events``, boot-id changes and a stopped
+runner."""
 from __future__ import annotations
 
 import pathlib
@@ -9,11 +9,6 @@ import unittest
 from ci_runners import outcome as oc
 
 FX = pathlib.Path(__file__).resolve().parent / 'fixtures' / 'host'
-UNIT = 'ci-brainspike-20261105-000734-4870627.scope'
-OOMD = (FX / 'journal_oomd.txt').read_text()
-UNIT_ONLY = (FX / 'journal_unit_only.txt').read_text()
-KERNEL = (FX / 'journal_kernel.txt').read_text()
-CLEAN = (FX / 'journal_clean.txt').read_text()
 WATCHDOG = (FX / 'watchdog.log').read_text()
 A8 = '00000000:A8:00.0'  # card 3 in smi_bus.csv
 
@@ -50,19 +45,6 @@ class Watchdog(unittest.TestCase):
 
 
 class Oom(unittest.TestCase):
-    def test_journal(self):
-        self.assertTrue(oc.journal_oom(OOMD, UNIT))  # systemd-oomd and "Failed with result 'oom-kill'"
-        self.assertTrue(oc.journal_oom(OOMD.splitlines()[1], UNIT))  # the oomd line alone
-        self.assertTrue(oc.journal_oom(OOMD.splitlines()[2], UNIT))
-        self.assertFalse(oc.journal_oom(OOMD, 'ci-other.scope'))  # another scope's lines
-        self.assertTrue(oc.journal_oom(UNIT_ONLY, UNIT))  # `journalctl -u UNIT` lines name no scope
-        self.assertTrue(oc.journal_oom(KERNEL, 'ci-p-A.scope'))  # the kernel's line, our memcg
-        self.assertFalse(oc.journal_oom(KERNEL, 'p-A.scope'))  # a suffix of another scope's name
-        self.assertFalse(oc.journal_oom(KERNEL, 'ci-p-B.scope'))
-        self.assertTrue(oc.journal_oom(KERNEL))  # no unit asked: any
-        self.assertFalse(oc.journal_oom(CLEAN, 'ci-p-A.scope'))
-        self.assertFalse(oc.journal_oom('', UNIT))
-
     def test_memory_events(self):
         self.assertEqual(oc.memory_oom_kills((FX / 'memory.events').read_text()), 2)
         self.assertEqual(oc.memory_oom_kills((FX / 'memory.events.clean').read_text()), 0)
@@ -77,8 +59,6 @@ class Classify(unittest.TestCase):
         self.assertEqual(kind(rc=0, timed_out=True), 'red')  # the inner timeout is red
         self.assertEqual(kind(rc=None), 'lost')  # the record never got an exit status
         self.assertEqual(kind(rc=137, oom_kills=1), 'oom')  # a nonzero exit with an OOM kill is not red
-        self.assertEqual(kind(rc=1, journal=OOMD, unit=UNIT), 'oom')
-        self.assertEqual(kind(rc=1, journal=OOMD, unit='ci-other.scope'), 'red')
         self.assertEqual(kind(rc=143, stopped=True), 'stopped')
         self.assertEqual(kind(rc=None, boot_start='b1', boot_end='b2'), 'reboot')
         self.assertEqual(kind(rc=None, boot_start='b1', boot_end='b1'), 'lost')
@@ -91,30 +71,24 @@ class Classify(unittest.TestCase):
         self.assertEqual(kind(rc=137, watchdog=WATCHDOG, pids=(12345,), buses=(A8,), end='2026-11-05 09:59:59'),
                          'red')  # and after it
         self.assertEqual(kind(rc=137, watchdog=WATCHDOG, pids=(222,), buses=('b8',)), 'red')  # not ours
-        self.assertEqual(kind(rc=1, yield_marker=200.0, start_epoch=100.0), 'yielded')
-        self.assertEqual(kind(rc=1, yield_marker=100.0, start_epoch=100.0), 'red')  # an old marker
         self.assertEqual(kind(rc=None, unavailable='no card fits'), 'unavailable')
         self.assertIn('a8', oc.classify(E(rc=1, watchdog=WATCHDOG, pids=(12345,), buses=(A8,))).reason)
-        self.assertEqual(oc.classify(E(rc=None, unavailable='manifest: x')).reason, 'manifest: x')
+        self.assertEqual(oc.classify(E(rc=None, unavailable='low disk: x')).reason, 'low disk: x')
 
     def test_precedence(self):
-        """stopped, reboot, thermal, oom, yielded, unavailable, lost, red, pass: each
-        piece of evidence removed in turn exposes the next."""
-        ev = dict(rc=1, stopped=True, boot_start='b1', boot_end='b2', early_stop=True, oom_kills=1,
-                  yield_marker=2.0, start_epoch=1.0, unavailable='x')
+        """stopped, reboot, thermal, oom, unavailable, lost, red, pass: each piece of
+        evidence removed in turn exposes the next."""
+        ev = dict(rc=1, stopped=True, boot_start='b1', boot_end='b2', early_stop=True, oom_kills=1, unavailable='x')
         order = []
-        for drop in (('stopped',), ('boot_end',), ('early_stop',), ('oom_kills',), ('yield_marker',),
-                     ('unavailable',)):
+        for drop in (('stopped',), ('boot_end',), ('early_stop',), ('oom_kills',), ('unavailable',)):
             order.append(kind(**ev))
             for k in drop:
                 del ev[k]
         order.append(kind(**ev))
         order.append(kind(**{**ev, 'rc': None}))
         order.append(kind(**{**ev, 'rc': 0}))
-        self.assertEqual(order, ['stopped', 'reboot', 'thermal', 'oom', 'yielded', 'unavailable', 'red', 'lost',
-                                 'pass'])
-        self.assertEqual(oc.PRECEDENCE, ('stopped', 'reboot', 'thermal', 'oom', 'yielded', 'unavailable', 'lost',
-                                         'red', 'pass'))
+        self.assertEqual(order, ['stopped', 'reboot', 'thermal', 'oom', 'unavailable', 'red', 'lost', 'pass'])
+        self.assertEqual(oc.PRECEDENCE, ('stopped', 'reboot', 'thermal', 'oom', 'unavailable', 'lost', 'red', 'pass'))
         self.assertEqual(kind(rc=0, oom_kills=1), 'oom')  # design §4.4: oom ranks above pass
 
     def test_the_watchdog_ranks_with_thermal_above_oom(self):
@@ -125,9 +99,9 @@ class Hint(unittest.TestCase):
     def test_hints(self):
         H = oc.Hint
         table = {
-            'pass': H('none'), 'red': H('none'), 'stopped': H('none'), 'disagreement': H('none'),
+            'pass': H('none'), 'red': H('none'), 'stopped': H('none'),
             'oom': H('retry', True, 'more-memory'), 'reboot': H('retry', False, 'same-host'),
-            'yielded': H('fallback'), 'unavailable': H('fallback'), 'lost': H('retry', False, 'any'),
+            'unavailable': H('fallback'), 'lost': H('retry', False, 'any'),
             'thermal': H('fallback'),
         }
         for k, want in table.items():

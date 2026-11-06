@@ -1,6 +1,6 @@
 {
  "action": "completed",
- "repository": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false},
+ "repository": {"id": 1001, "full_name": "chaobrain/brainkit", "name": "brainkit", "private": true, "fork": false},
  "sender": {"login": "alice", "type": "User"},
- "workflow_run": {"event": "pull_request", "head_repository": {"id": 666, "full_name": "mallory/brainspike", "name": "brainspike", "private": true, "fork": true}, "repository": {"id": 1001, "full_name": "chaobrain/brainspike", "name": "brainspike", "private": true, "fork": false}, "actor": {"login": "alice"}, "triggering_actor": {"login": "alice"}}
+ "workflow_run": {"event": "pull_request", "head_repository": {"id": 666, "full_name": "mallory/brainkit", "name": "brainkit", "private": true, "fork": true}, "repository": {"id": 1001, "full_name": "chaobrain/brainkit", "name": "brainkit", "private": true, "fork": false}, "actor": {"login": "alice"}, "triggering_actor": {"login": "alice"}}
 }

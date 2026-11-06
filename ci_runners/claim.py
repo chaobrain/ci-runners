@@ -53,12 +53,10 @@ def parse_statuses(api: object, context: str) -> list[Status]:
 
 
 def decide(statuses: Sequence[Status], *, actors: Iterable[str], bot: str, now: float,
-           lapse_minutes: float = 45, hosted: bool = False) -> Claim:
+           lapse_minutes: float = 45) -> Claim:
     """The rule of design §4.1, on the newest status that counts.
 
-    A status counts if the bot posted it, or, on a self-hosted runner, an allowlisted
-    actor (``actors``; a hosted runner has no allowlist, so ``hosted`` ignores them).
-    Then:
+    A status counts if the bot posted it, or an allowlisted actor (``actors``). Then:
 
     1. success: skip, the head is green;
     2. failure by an allowlisted actor (a local run): skip, the fix is a new push;
@@ -70,7 +68,7 @@ def decide(statuses: Sequence[Status], *, actors: Iterable[str], bot: str, now: 
     first) wins. Pure.
     """
     bot = bot.lower()
-    people = frozenset() if hosted else frozenset(a.lower() for a in actors) - {bot}
+    people = frozenset(a.lower() for a in actors) - {bot}
     counted = [s for s in statuses if s.creator.lower() == bot or s.creator.lower() in people]
     if not counted:
         return Claim(True, 'no verdict on this head')

@@ -1,6 +1,5 @@
 """``ci-run``: the host layer's commands (design §3.1).
 
-    ci-run proxy-check     one check of the CI proxy (ci-proxy-check.timer)
     ci-run reap            the reaper's pass (ci-reaper.timer)
     ci-run egress --port P --allow FILE   the egress proxy (ci-egress.service on the egress host; 11.10)
     ci-run org-sync [--fetch --org NAME | --receive]   the org snapshot (§6.5, decision 11.9)
@@ -8,10 +7,7 @@
     ci-run runners         this host's runners: name, labels, class
     ci-run role            this host's role
     ci-run claim ...       claim a head (actions/claim; design §4.1)
-    ci-run probe           this host's probe, as JSON (design §4.2)
-    ci-run place ...       place parts on hosts (actions/place; design §4.2)
     ci-run part ...        run one part (actions/part; design §4.3)
-    ci-run salvage ...     the outputs of a part whose job ended without them (§4.5)
     ci-run verdict ...     post a run's verdict (actions/verdict; h100-test.yml, §4.7)
     ci-run env build P     build project P's env from its default branch's spec (decision 11.4)
 
@@ -42,15 +38,6 @@ def main(argv: list[str]) -> int:
     if cmd == 'role':
         print(load_inventory().this)
         return 0
-    if cmd == 'proxy-check':
-        from ci_runners import proxy
-        h = load_inventory().host
-        if 'proxy' not in h:  # h100: a tunnel instead, or nothing (decision 11.8)
-            print('ci-run proxy-check: this host has no CI proxy; nothing to check')
-            return 0
-        p = h['proxy']
-        print(proxy.check(h['data'], p['http_port'], p['nodes']))
-        return 0
     if cmd == 'egress':  # on the egress host: no inventory there
         from ci_runners import bridge
         return bridge.main(args)
@@ -64,12 +51,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'claim':
         from ci_runners import github
         return github.main(args, etc_dir())
-    if cmd in ('probe', 'place'):
-        from ci_runners import probe
-        return probe.main(argv, load_inventory())
-    if cmd in ('part', 'salvage'):
+    if cmd == 'part':
         from ci_runners import part
-        return part.main(argv if cmd == 'salvage' else args, load_inventory(), etc_dir())
+        return part.main(args, load_inventory(), etc_dir())
     if cmd == 'verdict':
         from ci_runners import verdict
         return verdict.main(args, load_inventory())

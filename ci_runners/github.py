@@ -3,10 +3,9 @@
 ``ci-run claim --context C [--sha S] [--wait-seconds N] [--local-lapse-minutes M]
 [--pending-description D]`` uses ``GITHUB_TOKEN`` (the job's token, with
 ``statuses: write``) against ``GITHUB_API_URL`` through the host's ``https_proxy``.
-Each API call gets 30 s and 3 tries (design §8). On a self-hosted runner the actor
-allowlist and the bot come from this host's policy; on a GitHub-hosted runner there is
-no allowlist, so only the bot's statuses count. A schema 2 policy's allowlist includes
-the org snapshot's members, as the hook's does (design §6.5).
+Each API call gets 30 s and 3 tries (design §8). The actor allowlist and the bot come
+from this host's policy, merged with the org snapshot's members as the hook's is
+(design §6.5).
 """
 from __future__ import annotations
 
@@ -67,7 +66,7 @@ def statuses(call: Callable, url: str, token: str) -> list:
 
 
 def run_claim(env: Mapping[str, str], *, context: str, sha: str, wait_seconds: float, lapse_minutes: float,
-              description: str, actors: frozenset[str], bot: str, hosted: bool,
+              description: str, actors: frozenset[str], bot: str,
               call: Callable = api, now: Callable = time.time, sleep: Callable = time.sleep,
               poll: float = 10) -> claim.Claim:
     repo, token = env.get('GITHUB_REPOSITORY', ''), env.get('GITHUB_TOKEN', '')
@@ -78,7 +77,7 @@ def run_claim(env: Mapping[str, str], *, context: str, sha: str, wait_seconds: f
     deadline = now() + wait_seconds
     while True:
         c = claim.decide(claim.parse_statuses(statuses(call, url, token), context), actors=actors, bot=bot, now=now(),
-                         lapse_minutes=lapse_minutes, hosted=hosted)
+                         lapse_minutes=lapse_minutes)
         if not c.run or now() >= deadline:
             break
         sleep(min(poll, max(0.0, deadline - now())))  # a local claim may still appear
@@ -96,25 +95,21 @@ def main(argv: list[str], etc: str, call: Callable | None = None) -> int:
     p.add_argument('--wait-seconds', type=float, default=0)
     p.add_argument('--local-lapse-minutes', type=float, default=45)
     p.add_argument('--pending-description', default='queued on the runners')
-    p.add_argument('--hosted', action='store_true', help='a GitHub-hosted runner: no allowlist')
     a = p.parse_args(argv)
     env = os.environ
     sha = a.sha or env.get('GITHUB_SHA', '')
     try:
-        if a.hosted:
-            actors, bot = frozenset(), 'github-actions[bot]'
-        else:
-            with open(os.path.join(etc, 'policy.toml'), 'rb') as f:
-                pol = policy.load(f.read(1 << 20))
-            if pol.org is not None:  # the hook's merge (design §6.5): the same allowlist
-                with open(os.path.join(etc, 'org.json'), 'rb') as f:
-                    data = f.read((4 << 20) + 1)
-                if len(data) > 4 << 20:
-                    raise ValueError('org.json: larger than 4 MiB')
-                pol = policy.with_snapshot(pol, policy.load_snapshot(data), time.time())
-            actors, bot = policy.actors_for(pol, env.get('GITHUB_REPOSITORY', '')), pol.bot
+        with open(os.path.join(etc, 'policy.toml'), 'rb') as f:
+            pol = policy.load(f.read(1 << 20))
+        if pol.org is not None:  # the hook's merge (design §6.5): the same allowlist
+            with open(os.path.join(etc, 'org.json'), 'rb') as f:
+                data = f.read((4 << 20) + 1)
+            if len(data) > 4 << 20:
+                raise ValueError('org.json: larger than 4 MiB')
+            pol = policy.with_snapshot(pol, policy.load_snapshot(data), time.time())
+        actors, bot = policy.actors_for(pol, env.get('GITHUB_REPOSITORY', '')), pol.bot
         c = run_claim(env, context=a.context, sha=sha, wait_seconds=a.wait_seconds, lapse_minutes=a.local_lapse_minutes,
-                      description=a.pending_description, actors=actors, bot=bot, hosted=a.hosted, call=call or api)
+                      description=a.pending_description, actors=actors, bot=bot, call=call or api)
     except (OSError, ValueError, ApiError) as e:
         print(f'ci-run claim: {e}', file=sys.stderr)
         return 2

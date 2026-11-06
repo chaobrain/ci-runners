@@ -23,9 +23,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKERS = 4  # a hosted runner's cores; each worker has its own copy of the tree
 HANG = 60  # seconds: the slowest guarded test takes about 9 s, so a mutant's tests still running have hung
 POL = 'ci_runners/policy.py'
-REM = 'ci_runners/remote.py'
 INV = 'ci_runners/inventory.py'
-LCK = 'ci_runners/locks.py'
 HOK = 'ci_runners/hook.py'
 SET = 'ci_runners/setup.py'
 CLI = 'ci_runners/cli.py'
@@ -33,13 +31,10 @@ HKS = 'hooks/job-started.sh'
 HKC = 'hooks/job-completed.sh'
 PLN = 'setup/plan.sh'
 UNS = 'setup/uninstall.sh'
-PRX = 'ci_runners/proxy.py'
 CLA = 'ci_runners/claim.py'
 OUT = 'ci_runners/outcome.py'
 GPU = 'ci_runners/gpus.py'
-PLA = 'ci_runners/place.py'
 SLO = 'ci_runners/slots.py'
-PRB = 'ci_runners/probe.py'
 GHB = 'ci_runners/github.py'
 PRT = 'ci_runners/part.py'
 RGY = 'ci_runners/registry.py'
@@ -54,18 +49,14 @@ REG = 'setup/register.sh'
 INS = 'setup/install.sh'
 UNI = 'setup/uninstall.sh'
 TP = 'tests.test_policy'
-TR = 'tests.test_remote_env'
 TI = 'tests.test_inventory'
-TX = 'tests.test_interop'
 TH = 'tests.test_hook'
 TU = 'tests.test_setup'
-TY = 'tests.test_proxy'
 TC = 'tests.test_claim'
 TO = 'tests.test_outcome'
 TG = 'tests.test_gpus'
-TL = 'tests.test_place'
 TS = 'tests.test_slots'
-TQ = 'tests.test_probe_claim'
+TQ = 'tests.test_github'
 TT = 'tests.test_part'
 TE = 'tests.test_reaper'
 TK = 'tests.test_scripts'
@@ -96,11 +87,8 @@ MUTANTS = [
     (POL, "    elif event_name != 'schedule':", "    elif False:",
      [f'{TP}.Refused.test_a_payload_without_a_repository_or_not_an_object']),
     (POL, "    if repo.paused:", "    if False:", [f'{TP}.Refused.test_a_paused_repository']),
-    (POL, "    if public and cls not in PUBLIC_CLASSES:", "    if False:",
-     [f'{TP}.Refused.test_a_public_repository_on_a_part_runner']),
-    (POL, "PUBLIC_EVENTS if public else PRIVATE_EVENTS | repo.extra_events", "PRIVATE_EVENTS | repo.extra_events",
-     [f'{TP}.Refused.test_other_events']),
-    (POL, "PUBLIC_EVENTS if public else PRIVATE_EVENTS | repo.extra_events", "PUBLIC_EVENTS if public else PRIVATE_EVENTS",
+    (POL, "    if repo.visibility != 'private':", "    if False:", [f'{TP}.Refused.test_a_public_repository_on_any_runner']),
+    (POL, "PRIVATE_EVENTS | repo.extra_events:", "PRIVATE_EVENTS:",
      [f'{TP}.Refused.test_pull_request_target_is_refused_unless_listed_and_then_still_not_from_a_fork']),
     (POL, "for side in ('head', 'base'):", "for side in ('base',):", [f'{TP}.Refused.test_fork_pull_requests']),
     (POL, "for side in ('head', 'base'):", "for side in ('head',):", [f'{TP}.Refused.test_fork_pull_requests']),
@@ -108,10 +96,9 @@ MUTANTS = [
      "    if event_name == 'pull_request':\n        pr =",
      [f'{TP}.Refused.test_pull_request_target_is_refused_unless_listed_and_then_still_not_from_a_fork']),
     (POL, "    if event_name == 'workflow_run':", "    if False:", [f'{TP}.Refused.test_a_workflow_run_of_a_fork_or_an_outsider']),
-    (POL, "if public or not repo.bot_dispatch or event_name not in BOT_EVENTS:", "if not repo.bot_dispatch or event_name not in BOT_EVENTS:", [f'{TP}.Refused.test_the_bot']),
-    (POL, "if public or not repo.bot_dispatch or event_name not in BOT_EVENTS:", "if public or not repo.bot_dispatch:", [f'{TP}.Refused.test_the_bot_dispatch_switch_is_off_by_default']),
-    (POL, "if public or not repo.bot_dispatch or event_name not in BOT_EVENTS:", "if public or event_name not in BOT_EVENTS:", [f'{TP}.Refused.test_the_bot_dispatch_switch_is_off_by_default']),
-    (POL, "if public or not repo.bot_dispatch or event_name not in BOT_EVENTS:", "if True:", [f'{TP}.Accepted.test_the_bot_may_dispatch_where_the_switch_is_on']),
+    (POL, "if not repo.bot_dispatch or event_name not in BOT_EVENTS:", "if not repo.bot_dispatch:", [f'{TP}.Refused.test_the_bot_dispatch_switch_is_off_by_default']),
+    (POL, "if not repo.bot_dispatch or event_name not in BOT_EVENTS:", "if event_name not in BOT_EVENTS:", [f'{TP}.Refused.test_the_bot_dispatch_switch_is_off_by_default']),
+    (POL, "if not repo.bot_dispatch or event_name not in BOT_EVENTS:", "if True:", [f'{TP}.Accepted.test_the_bot_may_dispatch_where_the_switch_is_on']),
     (POL, "        bot_dispatch = r.get('bot_dispatch', False)", "        bot_dispatch = r.get('bot_dispatch', True)", [f'{TP}.Refused.test_the_bot_dispatch_switch_is_off_by_default']),
     (POL, "        if bot_dispatch and vis == 'public':", "        if False:", [f'{TP}.Load.test_malformed_policies']),
     (POL, "        if type(bot_dispatch) is not bool:", "        if False:", [f'{TP}.Load.test_malformed_policies']),
@@ -138,7 +125,6 @@ MUTANTS = [
      [f'{TP}.Load.test_malformed_policies']),
     (POL, "if extra and vis == 'public':", "if False:", [f'{TP}.Load.test_malformed_policies']),
     # the claim
-    (CLA, "frozenset() if hosted else frozenset(", "frozenset(", [f'{TC}.Decide.test_on_a_hosted_runner_only_the_bot_counts']),
     (CLA, "for a in actors) - {bot}", "for a in actors)", [f'{TC}.Decide.test_the_bot_listed_as_an_actor_is_still_the_bot']),
     (CLA, "max(counted, key=lambda s: s.time)", "counted[0]", [f'{TC}.Decide.test_only_the_newest_counted_status_decides']),
     (CLA, "if newest.state == 'failure' and local:", "if newest.state == 'failure':",
@@ -159,13 +145,8 @@ MUTANTS = [
     (OUT, "(not end or m.group(1) <= end)", "True", [f'{TO}.Watchdog.test_kill_lines_only']),
     (OUT, "(not start or m.group(1) >= start)", "True", [f'{TO}.Watchdog.test_kill_lines_only']),
     (OUT, "        s = parts[-2] if len(parts) >= 2 else s", "        s = parts[-1]", [f'{TO}.Watchdog.test_bus_key']),
-    (OUT, "    if e.oom_kills > 0 or journal_oom(e.journal, e.unit):", "    if journal_oom(e.journal, e.unit):",
-     [f'{TO}.Classify.test_each_outcome_from_its_own_evidence']),
-    (OUT, "(not unit or unit in line or '.scope' not in line)", "(not unit or unit in line)", [f'{TO}.Oom.test_journal']),
-    (OUT, "m.group(1).endswith('/' + unit)", "m.group(1).endswith(unit)", [f'{TO}.Oom.test_journal']),
+    (OUT, "    if e.oom_kills > 0:", "    if False:", [f'{TO}.Classify.test_each_outcome_from_its_own_evidence']),
     (OUT, "if k == 'oom_kill' and", "if k.startswith('oom') and", [f'{TO}.Oom.test_memory_events']),
-    (OUT, "e.yield_marker > e.start_epoch", "e.yield_marker >= e.start_epoch",
-     [f'{TO}.Classify.test_each_outcome_from_its_own_evidence']),
     (OUT, "    if e.rc is None:\n", "    if False:\n", [f'{TO}.Classify.test_each_outcome_from_its_own_evidence']),
     (OUT, "    if e.timed_out:", "    if False:", [f'{TO}.Classify.test_each_outcome_from_its_own_evidence']),
     (OUT, "if kind in FINAL or attempt > retries:", "if kind in FINAL:", [f'{TO}.Hint.test_at_most_one_retry']),
@@ -178,59 +159,17 @@ MUTANTS = [
     (GPU, "if leased.get(i, 0) < max_parts]", "]", [f'{TG}.Gpus.test_lease']),
     (GPU, "return ok[:n] if len(ok) >= n else None", "return ok[:n]", [f'{TG}.Gpus.test_lease']),
     (GPU, "for i in cards if i in free}", "for i in free}", [f'{TG}.Gpus.test_lease']),
-    # place
-    (PLA, "    if not p.proxy:", "    if False:", [f'{TL}.Place.test_a_host_that_fails_a_probe_gets_no_part']),
-    (PLA, "    if p.reserved:", "    if False:", [f'{TL}.Place.test_a_host_that_fails_a_probe_gets_no_part']),
-    (PLA, "    if p.quarantined:", "    if False:", [f'{TL}.Place.test_a_host_that_fails_a_probe_gets_no_part']),
-    (PLA, "return part.cls == 'gpu' and part.gpus == 1 and ", "return ",
-     [f'{TL}.Place.test_h100_takes_gpu_parts_with_one_card_only']),
-    (PLA, "    if POOL[part.cls] not in p.runners:", "    if False:",
-     [f'{TL}.Place.test_a_host_that_fails_a_probe_gets_no_part']),
-    (PLA, "return c.healthy and not c.others and c.free_mib >= need_mib and c.temp_c < max_temp_c",
-     "return c.healthy and not c.others and c.free_mib >= need_mib",
-     [f'{TL}.Place.test_each_h100_part_gets_its_own_coolest_fitting_card', f'{TL}.Place.test_a_3090_needs_enough_fitting_cards']),
-    (PLA, "return c.healthy and not c.others and c.free_mib", "return not c.others and c.free_mib",
-     [f'{TL}.Place.test_each_h100_part_gets_its_own_coolest_fitting_card']),
-    (PLA, "            taken.add(card.index)", "            pass", [f'{TL}.Place.test_each_h100_part_gets_its_own_coolest_fitting_card']),
-    (PLA, " and f'{REMOTE_POOL}-gpu{c.index}' in p.runners", "",
-     [f'{TL}.Place.test_each_h100_part_gets_its_own_coolest_fitting_card']),
-    (PLA, "key=lambda c: (c.temp_c, -c.free_mib, c.index)", "key=lambda c: (c.temp_c, c.index)",
-     [f'{TL}.Place.test_each_h100_part_gets_its_own_coolest_fitting_card']),
-    (PLA, "load[h] < probes[h].slots", "load[h] <= probes[h].slots",
-     [f'{TL}.Place.test_load_spreads_to_a_host_with_room_and_waits_on_the_first_when_none_has']),
-    (PLA, "        load[host] += 1\n", "",
-     [f'{TL}.Place.test_load_spreads_to_a_host_with_room_and_waits_on_the_first_when_none_has']),
-    (PLA, "if h not in exclude]", "]", [f'{TL}.Place.test_excluded_hosts']),
-    (PLA, "math.ceil(2 * max(0.0, estimate_minutes) * max(1.0, slowdown) + 30)",
-     "int(2 * max(0.0, estimate_minutes) * max(1.0, slowdown) + 30)", [f'{TL}.Place.test_timeout']),
-    (PLA, "* max(1.0, slowdown) + 30", "* slowdown + 30", [f'{TL}.Place.test_timeout']),
-    (PLA, "if (p['class'] == 'gpu') != (gpus > 0):", "if False:", [f'{TL}.Parse.test_malformed']),
     # the fair queue
     (SLO, "held.get(p, 0) >= caps.get(p, 0)", "False", [f'{TS}.Grants.test_a_project_at_its_cap_is_skipped']),
     (SLO, "key = (held.get(p, 0), t.seq)", "key = (0, t.seq)", [f'{TS}.Grants.test_the_project_holding_fewest_goes_first']),
     (SLO, "        held[p] = held.get(p, 0) + 1\n", "", [f'{TS}.Grants.test_a_project_at_its_cap_is_skipped']),
-    (SLO, "p = t.project or default_project\n            if", "p = t.project\n            if",
-     [f'{TS}.Grants.test_tickets_without_a_project_are_the_default_projects']),
     (SLO, "return waiting >= max_waiting", "return waiting > max_waiting", [f'{TS}.Grants.test_queue_full']),
-    # the host lock and the slots, against brainspike's originals (acceptance 2)
-    (LCK, "                    fcntl.flock(ts, fcntl.LOCK_UN)\n                    os.close(ts)\n                    self._fds.remove(ts)\n", "",
-     [f'{TX}.LockInterop.test_every_mode_pair_both_ways']),
-    (LCK, "self._flock(fd, fcntl.LOCK_SH if want == 's' else fcntl.LOCK_EX, t0)", "self._flock(fd, fcntl.LOCK_SH, t0)",
-     [f'{TX}.LockInterop.test_every_mode_pair_both_ways']),
-    (LCK, "                    if mode == 's':  # a normal shared holder", "                    if False:",
-     [f'{TX}.LockInterop.test_light_enters_beside_a_normal_shared_holder_only']),
-    (LCK, "            if mode == 'l' and self._normal_shared_in():", "            if False:",
-     [f'{TX}.LockInterop.test_light_enters_beside_a_normal_shared_holder_only']),
-    (LCK, "            elif self.held == 'x' or want == 's':", "            elif want == 's':",
-     [f'{TX}.LockInterop.test_nesting_covers_cross_implementations']),
-    (LCK, "            if not self.cover_live():", "            if False:", [f'{TX}.LockInterop.test_a_stale_cover_takes_the_lock']),
-    (LCK, "if left <= 0 or not _wait_in_queue(fd, op, left):", "if not _wait_in_queue(fd, op, 1e6):",
-     [f'{TX}.LockInterop.test_a_timeout']),
+    # the slots
     (SLO, "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", "fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)",
-     [f'{TX}.SlotInterop.test_together_never_more_than_the_slot_count', f'{TS}.Queue.test_a_taken_slot_is_held_exclusively']),
+     [f'{TS}.Queue.test_a_taken_slot_is_held_exclusively']),
     (SLO, "                        return True\n    except (OSError", "                        pass\n    except (OSError",
      [f'{TS}.Queue.test_flocked_reads_holders']),
-    # the hook, setup and the proxy check
+    # the hook and setup
     (HOK, "    return (0 if d.accepted else 1), policy.line(d, digest, snap_digest)", "    return 0, policy.line(d, digest, snap_digest)",
      [f'{TH}.Started.test_accept_and_refuse']),
     (HOK, "except (OSError, ValueError, RecursionError) as e:", "except (OSError, ValueError) as e:",
@@ -238,12 +177,9 @@ MUTANTS = [
     (HOK, "    if len(data) > limit:", "    if False:", [f'{TH}.Started.test_an_oversized_event_is_refused']),
     (SET, "    if plan.text() != approved:", "    if False:",
      [f'{TU}.Setup.test_apply_refuses_a_plan_that_is_not_the_fresh_one']),
-    (SET, "    if secret:\n", "    if False:\n", [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
     (SET, "            os.chmod(a['path'], a['mode'])\n        elif k == 'file':", "            pass\n        elif k == 'file':",
      [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
-    (SET, "    out.pop('log', None)\n    return out", "    return src", [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
-    (PRX, "    if failures < threshold:", "    if failures <= threshold:", [f'{TY}.Step.test_three_failures_switch_to_the_next_node']),
-    # review round 1 of the hook, setup, the proxy check, the reaper and the scripts
+    # review round 1 of the hook, setup, the reaper and the scripts
     (HOK, "    except _Timeout:\n        d = policy.Decision(False, 'timeout')", "    except _Timeout:\n        d = policy.Decision(True, 'timeout')",
      [f'{TH}.Started.test_a_hung_read_is_refused_at_the_bound']),
     (HOK, "        signal.alarm(START_BOUND)\n", "", [f'{TH}.Started.test_a_hung_read_is_refused_at_the_bound']),
@@ -252,8 +188,8 @@ MUTANTS = [
     (HOK, " | os.O_NONBLOCK", "", [f'{TH}.Started.test_a_planted_log_fifo_neither_blocks_nor_breaks_the_line']),
     (HOK, " | os.O_NOFOLLOW", "", [f'{TH}.Started.test_a_planted_log_fifo_neither_blocks_nor_breaks_the_line']),
     (SET, "    if h.hexdigest() != RUNNER_SHA256:", "    if False:", [f'{TU}.Setup.test_the_runner_app_is_checked_and_unpacked_whole']),
-    (SET, "        if port:\n            wait_port(port)\n", "", [f'{TU}.Setup.test_the_download_waits_for_the_proxy_to_listen']),
-    (SET, "            if time.monotonic() >= deadline:", "            if False:", [f'{TU}.Setup.test_a_proxy_that_never_listens_fails_within_the_bound']),
+    (SET, "        if port:\n            wait_port(port)\n", "", [f'{TU}.Setup.test_the_download_waits_for_the_forward_to_listen']),
+    (SET, "            if time.monotonic() >= deadline:", "            if False:", [f'{TU}.Setup.test_a_forward_that_never_listens_fails_within_the_bound']),
     (SET, "    if not runner_complete(tmp):", "    if False:", [f'{TU}.Setup.test_the_runner_app_is_checked_and_unpacked_whole']),
     (SET, "            if os.path.lexists(tmp):\n                os.unlink(tmp)  # a leftover", "            if False:\n                os.unlink(tmp)  # a leftover",
      [f'{TU}.Setup.test_a_planted_link_is_not_followed']),
@@ -261,8 +197,6 @@ MUTANTS = [
      [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
     (SET, "        if not PROJECT_NAME.fullmatch(name) or not MEMORY.fullmatch(mem):", "        if False:",
      [f'{TU}.Setup.test_project_names_and_memory_are_single_words']),
-    (PRX, "    except urllib.error.HTTPError:\n        return True", "    except urllib.error.HTTPError:\n        return False",
-     [f'{TY}.Probe.test_any_http_answer_means_the_proxy_works']),
     (REA, "                    t = max(t, os.lstat(os.path.join(top, n)).st_mtime)", "                    pass",
      [f'{TE}.Reap.test_a_run_counts_by_its_newest_file']),
     (REA, "RUN_DEPTH = 3", "RUN_DEPTH = 1", [f'{TE}.Reap.test_a_run_counts_by_its_newest_file']),
@@ -286,22 +220,10 @@ MUTANTS = [
     (REA, "            if os.path.islink(d) or not os.path.isdir(d):", "            if not os.path.isdir(d):",
      [f'{TE}.Reap.test_a_linked_owner_or_repository_is_not_walked']),
     (UNI, "[ \"$role\" = \"$1\" ] ||", "true ||", [f'{TK}.Uninstall.test_another_roles_inventory_is_refused']),
-    (SET, "        if not isinstance(v, str) or not CLIENT.fullmatch(v):", "        if False:",
-     [f'{TU}.Setup.test_the_proxy_client_is_one_absolute_path']),
     (UNI, "[ -z \"$left\" ] || {", "true || {", [f'{TK}.Uninstall.test_a_unit_still_active_removes_nothing']),
     (UNI, "  systemctl --user disable --now \"$u\" >/dev/null 2>&1 || true", "  systemctl --user disable --now \"$u\" >/dev/null 2>&1",
      [f'{TK}.Uninstall.test_each_unit_is_disabled_and_only_setups_files_go']),
-    # place's probes and the claim step
-    (PRB, "        if m and m.group(1).startswith(role + '-'):", "        if m:", [f'{TQ}.Probe.test_the_local_probe']),
-    (PRB, "    ok = http_ok(h['proxy']['http_port'], timeout=20) if 'proxy' in h else True", "    ok = True",
-     [f'{TQ}.Probe.test_the_local_probe']),
-    (PRB, "reserved=d.get('reserved') is not False", "reserved=d.get('reserved') is True", [f'{TQ}.Probe.test_json_round_trip_and_fail_closed']),
-    (PRB, "reachable=d.get('reachable') is True", "reachable=bool(d.get('reachable'))", [f'{TQ}.Probe.test_json_round_trip_and_fail_closed']),
-    (PRB, "        return from_json(json.loads(r.stdout)) if r.returncode == 0 else place.Probe()",
-     "        return from_json(json.loads(r.stdout))", [f'{TQ}.Probe.test_remote_probe_over_ssh']),
-    (PRB, "        for f in concurrent.futures.as_completed(futs, timeout=bound):", "        for f in concurrent.futures.as_completed(futs):",
-     [f'{TQ}.Probe.test_a_slow_probe_skips_its_host_within_the_bound']),
-    (PRB, "and int(p[0]) in want", "", [f'{TQ}.Probe.test_the_local_probe']),
+    # the claim step
     (GHB, "    if c.run:\n        target", "    if True:\n        target", [f'{TQ}.Claim.test_skip_posts_nothing']),
     (GHB, "        if not c.run or now() >= deadline:", "        if True:", [f'{TQ}.Claim.test_the_wait_lets_a_local_claim_appear']),
     (GHB, "            if e.code < 500 and e.code != 429:\n                break", "            if False:\n                break",
@@ -316,14 +238,6 @@ MUTANTS = [
     (GHB, "        out += got\n", "        out = got\n", [f'{TQ}.Claim.test_statuses_are_read_page_by_page']),
     (GHB, "        if not isinstance(got, list):\n            raise ApiError", "        if False:\n            raise ApiError",
      [f'{TQ}.Claim.test_statuses_are_read_page_by_page']),
-    (GHB, "        if a.hosted:\n            actors, bot", "        if False:\n            actors, bot",
-     [f'{TQ}.ClaimMain.test_hosted_ignores_the_allowlist']),
-    (PRB, "quarantined=d.get('quarantined') is not False", "quarantined=d.get('quarantined') is True",
-     [f'{TQ}.Probe.test_json_round_trip_and_fail_closed']),
-    (PRB, "c.get('healthy') is True", "bool(c.get('healthy', True))", [f'{TQ}.Probe.test_json_round_trip_and_fail_closed']),
-    (PRB, "c.get('others') is not False", "bool(c.get('others', False))", [f'{TQ}.Probe.test_json_round_trip_and_fail_closed']),
-    (PRB, "float(c['temp_c'])", "float(c.get('temp_c', 0))", [f'{TQ}.Probe.test_json_round_trip_and_fail_closed']),
-    (PRB, "'ServerAliveCountMax=4', '--', ", "'ServerAliveCountMax=4', ", [f'{TQ}.Probe.test_remote_probe_over_ssh']),
     # the executor and the registry
     (PRT, "        if self.env.get('GITHUB_REPOSITORY', '').lower() != proj.repository:", "        if False:",
      [f'{TT}.Execute.test_refusals']),
@@ -353,7 +267,8 @@ MUTANTS = [
     (PRT, "    out, todo = {root}, [root]", "    out, todo = {root}, []", [f'{TT}.OwnCap.test_a_part_over_its_memory_ends_oom']),
     (PRT, "        return (1 if out['outcome'] == 'red' else 0), out\n\n\n#", "        return 0, out\n\n\n#",
      [f'{TT}.Execute.test_red_is_the_only_failing_exit']),
-    (PRT, "('full' if cls in SLOT_CLASSES else 'none')", "('none')", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (PRT, "            if cls in SLOT_CLASSES:\n                q = slots", "            if True:\n                q = slots",
+     [f'{TT}.Execute.test_a_held_slot_makes_the_part_wait_then_unavailable']),
     (PRT, "            if free < h['disk_min_gib']:", "            if False:", [f'{TT}.Execute.test_low_disk_is_unavailable_before_the_command']),
     (PRT, "    if not real.startswith(root + os.sep):", "    if False:", [f'{TT}.Salvage.test_only_our_part_records']),
     (PRT, "    real = os.path.realpath(os.path.join(root, rel))", "    real = os.path.normpath(os.path.join(root, rel))", [f'{TT}.Salvage.test_only_our_part_records']),
@@ -376,8 +291,6 @@ MUTANTS = [
     (PRT, "        os.setsid()\n", "        pass\n", [f'{TT}.Execute.test_a_stopped_executor_leaves_the_part_to_salvage']),
     (PRT, "env=env, pass_fds=held)", "env=env)", [f'{TT}.Execute.test_a_stopped_executor_leaves_the_part_to_salvage']),
     (PRT, "                    os.killpg(child.pid, signal.SIGKILL)", "                    pass", [f'{TT}.Pure.test_a_command_that_ignores_term_is_killed']),
-    (PRT, "                        slot_fd = q.try_take(proj.name, caps, default=default)", "                        slot_fd = q.try_take(proj.name, caps, default=proj.name)",
-     [f'{TT}.Execute.test_a_local_holder_counts_as_the_default_project']),
     (PRT, "                    caps.setdefault(proj.name, proj.max_slots)\n", "                    caps[proj.name] = 1\n",
      [f'{TT}.Execute.test_the_cap_holds_with_a_free_slot']),
     (PRT, "    if not record_ref(record).lower().startswith(", "    if False and not record_ref(record).lower().startswith(",
@@ -391,29 +304,10 @@ MUTANTS = [
     (PRT, " and k not in STEP_FILES}", "}", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
     (RGY, "(CI_|GITHUB_|ACTIONS_|RUNNER_|LD_|PYTHON).*|CUDA_VISIBLE_DEVICES|CUDA_DEVICE_ORDER|PATH|", "(CI_|GITHUB_|ACTIONS_|RUNNER_).*|CUDA_VISIBLE_DEVICES|",
      [f'{TT}.Registry.test_malformed']),
-    (RGY, "    caps[default] = slots\n", "", [f'{TT}.Execute.test_an_older_local_ticket_keeps_its_turn']),
-    (RGY, "            if default:\n                raise RegistryError", "            if False:\n                raise RegistryError",
-     [f'{TT}.Execute.test_two_default_projects_are_refused']),
     (PRT, "part_dir=work, results=results", "part_dir=record, results=results", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
     (RGY, "        if not VAR.fullmatch(k) or RESERVED.fullmatch(k):", "        if not VAR.fullmatch(k):", [f'{TT}.Registry.test_malformed']),
     (RGY, "    if type(v) is not int or not lo <= v <= hi:", "    if not lo <= v <= hi:", [f'{TT}.Registry.test_malformed']),
     (RGY, " or (stem and name != stem)", "", [f'{TT}.Registry.test_malformed']),
-    # the env allowlist
-    (REM, "up.startswith(REFUSED_PREFIXES) or ", "", [f'{TR}.RemoteEnv.test_refused', f'{TR}.RemoteEnv.test_only_the_allowlist_passes']),
-    (REM, "any(p in up for p in REFUSED_PARTS)", "any(p in name for p in REFUSED_PARTS)", [f'{TR}.RemoteEnv.test_refused']),
-    (REM, " or up in REFUSED_NAMES", "", [f'{TR}.RemoteEnv.test_refused']),
-    (REM, " and '\\0' not in v", "", [f'{TR}.RemoteEnv.test_only_the_allowlist_passes']),
-    (REM, " | {k for k in environ if isinstance(k, str) and k.startswith('CI_')}", "",
-     [f'{TR}.RemoteEnv.test_only_the_allowlist_passes']),
-    (REM, "out = {**{k: fixed[k] for k in FIXED}", "out = {**{k: environ.get(k, fixed[k]) for k in FIXED}",
-     [f'{TR}.RemoteEnv.test_fixed_values_come_from_the_inventory']),
-    (REM, "'CUDA_VISIBLE_DEVICES': cuda}", "'CUDA_VISIBLE_DEVICES': environ.get('CUDA_VISIBLE_DEVICES', cuda)}",
-     [f'{TR}.RemoteEnv.test_the_card_is_the_drivers']),
-    (REM, "    fixed_names = set(FIXED) | {'CUDA_VISIBLE_DEVICES'}", "    fixed_names = set(FIXED)",
-     [f'{TR}.RemoteEnv.test_the_card_is_the_drivers']),
-    (REM, " and not _TOKEN_VALUE.search(v)", "", [f'{TR}.RemoteEnv.test_token_like_values_never_leave']),
-    (REM, "        if not refused(k) and isinstance(v, str)", "        if isinstance(v, str)",
-     [f'{TR}.RemoteEnv.test_only_the_allowlist_passes']),
     # the inventory: schema and lint
     (INV, "    if doc.get('schema') != SCHEMA:", "    if False:", [f'{TI}.Load.test_an_unknown_schema_is_refused']),
     (INV, "            if k not in PUBLIC_KEYS and (*path, k)", "            if True and (*path, k)", [f'{TI}.Deny.test_deny_tokens']),
@@ -441,17 +335,14 @@ MUTANTS = [
      [f'{TT}.Execute.test_a_stopped_executor_leaves_the_part_to_salvage']),
     (PRT, "                alive = False\n", "                return\n", [f'{TT}.Execute.test_a_stopped_executor_leaves_the_part_to_salvage']),
     # the actions and their launcher
-    (LCH, '  [ "$cmd" = claim ] || {', '  true || {', [f'{TA}.Launcher.test_a_hosted_runner_runs_only_claim_from_the_checkout']),
-    (LCH, 'ci-run" claim --hosted "$@"', 'ci-run" claim "$@"', [f'{TA}.Launcher.test_a_hosted_runner_runs_only_claim_from_the_checkout']),
     (LCH, 'if ! [[ $release =~ ^(hook|v[0-9]+\\.[0-9]+\\.[0-9]+)$ ]]; then', 'if ! [[ $release =~ ^(hook|v[0-9]+\\.[0-9]+\\.[0-9]+) ]]; then',
      [f'{TA}.Launcher.test_a_bad_stamp_is_refused']),
     (LCH, 'if ! [[ $release =~ ^(hook|v[0-9]+\\.[0-9]+\\.[0-9]+)$ ]]; then', 'if false; then', [f'{TA}.Launcher.test_a_bad_stamp_is_refused']),
     (LCH, 'ci_run=$rel/$release/bin/ci-run', 'ci_run=$rel/hook/bin/ci-run',
      [f'{TA}.Launcher.test_the_stamped_release_runs']),
-    (LCH, '[ "$cmd" = part ] || [ "$cmd" = salvage ] || exit 2', 'exit 2', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
-    (LCH, 'then next=fallback; retry_on="[\\"self-hosted\\",\\"$cls\\"]"', 'then next=fallback; retry_on="[\\"self-hosted\\"]"',
-     [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
-    (LCH, 'else next=none; retry_on=', 'else next=fallback; retry_on=', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
+    (LCH, '[ "$cmd" = part ] || exit 2', 'exit 2', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
+    (LCH, '[ "$cmd" = part ] || exit 2', 'true', [f'{TA}.Launcher.test_a_hosted_runner_has_no_path_of_its_own']),
+    (LCH, 'next=none; retry_on=', 'next=fallback; retry_on=', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, ' && [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]', '', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, '[ "$1" = --id ] && { id=$2; break; }', '[ "$1" = --id ] && { id=$2; }', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, '"$reason" "$next" "$retry_on" > "$art/outcome.json"', '"$reason" "$next" "$retry_on" > /dev/null',
@@ -459,8 +350,8 @@ MUTANTS = [
     (LCH, 'exec "$ci_run" "$cmd" "$@"', 'exec "$ci_run" "$@"', [f'{TA}.Launcher.test_the_stamped_release_runs']),
     (APT, ' --attempt-of "$IN_ATTEMPT_OF"', '', [f'{TA}.Actions.test_inputs_reach_their_flags']),
     (APT, '        IN_RESUME: ${{ inputs.resume }}\n', '', [f'{TA}.Actions.test_every_input_is_used_and_every_use_declared']),
-    (APT, '  record:\n    description: "the part record, for salvage"\n    value: ${{ steps.part.outputs.record }}\n',
-     "  record: {description: the part record, for salvage, value: '${{ steps.part.outputs.record }}'}\n",
+    (APT, '  record:\n    description: "the part record, for the retry and the verdict\'s salvage"\n    value: ${{ steps.part.outputs.record }}\n',
+     "  record: {description: the part record, value: '${{ steps.part.outputs.record }}'}\n",
      [f'{TA}.Actions.test_no_flow_mappings']),
     # the verdict of h100-test.yml (design §4.7)
     (VRD, "    if bad:\n        return Verdict('failure'", "    if False:\n        return Verdict('failure'",
@@ -520,7 +411,7 @@ MUTANTS = [
     (WFL, "&& (( IN_TIMEOUT >= 1 && IN_TIMEOUT <= 240 ))", "&& true", [f'{TW}.Prep.test_refusals']),
     (WFL, "[[ $IN_PROJECT =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]]", "true", [f'{TW}.Prep.test_refusals']),
     (AVD, ' --parts "$IN_PARTS"', '', [f'{TA}.Actions.test_inputs_reach_their_flags']),
-    # RUN-5: h100 as a standalone host (no proxy, its own python, labelled pools, a shared account)
+    # RUN-5: h100 as a standalone host (its own python, labelled pools, a shared account)
     (INV, "    if type(per_card) is not bool or per_card == ('count' in v):", "    if type(per_card) is not bool:",
      [f'{TI}.Load.test_pools_as_tables']),
     (INV, " and len(set(labels)) == len(labels)", "", [f'{TI}.Load.test_pools_as_tables']),
@@ -545,8 +436,8 @@ MUTANTS = [
     (SET, "    if h.get('python'):\n        check_python(python)", "    if False:\n        check_python(python)",
      [f'{TU}.Standalone.test_the_python_must_be_3_11_or_later']),
     (SET, "    if etc != os.path.join(base, 'etc'):", "    if False:", [f'{TU}.Standalone.test_etc_must_be_beside_the_data']),
-    (SET, "'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else TUNNEL_ORDER if 'tunnel' in h else ''", "'PROXY_ORDER': PROXY_ORDER",
-     [f'{TU}.Standalone.test_plan_without_a_proxy']),
+    (SET, "'PROXY_ORDER': TUNNEL_ORDER if 'tunnel' in h else ''", "'PROXY_ORDER': TUNNEL_ORDER",
+     [f'{TU}.Setup.test_a_host_without_a_tunnel_has_a_plain_runner_unit']),
     (SET, "        if not v:  # an empty value takes its line with it", "        if False:",
      [f'{TU}.Standalone.test_plan_without_a_proxy']),
     (SET, "    if card is not None:", "    if card:", [f'{TU}.Standalone.test_runners_labels_and_cards']),
@@ -566,11 +457,10 @@ MUTANTS = [
     (PRT, "['self-hosted', *(own or [cls])]", "['self-hosted', cls]", [f'{TT}.Pure.test_a_pool_with_its_own_labels_retries_on_them']),
     (PRT, "        if inventory.pool_labels(self.inv, cls):\n            rec['pool_labels']",
      "        if False:\n            rec['pool_labels']", [f'{TT}.Execute.test_a_labelled_pool_names_its_labels_in_the_record']),
-    (LCH, '&& $own =~ ^[a-z0-9][a-z0-9-]*(,[a-z0-9][a-z0-9-]*)*$ ]]', '&& -n $own ]]',
+    (LCH, '[[ $own =~ ^[a-z0-9][a-z0-9-]*(,[a-z0-9][a-z0-9-]*)*$ ]]', '[[ -n $own ]]',
      [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, 'retry_on="[\\"self-hosted\\",\\"${own//,/\\",\\"}\\"]"', 'retry_on="[\\"self-hosted\\",\\"$own\\"]"',
      [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
-    (CLI, "        if 'proxy' not in h:  # h100", "        if False:  # h100", [f'{TU}.Standalone.test_proxy_check_without_a_proxy']),
     (HKS, 'exec /usr/bin/timeout -k 5 65 "$py" -I', 'exec /usr/bin/timeout -k 5 65 /usr/bin/python3 -I',
      [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
     (HKC, 'exec "$py" -I', 'exec /usr/bin/python3 -I', [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
@@ -621,12 +511,12 @@ MUTANTS = [
      [f'{TM}.H100.test_the_early_stop_ends_a_hot_part_as_thermal']),
     (PRT, "    argv = ['taskset', '-c', cpus] if cpus else []", "    argv = []",
      [f'{TM}.Parse.test_taskset_where_the_inventory_gives_cpus', f'{TM}.H100.test_a_cool_card_runs_pinned_and_sampled']),
-    (PRT, "                                 cpus=str(h.get('cpus') or ''))", "                                 cpus='')",
+    (PRT, " command_argv(a.command, cpus=str(h.get('cpus') or ''))", " command_argv(a.command, cpus='')",
      [f'{TM}.H100.test_a_cool_card_runs_pinned_and_sampled']),
     # the org snapshot (design §6.5): policy schema 2, the merge, the hook, claim and ci-orgsync
-    (POL, "    if type(schema) is not int or schema not in (1, 2):", "    if schema not in (1, 2):",
-     [f'{TP}.Load.test_malformed_policies']),
-    (POL, " - ({'org'} if schema == 2 else set())", " - {'org'}", [f'{TP}.Load.test_malformed_policies']),
+    (POL, "    if type(schema) is not int or schema != 2:", "    if schema != 2:", [f'{TP}.Load.test_malformed_policies']),
+    (POL, "    if type(schema) is not int or schema != 2:", "    if type(schema) is not int or schema not in (1, 2):",
+     [f'{TP}.Load.test_a_schema_1_policy_is_refused']),
     (POL, "    if type(members) is not bool or type(repos) is not bool:", "    if False:",
      [f'{TZ}.LoadOrg.test_malformed_org_tables']),
     (POL, "    if type(age) is not int or not lo <= age <= hi:", "    if not lo <= age <= hi:",
@@ -658,9 +548,9 @@ MUTANTS = [
      [f'{TZ}.Merge.test_members_act_only_in_the_snapshots_private_repositories']),
     (POL, "if repo is not None and repo.org_members else policy.actors", "if repo is not None else policy.actors",
      [f'{TZ}.Merge.test_members_act_only_in_the_snapshots_private_repositories']),
-    (GHB, "            actors, bot = policy.actors_for(pol, env.get('GITHUB_REPOSITORY', '')), pol.bot",
-     "            actors, bot = pol.actors, pol.bot", [f'{TZ}.Hook.test_claim_takes_the_same_allowlist']),
-    (GHB, "                if len(data) > 4 << 20:", "                if False:",
+    (GHB, "        actors, bot = policy.actors_for(pol, env.get('GITHUB_REPOSITORY', '')), pol.bot",
+     "        actors, bot = pol.actors, pol.bot", [f'{TZ}.Hook.test_claim_takes_the_same_allowlist']),
+    (GHB, "            if len(data) > 4 << 20:", "            if False:",
      [f'{TZ}.Hook.test_claim_takes_the_same_allowlist']),
     (ORS, " or not m['login'].isascii():", ":", [f'{TZ}.Sync.test_strict_fields']),
     (ORS, " or not r['full_name'].isascii()", "", [f'{TZ}.Sync.test_strict_fields']),
@@ -680,7 +570,7 @@ MUTANTS = [
     (HOK, "            d = policy.Decision(False, 'stale')", "            d = policy.Decision(True, 'stale')",
      [f'{TZ}.Hook.test_a_stale_missing_or_malformed_snapshot_refuses']),
     (HOK, "'org.json'), MAX_SNAPSHOT))", "'org.json'), MAX_EVENT))", [f'{TZ}.Hook.test_an_oversized_snapshot_refuses']),
-    (GHB, "            if pol.org is not None:  # the hook's merge", "            if False:  # the hook's merge",
+    (GHB, "        if pol.org is not None:  # the hook's merge", "        if False:  # the hook's merge",
      [f'{TZ}.Hook.test_claim_takes_the_same_allowlist']),
     (ORS, "        if m.get('type', 'User') == 'User':", "        if True:", [f'{TZ}.Sync.test_snapshot_of_every_page']),
     (ORS, "        if r.get('private') is True and name.startswith(org + '/'):", "        if name.startswith(org + '/'):",
@@ -696,9 +586,9 @@ MUTANTS = [
      [f'{TZ}.Sync.test_main_writes_the_snapshot_and_keeps_it_on_failure']),
     (ORS, "        if pol.org is None:\n            print", "        if False:\n            print",
      [f'{TZ}.Sync.test_main_without_org_does_nothing']),
-    (SET, " and (h.get('orgsync') or 'orgsync' not in t)]", "]",
+    (SET, " if h.get('orgsync') or 'orgsync' not in t]", "]",
      [f'{TU}.Setup.test_the_org_snapshot_timer_only_where_the_inventory_asks']),
-    (SET, " or name.startswith('ci-orgsync') and not h.get('orgsync')\n", "\n",
+    (SET, "        if name.startswith('ci-orgsync') and not h.get('orgsync') or name ==", "        if name ==",
      [f'{TU}.Setup.test_the_org_snapshot_timer_only_where_the_inventory_asks']),
     # PR-3 review: the hooks' interpreter is written in by setup; uninstall stops only our units
     (UNS, "for p in sorted(p for p in files if os.path.dirname(p) == unit_dir):",
@@ -813,8 +703,6 @@ MUTANTS = [
     (BRG, "            self.tasks.discard(task)", "            pass", [f'{TBR}.Serve.test_a_side_left_open_is_closed_after_the_linger']),
     (BRG, "raise Refused(431, 'request head too large')", "raise Refused(408, 'request head too large')",
      [f'{TBR}.Serve.test_a_head_too_large']),
-    (INV, "            if 'proxy' in h:\n                raise InventoryError", "            if False:\n                raise InventoryError",
-     [f'{TU}.Egress.test_the_tunnel_table']),
     (INV, "    'egress_port': _PORT,", "    'egress_port': (lambda v: True, False),", [f'{TU}.Egress.test_the_tunnel_table']),
     (INV, "_DIRECT = re.compile(r'\\.?[a-z0-9][a-z0-9.-]{0,252}\\Z", "_DIRECT = re.compile(r'\\.?[a-z0-9][a-z0-9.,-]{0,252}\\Z",
      [f'{TU}.Egress.test_the_tunnel_table']),
@@ -872,14 +760,14 @@ MUTANTS = [
     # (asyncio.TimeoutError is an OSError since 3.11: dropping it from the tuple is no mutant)
     (BRG, "raise Refused(408, 'no request head')", "raise Refused(400, 'no request head')",
      [f'{TBR}.Serve.test_a_head_that_never_comes']),
-    (SET, "    elif 'tunnel' in h:\n        t = h['tunnel']\n        lines", "    elif False:\n        t = h['tunnel']\n        lines",
+    (SET, "    if 'tunnel' in h:\n        t = h['tunnel']\n        lines", "    if False:\n        t = h['tunnel']\n        lines",
      [f'{TU}.Egress.test_plan_with_a_tunnel']),
-    (SET, "PROXY_ORDER if 'proxy' in h else TUNNEL_ORDER if 'tunnel' in h else ''", "PROXY_ORDER if 'proxy' in h else ''",
+    (SET, "'PROXY_ORDER': TUNNEL_ORDER if 'tunnel' in h else ''", "'PROXY_ORDER': ''",
      [f'{TU}.Egress.test_plan_with_a_tunnel']),
     (SET, "['ci-tunnel.service'] if 'tunnel' in h else []", "[] if 'tunnel' in h else []",
      [f'{TU}.Egress.test_plan_with_a_tunnel']),
     (SET, "h['tunnel']['http_port'] if 'tunnel' in h else 0", "0 if 'tunnel' in h else 0", [f'{TU}.Egress.test_plan_with_a_tunnel']),
-    (SET, "                or name == 'ci-tunnel.service' and 'tunnel' not in h):", "                ):",
+    (SET, " or name == 'ci-tunnel.service' and 'tunnel' not in h:", ":",
      [f'{TU}.Standalone.test_plan_without_a_proxy']),
     (SET, "            if not adopt:\n", "            if True:\n", [f'{TU}.Standalone.test_adopt_takes_over_unrecorded_units']),
     (SET, "            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():\n                raise ValueError(f'{path} is not a regular",
@@ -909,6 +797,23 @@ MUTANTS = [
     (SET, "        run(['systemctl', '--user', 'stop', name], check=False, timeout=300)", "        pass",
      ['tests.test_setup.Egress.test_a_recorded_unit_already_gone_is_only_forgotten']),
     (INS, 'chmod 0555 "$rel/$id"', 'chmod u-w "$rel/$id"', ['tests.test_scripts.Install.test_an_annotated_tag_resolves_to_its_commit']),
+    # the first path retired (decision 11.12): what stays guards that it stays out
+    (INV, "HOST_KEYS.update({k: (lambda v: True, False) for k in RETIRED_KEYS})", "pass",
+     [f'{TI}.Load.test_the_retired_keys_are_accepted_and_ignored', f'{TU}.Setup.test_a_retired_proxy_table_plans_nothing']),
+    (INV, "RETIRED_KEYS = frozenset({'ssh', 'trusted', 'remote', 'cpu_slowdown', 'proxy'})",
+     "RETIRED_KEYS = frozenset({'ssh', 'trusted', 'remote', 'cpu_slowdown', 'proxy', 'slowdown'})",
+     [f'{TI}.Load.test_the_retired_keys_are_accepted_and_ignored']),
+    (INV, "{'slot_lock', 'slot_queue'} <= set(v) <= FILES", "set(v) == FILES", [f'{TI}.Load.test_the_example_loads']),
+    (INV, "{'slot_lock', 'slot_queue'} <= set(v) <= FILES", "{'slot_lock', 'slot_queue'} <= set(v)",
+     [f'{TI}.Load.test_the_retired_keys_are_accepted_and_ignored']),
+    (POL, "CLASSES = frozenset({'light', 'part', 'h100'})", "CLASSES = frozenset({'light', 'part', 'h100', 'compile', 'nightly', 'gpu'})",
+     [f'{TP}.Refused.test_the_retired_runner_classes']),
+    (GHB, "        with open(os.path.join(etc, 'policy.toml'), 'rb') as f:\n            pol = policy.load(f.read(1 << 20))\n",
+     "        pol = policy.load(b'schema = 2\\n')\n", [f'{TQ}.ClaimMain.test_the_policy_is_required']),
+    (HOK, "            if pol.org is not None:\n                snap =", "            if True:\n                snap =",
+     [f'{TZ}.Hook.test_a_policy_without_org_reads_no_snapshot']),
+    (SLO, "held.get(p, 0) >= caps.get(p, 0)", "held.get(p, 0) >= caps.get(p, 1)",
+     [f'{TS}.Grants.test_a_ticket_without_a_project_gets_no_slot']),
 ]
 
 

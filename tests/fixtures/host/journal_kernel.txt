@@ -1,2 +1,0 @@
-Nov 05 03:19:46 host kernel: oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=user.slice,mems_allowed=0,oom_memcg=/user.slice/user-1000.slice/user@1000.service/ci.slice/ci-p.slice/ci-p-A.scope,task_memcg=/user.slice/user-1000.slice/user@1000.service/ci.slice/ci-p.slice/ci-p-A.scope,task=python,pid=2233999,uid=1000
-Nov 05 03:19:46 host kernel: Memory cgroup out of memory: Killed process 2233999 (python) total-vm:9000000kB

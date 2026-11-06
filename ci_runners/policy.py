@@ -1,7 +1,9 @@
 """The pre-job hook's decision: may this job run on this runner (design §6.2, §6.3)?
 
-A schema 2 policy may take its actors and private repositories from the org snapshot
-(``etc/org.json``, design §6.5): ``with_snapshot`` merges them in, or refuses a stale one.
+The policy is schema 2 (design §6.5; schema 1 is retired, decision 11.12). It may take
+its actors and private repositories from the org snapshot (``etc/org.json``):
+``with_snapshot`` merges them in, or refuses a stale one. Only private repositories run
+(design §6.2): a repository listed as public is refused.
 
 ``decide`` is a pure function of the policy, the job's environment and its event
 payload. It reads only what it is given, prints nothing and returns a fixed reason
@@ -22,15 +24,12 @@ from collections.abc import Mapping
 SELF = 'chaobrain/ci-runners'
 
 #: runner classes (``CI_RUNNER_CLASS``, design §5.1)
-CLASSES = frozenset({'light', 'part', 'compile', 'nightly', 'gpu', 'h100'})
-#: the classes a public repository may use (lead decision 2)
-PUBLIC_CLASSES = frozenset({'gpu', 'h100'})
+CLASSES = frozenset({'light', 'part', 'h100'})
 
 #: events accepted per repository class (design §6.2)
 PRIVATE_EVENTS = frozenset({'pull_request', 'push', 'workflow_dispatch', 'schedule', 'workflow_run', 'status',
                             'repository_dispatch'})
-PUBLIC_EVENTS = frozenset({'pull_request', 'push', 'workflow_dispatch'})
-#: events the workflow bot may trigger, in a private repository only
+#: events the workflow bot may trigger
 BOT_EVENTS = frozenset({'workflow_dispatch', 'repository_dispatch'})
 #: the events a private repository's ``extra_events`` may add: those whose payload
 #: carries the pull request the fork check reads, and the merge queue's
@@ -118,16 +117,16 @@ def _ascii_lower(s: object, pattern: re.Pattern[str]) -> str | None:
 
 
 def load(data: bytes | str) -> Policy:
-    """Parse ``policy.toml`` (schema 1 or 2). Raises PolicyError on anything unexpected."""
+    """Parse ``policy.toml`` (schema 2). Raises PolicyError on anything unexpected."""
     raw = data.encode() if isinstance(data, str) else data
     try:
         doc = tomllib.loads(raw.decode('utf-8'))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise PolicyError(f'policy: not TOML: {e}') from None
     schema = doc.get('schema')
-    if type(schema) is not int or schema not in (1, 2):
-        raise PolicyError('policy: schema must be 1 or 2')
-    unknown = set(doc) - {'schema', 'bot', 'actors', 'repositories'} - ({'org'} if schema == 2 else set())
+    if type(schema) is not int or schema != 2:
+        raise PolicyError('policy: schema must be 2')
+    unknown = set(doc) - {'schema', 'bot', 'actors', 'repositories', 'org'}
     if unknown:
         raise PolicyError(f'policy: unknown keys {sorted(unknown)}')
     org = _load_org(doc['org']) if 'org' in doc else None
@@ -331,11 +330,9 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
         return no('payload')
     if repo.paused:
         return no('paused')
-    public = repo.visibility == 'public'
-    if public and cls not in PUBLIC_CLASSES:
-        return no('runner-class')
-    allowed = PUBLIC_EVENTS if public else PRIVATE_EVENTS | repo.extra_events
-    if event_name not in allowed:
+    if repo.visibility != 'private':  # public repositories stay on hosted runners (design §6.2)
+        return no('repository')
+    if event_name not in PRIVATE_EVENTS | repo.extra_events:
         return no('event')
     # not a fork: a pull request's head and base, and a workflow_run's head, are this repository
     if 'pull_request' in event or event_name.startswith('pull_request'):
@@ -352,7 +349,7 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
             return no('fork')
     for login in _actors(env, event, event_name):  # None (absent or malformed) is on no list
         if login == policy.bot:  # on no allowlist: passes only where the repository's switch is on
-            if public or not repo.bot_dispatch or event_name not in BOT_EVENTS:
+            if not repo.bot_dispatch or event_name not in BOT_EVENTS:
                 return no('bot')
         elif login not in policy.actors and not (repo.org_members and login in policy.members):
             return no('actor')

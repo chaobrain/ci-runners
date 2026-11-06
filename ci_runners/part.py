@@ -6,7 +6,7 @@ GPU leases, and runs the command in its own systemd scope
 ``MemorySwapMax=0``, nice 10, ionice best-effort 7 and OOM score +500). In the scope a
 small supervisor runs the command, enforces the inner timeout and records the exit in
 the part's record, so the record finishes even when the runner itself is stopped
-mid-part (the scope is not in the runner's cgroup): ``salvage`` then reads it.
+mid-part (the scope is not in the runner's cgroup): the verdict's salvage then reads it.
 
 Where the user manager has no memory controller (cgroup v1, design decision 11.11),
 ``MemoryMax`` is not enforced, so the supervisor enforces the part's memory itself: it
@@ -38,7 +38,7 @@ from ci_runners import inventory, outcome, registry, slots
 from ci_runners import sampler as sampler_mod
 
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
-SLOT_CLASSES = ('part', 'compile', 'nightly')  # slot=full by default on these (design §4.3)
+SLOT_CLASSES = ('part',)  # the classes whose parts take a host CI slot (design §4.3, §7)
 KILL_GRACE = 30  # s between TERM and KILL at the inner timeout
 RELAY_DRAIN = 5  # s the relay may still copy once the command has ended
 WATCHDOG_TAIL = 4 << 20  # bytes of the GPU watchdog's log read after a part
@@ -49,7 +49,7 @@ SCOPE = re.compile(r'ci-part-[^/]*\.scope')  # a part's scope, the only cgroup t
 H100_POOL = 'h100'
 #: the step's own files: the command must not write the part's outputs or the job's env
 STEP_FILES = frozenset({'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'GITHUB_ENV', 'GITHUB_PATH', 'GITHUB_STATE'})
-OUTPUTS = ('outcome', 'reason', 'next', 'retry-on', 'host', 'gpus', 'queue-seconds', 'run-seconds', 'verify',
+OUTPUTS = ('outcome', 'reason', 'next', 'retry-on', 'host', 'gpus', 'queue-seconds', 'run-seconds',
            'record', 'summary', 'attempt', 'resume')
 
 
@@ -212,15 +212,11 @@ class MemoryCap:
         return self.killed
 
 
-def command_argv(command: str, *, compile_part: bool, lock: str, lock_bin: str, host_lock: str,
-                 cpus: str = '') -> list[str]:
+def command_argv(command: str, *, cpus: str = '') -> list[str]:
     """What the supervisor runs: ``taskset`` to the inventory's ``cpus`` where it gives
-    them (h100: NUMA node 0, design §5.4), nice and ionice, the host lock if the part
-    declares one, then ``bash -c``. Pure."""
+    them (h100: NUMA node 0, design §5.4), nice and ionice, then ``bash -c``. Pure."""
     argv = ['taskset', '-c', cpus] if cpus else []
-    argv += ['nice', '-n', '0' if compile_part else '10', 'ionice', '-c', '2', '-n', '7']
-    if lock != 'none':
-        argv += [lock_bin, '--lock', host_lock, f'-{lock}']
+    argv += ['nice', '-n', '10', 'ionice', '-c', '2', '-n', '7']
     return argv + ['bash', '-c', command]
 
 
@@ -236,7 +232,7 @@ def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, p
     env.update({
         'CI_RUNNERS_HOST': role, 'CI_PROJECT': project.name, 'CI_PART_DIR': part_dir, 'CI_RESULTS_DIR': results,
         'CUDA_VISIBLE_DEVICES': ','.join(str(c) for c in cards), 'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
-        'CI_CPUS': cpus, 'CI_HOST_LOCK': files['host_lock'], 'CI_SLOT_LOCK': files['slot_lock'],
+        'CI_CPUS': cpus, 'CI_SLOT_LOCK': files['slot_lock'],
         'CI_SLOT_QUEUE': files['slot_queue'], 'CI_SLOT_HELD': slot, 'CI_RESUME': '1' if resume else '0',
     })
     return env
@@ -486,7 +482,7 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
         unavailable=unavailable, boot_start=str(rec.get('boot_start', '')),
         boot_end=str((ex or {}).get('boot_end', '')),
         oom_kills=int((ex or {}).get('oom_kills', 0)) + (1 if unit_result == 'oom-kill' else 0),
-        start_epoch=float(rec.get('start_epoch', 0)), watchdog=watchdog, start=_local(rec.get('run_epoch')),
+        watchdog=watchdog, start=_local(rec.get('run_epoch')),
         end=_local(end), pids=tuple(int(p) for p in rec.get('pids', ())), buses=tuple(map(str, rec.get('buses', ()))),
         early_stop=bool(rec.get('early_stop')))
     o = outcome.classify(ev)
@@ -510,7 +506,7 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
     run_seconds = int(max(0.0, end - float(rec['run_epoch']))) if rec.get('run_epoch') else 0
     return {'outcome': o.kind, 'reason': o.reason, 'next': h.next, 'retry-on': retry_on, 'host': role,
             'gpus': ','.join(str(c) for c in rec.get('cards', [])), 'queue-seconds': int(rec.get('queue_seconds', 0)),
-            'run-seconds': run_seconds, 'verify': False,
+            'run-seconds': run_seconds,
             'record': f'{role}:{record_ref(record)}', 'summary': f'{record_ref(record)}/summary.md', 'attempt': attempt,
             'resume': h.resume, 'peak': ', '.join(f'card {c} {t:g} C' for c, t in sorted(peak.items()))
             if isinstance(peak, dict) else ''}
@@ -543,8 +539,6 @@ class Inputs:
     gpus: int = 0
     gpu_mem_mib: int = 0
     memory: str = ''
-    slot: str = ''  # full or none; empty: by the runner class
-    lock: str = 'none'
     queue_timeout_minutes: float = 60
     results: str = ''
     resume: bool = False
@@ -560,14 +554,12 @@ def parse_args(argv: Sequence[str]) -> Inputs:
     p.add_argument('--gpus', type=int, default=0)
     p.add_argument('--gpu-mem-mib', type=int, default=0)
     p.add_argument('--memory', default='')
-    p.add_argument('--slot', choices=('', 'full', 'none'), default='')
-    p.add_argument('--lock', choices=('none', 's', 'x', 'l'), default='none')
     p.add_argument('--queue-timeout-minutes', type=float, default=60)
     p.add_argument('--results', default='')
     p.add_argument('--resume', choices=('true', 'false', ''), default='false')
     p.add_argument('--attempt-of', default='')
     a = p.parse_args(list(argv))
-    return Inputs(a.project, a.command, a.id, a.timeout_minutes, a.gpus, a.gpu_mem_mib, a.memory, a.slot, a.lock,
+    return Inputs(a.project, a.command, a.id, a.timeout_minutes, a.gpus, a.gpu_mem_mib, a.memory,
                   a.queue_timeout_minutes, a.results, a.resume == 'true', a.attempt_of)
 
 
@@ -636,9 +628,7 @@ class Executor:
             raise Refused('gpu-mem-mib and queue-timeout-minutes must not be negative')
         if not 0 <= a.gpus <= len(self.inv.host['gpus']):
             raise Refused(f'gpus must be in [0, {len(self.inv.host["gpus"])}] here')
-        if a.lock not in ('none', 's', 'x', 'l'):
-            raise Refused('lock must be none, s, x or l')
-        if not 0 < a.timeout_minutes <= (600 if cls == 'nightly' else 240):
+        if not 0 < a.timeout_minutes <= 240:
             raise Refused('timeout-minutes is out of range')
         card = self.env.get('CI_RUNNER_CARD', '')
         if card and (not card.isdigit() or int(card) not in self.inv.host['gpus']):
@@ -765,21 +755,17 @@ class Executor:
             why = self.gate(a, cls)
             if why:
                 return self._end(record, rec, a, unavailable=why)
-            take_slot = (a.slot or ('full' if cls in SLOT_CLASSES else 'none')) == 'full'
-            if take_slot:
+            if cls in SLOT_CLASSES:
                 q = slots.SlotQueue(h['files']['slot_lock'], h['slots'], h['files']['slot_queue'], poll=self.poll)
                 mine = sum(1 for t in q.waiting() if t.project == proj.name)
                 if slots.queue_full(mine, proj.max_waiting):
                     return self._end(record, rec, a, unavailable='project queue full')
                 q.take_ticket(proj.name, f'part {a.id}')
                 try:
-                    try:
-                        caps, default = registry.slot_caps(self.etc, self.inv.this, h['slots'])
-                    except registry.RegistryError as e:
-                        return self._end(record, rec, a, unavailable=f'registry: {e}')
+                    caps = registry.slot_caps(self.etc, self.inv.this)
                     caps.setdefault(proj.name, proj.max_slots)
                     while slot_fd is None:
-                        slot_fd = q.try_take(proj.name, caps, default=default)
+                        slot_fd = q.try_take(proj.name, caps)
                         if slot_fd is None:
                             if self.stopped:
                                 return self._end(record, rec, a, stopped=True)
@@ -796,7 +782,7 @@ class Executor:
                 need = a.gpu_mem_mib or proj.gpu_mem_mib
                 mine = self.candidates()
                 while True:
-                    # the health gate (h100-style hosts; elsewhere place has filtered hot cards):
+                    # the health gate (h100-style hosts):
                     # a hot or unread card refuses, to a cool card's runner, else the fallback
                     cool = gpus_mod.cool_cards(mine, smi_status(self.run), h['max_temp_c']) if h100_style(h) else mine
                     if not cool:
@@ -817,9 +803,7 @@ class Executor:
             cpus = str(h.get('cpus') or len(os.sched_getaffinity(0)))
             env = part_env(self.env, role=self.inv.this, project=proj, part_dir=work, results=results, cards=cards,
                            cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume)
-            inner = command_argv(a.command, compile_part=cls == 'compile', lock=a.lock,
-                                 lock_bin=os.path.join(self.release, 'bin', 'ci-lock'), host_lock=h['files']['host_lock'],
-                                 cpus=str(h.get('cpus') or ''))
+            inner = command_argv(a.command, cpus=str(h.get('cpus') or ''))
             cap = registry.memory_bytes(memory) if self.caps_memory() else 0
             sup = [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
                    'from ci_runners.part import supervise; '
@@ -889,7 +873,7 @@ def _record_path(inv: inventory.Inventory, ref: str) -> str:
     which must lie under this host's part records."""
     role, _, rel = ref.partition(':')
     if role != inv.this:
-        raise Refused(f'record {ref!r} is on another host (salvage over ssh comes with RUN-3)')
+        raise Refused(f'record {ref!r} is on another host')
     root = os.path.realpath(os.path.join(inv.host['data'], 'ci-runners', 'state', 'parts'))
     real = os.path.realpath(os.path.join(root, rel))
     if not real.startswith(root + os.sep):
@@ -939,14 +923,7 @@ def salvage(inv: inventory.Inventory, ref: str, env: Mapping[str, str], *, wait_
 def main(argv: list[str], inv: inventory.Inventory, etc: str) -> int:
     release = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
-        if argv and argv[0] == 'salvage':
-            p = argparse.ArgumentParser(prog='ci-run salvage')
-            p.add_argument('--record', required=True)
-            p.add_argument('--wait-seconds', type=float, default=0)
-            a = p.parse_args(argv[1:])
-            code, out = salvage(inv, a.record, os.environ, wait_seconds=a.wait_seconds)
-        else:
-            code, out = Executor(inv, etc, os.environ, release=release).execute(parse_args(argv))
+        code, out = Executor(inv, etc, os.environ, release=release).execute(parse_args(argv))
     except Refused as e:
         print(f'ci-run part: refused: {e}', file=sys.stderr)
         return 2

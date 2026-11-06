@@ -35,8 +35,8 @@ _SIZE = re.compile(r'[1-9][0-9]{0,5}[KMGT]\Z')
 _CPUS = re.compile(r'[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*\Z')
 #: a runner label the inventory gives (design §5.1): GitHub's own are added at registration
 LABEL = re.compile(r'[a-z0-9][a-z0-9-]{0,39}\Z')
-#: labels a pool may not give itself: GitHub's own, and the 3090 pools' classes, which a
-#: job of another host's policy asks for (design §5.1: h100's labels share nothing with them)
+#: labels a pool may not give itself: GitHub's own and the bare class names, which any
+#: runner's job could ask for (design §5.1: h100's labels are its own)
 RESERVED_LABELS = frozenset({'self-hosted', 'linux', 'x64', 'light', 'part', 'compile', 'nightly', 'gpu'})
 #: what a pool's runners run with, besides the count (RUN-5)
 POOL_KEYS = frozenset({'count', 'labels', 'per_card'})
@@ -81,15 +81,13 @@ def _pool(v: object) -> bool:
             and all(isinstance(x, str) and LABEL.match(x) and x not in RESERVED_LABELS for x in labels) and ('labels' not in v or bool(labels)))
 
 
+#: the slot files, and the retired host lock's (accepted and ignored)
+FILES = frozenset({'slot_lock', 'slot_queue', 'host_lock'})
 #: per host: key -> (check, required). Paths are absolute.
 HOST_KEYS = {
-    'ssh': (_str, True),             # how a trusted host reaches this one (place, salvage)
     'account': (_str, True),         # the Unix account the runners and parts run as
     'home': (_abs, True),
     'data': (_abs, True),            # runners, work directories and ci-runners live below it
-    'trusted': (lambda v: type(v) is bool, True),  # runs checks, CPU and compile parts
-    'remote': (lambda v: type(v) is bool, False),  # driven over ssh from another host (h100)
-    'cpu_slowdown': (_num, True),    # per-core time against the reference host
     'slots': (lambda v: _int(v, 1), True),         # host CI slots (design §7)
     'memory_max': (lambda v: isinstance(v, str) and bool(_SIZE.match(v)), True),  # ci.slice
     'disk_min_gib': (_int, True),
@@ -98,23 +96,18 @@ HOST_KEYS = {
     'cpus': (lambda v: isinstance(v, str) and bool(_CPUS.match(v)), False),  # taskset list
     'pools': (lambda v: isinstance(v, dict) and bool(v) and all(isinstance(k, str) and _POOL.match(k) and _pool(n)
                                                                 for k, n in v.items()), True),
-    'files': (lambda v: isinstance(v, dict) and set(v) == {'host_lock', 'slot_lock', 'slot_queue'}
-              and all(_abs(p) for p in v.values()), True),  # brainspike's lock and slot files (D5)
-    'proxy': (lambda v: isinstance(v, dict), False),  # the CI proxy (3090 hosts, decision 5)
+    'files': (lambda v: isinstance(v, dict) and {'slot_lock', 'slot_queue'} <= set(v) <= FILES
+              and all(_abs(p) for p in v.values()), True),  # the slot files (design §7)
     'tunnel': (lambda v: isinstance(v, dict), False),  # the ssh forward to the egress proxy (h100, decision 11.10)
     'python': (_abs, False),         # the host layer's interpreter, 3.11 or later; else /usr/bin/python3
     'orgsync': (lambda v: type(v) is bool, False),  # runs ci-orgsync.timer: the org snapshot (§6.5)
     'watchdog_log': (_abs, False),   # the GPU watchdog's log (h100; design §4.4 thermal)
-    'watchdog_notice': (_abs, False),  # the watchdog's notice file (h100 health gate, §5.4 phase 1)
+    'watchdog_notice': (_abs, False),  # the watchdog's notice file (h100 health gate, §5.4)
 }
-PROXY_KEYS = {
-    'client': (_abs, True),
-    'config': (_abs, True),
-    'nodes': (lambda v: isinstance(v, list) and bool(v) and all(_str(n) for n in v), True),
-    'http_port': (lambda v: _int(v, 1) and v < 65536, True),
-    'socks_port': (lambda v: _int(v, 1) and v < 65536, True),
-    'no_proxy': (_str, True),
-}
+#: the first path's keys (decision 11.12): accepted and ignored in v1.3, so that a host's
+#: inventory needs no change in the release's window (design §9); nothing reads them
+RETIRED_KEYS = frozenset({'ssh', 'trusted', 'remote', 'cpu_slowdown', 'proxy'})
+HOST_KEYS.update({k: (lambda v: True, False) for k in RETIRED_KEYS})
 _PORT = (lambda v: _int(v, 1) and v < 65536, True)
 #: a DNS name the egress proxy passes (its own check, lower case, two labels or more)
 NAME = re.compile(r'(?=.{1,253}\Z)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+\Z')
@@ -170,12 +163,8 @@ def load(text: str) -> Inventory:
         if not _ROLE.match(role):
             raise InventoryError(f'inventory: host role {role!r} is malformed')
         _check_table(f'hosts.{role}', h, HOST_KEYS)
-        if 'proxy' in h:
-            _check_table(f'hosts.{role}.proxy', h['proxy'], PROXY_KEYS)
         if 'tunnel' in h:
             _check_table(f'hosts.{role}.tunnel', h['tunnel'], TUNNEL_KEYS)
-            if 'proxy' in h:
-                raise InventoryError(f'hosts.{role}: a CI proxy and a tunnel; give one')
         for pool, v in h['pools'].items():
             if isinstance(v, dict) and v.get('per_card') and not h['gpus']:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: per_card on a host without gpus')
@@ -197,8 +186,7 @@ def pool_labels(inv: 'Inventory', pool: str) -> list[str] | None:
 
 # ------------------------------------------------------------------ deny list
 
-#: string values that are not inventory: they appear in the design or in brainspike's
-#: scripts already. Every other string value of the inventory and the policy is denied.
+#: string values that are not inventory: they appear in the design already. Every other string value of the inventory and the policy is denied.
 PUBLIC_KEYS = frozenset({'this', 'memory_max', 'cpus', 'host_lock', 'slot_lock', 'slot_queue', 'bot', 'visibility',
                          'extra_events', 'labels'})
 #: ``tunnel.direct`` values the repository holds (the example, the tests): public, so not

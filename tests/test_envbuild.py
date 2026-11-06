@@ -158,19 +158,16 @@ class Main(unittest.TestCase):
         self.inv = inventory.load(f'''schema = 1
 this = "hb"
 [hosts.hb]
-ssh = "alias-x"
 account = "acct-x"
 home = "{t}"
 data = "{self.data}"
-trusted = true
-cpu_slowdown = 1.0
 slots = 1
 memory_max = "120G"
 disk_min_gib = 0
 gpus = [0]
 max_temp_c = 80
 pools = {{ light = 1 }}
-files = {{ host_lock = "{t}/h.lock", slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
+files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
 ''')
         self.api = Api({HEAD: {'.github/ci-runners.toml': GOOD, 'requirements-dev.txt': 'pytest\n'}})
         self.ran = []

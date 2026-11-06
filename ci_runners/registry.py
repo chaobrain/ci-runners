@@ -17,8 +17,6 @@ host, added by the lead. It holds what a consumer's inputs may leave out.
     env = "/abs/prefix/of/the/conda/env"  # PATH gets <env>/bin
     max_slots = 2                         # CI slots this project may hold here
     variables = { NAME = "value" }        # set in every part's environment
-    default = true                        # the host's default project: ci_slot.sh's tickets and
-                                          # holders are its, and its cap is the slot count (§7 rule 4)
 
 Pure but for ``load_file``.
 """
@@ -38,7 +36,7 @@ VAR = re.compile(r'[A-Z_][A-Z0-9_]{0,63}')
 RESERVED = re.compile(r'(CI_|GITHUB_|ACTIONS_|RUNNER_|LD_|PYTHON).*|CUDA_VISIBLE_DEVICES|CUDA_DEVICE_ORDER|PATH|'
                       r'BASH_ENV|ENV|HOME|USER|SHELL|IFS')
 TOP = {'name', 'repository', 'context', 'retries', 'gpu_mem_mib', 'memory', 'max_waiting', 'fallback', 'hosts'}
-HOST = {'memory_max', 'env', 'max_slots', 'variables', 'default'}
+HOST = {'memory_max', 'env', 'max_slots', 'variables'}
 
 
 class RegistryError(ValueError):
@@ -59,7 +57,6 @@ class Project:
     env: str = ''  # this host's
     max_slots: int = 1  # this host's
     variables: Mapping[str, str] = dataclasses.field(default_factory=dict)  # this host's
-    default: bool = False  # this host's default project: unattributed slot holders and tickets are its
 
 
 def _bytes(m: str) -> int:
@@ -118,9 +115,6 @@ def parse(doc: Mapping[str, object], role: str, stem: str = '') -> Project:
     if env and (not isinstance(env, str) or not re.fullmatch(r'/[A-Za-z0-9._/-]+', env)):
         raise RegistryError(f'hosts.{role}.env must be an absolute path')
     max_slots = _int(f'hosts.{role}.max_slots', h.get('max_slots', 1), 0, 64)
-    default = h.get('default', False)
-    if type(default) is not bool:
-        raise RegistryError(f'hosts.{role}.default must be a boolean')
     variables = h.get('variables', {})
     if not isinstance(variables, dict):
         raise RegistryError(f'hosts.{role}.variables must be a table')
@@ -130,7 +124,7 @@ def parse(doc: Mapping[str, object], role: str, stem: str = '') -> Project:
         if not isinstance(v, str) or '\0' in v or '\n' in v:
             raise RegistryError(f'hosts.{role}.variables.{k} must be a one-line string')
     return Project(name, repo.lower(), context, retries, gpu_mem, memory, max_waiting,
-                   {k: tuple(v) for k, v in fallback.items()}, memory_max, env, max_slots, dict(variables), default)
+                   {k: tuple(v) for k, v in fallback.items()}, memory_max, env, max_slots, dict(variables))
 
 
 def load_file(etc: str, name: str, role: str) -> Project:
@@ -145,12 +139,10 @@ def load_file(etc: str, name: str, role: str) -> Project:
     return parse(doc, role, name)
 
 
-def slot_caps(etc: str, role: str, slots: int) -> tuple[dict[str, int], str]:
-    """Every project's slot cap on this host, and the host's default project (design §7
-    rules 2 and 4): unattributed holders and tickets (``ci_slot.sh``'s) are the default
-    project's, whose cap is the slot count. A malformed entry caps its project at 0."""
+def slot_caps(etc: str, role: str) -> dict[str, int]:
+    """Every project's slot cap on this host (design §7 rule 2). A malformed entry, or a
+    project with no entry for this host, caps its project at 0."""
     caps: dict[str, int] = {}
-    default = ''
     try:
         names = sorted(n[:-5] for n in os.listdir(os.path.join(etc, 'projects')) if n.endswith('.toml'))
     except OSError:
@@ -161,9 +153,4 @@ def slot_caps(etc: str, role: str, slots: int) -> tuple[dict[str, int], str]:
         except RegistryError:
             continue
         caps[p.name] = p.max_slots
-        if p.default:
-            if default:
-                raise RegistryError(f'{default} and {p.name} are both the default project here')
-            default = p.name
-    caps[default] = slots
-    return caps, default
+    return caps

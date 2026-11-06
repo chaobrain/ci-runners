@@ -17,9 +17,9 @@ from ci_runners import hook
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EVENTS = ROOT / 'tests' / 'fixtures' / 'events'
-POLICY = '''schema = 1
+POLICY = '''schema = 2
 actors = ["alice"]
-[repositories."chaobrain/brainspike"]
+[repositories."chaobrain/brainkit"]
 id = 1001
 visibility = "private"
 '''
@@ -33,7 +33,7 @@ class Started(unittest.TestCase):
         self.etc.mkdir()
         (self.etc / 'policy.toml').write_text(POLICY)
         self.env = {'CI_RUNNERS_ETC': str(self.etc), 'CI_RUNNER_CLASS': 'part', 'RUNNER_NAME': 'r-part-1',
-                    'GITHUB_REPOSITORY': 'chaobrain/brainspike', 'GITHUB_REPOSITORY_ID': '1001',
+                    'GITHUB_REPOSITORY': 'chaobrain/brainkit', 'GITHUB_REPOSITORY_ID': '1001',
                     'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_ACTOR': 'alice', 'GITHUB_TRIGGERING_ACTOR': 'alice',
                     'GITHUB_EVENT_PATH': str(EVENTS / 'pr_same_repo.json')}
 
@@ -162,7 +162,7 @@ class Started(unittest.TestCase):
         fake.chmod(0o755)
         for n in ('job-started.sh', 'job-completed.sh'):
             (hooks / n).write_text(setup.hook_text((ROOT / 'hooks' / n).read_text(), str(fake)))
-        (self.etc / 'policy.toml').write_text('schema = 1\n')  # refuses every job
+        (self.etc / 'policy.toml').write_text('schema = 2\n')  # refuses every job
         trap = self.base / 'trap'  # a job may put its own dirname and readlink first in PATH
         for tool in ('dirname', 'readlink'):
             (trap / tool).parent.mkdir(exist_ok=True)

@@ -22,12 +22,6 @@ inputs:
   memory:
     description: MemoryMax of the part's scope (default the registry's)
     default: ''
-  slot:
-    description: full or none (default full on part, compile and nightly; none on light)
-    default: ''
-  lock:
-    description: host lock for the whole command, s, x, l or none
-    default: none
   queue-timeout-minutes:
     description: longest wait for a slot or a lease, then unavailable
     default: '60'
@@ -42,7 +36,7 @@ inputs:
     default: ''
 outputs:
   outcome:
-    description: "pass, red, oom, thermal, reboot, yielded, unavailable, lost or stopped"
+    description: "pass, red, oom, thermal, reboot, unavailable, lost or stopped"
     value: ${{ steps.part.outputs.outcome }}
   reason:
     description: "why"
@@ -68,11 +62,8 @@ outputs:
   run-seconds:
     description: "time running"
     value: ${{ steps.part.outputs.run-seconds }}
-  verify:
-    description: "whether the keyed draw picked this part (h100)"
-    value: ${{ steps.part.outputs.verify }}
   record:
-    description: "the part record, for salvage"
+    description: "the part record, for the retry and the verdict's salvage"
     value: ${{ steps.part.outputs.record }}
   summary:
     description: "the part's Markdown summary below the host's part records (also in the artifact and the step summary)"
@@ -93,8 +84,6 @@ runs:
         IN_GPUS: ${{ inputs.gpus }}
         IN_GPU_MEM: ${{ inputs.gpu-mem-mib }}
         IN_MEMORY: ${{ inputs.memory }}
-        IN_SLOT: ${{ inputs.slot }}
-        IN_LOCK: ${{ inputs.lock }}
         IN_QUEUE: ${{ inputs.queue-timeout-minutes }}
         IN_RESULTS: ${{ inputs.results }}
         IN_RESUME: ${{ inputs.resume }}
@@ -102,7 +91,7 @@ runs:
       run: >-
         "$GITHUB_ACTION_PATH/../lib/ci-run.sh" part --project "$IN_PROJECT" --id "$IN_ID" --command "$IN_COMMAND"
         --timeout-minutes "$IN_TIMEOUT" --gpus "$IN_GPUS" --gpu-mem-mib "$IN_GPU_MEM" --memory "$IN_MEMORY"
-        --slot "$IN_SLOT" --lock "$IN_LOCK" --queue-timeout-minutes "$IN_QUEUE" --results "$IN_RESULTS"
+        --queue-timeout-minutes "$IN_QUEUE" --results "$IN_RESULTS"
         --resume "$IN_RESUME" --attempt-of "$IN_ATTEMPT_OF"
     - if: always() && steps.part.outputs.outcome != ''
       uses: actions/upload-artifact@v4

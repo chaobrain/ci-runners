@@ -461,6 +461,7 @@ class Push(unittest.TestCase):
 
     def test_fetch_needs_a_token_and_an_org_name(self):
         for environ, org in (({}, 'chaobrain'), ({'GH_TOKEN': 'a b'}, 'chaobrain'),
+                             ({'GH_TOKEN': 'tok', 'GITHUB_API_URL': 'http://evil.example'}, 'chaobrain'),
                              ({'GH_TOKEN': 'tok'}, 'chaobrain/x'), ({'GH_TOKEN': 'tok'}, '-x')):
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stderr(err):
@@ -472,7 +473,7 @@ class Push(unittest.TestCase):
         self.assertEqual(self.receive(self.doc())[0], 0)
         before = (self.etc / 'org.json').read_bytes()
         for data, why in ((self.doc(org='elsewhere', repositories={'elsewhere/x': 1}), "org 'elsewhere'"),
-                          (self.doc(fetched_at=NOW + 400), 'from the future'),
+                          (self.doc(fetched_at=NOW + policy.CLOCK_SKEW + 1), 'from the future'),
                           (self.doc(fetched_at=NOW - 601), 'older than the one in place'),
                           (self.doc(members=['bot[bot]']), 'not a human login'),
                           (b'{not json', 'not JSON'),
@@ -483,8 +484,26 @@ class Push(unittest.TestCase):
             self.assertIn('the old snapshot stays', err)
             self.assertEqual((self.etc / 'org.json').read_bytes(), before, why)
         self.assertEqual(self.receive(self.doc(fetched_at=NOW - 600))[0], 0)  # the same one again
+        self.assertEqual(stat.S_IMODE((self.etc / 'org.json.lock').stat().st_mode), 0o600)
         self.assertEqual(self.receive(self.doc(fetched_at=NOW - 60, members=['dave']))[0], 0)  # a newer one
         self.assertEqual(policy.load_snapshot((self.etc / 'org.json').read_bytes()).members, {'dave'})
+
+    def test_the_clock_skew_bound(self):
+        self.assertEqual(self.receive(self.doc(fetched_at=NOW + policy.CLOCK_SKEW))[0], 0)
+
+    def test_receives_take_turns(self):
+        import fcntl
+        fd = os.open(self.etc / 'org.json.lock', os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # another receive holds the lock
+        done = []
+        th = threading.Thread(target=lambda: done.append(self.receive(self.doc())[0]))
+        th.start()
+        th.join(0.5)
+        self.assertEqual(done, [])  # it waits
+        self.assertFalse((self.etc / 'org.json').exists())
+        os.close(fd)
+        th.join(10)
+        self.assertEqual(done, [0])
 
     def test_a_broken_snapshot_in_place_is_replaced(self):
         (self.etc / 'org.json').write_text('{broken')
@@ -578,7 +597,7 @@ class PushScript(unittest.TestCase):
         self.assertEqual((self.t / 'ssh.token').read_text().strip(), '0')  # the login stays on the workstation
 
     def test_arguments_are_plain_words(self):
-        for args in (('chaobrain', 'h;x', '/d', '/p'), ('chaobrain', 'h', 'd', '/p'), ('chaobrain', 'h', '/d', 'p'),
+        for args in (('chaobrain', '-F/tmp/x', '/d', '/p'), ('chaobrain', 'h;x', '/d', '/p'), ('chaobrain', 'h', 'd', '/p'), ('chaobrain', 'h', '/d', 'p'),
                      ('chaobrain', 'h', '/d $(id)', '/p'), ('chaobrain', 'h', '/d')):
             r = self.run_script(*args, api='http://127.0.0.1:9')  # nothing leaves the machine
             self.assertEqual(r.returncode, 2, args)

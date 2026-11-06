@@ -724,10 +724,18 @@ MUTANTS = [
     (ORS, "        if not policy._ORG.match(org):", "        if False:", [f'{TZ}.Push.test_fetch_needs_a_token_and_an_org_name']),
     (ORS, "        token = _token(environ.get('GH_TOKEN', '').encode())", "        token = environ.get('GH_TOKEN', '')",
      [f'{TZ}.Push.test_fetch_needs_a_token_and_an_org_name']),
-    (OPS, "  [[ $a =~ ^[A-Za-z0-9._/-]+$ ]] ||", "  true ||", [f'{TZ}.PushScript.test_arguments_are_plain_words']),
+    (OPS, "  [[ $a =~ ^[A-Za-z0-9._/][A-Za-z0-9._/-]*$ ]] ||", "  true ||", [f'{TZ}.PushScript.test_arguments_are_plain_words']),
     (OPS, "  case $a in /*) ;; *)", "  case $a in *) ;; /*)", [f'{TZ}.PushScript.test_arguments_are_plain_words']),
     (OPS, 'doc=$(GH_TOKEN=$token "$root/bin/ci-run"', 'export GH_TOKEN=$token; doc=$("$root/bin/ci-run"',
      [f'{TZ}.PushScript.test_the_snapshot_reaches_receive']),
+    (OPS, "set -euo pipefail", "set -u", [f'{TZ}.PushScript.test_a_failed_fetch_sends_nothing']),
+    (OPS, "  [[ $a =~ ^[A-Za-z0-9._/][A-Za-z0-9._/-]*$ ]] ||", "  [[ $a =~ ^[A-Za-z0-9._/-]+$ ]] ||",
+     [f'{TZ}.PushScript.test_arguments_are_plain_words']),
+    (ORS, "    if snap.fetched_at > now + policy.CLOCK_SKEW:", "    if snap.fetched_at >= now + policy.CLOCK_SKEW:",
+     [f'{TZ}.Push.test_the_clock_skew_bound']),
+    (ORS, "            fcntl.flock(fd, fcntl.LOCK_EX)", "            pass", [f'{TZ}.Push.test_receives_take_turns']),
+    (ORS, "        if not (base.startswith('https://') or base.startswith('http://127.0.0.1:')):", "        if False:",
+     [f'{TZ}.Push.test_fetch_needs_a_token_and_an_org_name']),
 ]
 
 

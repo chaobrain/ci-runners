@@ -10,7 +10,8 @@
 set -euo pipefail
 [ $# -eq 4 ] || { echo "usage: $0 ORG SSH_HOST REMOTE_DATA REMOTE_PYTHON" >&2; exit 2; }
 for a in "$@"; do  # each goes into the remote command line: one plain word each
-  [[ $a =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "orgsync-push.sh: an argument is not one word of [A-Za-z0-9._/-]" >&2; exit 2; }
+  [[ $a =~ ^[A-Za-z0-9._/][A-Za-z0-9._/-]*$ ]] ||  # no leading -: ssh would read an option
+    { echo "orgsync-push.sh: an argument is not one word of [A-Za-z0-9._/-], or starts with -" >&2; exit 2; }
 done
 org=$1 host=$2 data=$3 py=$4
 for a in "$data" "$py"; do

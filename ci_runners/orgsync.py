@@ -17,6 +17,7 @@ host that holds its own token runs the first form from ``ci-orgsync.timer``.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sys
@@ -155,7 +156,10 @@ def accept(data: bytes, org: str, current: bytes | None, now: float) -> dict:
             old = None  # a broken snapshot in place refuses every job: any good one replaces it
         if old is not None and snap.fetched_at < old.fetched_at:
             raise SyncError('the snapshot is older than the one in place')
-    return json.loads(data)
+    doc = json.loads(data)
+    if len(json.dumps(doc, indent=1, sort_keys=True)) + 1 > MAX_SNAPSHOT:  # as write() lays it out
+        raise SyncError(f'the snapshot as written is larger than {MAX_SNAPSHOT} bytes')
+    return doc
 
 
 def _policy_org(etc: str) -> str | None:
@@ -170,13 +174,19 @@ def receive(etc: str, stdin, now: Callable = time.time) -> int:
         if org is None:
             raise SyncError('the policy has no [org] table')
         data = stdin.read(MAX_SNAPSHOT + 1)
+        # one receive at a time: two that pass against the same snapshot could land out of order
+        fd = os.open(os.path.join(etc, 'org.json.lock'), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         try:
-            with open(os.path.join(etc, 'org.json'), 'rb') as f:
-                current = f.read(MAX_SNAPSHOT + 1)
-        except FileNotFoundError:
-            current = None
-        doc = accept(data, org, current, now())
-        write(etc, doc)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                with open(os.path.join(etc, 'org.json'), 'rb') as f:
+                    current = f.read(MAX_SNAPSHOT + 1)
+            except FileNotFoundError:
+                current = None
+            doc = accept(data, org, current, now())
+            write(etc, doc)
+        finally:
+            os.close(fd)
     except (OSError, ValueError, SyncError) as e:
         print(f'ci-run org-sync --receive: {e}; the old snapshot stays', file=sys.stderr)
         return 1
@@ -188,8 +198,11 @@ def fetch_out(org: str, environ, out, call: Callable = github.api, now: Callable
     try:
         if not policy._ORG.match(org):
             raise SyncError('--org is not an org name')
+        base = environ.get('GITHUB_API_URL', 'https://api.github.com')
+        if not (base.startswith('https://') or base.startswith('http://127.0.0.1:')):  # the login goes there
+            raise SyncError('GITHUB_API_URL must be https://')
         token = _token(environ.get('GH_TOKEN', '').encode())
-        doc = fetch(org, token, call, environ.get('GITHUB_API_URL', 'https://api.github.com'), now)
+        doc = fetch(org, token, call, base, now)
     except (OSError, ValueError, SyncError, github.ApiError) as e:
         print(f'ci-run org-sync --fetch: {e}', file=sys.stderr)
         return 1

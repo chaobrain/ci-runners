@@ -726,6 +726,7 @@ account:
 
 | change | detail |
 |---|---|
+| prerequisites | linger for the maintainer's account; an ssh key for h100 usable without an agent prompt; gh's login in its config file, not a keyring that needs a session |
 | `ci-orgsync-push.{service,timer}` | user units of the maintainer's account, every 10 min: `ci-run org-sync --fetch` from a checkout of a release, with the login from `gh auth token`, piped to `ssh <h100> <release>/bin/ci-run org-sync --receive`; `TimeoutStartSec=5min` |
 | unchanged | the maintainer's gh login and ssh access to h100 (both exist); nothing is stored |
 
@@ -901,7 +902,8 @@ fails meanwhile.
 the document loads as the hook loads it, every repository in it belongs to the policy's
 `[org]` name, its `fetched_at` is no later than 5 min from now and no earlier than the
 snapshot in place (a replayed old snapshot cannot bring back a removed member). Anything
-else leaves the old snapshot, exits 1 and prints why.
+else leaves the old snapshot, exits 1 and prints why. Receives take a lock, one at a
+time. The push timer is monotonic: a workstation suspended for an hour stales h100 too.
 
 ## 7. Scheduling and fairness
 

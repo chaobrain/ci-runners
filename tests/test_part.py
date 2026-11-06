@@ -284,6 +284,40 @@ class Execute(Host):
         self.assertEqual((out['outcome'], (rec / 'work' / 'done').exists()), ('pass', True))
 
 
+class OwnCap(Host):
+    """The supervisor's memory cap (design decision 11.11), outside a scope: the command and
+    its descendants count."""
+    HOG = 'python3 -c "import time; b = b\'x\' * (160 << 20); time.sleep(30)"'
+
+    def execute_capped(self, own_cap, **kw):
+        ex = part.Executor(self.inv, str(self.etc), self.env, release=str(ROOT), scope=False, poll=0.1,
+                           own_cap=own_cap)
+        kw.setdefault('timeout_minutes', 1)
+        kw.setdefault('queue_timeout_minutes', 0.02)
+        return ex.execute(part.Inputs(project='p', id='hog', **kw))
+
+    def test_the_executor_reads_the_systemd_version(self):
+        def run_with(text):
+            return lambda argv, **kw: subprocess.CompletedProcess(argv, 0, text, '')
+        old = part.Executor(self.inv, str(self.etc), self.env, release=str(ROOT), run=run_with('systemd 252 (252)\n'))
+        new = part.Executor(self.inv, str(self.etc), self.env, release=str(ROOT), run=run_with('systemd 253 (253)\n'))
+        self.assertEqual((old.oom_policy(), new.oom_policy()), (False, True))
+
+    def test_a_part_over_its_memory_ends_oom(self):
+        t0 = time.monotonic()
+        code, out = self.execute_capped(True, command=f'{self.HOG} & wait', memory='64M')
+        self.assertEqual((code, out['outcome']), (0, 'oom'))
+        self.assertLess(time.monotonic() - t0, 20)  # killed, not timed out
+
+    def test_under_its_memory_it_runs(self):
+        code, out = self.execute_capped(True, command='python3 -c "b = b\'x\' * (8 << 20)"', memory='64M')
+        self.assertEqual(out['outcome'], 'pass')
+
+    def test_without_the_own_cap_nothing_is_killed(self):
+        code, out = self.execute_capped(False, command=self.HOG.replace('30', '3'), memory='64M')  # past a reading
+        self.assertEqual(out['outcome'], 'pass')
+
+
 class Salvage(Host):
     def test_salvage_reads_a_finished_record(self):
         _, out = self.execute(command='exit 0')
@@ -381,6 +415,42 @@ class Pure(unittest.TestCase):
         self.assertEqual(part.command_argv('c', compile_part=True, lock='s', lock_bin='L', host_lock='H')[2:3], ['0'])
         self.assertIn('-s', part.command_argv('c', compile_part=True, lock='s', lock_bin='L', host_lock='H'))
         self.assertEqual(part.unit_name('a b', 'x', '7-1-1'), 'ci-part-a_b-x-7-1-1.scope')
+
+    def test_oom_policy_only_where_systemd_takes_it(self):
+        self.assertNotIn('OOMPolicy=continue', part.scope_argv('u.scope', 'p', '4G', ['sup'], oom_policy=False))
+        self.assertEqual(part.scope_argv('u.scope', 'p', '4G', ['sup'], oom_policy=False)[-1], 'sup')
+        self.assertEqual(part.systemd_major('systemd 249 (249.11-0ubuntu3.23)\n+PAM'), 249)
+        self.assertEqual(part.systemd_major('systemd 255 (255.4-1ubuntu8)'), 255)
+        self.assertEqual(part.systemd_major('nothing'), 0)
+
+
+    def test_where_systemd_enforces_memory(self):
+        files = {'/user.slice/user-5.slice/user@5.service/cgroup.subtree_control': 'cpu io memory pids\n'}
+
+        def read(path):
+            if path not in files:
+                raise FileNotFoundError(path)
+            return files[path]
+        unified = '0::/user.slice/user-5.slice/user@5.service/ci.slice/ci-runner@x.service\n'
+        self.assertTrue(part.memory_delegated(unified, read))
+        hybrid = '1:name=systemd:/user.slice/user-5.slice/user@5.service/ci.slice\n' + unified
+        self.assertFalse(part.memory_delegated(hybrid, read))  # v1 or hybrid: never
+        self.assertFalse(part.memory_delegated(unified + '1:name=systemd:/user.slice\n', read))
+        self.assertFalse(part.memory_delegated('0::/system.slice/runner.service\n', read))  # no user manager
+        files['/user.slice/user-5.slice/user@5.service/cgroup.subtree_control'] = 'cpu pids\n'
+        self.assertFalse(part.memory_delegated(unified, read))
+        self.assertFalse(part.memory_delegated('0::/user.slice/user-6.slice/user@6.service/a\n', read))  # unread
+
+    def test_the_scope_procs_file(self):
+        scope = '/user.slice/user-5.slice/user@5.service/ci.slice/ci-p.slice/ci-part-r-x-7-1-1.scope'
+        self.assertEqual(part.scope_procs_file(f'0::{scope}\n'), f'/sys/fs/cgroup{scope}/cgroup.procs')
+        self.assertEqual(part.scope_procs_file(f'11:memory:/user.slice\n1:name=systemd:{scope}\n0::{scope}\n'),
+                         f'/sys/fs/cgroup/systemd{scope}/cgroup.procs')
+        self.assertEqual(part.scope_procs_file(f'0::{scope}\n1:name=systemd:{scope}\n'),
+                         f'/sys/fs/cgroup/systemd{scope}/cgroup.procs')
+        self.assertEqual(part.scope_procs_file('0::/user.slice/user-5.slice/session-3.scope\n'), '')
+        self.assertEqual(part.rss_anon('Name:\tx\nRssAnon:\t  2048 kB\nRssFile:\t 9 kB\n'), 2 << 20)
+        self.assertEqual(part.rss_anon('Name:\tkthreadd\n'), 0)
 
     def test_outputs_are_one_line_each(self):
         with tempfile.NamedTemporaryFile('r') as f:

@@ -165,6 +165,12 @@ MUTANTS = [
     (SLO, "        held[p] = held.get(p, 0) + 1\n", "", [f'{TS}.Grants.test_a_project_at_its_cap_is_skipped']),
     (SLO, "return waiting >= max_waiting", "return waiting > max_waiting", [f'{TS}.Grants.test_queue_full']),
     # the slots
+    (SLO, "            fcntl.flock(lk, fcntl.LOCK_EX)\n", "            pass\n",
+     [f'{TS}.Queue.test_a_round_waits_for_another_round']),
+    (SLO, "        if self.seq not in grants(self.waiting(), per, caps, nfree):", "        if False:",
+     [f'{TS}.Concurrent.test_never_more_than_the_slots_or_a_cap']),
+    (SLO, "                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n", "                pass\n",
+     [f'{TS}.Concurrent.test_never_more_than_the_slots_or_a_cap']),
     (SLO, "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)", "fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)",
      [f'{TS}.Queue.test_a_taken_slot_is_held_exclusively']),
     (SLO, "                        return True\n    except (OSError", "                        pass\n    except (OSError",
@@ -799,7 +805,7 @@ MUTANTS = [
     (INS, 'chmod 0555 "$rel/$id"', 'chmod u-w "$rel/$id"', ['tests.test_scripts.Install.test_an_annotated_tag_resolves_to_its_commit']),
     # the first path retired (decision 11.12): what stays guards that it stays out
     (INV, "HOST_KEYS.update({k: (lambda v: True, False) for k in RETIRED_KEYS})", "pass",
-     [f'{TI}.Load.test_the_retired_keys_are_accepted_and_ignored', f'{TU}.Setup.test_a_retired_proxy_table_plans_nothing']),
+     [f'{TI}.Load.test_the_retired_keys_are_accepted_and_ignored', f'{TU}.Setup.test_the_retired_keys_plan_nothing']),
     (INV, "RETIRED_KEYS = frozenset({'ssh', 'trusted', 'remote', 'cpu_slowdown', 'proxy'})",
      "RETIRED_KEYS = frozenset({'ssh', 'trusted', 'remote', 'cpu_slowdown', 'proxy', 'slowdown'})",
      [f'{TI}.Load.test_the_retired_keys_are_accepted_and_ignored']),

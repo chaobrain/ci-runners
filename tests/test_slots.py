@@ -5,6 +5,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -82,6 +83,29 @@ class Queue(unittest.TestCase):
             finally:
                 os.close(fd)
 
+    def test_a_round_waits_for_another_round(self):
+        """A round holds take.lock from its read of the holders to its holder record, so
+        no other round sees a slot flocked and not yet recorded (a project would pass its
+        cap)."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 1, poll=0.05)
+            q.take_ticket('p', 'cmd')
+            lock = os.path.join(q.queue, 'take.lock')
+            hold = subprocess.Popen(['flock', '-x', lock, 'sleep', '1'], start_new_session=True)
+            try:
+                for _ in range(200):
+                    if slots._flocked(lock):
+                        break
+                    time.sleep(0.01)
+                t0 = time.monotonic()
+                fd = q.try_take('p', {'p': 1})
+                waited = time.monotonic() - t0
+                self.assertIsNotNone(fd)
+                os.close(fd)
+                self.assertGreater(waited, 0.5)
+            finally:
+                hold.wait()
+
     def test_tickets_share_the_counter_and_dead_ones_go(self):
         with tempfile.TemporaryDirectory() as d:
             q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05)
@@ -94,6 +118,51 @@ class Queue(unittest.TestCase):
             self.assertTrue(q.ticket.endswith('000000000008.wait'))
             self.assertEqual(q.waiting(), [T(8, 'p')])
             self.assertFalse(os.path.exists(dead))
+
+
+class Concurrent(unittest.TestCase):
+    """Waiters in separate processes, as the parts of v1.2 and v1.3 share h100's queue
+    in a release's window (design §7, §9): never more holders than slots, never more
+    than a project's cap."""
+
+    def test_never_more_than_the_slots_or_a_cap(self):
+        root = str(pathlib.Path(__file__).resolve().parents[1])
+        body = (
+            'import os, sys, time, fcntl\n'
+            'sys.path.insert(0, sys.argv[1])\n'
+            'from ci_runners import slots\n'
+            'd, project = sys.argv[2], sys.argv[3]\n'
+            'q = slots.SlotQueue(os.path.join(d, "slot.lock"), 2, os.path.join(d, "slot.queue"))\n'
+            'q.take_ticket(project, "cmd")\n'
+            'fd = None\n'
+            'while fd is None:\n'
+            '    fd = q.try_take(project, {"p": 2, "q": 1})\n'
+            '    time.sleep(0.02) if fd is None else None\n'
+            'def log(e):\n'
+            '    with open(os.path.join(d, "log"), "a") as f:\n'
+            '        fcntl.flock(f, fcntl.LOCK_EX)\n'
+            '        f.write(f"{e} {project}\\n")\n'
+            'log("in"); time.sleep(0.3); log("out")\n'
+            'os.close(fd)\n')
+        with tempfile.TemporaryDirectory(prefix='ci-slot-') as d:
+            procs = [subprocess.Popen([sys.executable, '-I', '-c', body, root, d, 'q' if i % 3 else 'p'])
+                     for i in range(9)]
+            for p in procs:
+                self.assertEqual(p.wait(120), 0)
+            depth, peak, qdepth, qpeak = 0, 0, 0, 0
+            lines = pathlib.Path(d, 'log').read_text().split('\n')
+            for line in filter(None, lines):
+                e, project = line.split()
+                step = 1 if e == 'in' else -1
+                depth += step
+                peak = max(peak, depth)
+                if project == 'q':
+                    qdepth += step
+                    qpeak = max(qpeak, qdepth)
+            self.assertEqual(sum(1 for x in lines if x.startswith('in ')), 9)
+            self.assertEqual(peak, 2)
+            self.assertEqual(qpeak, 1)
+            self.assertEqual([n for n in os.listdir(os.path.join(d, 'slot.queue')) if n.endswith('.wait')], [])
 
 
 if __name__ == '__main__':

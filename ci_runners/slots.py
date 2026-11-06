@@ -225,9 +225,21 @@ class SlotQueue:
 
     def try_take(self, project: str, caps: dict[str, int]) -> int | None:
         """One round: if ``grants`` names our ticket, try the free slots in order with a
-        non-blocking flock. Returns the fd of the slot taken (inheritable), or None."""
+        non-blocking flock. Returns the fd of the slot taken (inheritable), or None.
+
+        The round holds ``take.lock``, so no other round reads the holders between our
+        flock of a slot and our holder record: a slot held without a record counts for
+        no project, and a project could then pass its cap."""
         if not os.path.exists(self.ticket):  # deleted while we were stopped: re-queue
             self.take_ticket(project, 'requeued')
+        lk = os.open(os.path.join(self.queue, 'take.lock'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            return self._take(project, caps)
+        finally:
+            os.close(lk)
+
+    def _take(self, project: str, caps: dict[str, int]) -> int | None:
         per, nfree, _ = self.held()
         if self.seq not in grants(self.waiting(), per, caps, nfree):
             return None

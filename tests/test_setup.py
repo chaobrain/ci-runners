@@ -150,11 +150,17 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
             with self.assertRaises(ValueError, msg=(name, mem)):
                 setup.build(str(self.etc))
 
-    def test_a_retired_proxy_table_plans_nothing(self):
-        """Decision 11.12: an inventory's old proxy table is ignored, not set up."""
+    def test_the_retired_keys_plan_nothing(self):
+        """Decision 11.12: the first path's keys (h100's inventory still holds some) and an
+        old proxy table are ignored, not set up: the plan is the same without them."""
         inv = self.etc / 'inventory.toml'
         before = setup.build(str(self.etc)).text()
-        inv.write_text(inv.read_text() + '[hosts.hb.proxy]\nclient = "/usr/bin/x -c /tmp/y"\nhttp_port = 20809\n')
+        text = inv.read_text().replace('slots = 2\n', 'ssh = "<alias>"\ntrusted = true\nremote = false\n'
+                                       'cpu_slowdown = 2.7\nslots = 2\n', 1)
+        text = text.replace('{ slot_lock = ', '{ host_lock = "/tmp/h.lock", slot_lock = ', 1)
+        self.assertNotEqual(text, inv.read_text())
+        self.assertIn('host_lock', text)
+        inv.write_text(text + '[hosts.hb.proxy]\nclient = "/usr/bin/x -c /tmp/y"\nhttp_port = 20809\n')
         self.assertEqual(setup.build(str(self.etc)).text(), before)
 
     def test_the_runner_app_is_checked_and_unpacked_whole(self):

@@ -1057,6 +1057,18 @@ These are starting values, tuned from RUN-1's measured runs.
   4. A canary consumer branch pins `@v1.N.0` and passes.
   5. The lead moves `v1`. The hosts already have the release, so the order is safe.
   6. Rollback: move `v1` back. The old release is still installed.
+- **A reusable workflow's canary (measured with `v1.2.0`, 2026-11-06).** A workflow names
+  the actions it calls with a ref of their own. A canary that pins `h100-test.yml@v1.N.0`
+  still runs the actions at `@v1`, so the old release's host layer, and it tests only the
+  workflow file. So the release stamp also rewrites the reusable workflows' own action refs
+  (`chaobrain/ci-runners/actions/<a>@v1`) to `@v1.N.0`, and the PR after the tag sets them
+  back to `@v1` with `actions/RELEASE`. A test checks that the refs and the stamp agree.
+- **A host change the old release cannot run.** `v1.2.0` changed h100's inventory (the
+  tunnel table) in a way `v1.1.0`'s host layer refuses. Between h100's apply and the move
+  of `v1`, every h100 job ran `v1.1.0` and failed at once. Such a release says so in its
+  notes. Then the lead applies the host's plan and moves `v1` in one window, once every
+  host holds the release, or the host layer first learns to read both forms in a release
+  of its own.
 - **Breaking changes** get `v2`. `v1` stays tagged and installed until its last
   consumer has migrated. The registry lists each consumer's major, and the executor logs
   the release that called it.

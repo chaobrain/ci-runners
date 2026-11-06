@@ -55,7 +55,7 @@ class Load(unittest.TestCase):
         inv.load(EXAMPLE.replace('this = "3090b"', 'this = "h100"'))
         for bad in ('python = "python3"', 'python = ""', 'python = 3', 'orgsync = "yes"'):
             key = bad.split(' ')[0]
-            text = re.sub(rf'^{key} = .*$', bad, EXAMPLE, count=1, flags=re.M)
+            text = re.sub(rf'^(# )?{key} = .*$', bad, EXAMPLE, count=1, flags=re.M)
             with self.assertRaises(inv.InventoryError, msg=bad):
                 inv.load(text)
 

@@ -803,6 +803,12 @@ MUTANTS = [
     (SET, "                or name in ('ci-tunnel.service', 'ci-bridge.service') and 'tunnel' not in h):", "                ):",
      [f'{TU}.Standalone.test_plan_without_a_proxy']),
     (BRG, "    if not t:\n", "    if False:\n", [f'{TU}.Egress.test_bridge_command_without_a_tunnel']),
+    (SET, "            if not adopt:\n", "            if True:\n", [f'{TU}.Standalone.test_adopt_takes_over_unrecorded_units']),
+    (SET, "            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():\n                raise ValueError(f'{path} is not a regular",
+     "            if False:\n                raise ValueError(f'{path} is not a regular", [f'{TU}.Standalone.test_adopt_takes_over_unrecorded_units']),
+    (SET, "            made.append({'kind': 'file', 'path': a['path']})", "            pass",
+     [f'{TU}.Standalone.test_adopt_takes_over_unrecorded_units']),
+    (SET, "    plan = build(etc, adopt)\n", "    plan = build(etc, True)\n", [f'{TU}.Standalone.test_adopt_takes_over_unrecorded_units']),
 ]
 
 

@@ -110,11 +110,11 @@ allowlist edit is needed.
    registry lines to add: `env` and the spec's `variables`. Rerun it after a dependency
    change has merged. The maintainer runs it with their own `GH_TOKEN` (Contents: read on
    the repository and on any private upstream) set for that one command; no such token
-   is ever stored on h100. conda and pip reach the internet through h100's bridge, so the
-   shell takes a runner's proxy lines for the build: `https_proxy`, `http_proxy` and
-   `no_proxy` from `<data>/actions-runner/<runner>/.env`. Without them the hosts in the
-   inventory's `tunnel.direct` (a package mirror among them) go to the bridge, which
-   refuses them with 403.
+   is ever stored on h100. conda and pip reach the internet through h100's egress, so
+   the shell takes a runner's proxy lines for the build: `https_proxy`, `http_proxy` and
+   `no_proxy` from `<data>/actions-runner/<runner>/.env`. Without `no_proxy`, the hosts
+   in the inventory's `tunnel.direct` (a package mirror among them) go to the egress
+   proxy, which refuses them with 403.
 3. Add the workflow below, pinning `@v1`.
 4. Canary and done as in §2, steps 5 and 6.
 

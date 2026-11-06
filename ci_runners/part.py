@@ -8,6 +8,11 @@ small supervisor runs the command, enforces the inner timeout and records the ex
 the part's record, so the record finishes even when the runner itself is stopped
 mid-part (the scope is not in the runner's cgroup): ``salvage`` then reads it.
 
+Where the user manager has no memory controller (cgroup v1, design decision 11.11),
+``MemoryMax`` is not enforced, so the supervisor enforces the part's memory itself: it
+sums the scope's processes' ``RssAnon`` every ``CAP_POLL`` s and kills them over the
+cap. ``OOMPolicy`` is passed on systemd 253 and later only (``OOM_POLICY_SYSTEMD``).
+
 A part's record is ``state/parts/<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>/``:
 ``record.json`` (inputs, start), ``exit.json`` (the supervisor's) and ``outcome.json``
 (the outputs). The step exits 1 only for ``red``; 2 for an input the registry refuses.
@@ -37,6 +42,9 @@ SLOT_CLASSES = ('part', 'compile', 'nightly')  # slot=full by default on these (
 KILL_GRACE = 30  # s between TERM and KILL at the inner timeout
 RELAY_DRAIN = 5  # s the relay may still copy once the command has ended
 WATCHDOG_TAIL = 4 << 20  # bytes of the GPU watchdog's log read after a part
+CAP_POLL = 2.0  # s between the supervisor's memory readings, where it enforces the cap
+OOM_POLICY_SYSTEMD = 253  # the first systemd that takes OOMPolicy on a scope
+SCOPE = re.compile(r'ci-part-[^/]*\.scope')  # a part's scope, the only cgroup the cap kills in
 #: the pool that marks an h100-style host: one runner per card, labelled h100-gpu<N> (design §5.1)
 H100_POOL = 'h100'
 #: the step's own files: the command must not write the part's outputs or the job's env
@@ -85,11 +93,123 @@ def unit_name(runner: str, part_id: str, run: str) -> str:
     return f'ci-part-{safe}-{part_id}-{run}.scope'
 
 
-def scope_argv(unit: str, project: str, memory: str, inner: Sequence[str]) -> list[str]:
-    """``systemd-run`` for the part's scope (design §4.3). Pure."""
+def scope_argv(unit: str, project: str, memory: str, inner: Sequence[str], oom_policy: bool = True) -> list[str]:
+    """``systemd-run`` for the part's scope (design §4.3); ``oom_policy`` false on a
+    systemd that refuses ``OOMPolicy`` on a scope. Pure."""
+    policy = ['-p', 'OOMPolicy=continue'] if oom_policy else []
     return ['systemd-run', '--user', '--scope', '--quiet', f'--unit={unit}',
             f'--slice=ci-{project}.slice', '-p', f'MemoryMax={memory}', '-p', 'MemorySwapMax=0',
-            '-p', 'OOMPolicy=continue', *inner]
+            *policy, *inner]
+
+
+def systemd_major(version_text: str) -> int:
+    """The major version in ``systemctl --version``'s first line; 0 if unread. Pure."""
+    m = re.match(r'systemd (\d+)\b', version_text)
+    return int(m.group(1)) if m else 0
+
+
+def memory_delegated(proc_cgroup: str, read: Callable[[str], str]) -> bool:
+    """Whether systemd enforces a user scope's ``MemoryMax`` here: the unified hierarchy
+    only (``/proc/self/cgroup`` a single ``0::`` line), with ``memory`` in the user
+    manager's ``cgroup.subtree_control``. ``read`` reads a file below ``/sys/fs/cgroup``;
+    an unreadable one counts as no. Pure but for ``read``."""
+    lines = proc_cgroup.strip().splitlines()
+    if len(lines) != 1 or not lines[0].startswith('0::/'):
+        return False
+    parts = lines[0][3:].strip('/').split('/')
+    top = next((i for i, x in enumerate(parts) if re.fullmatch(r'user@\d+\.service', x)), None)
+    if top is None:
+        return False
+    try:
+        return 'memory' in read('/' + '/'.join(parts[:top + 1]) + '/cgroup.subtree_control').split()
+    except OSError:
+        return False
+
+
+def scope_procs_file(proc_cgroup: str) -> str:
+    """The ``cgroup.procs`` of this process's part scope, or ``''`` outside a part scope.
+    v1 and hybrid hosts list ``name=systemd``, which wins (a hybrid host's ``0::`` is
+    mounted elsewhere); a unified host lists only ``0::``. Pure."""
+    found = {}
+    for line in proc_cgroup.splitlines():
+        hid, _, rest = line.partition(':')
+        ctl, _, path = rest.partition(':')
+        if SCOPE.fullmatch(path.rsplit('/', 1)[-1]):
+            if ctl == 'name=systemd':
+                found['v1'] = f'/sys/fs/cgroup/systemd{path}/cgroup.procs'
+            elif hid == '0' and ctl == '':
+                found['v2'] = f'/sys/fs/cgroup{path}/cgroup.procs'
+    return found.get('v1') or found.get('v2', '')
+
+
+def rss_anon(status_text: str) -> int:
+    """``RssAnon`` in bytes from a ``/proc/<pid>/status``; 0 without it. Pure."""
+    m = re.search(r'^RssAnon:\s+(\d+) kB$', status_text, re.M)
+    return int(m.group(1)) * 1024 if m else 0
+
+
+def _descendants(root: int) -> set[int]:
+    """``root`` and its descendants, from ``/proc`` (the cap's members outside a scope)."""
+    parent: dict[int, int] = {}
+    for d in os.listdir('/proc'):
+        if d.isdigit():
+            try:
+                with open(f'/proc/{d}/stat') as f:
+                    parent[int(d)] = int(f.read().rsplit(')', 1)[1].split()[1])
+            except (OSError, IndexError, ValueError):
+                continue
+    out, todo = {root}, [root]
+    while todo:
+        p = todo.pop()
+        for c, pp in parent.items():
+            if pp == p and c not in out:
+                out.add(c)
+                todo.append(c)
+    return out
+
+
+class MemoryCap:
+    """The supervisor's own memory cap (design decision 11.11): the members are the part
+    scope's processes (its ``cgroup.procs``), or outside a scope the command and its
+    descendants; all but the supervisor count and are killed."""
+
+    def __init__(self, cap: int, child: int, procs_file: str) -> None:
+        self.cap, self.child, self.procs_file, self.me = cap, child, procs_file, os.getpid()
+        self.killed = False
+
+    def members(self) -> set[int]:
+        if self.procs_file:
+            try:
+                with open(self.procs_file) as f:
+                    pids = {int(x) for x in f.read().split()}
+            except (OSError, ValueError):
+                pids = set()
+        else:
+            pids = _descendants(self.child)
+        pids.discard(self.me)
+        return pids
+
+    def used(self, pids: set[int]) -> int:
+        total = 0
+        for p in pids:
+            try:
+                with open(f'/proc/{p}/status') as f:
+                    total += rss_anon(f.read())
+            except OSError:
+                continue
+        return total
+
+    def check(self) -> bool:
+        """Kill the members if they hold more than the cap; True once they have been."""
+        pids = self.members()
+        if not self.killed and self.used(pids) > self.cap:
+            self.killed = True
+            for p in pids:
+                try:
+                    os.kill(p, signal.SIGKILL)
+                except OSError:
+                    pass
+        return self.killed
 
 
 def command_argv(command: str, *, compile_part: bool, lock: str, lock_bin: str, host_lock: str,
@@ -142,7 +262,7 @@ def _relay(src: int, dst: int) -> None:
                 alive = False
 
 
-def supervise(record: str, timeout: float, argv: Sequence[str]) -> int:
+def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0) -> int:
     """Run ``argv`` in its own session with OOM score +500, end it at ``timeout``, and
     write ``exit.json``. Runs inside the part's scope, in a session of its own, so the
     job's signals (a cancel, a stopped runner) do not reach it: only a stop of the scope
@@ -151,7 +271,10 @@ def supervise(record: str, timeout: float, argv: Sequence[str]) -> int:
 
     The command's output goes through a pipe this supervisor relays to its own: when the
     job's end of it closes (a stopped runner), the relay drops the rest and the command
-    runs on, instead of dying of SIGPIPE at its next write."""
+    runs on, instead of dying of SIGPIPE at its next write.
+
+    ``cap`` > 0 (bytes): enforce the part's memory here, every ``CAP_POLL`` s
+    (``MemoryCap``), and count a kill over it as an OOM kill."""
     try:
         os.setsid()
     except OSError:
@@ -178,12 +301,24 @@ def supervise(record: str, timeout: float, argv: Sequence[str]) -> int:
     relay = threading.Thread(target=_relay, args=(child.stdout.fileno(), sys.stdout.fileno()), daemon=True)
     relay.start()
     _write_json(os.path.join(record, 'scope.json'), {'supervisor': os.getpid(), 'child': child.pid})
+    mcap = None
+    if cap > 0:
+        try:
+            with open('/proc/self/cgroup') as f:
+                procs_file = scope_procs_file(f.read())
+        except OSError:
+            procs_file = ''
+        mcap = MemoryCap(cap, child.pid, procs_file)
     deadline = time.monotonic() + timeout
     while True:
+        left = max(0.0, deadline - time.monotonic())
         try:
-            rc = child.wait(timeout=max(0.0, deadline - time.monotonic()))
+            rc = child.wait(timeout=min(left, CAP_POLL) if mcap else left)
             break
         except subprocess.TimeoutExpired:
+            if mcap is not None and time.monotonic() < deadline:
+                mcap.check()
+                continue
             if timed_out:  # TERM did not end it within the grace: KILL
                 try:
                     os.killpg(child.pid, signal.SIGKILL)
@@ -206,6 +341,8 @@ def supervise(record: str, timeout: float, argv: Sequence[str]) -> int:
             oom_kills = outcome.memory_oom_kills(f.read())
     except (OSError, ValueError):
         pass
+    if mcap is not None and mcap.killed:
+        oom_kills += 1
     _write_json(os.path.join(record, 'exit.json'), {'rc': rc, 'timed_out': timed_out, 'oom_kills': oom_kills,
                                                      'signalled': bool(signalled), 'end_epoch': time.time(),
                                                      'boot_end': boot_id()})
@@ -444,14 +581,36 @@ class Executor:
                  run: Callable = subprocess.run, spawn: Callable = subprocess.Popen, scope: bool = True,
                  poll: float = 3.0, procs: Callable[[], set[int]] | None = None,
                  stop_part: Callable[[], None] | None = None, clock: Callable[[], float] = time.time,
-                 sample_s: float = sampler_mod.SAMPLE_S) -> None:
+                 sample_s: float = sampler_mod.SAMPLE_S, own_cap: bool | None = None) -> None:
         self.inv, self.etc, self.env, self.release = inv, etc, dict(env), release
+        self.own_cap = own_cap  # None: the supervisor caps memory where systemd does not (11.11)
         self.run, self.spawn, self.scope, self.poll = run, spawn, scope, poll
         self.procs, self.stop_part, self.clock, self.sample_s = procs, stop_part, clock, sample_s
         self.stopped = False
         self.proc: subprocess.Popen | None = None
         self.unit = ''
         self.record = ''
+
+    def caps_memory(self) -> bool:
+        """Whether the supervisor enforces the memory cap: where systemd would not."""
+        if self.own_cap is not None:
+            return self.own_cap
+        def read(path: str) -> str:
+            with open('/sys/fs/cgroup' + path) as f:
+                return f.read()
+        try:
+            with open('/proc/self/cgroup') as f:
+                return not memory_delegated(f.read(), read)
+        except OSError:
+            return True
+
+    def oom_policy(self) -> bool:
+        """Whether this systemd takes ``OOMPolicy`` on a scope."""
+        try:
+            r = self.run(['systemctl', '--version'], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return systemd_major(r.stdout or '') >= OOM_POLICY_SYSTEMD
 
     # -- checks before anything is taken
 
@@ -661,15 +820,16 @@ class Executor:
             inner = command_argv(a.command, compile_part=cls == 'compile', lock=a.lock,
                                  lock_bin=os.path.join(self.release, 'bin', 'ci-lock'), host_lock=h['files']['host_lock'],
                                  cpus=str(h.get('cpus') or ''))
+            cap = registry.memory_bytes(memory) if self.caps_memory() else 0
             sup = [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
                    'from ci_runners.part import supervise; '
-                   'sys.exit(supervise(sys.argv[1], float(sys.argv[2]), sys.argv[3:]))',
-                   self.release, record, str(a.timeout_minutes * 60), *inner]
+                   'sys.exit(supervise(sys.argv[1], float(sys.argv[2]), sys.argv[4:], int(sys.argv[3])))',
+                   self.release, record, str(a.timeout_minutes * 60), str(cap), *inner]
             run_id = f'{os.path.basename(os.path.dirname(record))}-{attempt}'
             self.unit = unit_name(self.env.get('RUNNER_NAME', ''), a.id, run_id) if self.scope else ''
             rec['unit'] = self.unit
             _write_json(os.path.join(record, 'record.json'), rec)
-            argv = scope_argv(self.unit, proj.name, memory, sup) if self.scope else sup
+            argv = scope_argv(self.unit, proj.name, memory, sup, self.oom_policy()) if self.scope else sup
             if self.stopped:
                 return self._end(record, rec, a, stopped=True)
             held = tuple(fd for fd in [slot_fd, *leases.fds] if fd is not None)

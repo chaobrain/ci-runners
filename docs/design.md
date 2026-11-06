@@ -140,7 +140,8 @@ name; where this section and an older one disagree, this section holds for RUN-5
        `nologin`. The runners' `.env` points `https_proxy` at the bridge, with `no_proxy`
        naming the hosts that answer directly, so the runner's own traffic does not hang
        on the tunnel. Names resolve on the egress host (SOCKS5 with a domain name):
-       local DNS answers for blocked names cannot be trusted.
+       local DNS answers for blocked names cannot be trusted. *Amended by 11.10: the
+       allowlist moves to the egress host, and every GitHub name goes through it.*
     9. **The org snapshot is pushed from the maintainer's workstation (amends 11.2).** A
        fine-grained token can be minted only in the web UI, and a token on h100's shared
        account is readable by its co-users (T14). So no token lives on h100. A user timer
@@ -151,6 +152,49 @@ name; where this section and an older one disagree, this section holds for RUN-5
        and writes `etc/org.json`. A workstation that is down ages the snapshot: after
        60 min every h100 job is refused `stale`, never let through. `ci-orgsync.timer`
        stays for a host that holds its own token (inventory `orgsync`).
+    10. **Every GitHub name goes through the egress, whose allowlist is on the egress
+        host (amends 11.8).** Measured 2026-11-06, in the first canary run on h100:
+        direct requests to `*.actions.githubusercontent.com` broke off without an
+        answer. Three `launch` resolve requests failed in a row and so did the job's
+        setup. Two artifact uploads ended `ECONNRESET`. Short probes passed all along
+        (80 of 80). So the runners' own traffic and the jobs' both go through the
+        egress. Only localhost and the package mirror that answers directly stay direct
+        (inventory `tunnel.direct`).
+
+        The Actions service uses names that change: `pipelinesghubeus<N>`,
+        `run-actions-<N>-azure-<region>`, and the storage accounts under
+        `.blob.core.windows.net`. So the allowlist takes suffix entries: `.example.com`
+        matches every name below it, and not `example.com` itself. An `authorized_keys`
+        `permitopen` takes literal names only. So the allowlist moves to the egress
+        host, where no co-user of h100's account can change it:
+        - **On the egress host,** `ci-egress.service` is a system unit that runs
+          `ci-run egress` as the egress account. It is an HTTP CONNECT proxy on that
+          host's 127.0.0.1. It passes only names on its allowlist (`setup/egress/allow`,
+          installed root-owned), on port 443, and connects to them directly. It resolves
+          a name itself and connects only to global addresses. It answers 200 only once
+          its connection is open.
+        - **The key** opens one forward, to that port: `restrict,port-forwarding,
+          permitopen="127.0.0.1:<egress port>",permitlisten="127.0.0.1:9",
+          command="/usr/sbin/nologin"`.
+        - **On h100,** `ci-tunnel.service` is `ssh -N -L 127.0.0.1:<http port>:
+          127.0.0.1:<egress port>`, and the runners' `https_proxy` points at that local
+          port. `ci-bridge.service` and the SOCKS port go: the plan removes the bridge's
+          unit (§5.3). The inventory's `tunnel` table holds `http_port`, `egress_port`
+          and `direct`; `socks_port` and `allow` go (the allowlist is the egress
+          host's).
+    11. **A part's memory cap where the user manager has no memory controller.** h100
+        runs cgroup v1 (measured 2026-11-06, systemd 249). A user scope there has no
+        memory controller: with `MemoryMax=64M`, a 200 MB allocation succeeded. And
+        systemd 249 refuses `OOMPolicy` on a scope, so every part ended `lost` at once.
+        On such a host, the part's supervisor enforces the cap itself. Every 2 s it sums
+        the anonymous resident memory (`RssAnon`) of the scope's processes, read from
+        the scope's `cgroup.procs` in the systemd hierarchy, so a process that left the
+        command's session still counts. Over the cap, it kills every process of the
+        scope but itself and records an OOM kill, so the part ends `oom`. `OOMPolicy=
+        continue` is passed only on systemd 253 or later, the first to take it on a
+        scope; before that, an OOM kill never stopped a scope. The project slices'
+        `MemoryMax` (`memory_max`) is not enforced on such a host. The CI slots bound
+        the sum instead: at most `slots` parts, each under its cap.
 
 ## Decisions of this spec
 
@@ -256,7 +300,8 @@ AGENTS.md  README.md  docs/design.md  docs/consumers.md
 ci_runners/           stdlib-only Python: pure functions, thin I/O
   policy.py           hook decision: repository, actor, event, fork, runner class
   orgsync.py          the org snapshot: members and private repositories (RUN-5, §6.5)
-  bridge.py           h100's egress: HTTP CONNECT to the ssh tunnel, allowlisted (11.8)
+  bridge.py           the egress proxy: HTTP CONNECT to allowlisted names (exact or
+                      suffix) on 443, run on the egress host (11.10)
   claim.py            claim decision from a sha's statuses
   place.py            host and card choice from probe results
   outcome.py          outcome classification and the retry hint
@@ -270,7 +315,9 @@ hooks/                job-started.sh, job-completed.sh -> python -I -m ci_runner
 setup/                plan.sh, apply.sh, install.sh, register.sh, uninstall.sh
 setup/units/          user unit templates: ci-runner@.service, ci-proxy.service,
                       ci-proxy-check.{service,timer}, ci-reaper.{service,timer}, slices;
-                      ci-tunnel.service, ci-bridge.service (h100's egress, 11.8)
+                      ci-tunnel.service (h100's forward to the egress, 11.10)
+setup/egress/         ci-egress.service and allow: the egress host's proxy unit and its
+                      allowlist (11.10), installed by root there
 setup/inventory.example.toml   the schema, with placeholder values
 setup/workstation/    orgsync-push.sh and ci-orgsync-push.{service,timer}: the snapshot
                       push from the maintainer's workstation (decision 11.9)
@@ -340,7 +387,7 @@ defaults to `/usr/bin/python3`.
 | the env-build token (RUN-5): fine-grained, Contents read on the repositories whose envs are built | `GH_TOKEN` of the maintainer's shell, for one `ci-run env build`; never stored on h100, since co-users of the account could read every private repository with it | yes |
 | the org-sync login (RUN-5, decision 11.9) | the maintainer's own GitHub login on the workstation, read by the push timer at each run; nothing on h100. A host that syncs itself (inventory `orgsync`) keeps a fine-grained read-only token in `etc/orgsync.token`, mode 600 | yes |
 | the org snapshot (RUN-5): member logins, private repository names and ids | `etc/org.json` on h100, written by `ci-run org-sync --receive` (or `ci-orgsync`) | no, but never published |
-| the tunnel key, its `ssh_config` and the egress host's pinned key (RUN-5, decision 11.8) | `etc/tunnel/` on h100, the key mode 600; the egress host, its address and account are inventory | yes: it opens the allowlisted forwards through the egress host (T15) |
+| the tunnel key, its `ssh_config` and the egress host's pinned key (RUN-5, decision 11.8) | `etc/tunnel/` on h100, the key mode 600; the egress host, its address and account are inventory | yes: it opens the one forward to the egress proxy, which passes only its allowlist (T15) |
 | the workstation's push units (RUN-5, decision 11.9): the ssh alias of h100 and its paths | the maintainer's `~/.config/systemd/user/` on the workstation | no, but never published |
 
 3090b holds the master copy of `policy.toml` and `projects/`, and `setup/apply.sh`
@@ -424,7 +471,9 @@ The command's environment holds:
 On 3090b and 3090a the command runs in
 `systemd-run --user --scope --slice=ci-<project>.slice -p MemoryMax=<memory>
 -p MemorySwapMax=0 -p OOMPolicy=continue`, at nice 10 and ionice 7 (nice 0 for
-`compile`), with OOM score +500. In the scope a supervisor runs the command, ends it at
+`compile`), with OOM score +500. `OOMPolicy` is passed on systemd 253 or later only.
+Where the user manager has no memory controller (h100, decision 11.11), the supervisor
+enforces `memory` itself. In the scope a supervisor runs the command, ends it at
 the inner timeout (TERM, then KILL after 30 s) and writes the exit and the scope's OOM
 kills into the record. The scope is not in the runner's cgroup, so a stopped runner
 leaves the part running and its record finishing: `salvage` reads it. The supervisor
@@ -455,7 +504,7 @@ pass. A nonzero exit with an OOM kill is `oom`, not `red`.
 |---|---|---|
 | pass | exit 0 | none |
 | red | nonzero exit or the inner timeout, with no infrastructure cause | none |
-| oom | the scope's `memory.events` `oom_kill` > 0, or a journal OOM line for the scope (fixtures) | retry once with `resume`, on a host with more memory headroom |
+| oom | the scope's `memory.events` `oom_kill` > 0, the supervisor's own cap (decision 11.11), or a journal OOM line for the scope (fixtures) | retry once with `resume`, on a host with more memory headroom |
 | thermal | h100: a watchdog kill line (`GPU <bus> still <t>C -> killed <user>:<pid>, ...`) within the part's window that names our card's bus and a PID the sampler recorded for our scope; or our own early stop (§5.4) | retry once on a cool card of the same host, else fallback |
 | reboot | boot id differs from the one recorded at start | h100: as thermal (the board powers off at 101 °C); others: retry once |
 | yielded | the host reservation's yield marker is newer than the part's start (§7) | fallback |
@@ -698,28 +747,36 @@ A needs no GitHub access on h100: everything arrives from 3090b.
 **h100, RUN-5** (decision 11.3; the lead approves the plan, as for 3090b). Measured on
 2026-11-06 from the shared account: linger on; `systemctl --user` works; 2 TB of memory,
 176 CPUs, 5 cards; `api.github.com` answers directly, `github.com` and the package
-indexes do not (decision 11.8); not in the docker group; the system `python3` is 3.10.
+indexes do not (decision 11.8), and the Actions service breaks off (11.10); not in the
+docker group; the system `python3` is 3.10; cgroup v1 with systemd 249 (11.11).
 
 | change | detail |
 |---|---|
 | directories | §3.2 (RUN-5) under our subtree; `etc/` mode 700 |
 | runner app | the pinned release, checked by sha256, into 9 runner directories (§5.1) |
-| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON` (for the launcher and the units; the hooks have the interpreter written into them by setup, so a job's environment never chooses it); `CI_RUNNER_POOL_LABELS`, the pool's own labels (`h100-light`, `h100-cpu`, `h100`), for a retry's `retry-on`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card; `https_proxy` and `http_proxy` at the bridge, and `no_proxy` (inventory `tunnel.no_proxy`: localhost and the hosts that answer directly) |
-| `ci-runner@.service` | as on 3090b, with `After=`/`Wants=ci-bridge.service` instead of the CI proxy |
-| `ci-tunnel.service` | `ssh -F etc/tunnel/ssh_config -N -D 127.0.0.1:<socks port>` to the egress account (decision 11.8): batch mode, the egress host's key pinned in `etc/tunnel/known_hosts`, `ExitOnForwardFailure`, keep-alive every 30 s (a dead link ends after 90 s); `Restart=always` after 10 s |
-| `ci-bridge.service` | `ci-run bridge`: HTTP CONNECT on 127.0.0.1:<http port>, to `tunnel.allow` names on port 443 only (anything else: 403), handed to the tunnel as SOCKS5 with the name; at most 256 connections; one journal line per connection (name, result) |
-| `etc/tunnel/` | the key pair, `ssh_config` and `known_hosts`, placed by the lead before the plan; `plan.sh` refuses without them, with the key or the directory readable by others, with a link in place of a file, or with an `ssh_config` that sets anything but `Host egress`, its `HostName`, `User` and `Port` (the unit fixes every other option, among them the key, the pinned host key with no global or DNS source, and no agent, gateway port or local command). A changed tunnel table changes the bridge's unit, and the plan then restarts both units. The runner app is fetched only once the tunnel's port answers (ssh binds it after authenticating). |
+| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON` (for the launcher and the units; the hooks have the interpreter written into them by setup, so a job's environment never chooses it); `CI_RUNNER_POOL_LABELS`, the pool's own labels (`h100-light`, `h100-cpu`, `h100`), for a retry's `retry-on`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card; `https_proxy` and `http_proxy` at the tunnel's local port, and `no_proxy` (inventory `tunnel.direct`: localhost and the package mirror that answers directly, decision 11.10) |
+| `ci-runner@.service` | as on 3090b, with `After=`/`Wants=ci-tunnel.service` instead of the CI proxy |
+| `ci-tunnel.service` | `ssh -F etc/tunnel/ssh_config -N -L 127.0.0.1:<http port>:127.0.0.1:<egress port>` to the egress account (decision 11.10): batch mode, the egress host's key pinned in `etc/tunnel/known_hosts`, `ExitOnForwardFailure`, keep-alive every 30 s (a dead link ends after 90 s); `Restart=always` after 10 s |
+| `ci-bridge.service` | removed (decision 11.10): the plan lists it as `remove` where an earlier apply recorded it, and `apply` stops, disables and deletes it and drops it from the record |
+| `etc/tunnel/` | the key pair, `ssh_config` and `known_hosts`, placed by the lead before the plan; `plan.sh` refuses without them, with the key or the directory readable by others, with a link in place of a file, or with an `ssh_config` that sets anything but `Host egress`, its `HostName`, `User` and `Port` (the unit fixes every other option, among them the key, the pinned host key with no global or DNS source, and no agent, gateway port or local command). A changed tunnel table changes the tunnel's unit, and the plan then restarts it. The runner app is fetched only once the tunnel's port answers (ssh binds it after authenticating). |
 | `ci-orgsync.{service,timer}` | not on h100 (decision 11.9): the workstation pushes the snapshot |
 | `ci-reaper.timer` | as on 3090b |
-| slices | `ci.slice` `MemoryMax` (inventory; proposed 512G of 2 TB) and `ci-<project>.slice` |
+| slices | `ci.slice` `MemoryMax` (inventory; proposed 512G of 2 TB) and `ci-<project>.slice`; not enforced under cgroup v1, where the slots and each part's own cap bound memory (decision 11.11) |
 | lock and slot files | new ones under `state/`: h100 has no brainspike files to share (D5 does not apply) |
-| unit names | every unit file starts with `ci-` (`ci.slice` included); `uninstall.sh` stops and removes only the units an `apply` recorded in `state/setup.json`; `plan.sh` refuses if a unit of that name exists and no earlier `apply` wrote it (another user of the account may have one). `plan.sh ROLE --adopt` instead lists each such unit as `adopt` and plans it as usual (a regular file of this account only), for units an older release wrote without a record; the lead approves the adoption with the plan, and `apply.sh` takes `--adopt` too. Never on a shared account without checking each listed file. The unit directory exists (mode 700) and is the account's: setup never changes its mode. |
+| unit names | every unit file starts with `ci-` (`ci.slice` included); `uninstall.sh` stops and removes only the units an `apply` recorded in `state/setup.json`; `plan.sh` refuses if a unit of that name exists and no earlier `apply` wrote it (another user of the account may have one). `plan.sh ROLE --adopt` instead lists each such unit as `adopt` and plans it as usual (a regular file of this account only), for units an older release wrote without a record; the lead approves the adoption with the plan, and `apply.sh` takes `--adopt` too. A unit an earlier apply recorded that the plan no longer holds (`ci-bridge.service`, decision 11.10) is listed as `remove`. Never on a shared account without checking each listed file. The unit directory exists (mode 700) and is the account's: setup never changes its mode. |
 | unchanged | the shared account's shell files, crontab, `authorized_keys`, other users' files, envs and units; no proxy client |
 
 There is no root step on h100: the shared account has no sudo for us, and none is
-needed. The egress host takes one, made by the lead (done 2026-11-06): a system account
-with no password, `nologin` as its shell, and one `authorized_keys` line for the tunnel
-key, restricted as decision 11.8 states. Its sshd configuration is unchanged.
+needed. The egress host takes one, made by the lead:
+
+| change | detail |
+|---|---|
+| the egress account | a system account with no password and `nologin` as its shell (done 2026-11-06) |
+| `authorized_keys` | one line for the tunnel key, restricted as decision 11.10 states: one `permitopen`, to the egress proxy's port |
+| the release | `setup/install.sh` run by root with `CI_RUNNERS_ETC=/opt/ci-runners/etc`, so the release is root-owned under `/opt/ci-runners/releases/` |
+| `/opt/ci-runners/etc/egress-allow` | a root-owned copy of the release's `setup/egress/allow`, mode 644 |
+| `ci-egress.service` | the release's `setup/egress/ci-egress.service` in `/etc/systemd/system/`, enabled: `ci-run egress` as the egress account on 127.0.0.1:<egress port>, at most 256 connections, one journal line per connection (name, result); hardened (no new privileges, a read-only system, no home, its own `/tmp`, IP and Unix sockets only, no capabilities) and capped at 512 MB |
+| unchanged | the egress host's sshd configuration |
 
 **The maintainer's workstation, RUN-5** (decision 11.9), as the maintainer, not as a CI
 account:
@@ -865,7 +922,7 @@ bound).
 | T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the bot's and allowlisted actors' statuses; consumers audit merges (brainspike: daily) |
 | T13 | (on RUN-5 also any co-user of h100's account, an accepted gap) An accepted job (or its dependency) edits the host layer it owns: the hook, the policy, `.env` or the units, so later jobs pass unchecked. | private consumers only until the host layer is root-owned (§5.3, option (b)); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs |
 | T14 | (RUN-5) A co-user of h100's shared account reads the org-sync token, or edits the snapshot. | no token on h100 (decision 11.9): the snapshot arrives over the maintainer's ssh access, checked by `--receive` (§6.5). A host that syncs itself holds a fine-grained read-only token (members, metadata): it shows the member list and the private repositories' names, nothing else. An edited snapshot is T13's case. |
-| T15 | (RUN-5) A co-user of h100's shared account takes the tunnel key, or any local user of h100 uses the bridge or the SOCKS port on 127.0.0.1. | the egress account has no shell and no listening forward, and opens only the allowlisted names on port 443 (decision 11.8): HTTPS to GitHub and the package indexes, which job code reaches through the bridge anyway. They appear as the egress host's address. The lead revokes the key by deleting one line on the egress host. |
+| T15 | (RUN-5) A co-user of h100's shared account takes the tunnel key, or any local user of h100 uses the tunnel's port on 127.0.0.1. | the egress account has no shell and no listening forward, and its key opens only the egress proxy's port (decision 11.10). The proxy passes only its allowlist on port 443: HTTPS to GitHub, the Actions service's storage and the package indexes, which job code reaches through the tunnel anyway. The suffix `.blob.core.windows.net` lets them reach any Azure storage account over HTTPS: an accepted gap, since the Actions storage accounts have no stable names. They appear as the egress host's address. The allowlist is root-owned on the egress host. The lead revokes the key by deleting one line there. |
 | T12 | A burst of refused jobs blocks our runners. | refusal in under 10 s (RUN-1 acceptance); repo-level public runners do not share pools with private ones; the lead can pause a repository in the policy |
 
 ### 6.5 The org snapshot (RUN-5)
@@ -955,7 +1012,7 @@ Rules:
 | thermal kill or early stop (h100) | the part's processes die, or we stop them | `thermal`: one retry on a cool card, else fallback |
 | OOM | the scope is killed | `oom`: one retry with `resume` on a host with headroom |
 | h100 unreachable or quarantined | no part placed there | fallback order of the project |
-| h100's tunnel down (RUN-5) | the runners stay online (their own traffic is direct, `no_proxy`); a checkout or a package download in a job fails, and that part ends red | ssh's keep-alive ends a dead link in 90 s, and systemd restarts it after 10 s. The bridge answers 502 while ssh is down; before ssh has found the link dead, a connection may get its 200 and close at once (OpenSSH answers SOCKS before the channel opens), logged as `closed, 0 bytes down` |
+| h100's tunnel down (RUN-5) | the runners go offline for its length (their own traffic goes through it, decision 11.10); a running part goes on, but its job cannot report and may end `lost`, then is salvaged | ssh's keep-alive ends a dead link in 90 s, and systemd restarts it after 10 s; the runner app retries its connection on its own. The egress proxy answers 502 when its own connection fails |
 | the workstation down, or its push failing (RUN-5) | the snapshot ages | every h100 job refused `stale` after 60 min, until the push is back |
 | slot or lease starvation | a part waits | `queue-timeout-minutes`, then `unavailable` and fallback |
 | disk low (under 50 GiB free in `~/data`) | | `unavailable` before the command |
@@ -1068,15 +1125,19 @@ pool.
 policy schema 2; h100 as a local host in setup (no proxy, the inventory's `python` and
 labels); the local health gate, sampler and early stop; `h100-test.yml` and
 `ci-run env build`; h100's egress (tunnel and bridge, decision 11.8); the snapshot push
-(decision 11.9); then `v1.1.0`. *Acceptance:*
+(decision 11.9); then `v1.1.0`. Then the egress proxy on the egress host (11.10) and the
+supervisor's memory cap (11.11), then `v1.2.0`. *Acceptance:*
 
 1. Unit tests, each failing on a mutant: a snapshot member's push is accepted; an outside
    collaborator, a non-member and a bot are refused; a public repository, and a private
    one whose id differs from the snapshot's, are refused; a stale, a missing and a
    malformed snapshot are refused; schema 1 decides as before; a hot card is refused
    with a cool card's label; the early stop; a watchdog kill line counts only with our
-   PID and our card's bus. The bridge refuses a name off its list, a port other than 443
-   and a request that is not CONNECT, and answers 502 when the tunnel refuses.
+   PID and our card's bus. The egress proxy refuses a name off its list (a suffix entry
+   matching names below it only), a port other than 443, a request that is not CONNECT
+   and a name that resolves to no global address, and answers 502 when its connection
+   fails. On a host without a memory controller, a part over its `memory` ends `oom`;
+   `OOMPolicy` is passed on systemd 253 and later only.
    `--receive` refuses another org's snapshot, an older one than in place and one from
    the future.
 2. The lead-approved plan is applied on h100, and its 9 runners are online at org level.
@@ -1086,9 +1147,9 @@ labels); the local health gate, sampler and early stop; `h100-test.yml` and
    10 s, and print no inventory. A job of another private repository given
    `[self-hosted, light]` is not taken by an h100 runner.
 4. A member added to the org can run within 10 min. A snapshot made older than 60 min
-   refuses with `stale`. From h100, `github.com` answers through the bridge; a name off
-   the bridge's list gets 403, and a forward to a name off the egress account's list is
-   refused there.
+   refuses with `stale`. From h100, `github.com` and the Actions service answer through
+   the tunnel; a name off the egress proxy's list gets 403, and a forward to any other
+   port of the egress host is refused there.
 5. A canary private repository: a failing CPU test and a failing GPU test each end red in
    their own part, and only there. A part OOM-killed ends `oom` and is retried; a stopped
    runner ends `lost` and is salvaged; a forced hot reading stops the part as `thermal`,

@@ -153,7 +153,7 @@
 **gh 的权限**：
 
 - 日常只需要 `repo`、`read:org`、`workflow` 等，不要常驻 `admin:org`。
-- 注册或注销 runner、改 runner 组时，用 `gh auth refresh -h github.com -s admin:org` 临时加上（需要在浏览器里批准设备码）。用完运行 `gh auth refresh -h github.com -r admin:org` 收回。
+- 注册或注销 runner、改 runner 组时，用 `gh auth refresh -h github.com -s admin:org` 临时加上（需要在浏览器里批准设备码）。用完运行 `gh auth refresh -h github.com -r admin:org -s read:org` 收回：加 `admin:org` 时 GitHub 会把 `read:org` 并进去，只撤 `admin:org` 就会连读 org 的权限一起丢掉，工作站的快照推送随之失败，60 分钟后 h100 的任务会全部以 `stale` 被拒。
 - `admin:org` 永远不放在 runner 主机上。
 
 ## 8. 排障
@@ -194,7 +194,6 @@
 
 **2026-11-06 退役第一条路径**（design 决定 11.12，v1.3.0）：
 
-- 3090b 的 7 个 runner 已停止，CI 账户里的 `ci-` 单元已全部删除；
-- 在 org 注销这些 runner 需要 `admin:org`，还没做；
+- 3090b 的 7 个 runner 已停止并在 org 注销，runner 目录已删除，CI 账户里的 `ci-` 单元也已全部删除；org 里只剩 h100 的 9 个 runner；
 - CI 代理、`place`、主机锁、公开仓库 GPU 路径的代码都已删除；
 - v1.3.0 的金丝雀在 `@v1.3.0` 上跑了一绿一红，`v1` 移动之后又在 `@v1` 上跑了一次绿。

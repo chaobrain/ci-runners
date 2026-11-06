@@ -272,6 +272,8 @@ setup/units/          user unit templates: ci-runner@.service, ci-proxy.service,
                       ci-proxy-check.{service,timer}, ci-reaper.{service,timer}, slices;
                       ci-tunnel.service, ci-bridge.service (h100's egress, 11.8)
 setup/inventory.example.toml   the schema, with placeholder values
+setup/workstation/    orgsync-push.sh and ci-orgsync-push.{service,timer}: the snapshot
+                      push from the maintainer's workstation (decision 11.9)
 actions/              claim/, place/, part/, salvage/, verdict/, compare/ (composite, action.yml);
                       lib/ci-run.sh, the launcher; RELEASE, the release stamp
 .github/workflows/    gpu.yml (reusable, public consumers); h100-test.yml (reusable, the

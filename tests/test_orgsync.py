@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import threading
+import sys
+import subprocess
+import http.server
 import os
 import pathlib
 import stat
@@ -423,6 +427,167 @@ class Sync(unittest.TestCase):
                     orgsync.write(d, {'x': 1})
             self.assertEqual(victim.read_text(), 'keep')
 
+
+class Push(unittest.TestCase):
+    """The snapshot pushed from the workstation (decision 11.9): ``--fetch`` prints it with
+    ``GH_TOKEN``; ``--receive`` writes only a current snapshot of the policy's org."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.etc = pathlib.Path(self.tmp.name)
+        (self.etc / 'policy.toml').write_text(POLICY2)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def doc(self, **kw):
+        return json.dumps({**SNAP, **kw}).encode()
+
+    def receive(self, data: bytes, now=NOW):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            rc = orgsync.receive(str(self.etc), io.BytesIO(data), now=lambda: now)
+        return rc, err.getvalue()
+
+    def test_fetch_prints_what_receive_writes(self):
+        call, calls = api_pages(Sync.MEMBERS, Sync.REPOS)
+        out = io.StringIO()
+        self.assertEqual(orgsync.fetch_out('chaobrain', {'GH_TOKEN': 'tok\n'}, out, call, now=lambda: NOW), 0)
+        self.assertEqual(json.loads(out.getvalue())['repositories'], {'chaobrain/private1': 11, 'chaobrain/private2': 13})
+        self.assertEqual(self.receive(out.getvalue().encode())[0], 0)
+        written = policy.load_snapshot((self.etc / 'org.json').read_bytes())
+        self.assertEqual((len(written.members), written.fetched_at), (150, NOW))
+        self.assertEqual(stat.S_IMODE((self.etc / 'org.json').stat().st_mode), 0o600)
+
+    def test_fetch_needs_a_token_and_an_org_name(self):
+        for environ, org in (({}, 'chaobrain'), ({'GH_TOKEN': 'a b'}, 'chaobrain'),
+                             ({'GH_TOKEN': 'tok'}, 'chaobrain/x'), ({'GH_TOKEN': 'tok'}, '-x')):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = orgsync.fetch_out(org, environ, out, lambda *a: self.fail('no call'), now=lambda: NOW)
+            self.assertEqual((rc, out.getvalue()), (1, ''), (environ, org))
+            self.assertNotIn('a b', err.getvalue())
+
+    def test_receive_refuses_and_keeps_the_old_snapshot(self):
+        self.assertEqual(self.receive(self.doc())[0], 0)
+        before = (self.etc / 'org.json').read_bytes()
+        for data, why in ((self.doc(org='elsewhere', repositories={'elsewhere/x': 1}), "org 'elsewhere'"),
+                          (self.doc(fetched_at=NOW + 400), 'from the future'),
+                          (self.doc(fetched_at=NOW - 601), 'older than the one in place'),
+                          (self.doc(members=['bot[bot]']), 'not a human login'),
+                          (b'{not json', 'not JSON'),
+                          (b' ' * (orgsync.MAX_SNAPSHOT + 1), 'larger than')):
+            rc, err = self.receive(data)
+            self.assertEqual(rc, 1, why)
+            self.assertIn(why, err)
+            self.assertIn('the old snapshot stays', err)
+            self.assertEqual((self.etc / 'org.json').read_bytes(), before, why)
+        self.assertEqual(self.receive(self.doc(fetched_at=NOW - 600))[0], 0)  # the same one again
+        self.assertEqual(self.receive(self.doc(fetched_at=NOW - 60, members=['dave']))[0], 0)  # a newer one
+        self.assertEqual(policy.load_snapshot((self.etc / 'org.json').read_bytes()).members, {'dave'})
+
+    def test_a_broken_snapshot_in_place_is_replaced(self):
+        (self.etc / 'org.json').write_text('{broken')
+        self.assertEqual(self.receive(self.doc())[0], 0)
+
+    def test_receive_needs_an_org_policy(self):
+        (self.etc / 'policy.toml').write_text('schema = 1\n')
+        rc, err = self.receive(self.doc())
+        self.assertEqual(rc, 1)
+        self.assertIn('no [org] table', err)
+        self.assertFalse((self.etc / 'org.json').exists())
+
+    def test_cli_forms(self):
+        with unittest.mock.patch.object(orgsync, 'receive', return_value=7) as r:
+            self.assertEqual(orgsync.cli(['--receive'], '/e'), 7)
+        self.assertEqual(r.call_args[0][0], '/e')
+        with unittest.mock.patch.object(orgsync, 'fetch_out', return_value=5) as f:
+            self.assertEqual(orgsync.cli(['--fetch', '--org', 'chaobrain'], '/e'), 5)
+        self.assertEqual(f.call_args[0][0], 'chaobrain')
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(orgsync.cli(['--fetch'], '/e'), 2)
+
+
+class PushScript(unittest.TestCase):
+    """setup/workstation/orgsync-push.sh: the login read from gh for the fetch only, the
+    snapshot piped to --receive on the host, each argument one plain word."""
+    ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.bin = t / 'bin'
+        self.bin.mkdir()
+        (self.bin / 'gh').write_text('#!/bin/sh\n[ "$*" = "auth token" ] && echo tok-xyz\n')
+        # the host: records its command line, then runs --receive into a local etc
+        self.etc = t / 'data' / 'ci-runners' / 'etc'
+        self.etc.mkdir(parents=True)
+        (self.etc / 'policy.toml').write_text(POLICY2)
+        rel = t / 'data' / 'ci-runners' / 'releases'
+        rel.mkdir()
+        os.symlink(self.ROOT, rel / 'hook')
+        (self.bin / 'ssh').write_text(f'#!/bin/sh\nfor a; do last=$a; done\nprintf "%s\\n" "$@" > {t}/ssh.args\n'
+                                      'env | grep -c tok-xyz > ' + f'{t}/ssh.token\nexec sh -c "$last"\n')
+        for f in ('gh', 'ssh'):
+            (self.bin / f).chmod(0o755)
+        self.t = t
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_script(self, *args, api=''):
+        env = {'PATH': f'{self.bin}:/usr/bin:/bin', 'HOME': self.tmp.name, 'LANG': 'C.UTF-8'}
+        if api:
+            env['GITHUB_API_URL'] = api
+        return subprocess.run([str(self.ROOT / 'setup' / 'workstation' / 'orgsync-push.sh'), *args], env=env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_the_snapshot_reaches_receive(self):
+        members = [{'login': 'Dave', 'type': 'User'}]
+        repos = [{'full_name': 'chaobrain/p1', 'id': 7, 'private': True}]
+        seen = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.headers.get('Authorization'))
+                body = json.dumps(members if '/members?' in self.path else repos).encode()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            r = self.run_script('chaobrain', 'h100-alias', str(self.t / 'data'), sys.executable,
+                                api=f'http://127.0.0.1:{srv.server_address[1]}')
+        finally:
+            srv.shutdown()
+            srv.server_close()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('1 members, 1 private repositories', r.stdout)
+        snap = policy.load_snapshot((self.etc / 'org.json').read_bytes())
+        self.assertEqual((snap.members, dict(snap.repos)), ({'dave'}, {'chaobrain/p1': 7}))
+        self.assertEqual(set(seen), {'Bearer tok-xyz'})
+        args = (self.t / 'ssh.args').read_text().splitlines()
+        self.assertEqual(args[:-1], ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-o', 'ServerAliveInterval=15',
+                                     'h100-alias'])
+        self.assertTrue(args[-1].endswith('/ci-runners/releases/hook/bin/ci-run org-sync --receive'), args[-1])
+        self.assertEqual((self.t / 'ssh.token').read_text().strip(), '0')  # the login stays on the workstation
+
+    def test_arguments_are_plain_words(self):
+        for args in (('chaobrain', 'h;x', '/d', '/p'), ('chaobrain', 'h', 'd', '/p'), ('chaobrain', 'h', '/d', 'p'),
+                     ('chaobrain', 'h', '/d $(id)', '/p'), ('chaobrain', 'h', '/d')):
+            r = self.run_script(*args, api='http://127.0.0.1:9')  # nothing leaves the machine
+            self.assertEqual(r.returncode, 2, args)
+            self.assertFalse((self.t / 'ssh.args').exists(), args)
+
+    def test_a_failed_fetch_sends_nothing(self):
+        r = self.run_script('chaobrain', 'h', str(self.t / 'data'), sys.executable, api='http://127.0.0.1:9')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse((self.t / 'ssh.args').exists())
 
 if __name__ == '__main__':
     unittest.main()

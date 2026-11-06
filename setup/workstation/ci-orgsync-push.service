@@ -1,0 +1,13 @@
+# The org snapshot, pushed from the maintainer's workstation (design decision 11.9): a
+# user unit of the maintainer's account, not of a CI account. Placeholders: the release
+# directory on the workstation (setup/install.sh with CI_RUNNERS_ETC under a directory
+# of the maintainer's), the org, h100's ssh host and its data root and interpreter.
+# Copy to ~/.config/systemd/user/, fill in, then enable ci-orgsync-push.timer.
+[Unit]
+Description=ci-runners: push the org snapshot to h100
+
+[Service]
+Type=oneshot
+ExecStart=@RELEASE@/setup/workstation/orgsync-push.sh @ORG@ @H100_SSH@ @H100_DATA@ @H100_PYTHON@
+NoNewPrivileges=yes
+TimeoutStartSec=5min

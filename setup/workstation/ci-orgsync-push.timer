@@ -1,0 +1,11 @@
+# Every 10 min (design §6.5): a snapshot older than 60 min refuses every h100 job.
+[Unit]
+Description=ci-runners: push the org snapshot every 10 min
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

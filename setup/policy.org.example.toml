@@ -1,7 +1,8 @@
-# The hook's policy, schema 2, as on h100 (design §6.5, decision 11.2). Placeholders
+# The hook's policy, schema 2, as on h100 (design §6.5, decisions 11.2, 11.9). Placeholders
 # only: the real one is <data>/ci-runners/etc/policy.toml on h100. The org's members join
 # the actors, and its private repositories join the repositories, from etc/org.json,
-# which ci-orgsync.timer refreshes every 10 min. A stale snapshot refuses every job.
+# which the maintainer's workstation pushes every 10 min (ci-run org-sync --receive), or
+# ci-orgsync.timer refreshes on a host with its own token. A stale snapshot refuses every job.
 schema = 2
 bot = "github-actions[bot]"
 actors = []                                     # members come from the snapshot

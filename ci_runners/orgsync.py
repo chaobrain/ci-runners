@@ -1,14 +1,23 @@
-"""``ci-run org-sync``: the org snapshot (design §6.5, decision 11.2).
+"""``ci-run org-sync``: the org snapshot (design §6.5, decisions 11.2 and 11.9).
 
-Run every 10 min by ``ci-orgsync.timer`` on a host whose policy has an ``[org]`` table
-(h100, RUN-5). It reads the org's members and its private repositories through the
-GitHub API with ``etc/orgsync.token`` (fine-grained, read-only: org Members and
-repository Metadata) and writes ``etc/org.json``, which the hook merges into the policy
-(``policy.with_snapshot``). Every page must arrive; a failed, partial or empty fetch
-leaves the old snapshot in place, and the hook refuses once it is stale.
+    ci-run org-sync                     fetch with etc/orgsync.token, write etc/org.json
+    ci-run org-sync --fetch --org NAME  fetch with $GH_TOKEN, print the snapshot
+    ci-run org-sync --receive           read a snapshot on stdin, check it, write etc/org.json
+
+The snapshot holds the org's members and its private repositories, read through the
+GitHub API, and the hook merges it into the policy (``policy.with_snapshot``). Every
+page must arrive; a failed, partial or empty fetch leaves the old snapshot in place, and
+the hook refuses once it is stale.
+
+h100 holds no token (decision 11.9): a timer of the maintainer's account on the
+workstation runs ``--fetch`` with the maintainer's own login and pipes it over ssh to
+``--receive`` on h100. ``--receive`` writes only a snapshot that loads as the hook loads
+it, of the policy's org, not from the future and not older than the one in place. A
+host that holds its own token runs the first form from ``ci-orgsync.timer``.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sys
@@ -19,6 +28,7 @@ from ci_runners import github, policy
 
 PAGE, PAGES = 100, 50  # up to 5,000 members or repositories
 MAX_TOKEN = 4096
+MAX_SNAPSHOT = 4 << 20  # bytes, as the hook reads it
 
 
 class SyncError(RuntimeError):
@@ -112,6 +122,107 @@ def write(etc: str, doc: dict) -> str:
     return path
 
 
+def _token(raw: bytes) -> str:
+    """A token as read from a file or the environment, checked; no byte of a bad one is
+    ever printed."""
+    token = raw.strip().decode('ascii') if raw.isascii() else ''
+    if not token or len(token) > MAX_TOKEN or any(c.isspace() for c in token):
+        raise SyncError('the token is empty or malformed')
+    return token
+
+
+def accept(data: bytes, org: str, current: bytes | None, now: float) -> dict:
+    """The document of a received snapshot, if ``etc/org.json`` may become it. Raises
+    SyncError otherwise. Pure.
+
+    It must load as the hook loads it (``policy.load_snapshot``), be ``org``'s, be no
+    more than ``policy.CLOCK_SKEW`` seconds in the future, and be no older than
+    ``current``, the snapshot in place (if that one loads): a replayed old snapshot
+    cannot bring back a removed member."""
+    if len(data) > MAX_SNAPSHOT:
+        raise SyncError(f'the snapshot is larger than {MAX_SNAPSHOT} bytes')
+    try:
+        snap = policy.load_snapshot(data)
+    except policy.PolicyError as e:
+        raise SyncError(str(e)) from None
+    if snap.org != org.lower():
+        raise SyncError(f'the snapshot is of org {snap.org!r}, the policy\'s is {org.lower()!r}')
+    if snap.fetched_at > now + policy.CLOCK_SKEW:
+        raise SyncError('the snapshot is from the future')
+    if current is not None:
+        try:
+            old = policy.load_snapshot(current)
+        except policy.PolicyError:
+            old = None  # a broken snapshot in place refuses every job: any good one replaces it
+        if old is not None and snap.fetched_at < old.fetched_at:
+            raise SyncError('the snapshot is older than the one in place')
+    doc = json.loads(data)
+    if len(json.dumps(doc, indent=1, sort_keys=True)) + 1 > MAX_SNAPSHOT:  # as write() lays it out
+        raise SyncError(f'the snapshot as written is larger than {MAX_SNAPSHOT} bytes')
+    return doc
+
+
+def _policy_org(etc: str) -> str | None:
+    with open(os.path.join(etc, 'policy.toml'), 'rb') as f:
+        pol = policy.load(f.read(1 << 20))
+    return None if pol.org is None else pol.org.name
+
+
+def receive(etc: str, stdin, now: Callable = time.time) -> int:
+    try:
+        org = _policy_org(etc)
+        if org is None:
+            raise SyncError('the policy has no [org] table')
+        data = stdin.read(MAX_SNAPSHOT + 1)
+        # one receive at a time: two that pass against the same snapshot could land out of order
+        fd = os.open(os.path.join(etc, 'org.json.lock'), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                with open(os.path.join(etc, 'org.json'), 'rb') as f:
+                    current = f.read(MAX_SNAPSHOT + 1)
+            except FileNotFoundError:
+                current = None
+            doc = accept(data, org, current, now())
+            write(etc, doc)
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, SyncError) as e:
+        print(f'ci-run org-sync --receive: {e}; the old snapshot stays', file=sys.stderr)
+        return 1
+    print(f'ci-run org-sync --receive: {len(doc["members"])} members, {len(doc["repositories"])} private repositories')
+    return 0
+
+
+def fetch_out(org: str, environ, out, call: Callable = github.api, now: Callable = time.time) -> int:
+    try:
+        if not policy._ORG.match(org):
+            raise SyncError('--org is not an org name')
+        base = environ.get('GITHUB_API_URL', 'https://api.github.com')
+        if not (base.startswith('https://') or base.startswith('http://127.0.0.1:')):  # the login goes there
+            raise SyncError('GITHUB_API_URL must be https://')
+        token = _token(environ.get('GH_TOKEN', '').encode())
+        doc = fetch(org, token, call, base, now)
+    except (OSError, ValueError, SyncError, github.ApiError) as e:
+        print(f'ci-run org-sync --fetch: {e}', file=sys.stderr)
+        return 1
+    json.dump(doc, out, indent=1, sort_keys=True)
+    out.write('\n')
+    out.flush()
+    return 0
+
+
+def cli(args: list[str], etc: str) -> int:
+    if not args:
+        return main(etc)
+    if args == ['--receive']:
+        return receive(etc, sys.stdin.buffer)
+    if len(args) == 3 and args[:2] == ['--fetch', '--org']:
+        return fetch_out(args[2], os.environ, sys.stdout)
+    print('usage: ci-run org-sync [--fetch --org NAME | --receive]', file=sys.stderr)
+    return 2
+
+
 def main(etc: str, call: Callable = github.api, now: Callable = time.time) -> int:
     try:
         with open(os.path.join(etc, 'policy.toml'), 'rb') as f:
@@ -121,9 +232,10 @@ def main(etc: str, call: Callable = github.api, now: Callable = time.time) -> in
             return 0
         with open(os.path.join(etc, 'orgsync.token'), 'rb') as f:
             raw = f.read(MAX_TOKEN + 2)
-        token = raw.strip().decode('ascii') if raw.isascii() else ''  # no byte of it reaches the journal
-        if not token or len(token) > MAX_TOKEN or any(c.isspace() for c in token):
-            raise SyncError('orgsync.token is empty or malformed')
+        try:
+            token = _token(raw)
+        except SyncError:
+            raise SyncError('orgsync.token is empty or malformed') from None
         doc = fetch(pol.org.name, token, call, os.environ.get('GITHUB_API_URL', 'https://api.github.com'), now)
         write(etc, doc)
     except (OSError, ValueError, SyncError, github.ApiError) as e:

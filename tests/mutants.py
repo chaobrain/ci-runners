@@ -46,6 +46,7 @@ RGY = 'ci_runners/registry.py'
 REA = 'ci_runners/reaper.py'
 SMP = 'ci_runners/sampler.py'
 ORS = 'ci_runners/orgsync.py'
+OPS = 'setup/workstation/orgsync-push.sh'
 BRG = 'ci_runners/bridge.py'
 LCH = 'actions/lib/ci-run.sh'
 APT = 'actions/part/action.yml'
@@ -672,7 +673,7 @@ MUTANTS = [
     (ORS, "        if len(got) < PAGE:\n            return out", "        return out", [f'{TZ}.Sync.test_snapshot_of_every_page']),
     (ORS, "        out += got\n", "        out = got\n", [f'{TZ}.Sync.test_snapshot_of_every_page']),
     (ORS, " | os.O_EXCL | os.O_NOFOLLOW", "", [f'{TZ}.Sync.test_write_does_not_follow_a_planted_link']),
-    (ORS, "        if not token or len(token) > MAX_TOKEN or any(c.isspace() for c in token):", "        if not token:",
+    (ORS, "    if not token or len(token) > MAX_TOKEN or any(c.isspace() for c in token):", "    if not token:",
      [f'{TZ}.Sync.test_main_writes_the_snapshot_and_keeps_it_on_failure']),
     (ORS, "        if pol.org is None:\n            print", "        if False:\n            print",
      [f'{TZ}.Sync.test_main_without_org_does_nothing']),
@@ -709,6 +710,34 @@ MUTANTS = [
     (ENB, "    t = os.environ.get('GH_TOKEN', '').strip()\n",
      "    t = os.environ.get('GH_TOKEN', '').strip() or open(os.path.join(etc, 'envbuild.token')).read().strip()\n",
      [f'{TB}.Main.test_a_token_file_on_the_host_is_never_read']),
+    # the snapshot pushed from the workstation (decision 11.9)
+    (ORS, "    if len(data) > MAX_SNAPSHOT:", "    if False:", [f'{TZ}.Push.test_receive_refuses_and_keeps_the_old_snapshot']),
+    (ORS, "    if snap.org != org.lower():", "    if False:", [f'{TZ}.Push.test_receive_refuses_and_keeps_the_old_snapshot']),
+    (ORS, "    if snap.fetched_at > now + policy.CLOCK_SKEW:", "    if False:",
+     [f'{TZ}.Push.test_receive_refuses_and_keeps_the_old_snapshot']),
+    (ORS, "        if old is not None and snap.fetched_at < old.fetched_at:", "        if False:",
+     [f'{TZ}.Push.test_receive_refuses_and_keeps_the_old_snapshot']),
+    (ORS, "        if old is not None and snap.fetched_at < old.fetched_at:", "        if old is not None and snap.fetched_at <= old.fetched_at:",
+     [f'{TZ}.Push.test_receive_refuses_and_keeps_the_old_snapshot']),
+    (ORS, "            old = None  # a broken", "            raise SyncError('broken')  # a broken",
+     [f'{TZ}.Push.test_a_broken_snapshot_in_place_is_replaced']),
+    (ORS, "        if org is None:\n            raise SyncError('the policy has no [org] table')",
+     "        if False:\n            raise SyncError('the policy has no [org] table')", [f'{TZ}.Push.test_receive_needs_an_org_policy']),
+    (ORS, "        if not policy._ORG.match(org):", "        if False:", [f'{TZ}.Push.test_fetch_needs_a_token_and_an_org_name']),
+    (ORS, "        token = _token(environ.get('GH_TOKEN', '').encode())", "        token = environ.get('GH_TOKEN', '')",
+     [f'{TZ}.Push.test_fetch_needs_a_token_and_an_org_name']),
+    (OPS, "  [[ $a =~ ^[A-Za-z0-9._/][A-Za-z0-9._/-]*$ ]] ||", "  true ||", [f'{TZ}.PushScript.test_arguments_are_plain_words']),
+    (OPS, "  case $a in /*) ;; *)", "  case $a in *) ;; /*)", [f'{TZ}.PushScript.test_arguments_are_plain_words']),
+    (OPS, 'doc=$(GH_TOKEN=$token "$root/bin/ci-run"', 'export GH_TOKEN=$token; doc=$("$root/bin/ci-run"',
+     [f'{TZ}.PushScript.test_the_snapshot_reaches_receive']),
+    (OPS, "set -euo pipefail", "set -u", [f'{TZ}.PushScript.test_a_failed_fetch_sends_nothing']),
+    (OPS, "  [[ $a =~ ^[A-Za-z0-9._/][A-Za-z0-9._/-]*$ ]] ||", "  [[ $a =~ ^[A-Za-z0-9._/-]+$ ]] ||",
+     [f'{TZ}.PushScript.test_arguments_are_plain_words']),
+    (ORS, "    if snap.fetched_at > now + policy.CLOCK_SKEW:", "    if snap.fetched_at >= now + policy.CLOCK_SKEW:",
+     [f'{TZ}.Push.test_the_clock_skew_bound']),
+    (ORS, "            fcntl.flock(fd, fcntl.LOCK_EX)", "            pass", [f'{TZ}.Push.test_receives_take_turns']),
+    (ORS, "        if not (base.startswith('https://') or base.startswith('http://127.0.0.1:')):", "        if False:",
+     [f'{TZ}.Push.test_fetch_needs_a_token_and_an_org_name']),
     # h100's egress (decision 11.8)
     (BRG, "    if method != 'CONNECT':", "    if False:", [f'{TBR}.Target.test_refusals']),
     (BRG, "    if version not in ('HTTP/1.1', 'HTTP/1.0'):", "    if False:", [f'{TBR}.Target.test_refusals']),

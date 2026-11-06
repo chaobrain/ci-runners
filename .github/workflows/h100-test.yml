@@ -65,7 +65,7 @@ jobs:
           [ -n "$parts" ] || { echo "::error::set cpu-command or gpu-command"; exit 2; }
           { echo "parts=$parts"; echo "context=${IN_CONTEXT:-$IN_PROJECT/ci}"; echo "job-timeout=$((IN_TIMEOUT + 15))"; } >> "$GITHUB_OUTPUT"
       - id: claim
-        uses: chaobrain/ci-runners/actions/claim@v1
+        uses: chaobrain/ci-runners/actions/claim@v1.3.0
         with:
           context: ${{ steps.prep.outputs.context }}
 
@@ -84,7 +84,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - id: part
-        uses: chaobrain/ci-runners/actions/part@v1
+        uses: chaobrain/ci-runners/actions/part@v1.3.0
         with:
           project: ${{ inputs.project }}
           id: cpu
@@ -109,7 +109,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - id: part
-        uses: chaobrain/ci-runners/actions/part@v1
+        uses: chaobrain/ci-runners/actions/part@v1.3.0
         with:
           project: ${{ inputs.project }}
           id: gpu
@@ -131,7 +131,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - uses: chaobrain/ci-runners/actions/part@v1
+      - uses: chaobrain/ci-runners/actions/part@v1.3.0
         with:
           project: ${{ inputs.project }}
           id: cpu
@@ -152,7 +152,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - uses: chaobrain/ci-runners/actions/part@v1
+      - uses: chaobrain/ci-runners/actions/part@v1.3.0
         with:
           project: ${{ inputs.project }}
           id: gpu
@@ -174,7 +174,7 @@ jobs:
       contents: read
       statuses: write
     steps:
-      - uses: chaobrain/ci-runners/actions/verdict@v1
+      - uses: chaobrain/ci-runners/actions/verdict@v1.3.0
         with:
           context: ${{ needs.claim.outputs.context }}
           parts: ${{ needs.claim.outputs.parts }}

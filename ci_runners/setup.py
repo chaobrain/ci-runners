@@ -10,9 +10,10 @@
   against the file in place;
 - the CI proxy's node configs, made from the source configs (``proxy.config``) with
   their local ports replaced by the CI ports; their content is withheld (secrets). A
-  host with ``tunnel`` instead (h100, decision 11.8) gets ``ci-tunnel`` and ``ci-bridge``,
-  and its ``.env`` points at the bridge; the tunnel's key, ``ssh_config`` and
-  ``known_hosts`` in ``etc/tunnel/`` are the lead's, checked but never written;
+  host with ``tunnel`` instead (h100, decision 11.10) gets ``ci-tunnel``, an ssh forward
+  to the egress host's proxy, and its ``.env`` points at the forward; the tunnel's key,
+  ``ssh_config`` and ``known_hosts`` in ``etc/tunnel/`` are the lead's, checked but never
+  written;
 - the runner app, checked by sha256, extracted once per runner directory;
 - each runner's ``.env``;
 - the ``systemctl --user`` commands.
@@ -23,7 +24,10 @@ earlier ``apply`` wrote (``state/setup.json``) stops the plan: another user of a
 account may own it. ``plan --adopt`` instead lists each such file as ``adopt`` (a regular
 file of this account only) and plans it as usual, for a host whose units an older release
 wrote without a record; the lead approves the adoption with the plan, and ``apply`` must
-be given ``--adopt`` too.
+be given ``--adopt`` too. A unit an earlier apply recorded that the plan no longer holds
+(``ci-bridge.service``, decision 11.10) is listed as ``remove``: ``apply`` disables and
+stops it, deletes the file (a regular file of this account only, never a link) and
+drops it from the record.
 
 Registration is not in the plan: the lead runs ``setup/register.sh`` with a fresh
 token. ``apply --plan FILE`` refuses unless a fresh plan is identical (by sha256) and
@@ -55,7 +59,7 @@ PROXY_WAIT = 60  # s: the CI proxy's start, before the runner app is fetched thr
 RUNNER_URL = (f'https://github.com/actions/runner/releases/download/v{RUNNER_VERSION}/'
               f'actions-runner-linux-x64-{RUNNER_VERSION}.tar.gz')
 UNITS = ('ci-runner@.service', 'ci-proxy.service', 'ci-proxy-check.service', 'ci-proxy-check.timer',
-         'ci-tunnel.service', 'ci-bridge.service',
+         'ci-tunnel.service',
          'ci-reaper.service', 'ci-reaper.timer', 'ci-orgsync.service', 'ci-orgsync.timer', 'ci.slice')
 RUNNER_FILES = ('config.sh', 'run.sh', os.path.join('bin', 'Runner.Listener'))
 # what goes into a unit file: one word each, so nothing can add a line
@@ -66,8 +70,8 @@ TIMERS = ('ci-proxy-check.timer', 'ci-reaper.timer', 'ci-orgsync.timer')
 SYSTEM_PYTHON = '/usr/bin/python3'
 #: the runner unit's order after the CI proxy, where the host has one
 PROXY_ORDER = 'After=ci-proxy.service\nWants=ci-proxy.service'
-#: or after the egress bridge (h100, decision 11.8)
-BRIDGE_ORDER = 'After=ci-bridge.service\nWants=ci-bridge.service'
+#: or after the ssh forward to the egress (h100, decision 11.10)
+TUNNEL_ORDER = 'After=ci-tunnel.service\nWants=ci-tunnel.service'
 #: the lead's files in etc/tunnel/ (design §5.3): the key first, which no one else may read
 TUNNEL_FILES = ('id_ed25519', 'ssh_config', 'known_hosts')
 #: etc/tunnel/ssh_config: ``Host egress`` and only where it is (the unit fixes the rest)
@@ -314,14 +318,16 @@ def build(etc: str, adopt: bool = False) -> Plan:
             _file(plan, os.path.join(base, 'hooks', name), hook_text(f.read(), python), 0o755)
     plan.add('units:')
     subs = {'CI_MEMORY_MAX': h['memory_max'], 'PROXY_CLIENT': client, 'CI_DATA': data, 'CI_ETC': etc,
-            'CI_PYTHON': python, 'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else BRIDGE_ORDER if 'tunnel' in h else '',
-            'TUNNEL_SOCKS': str(h['tunnel']['socks_port']) if 'tunnel' in h else '',
-            # the bridge reads its table once: a changed table changes its unit, which restarts it
-            'TUNNEL_DIGEST': _sha(json.dumps(h['tunnel'], sort_keys=True).encode())[:16] if 'tunnel' in h else ''}
+            'CI_PYTHON': python, 'PROXY_ORDER': PROXY_ORDER if 'proxy' in h else TUNNEL_ORDER if 'tunnel' in h else '',
+            # the forward's ports are in its unit: a changed port changes the unit, which restarts it
+            'TUNNEL_HTTP': str(h['tunnel']['http_port']) if 'tunnel' in h else '',
+            'TUNNEL_EGRESS': str(h['tunnel']['egress_port']) if 'tunnel' in h else ''}
     ours = _ours(os.path.join(base, 'state', 'setup.json'))
+    planned: set[str] = set()
 
     def unit(name: str, content: str) -> None:
         path = os.path.join(unit_dir, name)
+        planned.add(path)
         if os.path.lexists(path) and path not in ours:
             if not adopt:
                 raise ValueError(f'{path} exists and no apply of ci-runners wrote it: another user\'s unit? '
@@ -341,7 +347,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
 
     for name in UNITS:
         if (name.startswith('ci-proxy') and 'proxy' not in h or name.startswith('ci-orgsync') and not h.get('orgsync')
-                or name in ('ci-tunnel.service', 'ci-bridge.service') and 'tunnel' not in h):
+                or name == 'ci-tunnel.service' and 'tunnel' not in h):
             continue
         with open(os.path.join(release, 'setup', 'units', name)) as f:
             unit(name, render(f.read(), subs))
@@ -380,10 +386,20 @@ def build(etc: str, adopt: bool = False) -> Plan:
         plan.add('egress tunnel (the lead\'s files, checked):')
         for name in TUNNEL_FILES:
             plan.add(f'  keep   {os.path.join(etc, "tunnel", name)}')
-        plan.add(f'  socks5 127.0.0.1:{t["socks_port"]}, bridge 127.0.0.1:{t["http_port"]}, '
-                 f'{len(t["allow"])} names on port 443: {", ".join(t["allow"])}')
-    egress = (['ci-proxy.service'] if 'proxy' in h else ['ci-tunnel.service', 'ci-bridge.service'] if 'tunnel' in h
-              else [])
+        plan.add(f'  forward 127.0.0.1:{t["http_port"]} -> the egress proxy, 127.0.0.1:{t["egress_port"]} there; '
+                 f'direct: {", ".join(t["direct"]) or "nothing"}')
+    gone = sorted(p for p in ours if os.path.dirname(p) == unit_dir and p not in planned)
+    if gone:  # recorded units this plan no longer holds (decision 11.10: ci-bridge.service)
+        plan.add('units removed (an earlier apply wrote them; this plan no longer holds them):')
+        for path in gone:
+            if os.path.lexists(path):
+                st = os.lstat(path)
+                if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                    raise ValueError(f'{path} is not a regular file of this account: remove it by hand')
+                plan.add(f'  remove {path} (disable --now, then delete)', kind='remove', path=path)
+            else:
+                plan.add(f'  forget {path} (already gone)', kind='remove', path=path)
+    egress = (['ci-proxy.service'] if 'proxy' in h else ['ci-tunnel.service'] if 'tunnel' in h else [])
     # egress units already running with an older file: enable --now leaves them as they are
     stale = 'tunnel' in h and any(a['kind'] == 'file' and os.path.dirname(a['path']) == unit_dir
                                   and os.path.basename(a['path']) in egress and os.path.exists(a['path'])
@@ -399,7 +415,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
             argv = ['systemctl', '--user', 'restart', *egress]
             plan.add(f'  run    {" ".join(argv)}', kind='run', argv=argv)
     port = h['proxy']['http_port'] if 'proxy' in h else h['tunnel']['http_port'] if 'tunnel' in h else 0
-    via = ('fetched through the CI proxy' if 'proxy' in h else 'fetched through the egress bridge' if 'tunnel' in h
+    via = ('fetched through the CI proxy' if 'proxy' in h else 'fetched through the egress tunnel' if 'tunnel' in h
            else 'fetched directly')
     plan.add(f'runners (actions/runner {RUNNER_VERSION}, sha256 {RUNNER_SHA256[:16]}, {via}):')
     cache = os.path.join(base, 'state', 'cache', os.path.basename(RUNNER_URL))
@@ -410,10 +426,9 @@ def build(etc: str, adopt: bool = False) -> Plan:
         if runner_complete(rdir):
             plan.add(f'  keep   {rdir}/ (runner app present)')
         else:
-            if not waited:  # the bridge listens at once; the tunnel's port, only once ssh is in
+            if not waited:  # the forward's port listens only once ssh is in
                 t = h['tunnel']
-                plan.add(f'  wait   127.0.0.1:{t["socks_port"]} (tunnel), 127.0.0.1:{t["http_port"]} (bridge)',
-                         kind='wait', ports=[t['socks_port'], t['http_port']])
+                plan.add(f'  wait   127.0.0.1:{t["http_port"]} (tunnel)', kind='wait', ports=[t['http_port']])
                 waited = True
             plan.add(f'  unpack {RUNNER_URL} -> {rdir}/', kind='runner', path=rdir, cache=cache, port=port)
         _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc, card), 0o600)
@@ -434,7 +449,14 @@ def _ours(state_path: str) -> frozenset[str]:
     try:
         with open(state_path, encoding='utf-8') as f:
             state = json.load(f)
-        return frozenset(m['path'] for a in state['applied'] for m in a['made'] if m.get('kind') == 'file')
+        out: set[str] = set()
+        for a in state['applied']:
+            for m in a['made']:
+                if m.get('kind') == 'file':
+                    out.add(m['path'])
+                elif m.get('kind') == 'remove':
+                    out.discard(m['path'])
+        return frozenset(out)
     except FileNotFoundError:
         return frozenset()
     except (OSError, ValueError, KeyError, TypeError) as e:
@@ -540,6 +562,8 @@ def _apply_actions(plan: Plan, made: list, run) -> None:
             made.append({'kind': 'file', 'path': a['path']})
             print(f'apply: adopt {a["path"]}')
             continue
+        elif k == 'remove':
+            _remove_unit(a['path'], run)
         elif k == 'wait':
             for port in a['ports']:
                 wait_port(port)
@@ -549,6 +573,23 @@ def _apply_actions(plan: Plan, made: list, run) -> None:
             run(a['argv'], check=True, timeout=300)
         made.append({x: a[x] for x in ('kind', 'path', 'argv') if x in a})
         print(f'apply: {k} {a.get("path") or " ".join(a.get("argv", []))}')
+
+
+def _remove_unit(path: str, run) -> None:
+    """Disable and stop a unit an earlier apply wrote, then delete its file: a regular
+    file of this account only, checked again here; a link or another's file stops the
+    apply. An absent file is forgotten, but its unit is still stopped and disabled: it may
+    run on from memory, holding its port, with its wants link behind."""
+    if not os.path.lexists(path):
+        name = os.path.basename(path)
+        run(['systemctl', '--user', 'stop', name], check=False, timeout=300)
+        run(['systemctl', '--user', 'disable', name], check=False, timeout=300)
+        return
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+        raise RuntimeError(f'{path} is not a regular file of this account: not removed')
+    run(['systemctl', '--user', 'disable', '--now', os.path.basename(path)], check=True, timeout=300)
+    os.unlink(path)
 
 
 def _record(state_path: str, digest: str, made: list) -> None:

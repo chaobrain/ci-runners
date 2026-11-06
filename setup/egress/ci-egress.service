@@ -1,0 +1,36 @@
+# The egress proxy (design decision 11.10, §5.3): a system unit of the egress host,
+# installed by root from a root-owned release. HTTP CONNECT on 127.0.0.1:18443 to the
+# allowlist's names on port 443, connected directly; h100's ci-tunnel.service forwards
+# its local port here, and the egress account's key opens this one port. The port must
+# match the inventory's tunnel.egress_port and the key's permitopen.
+[Unit]
+Description=ci-runners: egress proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# a transient user of its own: the proxy needs no account, and the egress account's
+# key only reaches this port
+DynamicUser=yes
+ExecStart=/opt/ci-runners/releases/hook/bin/ci-run egress --port 18443 --allow /opt/ci-runners/etc/egress-allow
+Environment=CI_RUNNERS_PYTHON=/usr/bin/python3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+MemoryMax=512M
+TasksMax=128
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

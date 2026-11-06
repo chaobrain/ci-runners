@@ -528,15 +528,15 @@ h100 = {{ per_card = true, labels = ["h100"] }}
 
 
 class Egress(unittest.TestCase):
-    """h100's egress (decision 11.8): a tunnel table gives ci-tunnel and ci-bridge, the
-    runners' proxy lines point at the bridge, and the lead's files in etc/tunnel/ are
-    checked, never written."""
+    """h100's egress (decision 11.10): a tunnel table gives ci-tunnel, an ssh forward of the
+    local http port to the egress proxy; the runners' proxy lines point at the forward;
+    the lead's files in etc/tunnel/ are checked, never written; a recorded ci-bridge.service
+    is removed."""
 
     TUNNEL = """[hosts.hx.tunnel]
-socks_port = 18181
 http_port = 18182
-allow = ["github.com", "pypi.org"]
-direct = ["localhost", "127.0.0.1", "::1", "api.github.com", ".actions.githubusercontent.com"]
+egress_port = 18443
+direct = ["localhost", "127.0.0.1", "::1"]
 """
 
     setUp_ = Standalone.setUp
@@ -564,41 +564,103 @@ direct = ["localhost", "127.0.0.1", "::1", "api.github.com", ".actions.githubuse
         self.unpacked = []
         text = setup.build(str(self.etc)).text()
         for want in ('| https_proxy=http://127.0.0.1:18182', '| http_proxy=http://127.0.0.1:18182',
-                     '| no_proxy=localhost,127.0.0.1,::1,api.github.com,.actions.githubusercontent.com',
-                     'fetched through the egress bridge', f'keep   {self.tun}/id_ed25519',
-                     '2 names on port 443: github.com, pypi.org',
-                     'run    systemctl --user enable --now ci-tunnel.service ci-bridge.service\n'):
+                     '| no_proxy=localhost,127.0.0.1,::1', 'fetched through the egress tunnel',
+                     f'keep   {self.tun}/id_ed25519',
+                     'forward 127.0.0.1:18182 -> the egress proxy, 127.0.0.1:18443 there; direct: localhost, 127.0.0.1, ::1',
+                     'run    systemctl --user enable --now ci-tunnel.service\n'):
             self.assertIn(want, text)
         self.assertNotIn('ci-proxy', text)
+        self.assertNotIn('ci-bridge', text)
+        self.assertNotIn('remove', text)  # nothing recorded: nothing to remove
         self.assertNotIn('egress.example', text)  # the lead's files are not shown
         self.assertEqual(self.apply(text), 0)
         self.assertEqual(sorted(p.name for p in self.units.iterdir()),
-                         ['ci-bridge.service', 'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service',
-                          'ci-tunnel.service', 'ci.slice'])
+                         ['ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service', 'ci-tunnel.service', 'ci.slice'])
         tunnel = (self.units / 'ci-tunnel.service').read_text()
-        for want in (f'ExecStart=/usr/bin/ssh -F {self.etc}/tunnel/ssh_config -N -D 127.0.0.1:18181 ',
+        for want in (f'ExecStart=/usr/bin/ssh -F {self.etc}/tunnel/ssh_config -N -L 127.0.0.1:18182:127.0.0.1:18443 ',
                      f'-o IdentityFile={self.etc}/tunnel/id_ed25519 ', '-o StrictHostKeyChecking=yes ',
                      f'-o UserKnownHostsFile={self.etc}/tunnel/known_hosts ', '-o ExitOnForwardFailure=yes ',
-                     '-o BatchMode=yes ', ' egress\n'):
+                     '-o BatchMode=yes ', '-o GatewayPorts=no ', '-o IdentityAgent=none ', ' egress\n'):
             self.assertIn(want, tunnel)
-        bridge = (self.units / 'ci-bridge.service').read_text()
-        self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run bridge\n', bridge)
+        self.assertNotIn(' -D ', tunnel)
         runner = (self.units / 'ci-runner@.service').read_text()
-        self.assertIn('After=ci-bridge.service\nWants=ci-bridge.service\n', runner)
-        self.assertEqual([port for _, port in self.unpacked], [18182] * 4)  # the runner app through the bridge
-        self.assertEqual(self.waited, [18181, 18182])  # the tunnel's port first: it binds once ssh is in
+        self.assertIn('After=ci-tunnel.service\nWants=ci-tunnel.service\n', runner)
+        self.assertEqual([port for _, port in self.unpacked], [18182] * 4)  # the runner app through the forward
+        self.assertEqual(self.waited, [18182])  # the forward's port: it binds once ssh is in
         self.assertEqual((self.tun / 'ssh_config').read_text(), 'Host egress\n  HostName egress.example\n')
         self.assertEqual(setup.build(str(self.etc)).actions, [])
-        self.assertNotIn('systemctl --user restart', text)  # a first apply starts them
+        self.assertNotIn('systemctl --user restart', text)  # a first apply starts it
 
-    def test_a_changed_table_restarts_the_egress(self):
+    def test_a_changed_port_restarts_the_tunnel(self):
         self.unpacked = []
         self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
-        self.inv.write_text(self.inv.read_text().replace('"github.com", "pypi.org"', '"github.com"'))
+        self.inv.write_text(self.inv.read_text().replace('egress_port = 18443', 'egress_port = 18444'))
         text = setup.build(str(self.etc)).text()
-        self.assertIn(f'update {self.units}/ci-bridge.service', text)
-        self.assertIn('run    systemctl --user restart ci-tunnel.service ci-bridge.service\n', text)
+        self.assertIn(f'update {self.units}/ci-tunnel.service', text)
+        self.assertIn('run    systemctl --user restart ci-tunnel.service\n', text)
         self.assertNotIn('  wait ', text)  # the runners are there: nothing to fetch
+
+    def recorded_bridge(self):
+        """ci-bridge.service as an earlier release's apply left it, on record."""
+        self.unpacked = []
+        self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+        bridge = self.units / 'ci-bridge.service'
+        bridge.write_text('[Service]\nExecStart=/old/ci-run bridge\n')
+        state = self.data / 'ci-runners' / 'state' / 'setup.json'
+        doc = json.loads(state.read_text())
+        doc['applied'].insert(0, {'plan': 'old', 'made': [{'kind': 'file', 'path': str(bridge)}]})
+        state.write_text(json.dumps(doc))
+        return bridge, state
+
+    def test_a_recorded_unit_the_plan_no_longer_holds_is_removed(self):
+        bridge, state = self.recorded_bridge()
+        text = setup.build(str(self.etc)).text()
+        self.assertIn(f'  remove {bridge} (disable --now, then delete)\n', text)
+        self.assertIn('run    systemctl --user daemon-reload', text)
+        self.ran.clear()
+        self.assertEqual(self.apply(text), 0)
+        self.assertFalse(bridge.exists())
+        self.assertEqual(self.ran[0], ['systemctl', '--user', 'disable', '--now', 'ci-bridge.service'])
+        self.assertIn(['systemctl', '--user', 'daemon-reload'], self.ran[1:])  # after the removal
+        self.assertNotIn(str(bridge), setup._ours(str(state)))  # off the record
+        self.assertIn({'kind': 'remove', 'path': str(bridge)}, json.loads(state.read_text())['applied'][-1]['made'])
+        self.assertEqual(setup.build(str(self.etc)).actions, [])  # a second apply is a no-op
+
+    def test_a_recorded_unit_already_gone_is_only_forgotten(self):
+        bridge, state = self.recorded_bridge()
+        bridge.unlink()
+        text = setup.build(str(self.etc)).text()
+        self.assertIn(f'  forget {bridge} (already gone)\n', text)
+        self.ran.clear()
+        self.assertEqual(self.apply(text), 0)
+        self.assertNotIn(['systemctl', '--user', 'disable', '--now', 'ci-bridge.service'], self.ran)
+        # but its unit may run on from memory, holding its port: stopped and disabled anyway
+        self.assertIn(['systemctl', '--user', 'stop', 'ci-bridge.service'], self.ran)
+        self.assertIn(['systemctl', '--user', 'disable', 'ci-bridge.service'], self.ran)
+        self.assertNotIn(str(bridge), setup._ours(str(state)))
+
+    def test_a_link_in_place_of_a_recorded_unit_is_not_removed(self):
+        bridge, _ = self.recorded_bridge()
+        target = pathlib.Path(self.tmp.name) / 'elsewhere.service'
+        target.write_text('kept\n')
+        bridge.unlink()
+        os.symlink(target, bridge)
+        with self.assertRaisesRegex(ValueError, 'not a regular file of this account'):
+            setup.build(str(self.etc))
+        with self.assertRaisesRegex(RuntimeError, 'not a regular file'):  # checked again at apply time
+            setup._remove_unit(str(bridge), self.run_)
+        self.assertTrue(bridge.is_symlink())
+        self.assertEqual(target.read_text(), 'kept\n')
+
+    def test_uninstall_skips_a_removed_unit(self):
+        bridge, state = self.recorded_bridge()
+        self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+        script = (ROOT / 'setup' / 'uninstall.sh').read_text()
+        code = script.split("units=$(\"$py\" -I - \"$base/state/setup.json\" \"$unit_dir\" <<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        out = subprocess.run([sys.executable, '-I', '-', str(state), str(self.units)], input=code, text=True,
+                             capture_output=True, check=True).stdout.split()
+        self.assertNotIn('ci-bridge.service', out)
+        self.assertIn('ci-tunnel.service', out)
 
     def test_the_leads_files_are_required(self):
         def refused(why):
@@ -621,6 +683,7 @@ direct = ["localhost", "127.0.0.1", "::1", "api.github.com", ".actions.githubuse
                          ('Host egress\n  HostName h\nHost egress\n  HostName i\n', 'one "Host egress"'),
                          ('Host egress\n  HostName h\n  IdentityFile /tmp/k\n', 'line 3: only'),
                          ('Host egress\n  HostName h\n  DynamicForward 0.0.0.0:1080\n', 'line 3: only'),
+                         ('Host egress\n  HostName h\n  LocalForward 0.0.0.0:1080 x:1\n', 'line 3: only'),
                          ('Host egress\n  HostName h\n  ProxyCommand sh -c x\n', 'line 3: only'),
                          ('Host egress\n  HostName h; x\n', 'line 2: only'),
                          ('Match all\n  HostName h\n', 'line 1: only')):
@@ -635,36 +698,50 @@ direct = ["localhost", "127.0.0.1", "::1", "api.github.com", ".actions.githubuse
 
     def test_the_tunnel_table(self):
         good = self.inv.read_text()
-        for old, new, why in (('http_port = 18182', 'http_port = 18181', 'the same'),
-                              ('"github.com", "pypi.org"', '"10.20.30"', 'allow is malformed'),
-                              ('"github.com", "pypi.org"', '', 'allow is malformed'),
-                              ('"github.com", "pypi.org"', '"GitHub.com"', 'allow is malformed'),
-                              ('"::1", ', '"::1,example.com", ', 'direct is malformed'),
-                              ('"::1", ', '"::1", "a.org,b.org", ', 'direct is malformed'),  # one name each
+        for old, new, why in (('egress_port = 18443\n', '', 'egress_port is missing'),
+                              ('http_port = 18182\n', '', 'http_port is missing'),
+                              ('egress_port = 18443', 'egress_port = 0', 'egress_port is malformed'),
                               ('http_port = 18182', 'http_port = 70000', 'http_port is malformed'),
+                              ('http_port = 18182', 'http_port = 18182\nsocks_port = 18181', r"unknown keys \['socks_port'\]"),
+                              ('http_port = 18182', 'http_port = 18182\nallow = ["github.com"]', r"unknown keys \['allow'\]"),
+                              ('"::1"]', '"::1,example.com"]', 'direct is malformed'),
+                              ('"::1"]', '"::1", "a.org,b.org"]', 'direct is malformed'),  # one name each
                               ('[hosts.hx.tunnel]', '[hosts.hx.proxy]\nclient = "/bin/x"\nconfig = "/c"\n'
                                'nodes = ["n"]\nhttp_port = 1\nsocks_port = 2\nno_proxy = "localhost"\n'
                                '[hosts.hx.tunnel]', 'a CI proxy and a tunnel')):
             with self.assertRaisesRegex(inventory.InventoryError, why, msg=new):
                 inventory.load(good.replace(old, new))
-        self.assertEqual(inventory.load(good).host['tunnel']['allow'], ['github.com', 'pypi.org'])
-        self.assertEqual(inventory.deny_tokens(inventory.tomllib.loads(good)) & {'github.com', 'api.github.com'},
+        self.assertEqual(inventory.load(good).host['tunnel'],
+                         {'http_port': 18182, 'egress_port': 18443, 'direct': ['localhost', '127.0.0.1', '::1']})
+        public = inventory.tomllib.loads(good.replace('"::1"]', '"::1", "api.github.com", ".blob.core.windows.net"]'))
+        self.assertEqual(inventory.deny_tokens(public) & {'api.github.com', '.blob.core.windows.net'},
                          set())  # public names: the repository may hold them
-        private = inventory.tomllib.loads(good.replace('"::1", ', '"::1", "mirror.lab.internal", "fd00::5", '))
+        private = inventory.tomllib.loads(good.replace('"::1"]', '"::1", "mirror.lab.internal", "fd00::5"]'))
         self.assertLessEqual({'mirror.lab.internal', 'fd00::5'}, inventory.deny_tokens(private))  # inventory
-        self.assertIn('secret-name.org', inventory.deny_tokens({'other': {'allow': ['secret-name.org']}}))
+        self.assertIn('secret-name.org', inventory.deny_tokens(
+            {'hosts': {'hx': {'tunnel': {'allow': ['secret-name.org']}}}}))  # no tunnel key is exempt but direct's
         self.assertEqual(inventory.deny_tokens({'org': {'name': 'chaobrain'}, 'x': {'name': 'secretorg'}}),
                          {'secretorg'})  # the policy's org name is public; another name is not
         self.assertIn('api.github.com', inventory.deny_tokens({'hosts': {'hx': {'other': ['api.github.com']}}}))
 
-    def test_bridge_command_without_a_tunnel(self):
+    def test_the_egress_command(self):
         from ci_runners import cli
-        self.inv.write_text(self.inv.read_text().replace(self.TUNNEL, ''))
         err = io.StringIO()
-        with mock.patch.dict(os.environ, {'CI_RUNNERS_ETC': str(self.etc)}), contextlib.redirect_stderr(err):
-            self.assertEqual(cli.main(['bridge']), 2)
-        self.assertIn('no tunnel', err.getvalue())
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(cli.main(['egress', '--port', '18443', '--allow', str(self.tmp.name) + '/absent']), 2)
+            self.assertEqual(cli.main(['bridge']), 2)  # gone
+        self.assertIn('ci-run egress:', err.getvalue())
 
+    def test_the_egress_unit(self):
+        unit = (ROOT / 'setup' / 'egress' / 'ci-egress.service').read_text()
+        for want in ('DynamicUser=yes\n', 'ExecStart=/opt/ci-runners/releases/hook/bin/ci-run egress --port 18443 '
+                     '--allow /opt/ci-runners/etc/egress-allow\n', 'Environment=CI_RUNNERS_PYTHON=/usr/bin/python3\n',
+                     'NoNewPrivileges=yes\n', 'ProtectSystem=strict\n', 'ProtectHome=yes\n', 'PrivateTmp=yes\n',
+                     'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n', 'CapabilityBoundingSet=\n',
+                     'MemoryMax=512M\n', 'Restart=always\n'):
+            self.assertIn(want, unit)
+        example = (ROOT / 'setup' / 'inventory.example.toml').read_text()
+        self.assertIn('egress_port = 18443', example)  # the unit's port
 
 if __name__ == '__main__':
     unittest.main()

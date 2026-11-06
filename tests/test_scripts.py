@@ -168,6 +168,7 @@ class Install(unittest.TestCase):
         self.assertEqual(self.hook(), 'v1.0.0')
         self.assertEqual((self.rel / 'v1.0.0/COMMIT').read_text(), SHA + '\n')
         self.assertFalse(os.access(self.rel / 'v1.0.0/ci_runners/__init__.py', os.W_OK))
+        self.assertEqual(os.stat(self.rel / 'v1.0.0').st_mode & 0o777, 0o555)  # a dynamic user can enter it
         self.assertEqual(self.install('--tag', 'v1.1.0', '--expect', SHA2).returncode, 0)  # lightweight
         self.assertEqual(self.hook(), 'v1.1.0')
         self.assertEqual(self.install('--tag', 'v2.0.0', '--expect', SHA).returncode, 1)  # no such tag
@@ -254,6 +255,23 @@ class Uninstall(unittest.TestCase):
         self.assertNotIn('ci-proxy', calls)  # never written by an apply here: not ours to stop
         self.assertEqual(sorted(p.name for p in self.units.iterdir()), ['ci-mine.slice', 'ci-proxy.service'])
         self.assertTrue((self.home / 'data/actions-runner/r-light-1/.env').exists())
+
+    def test_a_unit_a_later_apply_removed_is_left_alone(self):
+        """Decision 11.10: an apply that removed ci-bridge.service took it off the record, so
+        a co-user's unit of that name, written since, is neither stopped nor deleted."""
+        st = self.home / 'data/ci-runners/state/setup.json'
+        doc = json.loads(st.read_text())
+        gone = str(self.units / 'ci-bridge.service')
+        doc['applied'][0]['made'].insert(0, {'kind': 'file', 'path': gone})
+        doc['applied'].append({'plan': 'q', 'made': [{'kind': 'remove', 'path': gone}]})
+        st.write_text(json.dumps(doc))
+        (self.units / 'ci-bridge.service').write_text('a co-user\'s unit, written since')
+        r = self.uninstall()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('ci-bridge', (self.out / 'calls').read_text())
+        self.assertIn('--user disable --now ci-reaper.timer\n', (self.out / 'calls').read_text())
+        self.assertEqual(sorted(p.name for p in self.units.iterdir()),
+                         ['ci-bridge.service', 'ci-mine.slice', 'ci-proxy.service'])
 
     def test_another_roles_inventory_is_refused(self):
         r = subprocess.run(['sh', str(ROOT / 'setup/uninstall.sh'), 'other'],

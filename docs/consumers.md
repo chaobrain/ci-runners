@@ -1,143 +1,88 @@
-# Consumer guide (sketch)
+# 使用指南：在 h100 上跑仓库的测试
 
-How a chaobrain project runs its CI parts on the shared runners. The contract is
-[design.md](design.md). Nothing here is implemented before RUN-1. Inputs, labels and
-outcomes follow the design's §4 and §5.1.
+这份指南写给要接入这套 CI 的仓库。契约是 [design.md](design.md)（英文），本文与之不一致时以 design.md 为准。维护主机的人请看 [operations.md](operations.md)。
 
-## 1. What a project provides
+## 1. 这是什么，谁能用
 
-| item | where | notes |
-|---|---|---|
-| **Registry entry** | on the hosts, `etc/projects/<p>.toml`, added by the lead | name, repository, class (private or public), status context, env name per host, caps (`max_slots`, `max_cards`, `memory`, `memory_max`, `max_waiting`), `gpu-mem-mib`, `remote_env`, fallback order per part class, retries (0 or 1), the upstream update command |
-| **Env spec** | `.github/ci-runners.toml` in the project, read **from the default branch only** | conda env name, Python version, requirement files, editable upstream checkouts and their ref policy (for example `origin/main`), variables to set. A pull request cannot change a host's env. |
-| **Envs** | built on each host it uses by `ci-run env build <p> --host <role>`, run by a maintainer | on h100, the manifest is built in the same step (design §5.4) |
-| **Commands** | in the project | the contract below |
-| **Workflow** | `.github/workflows/` in the project | §3 (private) or §4 (public) |
-| **Status context** | one per head, `<project>/ci` | `claim` reads it; the project's verdict job posts it |
+- chaobrain 的**每个私有仓库**都能用。h100 上的 runner 跑测试，CPU 和 GPU 两部分都在 h100 上（design 决定 11）。
+- **只有 org 成员**触发的任务才会被接受。成员和私有仓库的名单每 10 分钟从 org 自动同步一次（design §6.5），不需要找人加白名单。
+- **公开仓库不能用**，继续用 GitHub 托管 runner。org 也不允许 fork 私有仓库，所以 fork 的 PR 跑不到这里。
+- 私有仓库调用 `h100-test.yml` 时，所有作业都跑在 h100 上，**不消耗**私有仓库的托管 Actions 分钟数。
 
-**Command contract.** A part's command:
+**共享账户意味着什么。** h100 的 runner 跑在一个实验室多人共用的 Unix 账户上（design §6.1）。任务运行期间，其他使用者能看到你的 checkout，也有能力篡改结果。所以：
 
-- runs from the job's checkout, and exits nonzero only for a red result;
-- handles TERM by stopping its own process tree;
-- takes the host lock per step (`$CI_HOST_LOCK`, or `ci-lock -s|-x|-l`), holding a
-  shared lock for at most about 15 min. Otherwise the part declares `lock`;
-- reads `CUDA_VISIBLE_DEVICES` and `CI_CPUS`, and does not choose its own cards;
-- writes JUnit XML into `$CI_RESULTS_DIR` (required on h100, where verify compares it);
-- honours `CI_RESUME=1`, if it can resume;
-- runs in a tree without `.git` if it is to run on h100 (snapshot by `git archive`).
+- 不要把 secret 传给这些任务；
+- 代码不能给同实验室的人看的仓库，不要接入。
 
-## 2. Onboarding
+## 2. 管线
 
-1. **Ask the lead.** The lead adds the repository, its class and its actors to the
-   hosts' policy and registry, through `setup/plan.sh` and `apply.sh`. A public
-   repository also gets its own repository-level GPU runners (design §12 item 2).
-2. **Add the env spec** to the project's default branch.
-3. **Build the envs** on each host the project uses. For h100, build the env and its
-   manifest from 3090b.
-4. **Write the workflow** (§3 or §4), pinning `@v1`.
-5. **Canary.** A branch with one failing test in each part class ends red in that part,
-   and only there. A stopped runner and an OOM end as `lost` and `oom`, not red.
-6. **Done** when 5 heads have run end to end and their statuses and summaries read
-   right. Queue and run times are on the host's `ci-run report`.
-
-## 3. A private consumer's workflow (sketch)
-
-```yaml
-name: CI
-on:
-  pull_request: {types: [opened, synchronize, reopened, ready_for_review]}
-  workflow_dispatch: {inputs: {sha: {required: true}}}
-concurrency:
-  group: ci-${{ github.event.pull_request.number || inputs.sha }}
-  cancel-in-progress: true
-permissions: {contents: read}
-jobs:
-  claim:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, light]
-    permissions: {statuses: write}
-    outputs: {run: "${{ steps.c.outputs.run }}"}
-    steps:
-      - id: c
-        uses: chaobrain/ci-runners/actions/claim@v1
-        with: {context: myproj/ci}
-  plan:                      # the project's own selection, then placement
-    needs: claim
-    if: needs.claim.outputs.run == 'true'
-    runs-on: [self-hosted, light]
-    outputs: {plan: "${{ steps.place.outputs.plan }}"}
-    steps:
-      - uses: actions/checkout@v4
-      - id: sel
-        run: python scripts/select_parts.py > "$RUNNER_TEMP/parts.json"   # project code
-      - id: place
-        uses: chaobrain/ci-runners/actions/place@v1
-        with: {parts-file: "${{ runner.temp }}/parts.json"}
-  part:
-    needs: plan
-    strategy: {fail-fast: false, matrix: {part: "${{ fromJSON(needs.plan.outputs.plan) }}"}}
-    runs-on: ${{ matrix.part.runs-on }}
-    timeout-minutes: ${{ matrix.part.timeout-minutes }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: chaobrain/ci-runners/actions/part@v1
-        with:
-          project: myproj
-          id: ${{ matrix.part.id }}
-          command: scripts/run_part.sh ${{ matrix.part.id }}
-          timeout-minutes: 25     # inner bound: below the plan's, which is at least 30
-          # a GPU part also sets gpus; the plan names only id, runs-on, fallback, timeout-minutes
-          results: "*.xml"
-  # fallback: reads the ci-part-* artifacts and reruns each part whose `next` is retry
-  # or fallback, once, on its `retry-on`. verdict (always, on light): salvage the parts
-  # without an artifact, merge the summaries, post myproj/ci.
+```
+push / PR（同仓库）/ workflow_dispatch
+        │
+        ▼
+claim          [self-hosted, h100-light]
+  这个 head 已有结论就跳过（绿的不重跑），否则发 pending
+        │
+        ▼  （每个作业开跑前，runner 上的 pre-job hook 先检查：
+        │    org 成员？快照里的私有仓库，且 id 对得上？快照 ≤ 60 分钟？不是 fork？
+        │    不满足就在 "Set up runner" 里拒绝，打印 ci-runners: refused <原因>）
+        ├──────────────────────────────┐
+        ▼                              ▼
+cpu   [self-hosted, h100-cpu]     gpu   [self-hosted, h100]（一张卡一个 runner）
+  CI 槽位 → scope 内运行             健康门：卡 < 80 °C、watchdog 无告警
+  内存上限、超时                     租卡 → scope 内运行，CUDA_VISIBLE_DEVICES=N
+                                     每 30 s 采样；≥ 85 °C 持续 3 min 提前停止
+        │                              │
+        ▼                              ▼
+cpu-retry / gpu-retry：结果要求重试时（oom、thermal、unavailable 等）重试一次；
+  GPU 部件换到 retry-on 指定的凉卡
+        │
+        ▼
+verdict        [self-hosted, h100-light]
+  汇总各部件最后一次尝试的结果；没有 artifact 的部件从主机记录中 salvage；
+  合并 summary，发 <project>/ci 状态：success / failure / error
 ```
 
-## 3a. The standard test CI on h100 (RUN-5)
+**部件的结果**（design §4.4）：
 
-For any private chaobrain repository (design decision 11, §4.7). The hook already
-accepts every private repository of the org and every org member (design §6.5), so no
-allowlist edit is needed.
+| 结果 | 含义 | 之后 |
+|---|---|---|
+| `pass` | 命令退出码 0 | — |
+| `red` | 命令失败或超时，不是基础设施的原因 | 状态为 failure |
+| `oom` | 超出内存上限，被杀 | 带 `CI_RESUME=1` 重试一次 |
+| `thermal` | 卡过热，被 watchdog 杀掉或被提前停止 | 换一张凉卡重试一次 |
+| `reboot` | 运行期间主机重启 | 同 thermal |
+| `unavailable` | 开跑前就不满足条件：卡太热、没有空卡、排队超时、磁盘不足、`gpus > 1` 等 | 重试一次 |
+| `lost` | 作业没留下输出就结束了，例如 runner 被停 | verdict 从主机上的记录 salvage |
+| `stopped` | 被取消，例如同一个 PR 推了新 head | — |
 
-**Onboarding.**
+只有 `red` 会让部件这一步退出 1。基础设施问题重试一次还没解决，状态就是 `error`，不是 `failure`。
 
-1. Add `.github/ci-runners.toml` to the default branch (below).
-2. Ask a maintainer to add the registry entry (`etc/projects/<p>.toml` on h100, design
-   §4) and to run `ci-run env build <p> [--conda PATH] [--dry-run]`. It reads that file
-   and the requirement files it names (with their `-r` and `-c` files) at the default
-   branch's head, builds the env into `envs/<p>-<stamp>/`, links `envs/<p>` to it only
-   once every step has passed, and keeps the two builds before it. It prints the
-   registry lines to add: `env` and the spec's `variables`. Rerun it after a dependency
-   change has merged. The maintainer runs it with their own `GH_TOKEN` (Contents: read on
-   the repository and on any private upstream) set for that one command; no such token
-   is ever stored on h100. conda and pip reach the internet through h100's egress, so
-   the shell takes a runner's proxy lines for the build: `https_proxy`, `http_proxy` and
-   `no_proxy` from `<data>/actions-runner/<runner>/.env`. Without `no_proxy`, the hosts
-   in the inventory's `tunnel.direct` (a package mirror among them) go to the egress
-   proxy, which refuses them with 403.
-3. Add the workflow below, pinning `@v1`.
-4. Canary and done as in §2, steps 5 and 6.
+## 3. 接入步骤
 
-**`.github/ci-runners.toml`** (schema 1):
+1. **写环境规格。** 在默认分支上加 `.github/ci-runners.toml`（见下文）。规格只从默认分支读取，PR 改它不会影响环境。
+2. **请维护者建环境。** 维护者在 h100 上写 registry 条目 `etc/projects/<project>.toml`，然后跑 `ci-run env build <project>`，步骤见 [operations.md](operations.md) §4。依赖改动合并之后要重建一次。
+3. **加工作流**（见下文），引用 `@v1`。
+4. **金丝雀验证。** 在一个分支上分别放一个必然失败的 CPU 测试和一个必然失败的 GPU 测试，确认它们各自只在自己的部件里变红。
+5. **完成。** 连续几个 head 端到端跑通，`<project>/ci` 状态和 summary 都对。
+
+**`.github/ci-runners.toml`**（schema 1）：
 
 ```toml
 schema = 1
-python = "3.12"                                   # conda python version of the env
-requirements = ["requirements-dev.txt"]           # pip -r, in order; paths inside the repository
-install = ["pytest-xdist"]                        # more requirement specifiers: no options, URLs or paths
-[[upstream]]                                      # optional: editable sibling checkouts
+python = "3.12"                                   # 环境的 Python 版本（conda）
+requirements = ["requirements-dev.txt"]           # pip -r，按顺序；仓库内的路径，-r/-c 引用的文件会一并读取
+install = ["pytest-xdist"]                        # 额外的依赖说明符：不能带选项、URL 或路径
+[[upstream]]                                      # 可选：以 editable 方式安装的兄弟仓库
 repository = "chaobrain/brainstate"
 ref = "origin/main"
-[variables]                                       # for the registry entry (registry RESERVED names refused)
+[variables]                                       # 写进 registry 条目的环境变量（保留名会被拒绝）
 XLA_PYTHON_CLIENT_PREALLOCATE = "false"
 ```
 
-The project itself is not installed into the env: an editable install would point at a
-build's temporary checkout. A part runs from the job's checkout, so `python -m pytest`
-imports the project from there. Upstreams are cloned into the build and installed
-editable, at the branch head when the env was built.
+项目本身**不会**装进环境：部件在作业的 checkout 里运行，`python -m pytest` 会直接从 checkout 导入项目。upstream 在建环境时 clone 并以 editable 方式安装，版本是当时分支的 head。
 
-**Workflow.**
+**工作流**（`.github/workflows/test.yml`）：
 
 ```yaml
 name: test
@@ -162,95 +107,61 @@ jobs:
       timeout-minutes: 60
 ```
 
-The command contract of §1 holds; the GPU part gets one card in `CUDA_VISIBLE_DEVICES`.
-The `myproj/ci` status is the verdict. A run by someone outside the org fails in "Set up
-runner" with `ci-runners: refused actor`.
+注意：
 
-**What the shared account means for you.** h100's runners run on an account that other
-lab users share (design §6.1). They can read your checkout while a job runs and could
-alter a result. Don't send secrets to these jobs, and keep a repository whose code must
-not be seen off this CI.
+- `concurrency` 必须写成块格式。行内映射 `{group: ...${{ }}...}` 里含表达式时，YAML 会解析失败，GitHub 会直接拒绝整个文件。`tests/test_workflow.py` 会检查本文档里的示例。
+- `permissions` 在调用处要给 `contents: read` 和 `statuses: write`：claim 和 verdict 需要发状态。
 
-## 4. A public consumer's workflow (sketch)
+**`h100-test.yml` 的输入**（design §4.7）：
 
-CPU jobs stay on `ubuntu-latest`. Only the GPU part comes to our runners, through the
-reusable workflow, and only for same-repository pull requests, pushes and dispatches.
-A `claim` on a GitHub-hosted runner runs the action's own checkout with the image's
-`/usr/bin/python3`, which must be 3.11 or later (`ubuntu-24.04`, today's `ubuntu-latest`).
+| 输入 | 默认 | 含义 |
+|---|---|---|
+| `project` | 必填 | registry 键，必须与仓库对应 |
+| `cpu-command` | 空 | CPU 部件的命令；为空就不跑这个部件 |
+| `gpu-command` | 空 | GPU 部件的命令；为空就不跑这个部件 |
+| `gpus` | 1 | GPU 部件用几张卡；h100 上只能是 1 |
+| `timeout-minutes` | 60 | 每个部件的内层超时，1 到 240；作业的超时再加 15 分钟 |
+| `results` | 空 | `CI_RESULTS_DIR` 下 JUnit XML 的 glob |
+| `context` | `<project>/ci` | claim 读、verdict 写的状态 context |
 
-```yaml
-on:
-  push: {branches: [main]}
-  pull_request: {}
-  workflow_dispatch: {}
-jobs:
-  cpu:
-    runs-on: ubuntu-latest
-    steps: [...]
-  gpu:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    uses: chaobrain/ci-runners/.github/workflows/gpu.yml@v1
-    permissions: {contents: read, statuses: write}
-    with:
-      project: brainevent
-      command: python -m pytest -m gpu --junitxml="$CI_RESULTS_DIR/gpu.xml"
-      context: brainevent/gpu
-      results: "*.xml"
-      timeout-minutes: 60
-```
+两个命令至少要设一个。
 
-A member who is not on the actor allowlist sees `gpu` fail in "Set up runner" with
-`ci-runners: refused actor`. Fork pull requests skip `gpu`, by the `if:` and by the hook.
+## 4. 命令约定
 
-## 5. brainspike, the first consumer
+部件的命令在作业的 checkout 里用 `bash -c` 运行。项目环境已经放在 `PATH` 最前面，并设好了 `CONDA_PREFIX`。它应当：
 
-brainspike's contract is its `docs/specs/arch/ci.md`. The project keeps everything about
-what to test:
+- 只在测试失败时以非零退出；
+- 收到 TERM 时停掉自己的进程树（超时会先发 TERM，30 秒后发 KILL）；
+- 用 `CUDA_VISIBLE_DEVICES` 给的卡（GPU 部件一张卡；CPU 部件为空），不自己选卡；进程已经用 taskset 绑到 `CI_CPUS` 列出的 CPU（NUMA 0），定并行度时以它为准；
+- 把 JUnit XML 写进 `$CI_RESULTS_DIR`，结果会出现在 summary 里；
+- 能续跑的话，支持 `CI_RESUME=1`（OOM 之后的重试会带上它）。
 
-- `ci_select.py plan` and the profile choice (`affected` or `merge -L`);
-- the `local_ci.sh` stages and its summary format;
-- the verdict, the merge gate, the sweeper, the audit and the nightly logic.
+命令还能读到这些环境变量：
 
-ci-runners runs it.
+- `CI_PROJECT`、`CI_PART_DIR`、`CI_RUNNERS_HOST`；
+- registry 里的 `variables`；
+- runner 的 `https_proxy`、`http_proxy`、`no_proxy`。h100 访问外网要经过 egress，所以 pip、git、下载数据集都会自动走代理；只能访问 egress 允许清单上的域名（见 [operations.md](operations.md) §6）。
 
-### 5.1 Registry entry (values without inventory)
+内存上限来自 registry 的 `memory`。超出就是 `oom`，不算 `red`。
 
-| key | value |
-|---|---|
-| repository, class, context | `chaobrain/brainspike`, private, `brainspike/ci` (shadow phase: `brainspike/ci-shadow`) |
-| env | `brainspike-dev` on 3090b, 3090a and h100 |
-| caps | 3090b and 3090a: `max_slots` 2 (all slots); h100: `max_cards` 3; `max_waiting` 1 per pool |
-| memory | `memory` 56G and `memory_max` 80G on the 3090 hosts (today's `REMOTE_CI_MEMORY` and slice); 128G on h100 |
-| GPU | `gpu-mem-mib` 6000 (S2, L64); `max_parts` 1 per card (two workers inside it) |
-| `remote_env` | `BRAINSPIKE_HOST`, `XLA_PYTHON_CLIENT_PREALLOCATE`, `CUDA_DEVICE_ORDER` |
-| upstream | saiunit, brainevent, brainstate, braintools, braintrace at `origin/main`; update command `scripts/nightly_host.sh --update`, under the project's env lock (today's `pr.lock`) |
-| lock variables | `LOCAL_CI_HOST_LOCK` and `LOCAL_CI_SLOT_LOCK` set to the host's lock and slot files, which are today's files (design D5) |
-| fallback order | as ci.md §4.1: `gpu` h100, then 3090a, then 3090b; `cpu`, `gates`, `sharding`, `nest`, `inventory` and `cov` 3090a, then 3090b; `compile` 3090b only, with no fallback |
-| reservation | 3090a: the nightly holds it after a 1 h grace (today's yield protocol) |
-| retries | 1 |
+## 5. 看结果与常见问题
 
-### 5.2 Jobs of `ci.yml`
+- **`<project>/ci` 状态**就是结论。verdict 作业的 summary 里列出每个部件的结果、主机、卡、排队和运行时间、峰值温度。
+- **"Set up runner" 里出现 `ci-runners: refused <原因>`**：被 hook 拒绝了。常见原因：
 
-| ci.md job | runs on | ci-runners piece | brainspike code |
-|---|---|---|---|
-| claim | `[light]` | `claim` (`wait-seconds: 60`, `local-lapse-minutes: 45`) | none |
-| checks | `[light]` | `part` (`slot: none`, `lock: l`) | `local_ci.sh light` |
-| plan | `[light]` | `place`, fed by the plan's parts | `ci_select.py plan`; split into parts; upload the plan |
-| part | `place`'s `runs-on`: `[part, 3090a]`, `[part, 3090b]`, `[compile, 3090b]`, `[h100-gpu<N>]` | `part` (`resume` on retry; `results` for `gpu`) | `ci_job.py`: download the plan, then `local_ci.sh -O <part> [-R]` |
-| fallback | `retry-on` | `part` again, `attempt-of` the first record | as part |
-| verify | `[part, 3090b]` or `[part, 3090a]`, GPU | `part` + `compare` | as part, on the same `gpu` commands |
-| verdict | `[light]`, always | `salvage` for parts without an artifact | the summary block, `brainspike/ci`, the `high-risk` label |
-| merge gate, sweeper, audit | `[light]` | none | `merge_gate.py` |
-| nightly | `[nightly, 3090a]` | `part` (`slot: full`, 600 min), reservation owner | `nightly_host.sh` |
+  | 原因 | 意思 |
+  |---|---|
+  | `actor` | 触发者不是 org 成员（外部协作者、bot 等） |
+  | `bot` | bot 触发的任务，而这个仓库没有开 `bot_dispatch` |
+  | `repository` / `repository-id` | 仓库不在快照里（公开仓库，或刚建、还没同步），或者 id 对不上 |
+  | `fork` | 来自 fork 的 PR |
+  | `event` | 这个事件不被接受，例如 `pull_request_target` |
+  | `paused` | 维护者暂停了这个仓库 |
+  | `stale` | org 快照超过 60 分钟没更新：同步出了问题，请联系维护者 |
+  | `runner-class` | 这个 runner 不接这一类任务 |
+  | `policy` / `timeout` / `error` | hook 无法做出判断，请联系维护者 |
 
-### 5.3 What brainspike changes, and when
-
-- **CI-1a, after RUN-1 (3090b) and RUN-3 (3090a).**
-  - `ci.yml` pins `@v1`, and `ci_job.py` shrinks to the command wrapper.
-  - `scripts/runner/` is not written, since the hook and host notes live here.
-  - `local_ci.sh` gains its plan option, as CI-1a already plans.
-- **CI-1b, with RUN-2.**
-  - The `gpu` stage writes JUnit and runs from an archive tree.
-  - The in-run chunk rotation becomes per-part card choice.
-- **ci.md edits**, listed in design §11, go in one lead-approved spec PR in brainspike
-  before CI-1a's code.
+- **新建的私有仓库或新成员**：最多等 10 分钟，下一次同步后就能用。
+- **想对同一个 head 重跑**：已经绿的 head 会被 claim 跳过，要重跑就推一个新 commit。红的 head 或 error 的 head 重新触发会再跑一次。
+- **`unavailable: health gate`**：分到的卡太热，会自动换一张凉卡重试。
+- **作业排队很久**：CPU 部件共用 2 个 CI 槽位，GPU 部件一张卡一次只跑一个。每个项目在每个池子里最多有 1 个等待中的部件，再多就直接 `unavailable`（"project queue full"）。

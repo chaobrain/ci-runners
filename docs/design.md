@@ -402,7 +402,11 @@ from the load record they add.
        below held in every sample of its window (the last `busy.window_minutes`, or
        `busy.lock_minutes` for the host lock), the part ends `unavailable` (`busy:
        <rule>`) with `next` `fallback` and `retry-on` the other host's pool of its class
-       (13.3). The rules:
+       (13.3). "Other accounts" are every account but the CI account, the local
+       maintainer's included: local runs on 3090b send parts to 3090a, as other people's
+       work on 3090a sends them to 3090b. A `busy:` reason names the rule, the value
+       measured and the threshold (e.g. `busy: cpu 17.2 >= 14 cores for 10 min`), as does
+       the part's summary, so the defaults can be tuned from the runs. The rules:
        - **CPU**: other accounts' CPU use at or above `busy.cpu_cores`: the busy time of
          `/proc/stat` (user, nice, system, irq, softirq, steal) minus the CI account's
          (`cpu.stat` of its `user@<uid>.service`), per second between two samples;
@@ -1394,7 +1398,10 @@ Rules:
      `retry-on` (§4.8 rule 4) to benefit; without one, such a part ends as error in the
      verdict;
   4. an inventory that sets `watchdog_log` or `watchdog_notice` is refused by `v1.5.0`;
-     none does.
+     none does;
+  5. a behaviour change on the 3090 path: a retry whose `attempt-of` names another
+     host's record runs (as attempt `n + 1`) instead of being refused with exit 2
+     (13.3).
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

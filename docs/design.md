@@ -847,14 +847,15 @@ several hosts adds a `salvage` job on each such host's light pool (decision 12.1
 | `parts` | required | the ids of the parts the run started, space-separated |
 | `wait-seconds` | 0 | how long to wait for a part of this host that still runs |
 
-For each part whose newest record on this host belongs to this run and attempt, and
-whose artifacts stop short, it uploads `outcome.json` as `ci-part-<id>-<attempt>`, with
-`salvaged: true`. A part it does not find on this host is left alone. "Newest" is read
-across runs: when a later run's part of the same id ran on this host, the older run's
-part has no record of its own here and ends `lost`. A composite action cannot loop, so
-`salvage` uploads at most 16 parts per host and fails beyond that (read at the stamp,
-2026-11-07). Salvage jobs run
-before the verdict, which then reads every artifact as usual.
+For each part whose artifacts stop short at an attempt, and whose newest record of this
+run (`<run id>-<run attempt>`) on this host is that attempt, it uploads `outcome.json`
+as `ci-part-<id>-<attempt>`, with `salvaged: true`. A part it does not find in this
+run's records here is left alone. Only this run's records are read: every run's part has
+its own record (`<repo>/<run>/<id>-<attempt>`), so a part of the same id in another run,
+older or newer, changes nothing (`v1.5.1`; until then "newest" was read across runs, and
+a later run's part of the same id on the host left the lost part `lost`). A composite
+action cannot loop, so `salvage` uploads at most 16 parts per host and fails beyond that
+(read at the stamp, 2026-11-07). Salvage jobs run before the verdict, which then reads every artifact as usual.
 
 ### 4.6 *Reusable workflow `gpu.yml`* (retired by 11.12)
 

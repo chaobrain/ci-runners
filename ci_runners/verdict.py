@@ -13,10 +13,11 @@ parts' summaries go to the job summary.
 
 ``ci-run salvage --parts "cpu gpu" --artifacts DIR --out DIR`` is the ``salvage`` action
 (§4.5, decision 12.13), run on the light pool of each host that ran parts of a run whose
-verdict runs elsewhere. For each part whose artifacts stop short and whose newest record
-on this host belongs to this run and attempt, it writes ``<out>/ci-part-<id>-<attempt>/
-outcome.json`` with ``salvaged: true``, which the action uploads. A part it does not find
-on this host, or whose newest record here is another run's or attempt's, is left alone.
+verdict runs elsewhere. For each part whose artifacts stop short at an attempt, and whose
+newest record of this run on this host is that attempt, it writes ``<out>/ci-part-<id>-
+<attempt>/outcome.json`` with ``salvaged: true``, which the action uploads. A part it does
+not find in this run's records here, or whose newest attempt here is another, is left
+alone; other runs' records are never read.
 """
 from __future__ import annotations
 
@@ -221,50 +222,31 @@ def main(argv: list[str], inv: inventory.Inventory, call: Callable | None = None
 # ------------------------------------------------------------------ salvage (§4.5)
 
 
-def newest_record(parts_root: str, repo: str, pid: str) -> tuple[str, int, str] | None:
-    """``(run, attempt, ref)`` of part ``pid``'s newest record on this host, across the
-    repository's runs (``<run id>-<run attempt>``), by its start time; None if it has
-    none here. ``ref`` is ``<repo>/<run>/<id>-<attempt>``."""
+def newest_record(parts_root: str, repo: str, run: str, pid: str) -> tuple[int, str] | None:
+    """``(attempt, ref)`` of part ``pid``'s newest attempt on this host in run ``run``
+    (``<run id>-<run attempt>``); None if it has none here. ``ref`` is
+    ``<repo>/<run>/<id>-<attempt>``. Only this run's records are read: another run's part
+    of the same id, older or newer, has its own."""
     best = None
-    want = re.compile(rf'{re.escape(pid)}-([0-9]{{1,2}})')
-    base = os.path.join(parts_root, repo)
-    try:
-        runs = os.listdir(base)
-    except OSError:
-        return None
-    for run in runs:
-        if not re.fullmatch(r'[0-9]+-[0-9]+', run):
+    for n in range(1, MAX_ATTEMPT + 1):
+        name = f'{pid}-{n}'
+        d = os.path.join(parts_root, repo, run, name)
+        if os.path.islink(d):
             continue
+        doc = _read(os.path.join(d, 'record.json'))
         try:
-            names = os.listdir(os.path.join(base, run))
-        except OSError:
-            continue
-        for name in names:
-            m = want.fullmatch(name)
-            path = os.path.join(base, run, name, 'record.json')
-            if not m or os.path.islink(os.path.join(base, run, name)):
-                continue
-            doc = _read(path)
-            try:
-                rec = json.loads(doc) if doc is not None else None
-            except ValueError:
-                rec = None
-            if not isinstance(rec, dict) or rec.get('id') != pid:
-                continue
-            try:
-                when = float(rec.get('start_epoch') or os.stat(path).st_mtime)
-            except (OSError, TypeError, ValueError):
-                continue
-            key = (when, run, int(m.group(1)))
-            if best is None or key > best[0]:
-                best = (key, (run, int(m.group(1)), f'{repo}/{run}/{name}'))
-    return best[1] if best else None
+            rec = json.loads(doc) if doc is not None else None
+        except ValueError:
+            rec = None
+        if isinstance(rec, dict) and rec.get('id') == pid:
+            best = (n, f'{repo}/{run}/{name}')
+    return best
 
 
 def to_salvage(ids: Iterable[str], found: Mapping[str, Mapping[int, tuple[dict, str]]],
-               newest: Callable[[str], tuple[str, int, str] | None], run: str) -> list[tuple[str, int, str]]:
+               newest: Callable[[str], tuple[int, str] | None]) -> list[tuple[str, int, str]]:
     """``(id, attempt, ref)`` of the parts this host salvages: the artifacts stop short at
-    ``attempt``, and the part's newest record here is that attempt of this run. Pure but
+    ``attempt``, and the part's newest record of this run here is that attempt. Pure but
     for ``newest``."""
     out = []
     for pid in ids:
@@ -272,9 +254,9 @@ def to_salvage(ids: Iterable[str], found: Mapping[str, Mapping[int, tuple[dict, 
         if not n:
             continue  # complete (no record attempt is 0, so the check below says the same)
         got = newest(pid)
-        if got is None or got[0] != run or got[1] != n:
-            continue  # not run here, or the newest record here is another run's or attempt's
-        out.append((pid, n, got[2]))
+        if got is None or got[0] != n:
+            continue  # not run here, or its newest attempt here is another one
+        out.append((pid, n, got[1]))
     return out
 
 
@@ -296,7 +278,7 @@ def salvage_main(argv: list[str], inv: inventory.Inventory, *, systemctl: Callab
         if a.wait_seconds < 0:
             raise ValueError('wait-seconds is negative')
         root = os.path.join(inv.host['data'], 'ci-runners', 'state', 'parts')
-        todo = to_salvage(ids, collect(a.artifacts), lambda pid: newest_record(root, repo, pid), run)
+        todo = to_salvage(ids, collect(a.artifacts), lambda pid: newest_record(root, repo, run, pid))
         if len(todo) > MAX_SALVAGED:
             raise ValueError(f'{len(todo)} parts to salvage, more than the action uploads ({MAX_SALVAGED})')
         names = []

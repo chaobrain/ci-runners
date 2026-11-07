@@ -70,6 +70,10 @@ class State(unittest.TestCase):
         path.write_text('{"host": null, "pools": {}}')
         self.assertEqual(drain.refusal(drain.read(self.data), self.host, 'part'), '')
         path.write_text('{')
+        for on, pool in ((True, ''), (True, 'part'), (False, 'part')):  # each would undrain the host
+            with self.assertRaisesRegex(ValueError, 'drain.json is unreadable.*drain off'):
+                drain.change(self.data, on, pool)
+            self.assertEqual(path.read_text(), '{', (on, pool))
         self.assertEqual(drain.change(self.data, False), {'host': None, 'pools': {}})  # off rewrites it
 
     def test_a_pool_by_key_or_class(self):
@@ -115,6 +119,11 @@ class State(unittest.TestCase):
             self.assertEqual(drain.main([], inv, fake), 2)
         self.assertEqual(set(drain.read(self.data)['pools']), {'cards'})
         self.assertIn('pool cards: drained since', out.getvalue())
+        pathlib.Path(drain.state_path(self.data)).write_text('{')
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(drain.main(['on', '--pool', 'part'], inv, fake), 1)
+        self.assertIn('ci-run drain: ', err.getvalue())
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(drain.main(['off'], inv, fake), 0)
         self.assertEqual(drain.read(self.data), {'host': None, 'pools': {}})

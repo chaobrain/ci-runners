@@ -3,13 +3,16 @@
 RUN-1b removes the dated hook logs (``logs/hook-<date>.log``) and the part records of
 runs (``state/parts/<owner>/<repo>/<run>/``) that nothing touched for 14 days: a run
 counts by the newest change anywhere under it, so a run still writing is never reaped.
-RUN-1b-3 adds the part scopes of gone jobs and stale leases.
+RUN-1b-3 adds the part scopes of gone jobs and stale leases. RUN-8 adds the load record's
+files after 2 days and its refused markers after 14 (decision 13.2).
 """
 from __future__ import annotations
 
 import os
 import shutil
 import time
+
+from ci_runners import hostload
 
 KEEP_DAYS = 14
 RUN_DEPTH = 3  # state/parts/<owner>/<repo>/<run>
@@ -69,6 +72,9 @@ def reap(data: str, now: float | None = None) -> str:
     gone = [p for p in old_entries(os.path.join(base, 'logs'), now) if os.path.basename(p).startswith('hook-')]
     parts = os.path.join(base, 'state', 'parts')
     gone += old_entries(parts, now, depth=RUN_DEPTH)
+    load = os.path.join(base, 'state', 'hostload')  # the load record and its markers (decision 13.2)
+    gone += [p for p in old_entries(load, now, days=hostload.KEEP_DAYS) if p.endswith('.jsonl')]
+    gone += old_entries(os.path.join(load, 'refused'), now, days=hostload.MARK_DAYS)
     for p in gone:
         _remove(p)
     for depth in range(RUN_DEPTH - 1, 0, -1):  # the owner and repository directories left empty

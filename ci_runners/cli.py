@@ -12,6 +12,7 @@
     ci-run salvage ...     this host's parts of a run that stop short (actions/salvage; §4.5)
     ci-run env build P     build project P's env from its default branch's spec (decision 11.4)
     ci-run drain on|off [--pool P] | status   the drain switch (decision 13.1)
+    ci-run hostload sample|status   the load record and the busy rule (decision 13.2)
 
 The inventory is ``$CI_RUNNERS_ETC/inventory.toml``, else ``~/data/ci-runners/etc``.
 """
@@ -65,6 +66,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'env':
         from ci_runners import envbuild
         return envbuild.main(args, load_inventory(), etc_dir())
+    if cmd == 'hostload':
+        from ci_runners import hostload
+        return hostload.main(args, load_inventory())
     if cmd == 'drain':
         from ci_runners import drain
         return drain.main(args, load_inventory())

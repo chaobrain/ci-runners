@@ -304,7 +304,7 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
         a job, could read tens of thousands of the local account's files in `/tmp`,
         `/var/tmp` and `/dev/shm` on 3090b (left there with a 002 or 022 umask: copies of
         private code, logs) and other people's on 3090a, and other people's directories on
-        the data disks (`/data` on 3090b, `/mnt/16T` on 3090a). No local account's file
+        the data disks of both hosts. No local account's file
         modes change. Instead the CI account's user manager, `user@<uid>.service`, runs in
         its own mount namespace, so every runner, part scope and unit of the account sees:
         a private `/tmp` and `/var/tmp` (`PrivateTmp=yes`) and an empty `/dev/shm`; an

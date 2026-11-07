@@ -277,6 +277,26 @@ class Scan(unittest.TestCase):
         self.assertEqual(self.kinds('-----BEGIN ' + 'OPENSSH PRIVATE KEY-----'), ['private-key'])
         self.assertEqual(self.kinds('-----BEGIN PUBLIC KEY-----'), [])
 
+    def test_a_hosts_uid_or_disk_numbers(self):
+        """The lint rules a host's uid and its disks' device numbers (RUN-8 review): a
+        fixture uses a fake one, of FAKE_UIDS or a major of FAKE_MAJORS. The literals are
+        built here, so that this file holds none."""
+        uid, major = 1000 + 9, 250 + 9
+        for text in (f'0::/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/x.service',
+                     f'/tmp/systemd-private-0a-user@{uid}.service-Xy/tmp', f'uid={uid}', f'uid: {uid}', f'Uid = {uid}'):
+            self.assertEqual(self.kinds(text), ['uid'], text)
+        for text in ('user@4242.service', 'user@999.service', 'user@0.service', 'uid=65534', 'user@65535.service',
+                     'useruser@1500', 'pid 1500', 'the uid', 'port: 8080', 'user-123456.slice'):
+            self.assertEqual(self.kinds(text), [], text)
+        for text in (f'600 22 {major}:2 /tmp/systemd-private-x/tmp /tmp rw - ext4 /dev/x rw',
+                     f"HOST = '22 1 {major}:2 / / rw,relatime shared:1 - ext4 /dev/x rw'",
+                     f'1: FLOCK  ADVISORY  WRITE 900 {major:x}:02:1234 0 EOF',
+                     f'2: POSIX  ADVISORY  READ  901 {major:02x}:2:1 0 EOF'):
+            self.assertEqual(self.kinds(text), ['device'], text)
+        for text in ('600 22 250:2 /tmp/x /tmp rw', '23 22 0:5 / /proc rw - proc proc rw', '1: FLOCK  ADVISORY  WRITE 9 fa:02:1 0 EOF',
+                     '1: FLOCK  ADVISORY  WRITE 9 00:2a:1 0 EOF', 'at 12:30 /x', 'v1.2 3 4:5 /x'):
+            self.assertEqual(self.kinds(text), [], text)
+
     def test_one_finding_per_line_and_kind_with_its_line_number(self):
         got = inv.scan(f'ok\nacct1 acct1 {H}a {H}b\n', self.DENY, 'f')
         self.assertEqual([(f.line, f.kind) for f in got], [(2, 'denied'), (2, 'home-path')])

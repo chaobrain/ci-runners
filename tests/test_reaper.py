@@ -58,6 +58,20 @@ class Reap(unittest.TestCase):
         reaper.reap(str(self.data), now=self.now)
         self.assertEqual(sorted(p.name for p in (self.base / 'logs').iterdir()), ['hook-2026-11-04.log', 'keep-me'])
 
+    def test_the_load_record_after_2_days_its_markers_after_14(self):
+        """Decision 13.2: the record's day files go after 2 days, the refused markers after
+        14; nothing else under it."""
+        self.put('state/hostload/2026-11-01.jsonl', 3)
+        self.put('state/hostload/2026-11-07.jsonl', 1)
+        self.put('state/hostload/notes', 30)
+        self.put('state/hostload/refused/aa', 15)
+        self.put('state/hostload/refused/bb', 13)
+        os.utime(self.base / 'state/hostload/refused', (self.now - 30 * DAY,) * 2)
+        reaper.reap(str(self.data), now=self.now)
+        load = self.base / 'state/hostload'
+        self.assertEqual(sorted(p.name for p in load.iterdir()), ['2026-11-07.jsonl', 'notes', 'refused'])
+        self.assertEqual([p.name for p in (load / 'refused').iterdir()], ['bb'])
+
     def test_a_link_is_removed_not_followed(self):
         outside = self.data / 'outside'
         outside.mkdir()

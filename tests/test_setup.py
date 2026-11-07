@@ -84,8 +84,8 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         self.assertEqual(self.apply(text), 0)
         self.assertEqual((self.etc.stat().st_mode & 0o777), 0o700)
         self.assertEqual(sorted(p.name for p in (self.home / '.config' / 'systemd' / 'user').glob('ci-*')),
-                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-p.slice', 'ci-reaper.service',
-                          'ci-reaper.timer', 'ci-runner@.service'])
+                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-hostload.service', 'ci-hostload.timer',
+                          'ci-p.slice', 'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service'])
         self.assertIn(['systemctl', '--user', 'enable', 'ci-runner@hb-light-1.service', 'ci-runner@hb-part-1.service',
                        'ci-runner@hb-part-2.service'], self.ran)
         state = json.loads((self.data / 'ci-runners' / 'state' / 'setup.json').read_text())
@@ -264,9 +264,10 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         enable = [a['argv'] for a in plan.actions if a.get('kind') == 'run' and '--now' in a['argv']
                   and 'ci-reaper.timer' in a['argv']]
         self.assertEqual(enable, [['systemctl', '--user', 'enable', '--now', 'ci-reaper.timer', 'ci-orgsync.timer',
-                                   'ci-envrefresh.timer']])
-        self.assertEqual(setup.timers({}), ['ci-reaper.timer', 'ci-envrefresh.timer'])
-        self.assertEqual(setup.timers({'orgsync': True}), ['ci-reaper.timer', 'ci-orgsync.timer', 'ci-envrefresh.timer'])
+                                   'ci-envrefresh.timer', 'ci-hostload.timer']])
+        self.assertEqual(setup.timers({}), ['ci-reaper.timer', 'ci-envrefresh.timer', 'ci-hostload.timer'])
+        self.assertEqual(setup.timers({'orgsync': True}), ['ci-reaper.timer', 'ci-orgsync.timer', 'ci-envrefresh.timer',
+                                                           'ci-hostload.timer'])
 
     def test_runner_names_and_labels(self):
         inv = inventory.load((self.etc / 'inventory.toml').read_text())
@@ -406,12 +407,17 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
         for want in ('labels hx-light;', 'labels hx-cpu;', 'labels hx-gpu,hx-gpu0;', 'labels hx-gpu,hx-gpu3;',
                      '| CI_RUNNER_CARD=3', f'| CI_RUNNERS_PYTHON={sys.executable}', '| MemoryMax=512G',
                      'fetched directly',
-                     'run    systemctl --user enable --now ci-reaper.timer ci-orgsync.timer ci-envrefresh.timer\n'):
+                     'run    systemctl --user enable --now ci-reaper.timer ci-orgsync.timer ci-envrefresh.timer '
+                     'ci-hostload.timer\n'):
             self.assertIn(want, text)
         self.assertEqual(self.apply(text), 0)
         self.assertEqual(sorted(p.name for p in self.units.iterdir()),
-                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-orgsync.service', 'ci-orgsync.timer',
-                          'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service', 'ci.slice'])
+                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-hostload.service', 'ci-hostload.timer',
+                          'ci-orgsync.service', 'ci-orgsync.timer', 'ci-reaper.service', 'ci-reaper.timer',
+                          'ci-runner@.service', 'ci.slice'])
+        load = (self.units / 'ci-hostload.service').read_text()  # decision 13.2: the load record
+        self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run hostload sample\n', load)
+        self.assertIn('OnUnitActiveSec=60s\n', (self.units / 'ci-hostload.timer').read_text())
         orgsync = (self.units / 'ci-orgsync.service').read_text()
         self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run org-sync\n', orgsync)
         refresh = (self.units / 'ci-envrefresh.service').read_text()  # decision 12.11: every host refreshes
@@ -586,8 +592,8 @@ direct = ["localhost", "127.0.0.1", "::1"]
         self.assertNotIn('egress.example', text)  # the lead's files are not shown
         self.assertEqual(self.apply(text), 0)
         self.assertEqual(sorted(p.name for p in self.units.iterdir()),
-                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-reaper.service', 'ci-reaper.timer',
-                          'ci-runner@.service', 'ci-tunnel.service', 'ci.slice'])
+                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-hostload.service', 'ci-hostload.timer',
+                          'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service', 'ci-tunnel.service', 'ci.slice'])
         tunnel = (self.units / 'ci-tunnel.service').read_text()
         for want in (f'ExecStart=/usr/bin/ssh -F {self.etc}/tunnel/ssh_config -N -L 127.0.0.1:18182:127.0.0.1:18443 ',
                      f'-o IdentityFile={self.etc}/tunnel/id_ed25519 ', '-o StrictHostKeyChecking=yes ',
@@ -939,20 +945,20 @@ class Shared(unittest.TestCase):
         hm, root, home, data = '/ho' + 'me', str(self.data.parent), str(self.home), str(self.data)
         priv = '/tmp/systemd-private-0a1b-user@4242.service-xyz/tmp'
         files, queue = setup.shared_files(self.h)
-        return ['22 1 259:2 / / rw - ext4 /dev/x rw',
+        return ['22 1 250:2 / / rw - ext4 /dev/x rw',
                 '23 22 0:5 / /proc rw - proc proc rw',
                 '25 22 0:24 / /dev/shm rw - tmpfs tmpfs rw',
-                f'26 22 259:3 / {root} rw - ext4 /dev/y rw',  # the host's data disk, shadowed
-                f'27 22 259:2 /x {hm}/someone rw - ext4 /dev/x rw',  # another account's mount, shadowed
+                f'26 22 250:3 / {root} rw - ext4 /dev/y rw',  # the host's data disk, shadowed
+                f'27 22 250:2 /x {hm}/someone rw - ext4 /dev/x rw',  # another account's mount, shadowed
                 '50 23 0:60 / /proc rw - proc proc rw,nosuid,hidepid=invisible',
                 '51 25 0:50 / /dev/shm rw - tmpfs tmpfs rw',
                 '52 22 0:51 / /home rw - tmpfs tmpfs rw',
-                f'53 22 259:2 {priv} /tmp rw - ext4 /dev/x rw',
-                f'54 22 259:2 /var{priv} /var/tmp rw - ext4 /dev/x rw',
+                f'53 22 250:2 {priv} /tmp rw - ext4 /dev/x rw',
+                f'54 22 250:2 /var{priv} /var/tmp rw - ext4 /dev/x rw',
                 f'55 53 0:52 / {root} rw - tmpfs tmpfs rw',
-                f'56 53 259:2 {home} {home} rw - ext4 /dev/x rw',
-                f'57 55 259:3 /ci {data} rw - ext4 /dev/y rw',
-                *(f'{58 + k} 53 259:2 {f} {f} rw - ext4 /dev/x rw' for k, f in enumerate([*files, queue]))]
+                f'56 53 250:2 {home} {home} rw - ext4 /dev/x rw',
+                f'57 55 250:3 /ci {data} rw - ext4 /dev/y rw',
+                *(f'{58 + k} 53 250:2 {f} {f} rw - ext4 /dev/x rw' for k, f in enumerate([*files, queue]))]
 
     def test_the_namespace_matches_the_drop_in_exactly(self):
         hm, root, home, data = '/ho' + 'me', str(self.data.parent), str(self.home), str(self.data)
@@ -979,13 +985,13 @@ class Shared(unittest.TestCase):
             self.assertIn(fault, faults(without(mount_id)), msg=mount_id)
         self.assertEqual(faults([line.replace('rw,nosuid,hidepid=invisible', 'rw,hidepid=2') for line in ns]),
                          ['other processes visible'])
-        gone = [line.replace(f'259:2 {files[1]} ', f'259:2 {files[1]}//deleted ') for line in ns]  # replaced since
+        gone = [line.replace(f'250:2 {files[1]} ', f'250:2 {files[1]}//deleted ') for line in ns]  # replaced since
         self.assertEqual(faults(gone), [f'{files[1]} bound from a deleted file'])
-        self.assertEqual(faults(ns + [f'70 52 259:2 /x {hm}/other rw - ext4 /dev/x rw']), [f'another mount at {hm}/other'])
-        self.assertEqual(faults(ns + ['71 53 259:2 /y /tmp/z rw - ext4 /dev/x rw']), ['another mount at /tmp/z'])
-        self.assertEqual(faults(ns + [f'73 55 259:3 /z {root}/z rw - ext4 /dev/y rw']), [f'another mount at {root}/z'])
-        self.assertEqual(faults(ns + ['74 52 259:2 / /home rw - ext4 /dev/x rw']), ['no tmpfs at /home'])  # over it
-        self.assertEqual(faults(ns + ['75 22 259:2 / /home rw - ext4 /dev/x rw']), ['no tmpfs at /home'])  # later, beside
+        self.assertEqual(faults(ns + [f'70 52 250:2 /x {hm}/other rw - ext4 /dev/x rw']), [f'another mount at {hm}/other'])
+        self.assertEqual(faults(ns + ['71 53 250:2 /y /tmp/z rw - ext4 /dev/x rw']), ['another mount at /tmp/z'])
+        self.assertEqual(faults(ns + [f'73 55 250:3 /z {root}/z rw - ext4 /dev/y rw']), [f'another mount at {root}/z'])
+        self.assertEqual(faults(ns + ['74 52 250:2 / /home rw - ext4 /dev/x rw']), ['no tmpfs at /home'])  # over it
+        self.assertEqual(faults(ns + ['75 22 250:2 / /home rw - ext4 /dev/x rw']), ['no tmpfs at /home'])  # later, beside
         tmp_tmpfs = [line.replace('- ext4', '- tmpfs') if line.startswith('53 ') else line for line in without(55)]
         self.assertIn(f'no tmpfs at {root}', faults(tmp_tmpfs))  # a tmpfs above the root is not one at it
         self.assertEqual(faults([line.replace(' 0:50 ', ' 0:24 ') for line in ns]), [SHM])  # the host's tmpfs

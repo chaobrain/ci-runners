@@ -46,6 +46,7 @@ verdict        [self-hosted, <host>-light]
 | `reboot` | 运行期间主机重启 | 在同一台主机上重试一次 |
 | `unavailable` | 开跑前就不满足条件：卡太热、没有空卡、排队超时、磁盘不足、`gpus` 不合该类 runner 等 | 重试一次 |
 | `unavailable`（`drained: …`） | 这台主机或这个池子被维护者排空了（design 决定 13.1） | 在另一台主机的同类池子上重试一次（`retry-on`）；另一台主机没有这一类（`compile`、`nightly`）就不重试，状态为 `error` |
+| `unavailable`（`busy: …`） | 第一次尝试时这台主机被其他账户占满了：原因写出规则、测到的值和阈值（design 决定 13.2） | 同上，在另一台主机的同类池子上重试一次；同一个 head 的同一个部件只让出一次 |
 | `unavailable`（`p2p: …`） | 双卡部件（`multi`）开跑前的 P2P 自检失败：主机故障 | 不重试，状态为 `error` |
 | `lost` | 作业没留下输出就结束了，例如 runner 被停 | verdict 从主机上的记录 salvage |
 | `stopped` | 被取消，例如同一个 PR 推了新 head | — |

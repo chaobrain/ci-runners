@@ -65,13 +65,15 @@ PORT_WAIT = 60  # s: the egress forward's start, before the runner app is fetche
 RUNNER_URL = (f'https://github.com/actions/runner/releases/download/v{RUNNER_VERSION}/'
               f'actions-runner-linux-x64-{RUNNER_VERSION}.tar.gz')
 UNITS = ('ci-runner@.service', 'ci-tunnel.service', 'ci-reaper.service', 'ci-reaper.timer', 'ci-orgsync.service',
-         'ci-orgsync.timer', 'ci-envrefresh.service', 'ci-envrefresh.timer', 'ci.slice')
+         'ci-orgsync.timer', 'ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-hostload.service',
+         'ci-hostload.timer', 'ci.slice')
 RUNNER_FILES = ('config.sh', 'run.sh', os.path.join('bin', 'Runner.Listener'))
 # what goes into a unit file: one word each, so nothing can add a line
 PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,39}')
 PATH = re.compile(r'/[A-Za-z0-9._/-]+')
 MEMORY = re.compile(r'[1-9][0-9]*[KMGT]?|[1-9][0-9]?%|infinity')
-TIMERS = ('ci-reaper.timer', 'ci-orgsync.timer', 'ci-envrefresh.timer')  # env refresh: decision 12.11
+#: env refresh: decision 12.11; the load record: decision 13.2
+TIMERS = ('ci-reaper.timer', 'ci-orgsync.timer', 'ci-envrefresh.timer', 'ci-hostload.timer')
 SYSTEM_PYTHON = '/usr/bin/python3'
 #: the runner unit's order after the ssh forward to the egress (h100, decision 11.10); the
 #: template's key is still PROXY_ORDER, so that the rendered unit stays as it was

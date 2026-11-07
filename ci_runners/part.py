@@ -35,6 +35,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 from ci_runners import gpus as gpus_mod
 from ci_runners import drain as drain_mod
+from ci_runners import hostload
 from ci_runners import envuse, inventory, locks, outcome, registry, slots
 from ci_runners import p2p as p2p_mod
 from ci_runners import sampler as sampler_mod
@@ -926,6 +927,9 @@ class Executor:
             why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # decision 13.1
             if why:
                 return self._away(record, rec, a, why, cls)
+            why = self.busy(a, cls, proj.retries)  # decision 13.2
+            if why:
+                return self._away(record, rec, a, why, cls)
             if cls in SLOT_CLASSES or nightly:
                 q = slots.SlotQueue(h['files']['slot_lock'], h['slots'], h['files']['slot_queue'], poll=self.poll,
                                     default_project=h.get('default_project', ''))
@@ -1067,6 +1071,24 @@ class Executor:
             leases.release()
             for fd in {slot_fd, env_fd, *every} - {None}:
                 os.close(fd)
+
+    def busy(self, a: Inputs, cls: str, retries: int) -> str:
+        """Busy-host avoidance (decision 13.2): why this part's first attempt goes to the
+        other host, or empty. Only where it can go there: a class with a peer pool other than
+        ``light``, and a project that allows a retry; never on a retry, and once per head and
+        part on this host (a marker, then it waits here)."""
+        if a.attempt_of or retries < 1 or cls == 'light' or not inventory.peer_labels(self.inv, cls):
+            return ''
+        data = str(self.inv.host['data'])
+        mark = hostload.marker(data, self.env.get('GITHUB_REPOSITORY', ''), self.env.get('GITHUB_SHA', ''), a.id)
+        if os.path.lexists(mark):
+            return ''
+        why = hostload.check(self.inv, cards=self.candidates() if a.gpus else [])
+        if why:
+            os.makedirs(os.path.dirname(mark), mode=0o700, exist_ok=True)
+            with open(mark, 'w', encoding='utf-8') as f:
+                f.write(why + '\n')
+        return why
 
     def _away(self, record: str, rec: dict[str, object], a: Inputs, why: str, cls: str) -> tuple[int, dict[str, object]]:
         """End a part this host refuses as drained or busy: ``unavailable``, to the other

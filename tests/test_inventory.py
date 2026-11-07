@@ -145,6 +145,22 @@ class Load(unittest.TestCase):
         with self.assertRaises(inv.InventoryError):
             inv.load(base.replace('@', 'light = 1').replace('compile_cpus = "4-15"', 'compile_cpus = "4-15;x"'))
 
+    def test_peer_labels(self):
+        """Decision 13.3: the other host's pool per class; labels, so public."""
+        self.assertEqual(inv.peer_labels(inv.load(EXAMPLE), 'multi'), ['3090a-multi'])
+        base = re.sub(r'^peer_labels = .*\n', '', EXAMPLE, flags=re.M)
+        i = inv.load(base.replace('slots = 2', 'peer_labels = { part = ["hz-cpu"], gpu = ["hz-gpu", "x-1"] }\n'
+                                     'slots = 2', 1))
+        self.assertEqual((inv.peer_labels(i, 'part'), inv.peer_labels(i, 'gpu'), inv.peer_labels(i, 'compile')),
+                         (['hz-cpu'], ['hz-gpu', 'x-1'], None))
+        self.assertIsNone(inv.peer_labels(inv.load(base), 'part'))
+        for bad in ('{ cpu = ["hz-cpu"] }', '{ h100 = ["hz-gpu"] }', '{ part = [] }', '{ part = "hz-cpu" }',
+                    '{ part = ["HZ"] }', '{ part = ["part"] }', '{ part = ["self-hosted"] }', '{ part = ["a", "a"] }',
+                    '["hz-cpu"]'):
+            with self.assertRaises(inv.InventoryError, msg=bad):
+                inv.load(base.replace('slots = 2', f'peer_labels = {bad}\nslots = 2', 1))
+        self.assertEqual(inv.deny_tokens({'hosts': {'h': {'peer_labels': {'part': ['secretish-label']}}}}), set())
+
     def test_python_and_orgsync(self):
         for bad in ('python = "python3"', 'python = ""', 'python = 3', 'orgsync = "yes"'):
             key = bad.split(' ')[0]

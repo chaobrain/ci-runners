@@ -45,6 +45,7 @@ verdict        [self-hosted, <host>-light]
 | `thermal` | 卡过热，被提前停止 | 换一张凉卡重试一次 |
 | `reboot` | 运行期间主机重启 | 在同一台主机上重试一次 |
 | `unavailable` | 开跑前就不满足条件：卡太热、没有空卡、排队超时、磁盘不足、`gpus` 不合该类 runner 等 | 重试一次 |
+| `unavailable`（`drained: …`） | 这台主机或这个池子被维护者排空了（design 决定 13.1） | 在另一台主机的同类池子上重试一次（`retry-on`）；另一台主机没有这一类（`compile`、`nightly`）就不重试，状态为 `error` |
 | `unavailable`（`p2p: …`） | 双卡部件（`multi`）开跑前的 P2P 自检失败：主机故障 | 不重试，状态为 `error` |
 | `lost` | 作业没留下输出就结束了，例如 runner 被停 | verdict 从主机上的记录 salvage |
 | `stopped` | 被取消，例如同一个 PR 推了新 head | — |
@@ -87,7 +88,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE = "false"
 1. **每个作业都要加 guard**：`pull_request` 只接受 `head.repo.full_name == github.repository`，此外是 `push`、`workflow_dispatch`、`schedule`。
 2. **标签**：写 `self-hosted` 加上某台主机的池子标签，比如 `3090b-cpu`、`3090b-gpu`、`3090b-gpu1`、`3090b-multi`、`3090b-compile`、`3090a-nightly`。不要只写类名。每一类接受的 `gpus`、`lock`、`timeout-minutes` 见 design §4.8 的表，超出范围的部件直接 `unavailable`。`compile` 和 `nightly` 需要仓库在 `policy.toml` 里登记了这一类（design 决定 12.14）。
 3. **一个作业只跑一个 `part`**，作业的 `timeout-minutes` 至少比部件的多 15。部件 id 在一次 run 里不能重复。matrix 各分支的输出到不了后面的作业，所以后面的作业要读 `ci-part-<id>-<attempt>` artifact。
-4. **重试**：`next` 为 `retry` 或 `fallback` 的部件最多再跑一次，带上 `attempt-of`（第一次的 `record`）和 `resume`，跑在 `retry-on` 给出的标签上，`fallback` 时也可以换到别的主机。
+4. **重试**：`next` 为 `retry` 或 `fallback` 的部件最多再跑一次，带上 `attempt-of`（第一次的 `record`）和 `resume`，跑在 `retry-on` 给出的标签上，`fallback` 时也可以换到别的主机。在另一台主机上重试时，`attempt-of` 照样填第一次的 `record`（它在第一台主机上，v1.5 起按名字取次数，design 决定 13.3）。
 5. **salvage 和 verdict**：verdict 放在最后，跑在某一台跑过部件的主机的 light 池上。它能直接读这台主机上的记录。其他跑过部件的主机，每台在 verdict 之前加一个 `salvage` 作业，跑在那台主机的 light 池上：
 
    ```yaml

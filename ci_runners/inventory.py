@@ -95,6 +95,22 @@ def _pool(v: object) -> bool:
             and all(isinstance(x, str) and LABEL.match(x) and x not in RESERVED_LABELS for x in labels) and ('labels' not in v or bool(labels)))
 
 
+def _peer_labels(v: object) -> bool:
+    """``peer_labels``: a table from a runner class to the labels of the other host's pool
+    of that class (decision 13.3), each a label a pool may give itself."""
+    return isinstance(v, dict) and all(
+        k in CLASSES and isinstance(ls, list) and 0 < len(ls) <= 8 and len(set(ls)) == len(ls)
+        and all(isinstance(x, str) and LABEL.match(x) and x not in RESERVED_LABELS for x in ls)
+        for k, ls in v.items())
+
+
+def peer_labels(inv: 'Inventory', cls: str) -> list[str] | None:
+    """The labels of the other host's pool of class ``cls`` (decision 13.3), or None where
+    the inventory names none. Pure."""
+    v = inv.host.get('peer_labels')
+    return list(v[cls]) if isinstance(v, dict) and cls in v else None
+
+
 #: a Unix account name (what useradd accepts, and what a tmpfiles.d ACL entry may name)
 ACCOUNT = re.compile(r'[a-z_][a-z0-9_-]{0,31}')
 #: an ed25519 public key, with or without its comment (the comment is replaced)
@@ -128,6 +144,8 @@ HOST_KEYS = {
                        and all(isinstance(x, str) and ACCOUNT.fullmatch(x) for x in v), False),
     # the org snapshot's push key (decision 12.4): its line in the account's authorized_keys
     'push_key': (lambda v: isinstance(v, str) and bool(PUSH_KEY.fullmatch(v)), False),
+    # the other host's pool of each runner class: where a drained or busy part goes (decision 13.3)
+    'peer_labels': (lambda v: _peer_labels(v), False),
 }
 #: the first path's keys (decision 11.12): accepted and ignored in v1.3, so that a host's
 #: inventory needs no change in the release's window (design §9); nothing reads them
@@ -242,7 +260,8 @@ def pool_labels(inv: 'Inventory', cls: str) -> list[str] | None:
 
 #: string values that are not inventory: they appear in the design already. Every other string value of the inventory and the policy is denied.
 PUBLIC_KEYS = frozenset({'this', 'memory_max', 'cpus', 'compile_cpus', 'host_lock', 'slot_lock', 'slot_queue', 'bot',
-                         'visibility', 'extra_events', 'labels', 'default_project', 'class', 'classes'})
+                         'visibility', 'extra_events', 'labels', 'default_project', 'class', 'classes',
+                         'peer_labels'})
 #: ``tunnel.direct`` values the repository holds (the example, the tests): public, so not
 #: denied. Every other ``direct`` value is denied, as any inventory value is.
 #: the policy's ``[org] name`` is the org's, public as the repository is.

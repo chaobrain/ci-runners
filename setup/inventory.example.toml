@@ -32,6 +32,8 @@ python = "/<path to a Python 3.11 or later>"    # export it as CI_RUNNERS_PYTHON
                                                 # snapshot is pushed from the workstation (12.4)
 # local_accounts = ["<local account>"]          # the root steps that share the files (§5.3)
 # push_key = "ssh-ed25519 <key>"                # the snapshot push's key (decision 12.4)
+# the other host's pool of each class: where a drained or busy part goes (decision 13.3)
+peer_labels = { light = ["3090a-light"], part = ["3090a-cpu"], gpu = ["3090a-gpu"], multi = ["3090a-multi"] }
 
 [hosts.3090b.tunnel]                            # the egress (decisions 11.10, 12.3)
 http_port = 18182                               # ci-tunnel's forward on 127.0.0.1: the runners' https_proxy

@@ -101,6 +101,17 @@
 - **部件用哪个构建。** `envs/<project>` 是会被 refresh 移动的链接。部件开始时把它解析一次，`PATH` 和 `CONDA_PREFIX` 都指向那个构建目录，部件记录（`record.json`）的 `env_build` 写下构建名；部件在 `<构建>/.inuse` 上持有共享 `flock` 直到结束（supervisor 继承该描述符，runner 停了也不放）。清理旧构建时只删能拿到独占非阻塞锁的构建，被部件占用的构建多留一轮，拿不准就保留。
 - **刷新单元。** `setup/units/ci-envrefresh.{service,timer}`：timer 每 30 分钟触发，service 运行 `ci-run env refresh --all`。service 读 `etc/envrefresh.env`（可选，由维护者写，模式 600）：放 runner `.env` 里的 `https_proxy`、`http_proxy`、`no_proxy`，以及 `CI_RUNNERS_CONDA=<conda 路径>`。git 的 `ls-remote` 和 clone 都走这个代理。这两个文件随仓库发布，由 setup 计划在对应主机上安装，计划要经维护者批准。
 
+**排空一台主机**（design 决定 13.1）。维修、重启 runner 之前，以 CI 账户身份：
+
+```sh
+ci-run drain on                 # 整台主机不再接新部件
+ci-run drain on --pool cards    # 只排空一个池子（写 inventory 里的键或类名，如 gpu）
+ci-run drain status             # 看状态，以及还在跑的部件 scope
+ci-run drain off                # 恢复整台主机和所有池子；--pool P 只恢复那个池子
+```
+
+被排空的部件以 `unavailable`（`drained: …`）结束，`retry-on` 指向 inventory `peer_labels` 写的另一台主机的同类池子；已经开跑的部件会跑完，`claim`、`salvage`、`verdict` 不受影响。`drain status` 显示没有部件 scope 后再重启 runner。状态文件是 `state/drain.json`，重启后仍有效；文件坏了按整台主机已排空处理，`drain off` 会重写它。这只对用 `@v1.5.0` 以后版本的调用方有效。
+
 ## 5. 发布流程
 
 一次发布的六步（design §9）：

@@ -1386,7 +1386,7 @@ Rules:
   `attempt-of` add outcomes' reasons and accept a retry `v1.4` refused; no input or
   output a consumer passes or reads changes. The deleted `h100` class and watchdog keys
   are used by no runner and no host's inventory (12.17). So it is a minor release.
-- **`v1.5.0` notes** (stamped 2026-11-08):
+- **`v1.5.0` notes** (stamped 2026-11-08; `v1` moved to it after the 3090 canary at `@v1.5.0`, 2026-11-08):
   1. the drain and the busy rule live in `part`, so they hold for a caller of
      `@v1.5.0` or later; until `v1` moves, `@v1` callers' parts ignore them. The load
      timer and the hook copies are the host's (`releases/hook`) from the apply on;

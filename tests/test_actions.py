@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-ACTIONS = ('claim', 'part', 'verdict')
+ACTIONS = ('claim', 'part', 'salvage', 'verdict')
 
 
 def declared(text: str, section: str) -> list[str]:
@@ -35,7 +35,7 @@ class Actions(unittest.TestCase):
             self.assertEqual(used, ins, name)
 
     def test_inputs_reach_their_flags(self):
-        modules = {'claim': 'github', 'part': 'part', 'verdict': 'verdict'}
+        modules = {'claim': 'github', 'part': 'part', 'salvage': 'verdict', 'verdict': 'verdict'}
         skip = {'token'}  # claim's token travels as GITHUB_TOKEN
         for name in ACTIONS:
             text = (ROOT / 'actions' / name / 'action.yml').read_text()
@@ -69,6 +69,22 @@ class Actions(unittest.TestCase):
         for name in ACTIONS:
             self.assertIn('"$GITHUB_ACTION_PATH/../lib/ci-run.sh" ' + name,
                           (ROOT / 'actions' / name / 'action.yml').read_text().replace('\n        ', ' '))
+
+
+class Salvage(unittest.TestCase):
+    def test_one_upload_per_salvaged_part_up_to_the_bound(self):
+        """Design §4.5: salvage uploads each part as ``ci-part-<id>-<attempt>``. A composite
+        action has no loop, so it has one upload step per part the command may name, and
+        the command refuses more (``MAX_SALVAGED``)."""
+        from ci_runners import verdict
+        text = (ROOT / 'actions' / 'salvage' / 'action.yml').read_text()
+        steps = re.findall(r"- if: fromJSON\(steps\.salvage\.outputs\.count \|\| '0'\) >= ([0-9]+)\n"
+                           r"      uses: actions/upload-artifact@v4\n      with:\n"
+                           r"        name: \$\{\{ steps\.salvage\.outputs\.name-([0-9]+) \}\}\n"
+                           r"        path: \$\{\{ runner\.temp \}\}/ci-salvage-out/\$\{\{ steps\.salvage\.outputs\.name-([0-9]+) \}\}\n",
+                           text)
+        self.assertEqual(steps, [(str(i), str(i), str(i)) for i in range(1, verdict.MAX_SALVAGED + 1)])
+        self.assertIn('pattern: ci-part-*', text)
 
 
 class Launcher(unittest.TestCase):

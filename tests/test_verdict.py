@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr
 from unittest import mock
@@ -183,3 +184,129 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Salvage(unittest.TestCase):
+    """The salvage action's command (design §4.5, decision 12.13): this host's parts of
+    the run whose artifacts stop short, and nothing else."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = pathlib.Path(self.tmp.name)
+        self.arts, self.outdir, self.output = t / 'arts', t / 'out', t / 'output'
+        self.arts.mkdir()
+        self.parts = t / 'data/ci-runners/state/parts/org/repo'
+        self.inv = inventory.load(f'''schema = 1
+this = "hb"
+[hosts.hb]
+account = "acct-x"
+home = "{t}"
+data = "{t}/data"
+slots = 1
+memory_max = "120G"
+disk_min_gib = 0
+gpus = [0]
+max_temp_c = 80
+pools = {{ light = 1 }}
+files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
+''')
+        self.env = {'GITHUB_REPOSITORY': 'Org/Repo', 'GITHUB_RUN_ID': '77', 'GITHUB_RUN_ATTEMPT': '1',
+                    'GITHUB_OUTPUT': str(self.output)}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def record(self, run, pid, n=1, *, start=1000.0, outcome='pass', unit=''):
+        d = self.parts / run / f'{pid}-{n}'
+        d.mkdir(parents=True)
+        rec = {'id': pid, 'attempt': n, 'start_epoch': start, 'host': 'hb', 'class': 'part', 'unit': unit,
+               'run_epoch': start}
+        (d / 'record.json').write_text(json.dumps(rec))
+        if outcome:
+            (d / 'outcome.json').write_text(json.dumps({'outcome': outcome, 'reason': 'exit 0', 'next': 'none',
+                                                        'attempt': n}))
+        return d
+
+    def main(self, parts, *, wait=0, run=None):
+        with mock.patch.dict(os.environ, self.env, clear=True), redirect_stderr(io.StringIO()):
+            return verdict.salvage_main(['--parts', parts, '--artifacts', str(self.arts), '--out', str(self.outdir),
+                                         '--wait-seconds', str(wait)], self.inv, systemctl=run, poll=0.05)
+
+    def uploaded(self):
+        return sorted(os.listdir(self.outdir)) if self.outdir.exists() else []
+
+    def test_only_this_hosts_parts_that_stop_short(self):
+        art(self.arts, 'ci-part-done-1', {'outcome': 'pass', 'next': 'none'})
+        self.record('77-1', 'done')  # its artifact is there: nothing to do
+        self.record('77-1', 'here', outcome='red')  # ran here, its job left no artifact
+        # 'away' ran on another host: no record of it here, only one shaped like it
+        d = self.record('77-1', 'away')
+        rec = json.loads((d / 'record.json').read_text())
+        (d / 'record.json').write_text(json.dumps({**rec, 'id': 'other'}))
+        self.assertEqual(self.main('done here away'), 0)
+        self.assertEqual(self.uploaded(), ['ci-part-here-1'])
+        got = json.loads((self.outdir / 'ci-part-here-1' / 'outcome.json').read_text())
+        self.assertEqual((got['outcome'], got['salvaged']), ('red', True))
+        self.assertEqual(self.output.read_text(), 'count=1\nname-1=ci-part-here-1\n')
+
+    def test_a_newer_record_of_another_run_or_attempt_is_left_alone(self):
+        self.record('77-1', 'cpu', start=1000)
+        self.record('78-1', 'cpu', start=2000)  # a later run ran its own cpu here
+        self.record('77-1', 'gpu', start=1000)
+        self.record('77-2', 'gpu', start=2000)  # this run's second attempt did too
+        self.record('77-1', 'lnt', start=2000)
+        self.record('9-1', 'lnt', start=1000)  # an older run's record does not matter (start time, not name)
+        self.assertEqual(self.main('cpu gpu lnt'), 0)
+        self.assertEqual(self.uploaded(), ['ci-part-lnt-1'])
+
+    def test_the_retry_whose_artifact_is_missing(self):
+        art(self.arts, 'ci-part-cpu-1', {'outcome': 'thermal', 'next': 'retry'})
+        self.record('77-1', 'cpu', 1, start=1000)
+        self.record('77-1', 'cpu', 2, start=2000)
+        self.assertEqual(self.main('cpu'), 0)
+        self.assertEqual(self.uploaded(), ['ci-part-cpu-2'])
+
+    def test_a_retry_that_ran_elsewhere_is_left_alone(self):
+        art(self.arts, 'ci-part-cpu-1', {'outcome': 'thermal', 'next': 'retry'})
+        self.record('77-1', 'cpu', 1)  # attempt 1 ran here and uploaded; attempt 2 ran on another host
+        self.assertEqual(self.main('cpu'), 0)
+        self.assertEqual(self.uploaded(), [])
+
+    def test_more_parts_than_the_action_uploads_is_refused(self):
+        ids = [f'p{i}' for i in range(verdict.MAX_SALVAGED + 1)]
+        for i in ids:
+            self.record('77-1', i)
+        self.assertEqual(self.main(' '.join(ids)), 2)
+        self.assertEqual(self.uploaded(), [])
+        self.assertEqual(self.main(' '.join(ids[1:])), 0)  # the bound itself is fine
+        self.assertEqual(len(self.uploaded()), verdict.MAX_SALVAGED)
+
+    def test_a_part_still_running_is_waited_for_then_lost(self):
+        self.record('77-1', 'cpu', outcome='', unit='ci-part-x.scope')
+        calls = []
+
+        def active(argv, **kw):
+            calls.append(argv)
+            return mock.Mock(stdout='active\n', returncode=0)
+        t0 = time.monotonic()
+        self.assertEqual(self.main('cpu', wait=0.5, run=active), 0)
+        self.assertGreaterEqual(time.monotonic() - t0, 0.5)
+        self.assertGreater(len(calls), 1)
+        got = json.loads((self.outdir / 'ci-part-cpu-1' / 'outcome.json').read_text())
+        self.assertEqual((got['outcome'], got['salvaged']), ('lost', True))
+
+    def test_a_part_that_ends_in_the_wait_gives_its_outcome(self):
+        d = self.record('77-1', 'cpu', outcome='', unit='ci-part-x.scope')
+
+        def active(argv, **kw):
+            (d / 'exit.json').write_text(json.dumps({'rc': 0, 'end_epoch': 1010.0}))
+            return mock.Mock(stdout='inactive\n', returncode=3)
+        self.assertEqual(self.main('cpu', wait=30, run=active), 0)
+        got = json.loads((self.outdir / 'ci-part-cpu-1' / 'outcome.json').read_text())
+        self.assertEqual((got['outcome'], got['salvaged']), ('pass', True))
+
+    def test_malformed_inputs(self):
+        self.assertEqual(self.main('a a'), 2)
+        self.assertEqual(self.main('../x'), 2)
+        self.env['GITHUB_RUN_ID'] = 'x'
+        self.assertEqual(self.main('cpu'), 2)

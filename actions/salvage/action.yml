@@ -1,0 +1,128 @@
+name: ci-runners salvage
+description: Upload the outputs of this host's parts of the run whose artifacts stop short, read from their records (design §4.5, decision 12.13). Runs on light, before the verdict.
+inputs:
+  parts:
+    description: the ids of the parts the run started, space-separated
+    required: true
+  wait-seconds:
+    description: how long to wait for a part of this host that still runs
+    default: '0'
+outputs:
+  count:
+    description: "how many parts this host salvaged"
+    value: ${{ steps.salvage.outputs.count }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        pattern: ci-part-*
+        path: ${{ runner.temp }}/ci-salvage-in
+    - id: salvage
+      shell: bash
+      env:
+        IN_PARTS: ${{ inputs.parts }}
+        IN_WAIT: ${{ inputs.wait-seconds }}
+        ARTIFACTS: ${{ runner.temp }}/ci-salvage-in
+        OUT: ${{ runner.temp }}/ci-salvage-out
+      run: >-
+        "$GITHUB_ACTION_PATH/../lib/ci-run.sh" salvage --parts "$IN_PARTS" --wait-seconds "$IN_WAIT"
+        --artifacts "$ARTIFACTS" --out "$OUT"
+    # one upload per salvaged part, up to MAX_SALVAGED (ci_runners/verdict.py)
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 1
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-1 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-1 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 2
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-2 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-2 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 3
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-3 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-3 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 4
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-4 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-4 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 5
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-5 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-5 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 6
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-6 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-6 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 7
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-7 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-7 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 8
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-8 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-8 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 9
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-9 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-9 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 10
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-10 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-10 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 11
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-11 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-11 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 12
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-12 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-12 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 13
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-13 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-13 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 14
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-14 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-14 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 15
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-15 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-15 }}
+        retention-days: 7
+    - if: fromJSON(steps.salvage.outputs.count || '0') >= 16
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.salvage.outputs.name-16 }}
+        path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-16 }}
+        retention-days: 7

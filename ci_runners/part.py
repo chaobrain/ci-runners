@@ -34,7 +34,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 
 from ci_runners import gpus as gpus_mod
-from ci_runners import envuse, inventory, outcome, registry, slots
+from ci_runners import envuse, inventory, locks, outcome, registry, slots
 from ci_runners import p2p as p2p_mod
 from ci_runners import sampler as sampler_mod
 
@@ -239,10 +239,15 @@ def command_argv(command: str, *, cpus: str = '', nice: int = 10) -> list[str]:
 
 
 def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, part_dir: str, results: str,
-             cards: Sequence[int], cpus: str, files: Mapping[str, str], slot: str, resume: bool) -> dict[str, str]:
+             cards: Sequence[int], cpus: str, files: Mapping[str, str], slot: str, resume: bool,
+             held: str = '') -> dict[str, str]:
     """The command's environment (design §4.3): the job's without our ``CI_*`` names,
-    then the project's variables, then ours, which nothing overrides. Pure."""
-    env = {k: v for k, v in base.items() if not k.startswith('CI_') and k not in STEP_FILES}
+    then the project's variables, then ours, which nothing overrides. On a host with the
+    host lock its path (``CI_HOST_LOCK``, and ``LOCAL_CI_HOST_LOCK`` for brainspike's
+    ``host_lock.sh``), and ``held``, the mode the part holds it in (``s`` or ``x``), as
+    the protocol's cover ``BRAINSPIKE_HOST_LOCK`` (decision 12.9). Pure."""
+    env = {k: v for k, v in base.items() if not k.startswith('CI_') and k not in STEP_FILES
+           and k not in (locks.ENV, 'LOCAL_CI_HOST_LOCK')}
     env.update(project.variables)
     if project.env:
         env['PATH'] = f'{project.env}/bin:' + env.get('PATH', '/usr/bin:/bin')
@@ -253,6 +258,10 @@ def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, p
         'CI_CPUS': cpus, 'CI_SLOT_LOCK': files['slot_lock'],
         'CI_SLOT_QUEUE': files['slot_queue'], 'CI_SLOT_HELD': slot, 'CI_RESUME': '1' if resume else '0',
     })
+    if files.get('host_lock'):
+        env['CI_HOST_LOCK'] = env['LOCAL_CI_HOST_LOCK'] = files['host_lock']
+        if held:
+            env[locks.ENV] = held
     return env
 
 
@@ -927,7 +936,8 @@ class Executor:
         slot_fd, slot_path, env_fd = None, '', None
         every: list[int] = []  # a nightly part's slots, every one of them (decision 12.8)
         nightly = cls == EVERY_SLOT
-        lock = a.lock or ('x' if cls == 'compile' else 'none')  # held by ci-lock (RUN-7d, 7e); checked here
+        lock = a.lock or ('x' if cls == 'compile' else 'none')  # the class's row checks it (gate)
+        hold: locks.HostLock | None = None  # the host lock, held for the whole command (design §5.5 item 3)
         rec['lock'] = lock
         try:
             free = shutil.disk_usage(h['data']).free / (1 << 30)
@@ -991,6 +1001,21 @@ class Executor:
                     if time.monotonic() >= deadline:
                         return self._end(record, rec, a, unavailable='queue timeout: no card fits')
                     time.sleep(self.poll)
+            if lock != 'none':
+                # Last, after the slots and the leases, as every holder takes them (§5.5 item 3): a part
+                # holds the host lock only once it waits for nothing else, so a nightly part holding
+                # every slot and a compile part holding x never wait for each other.
+                hold = locks.HostLock(str(h['files']['host_lock']), held='',
+                                      timeout=max(0.0, deadline - time.monotonic()))
+                try:
+                    hold.acquire(lock)
+                except locks.LockTimeout:
+                    return self._end(record, rec, a, unavailable=f'queue timeout: no host lock ({lock})')
+                except locks.MissingSharedFile as e:
+                    return self._end(record, rec, a, unavailable=f'host lock: {e}')
+                if self.stopped:
+                    return self._end(record, rec, a, stopped=True)
+                rec['lock_wait_seconds'] = round(hold.waited)
             rec.update(queue_seconds=round(time.monotonic() - t0), cards=cards, slot=slot_path, run_epoch=time.time())
             pin = str((h.get('compile_cpus') if cls == 'compile' else h.get('cpus')) or '')  # design §5.5 item 4
             cpus = pin or str(len(os.sched_getaffinity(0)))
@@ -999,7 +1024,8 @@ class Executor:
                 rec['env_build'] = os.path.basename(build)  # the one env this part runs in (design 12.11)
             env = part_env(self.env, role=self.inv.this, project=dataclasses.replace(proj, env=build), part_dir=work,
                            results=results, cards=cards,
-                           cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume)
+                           cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume,
+                           held=hold.mode if hold else '')
             inner = command_argv(a.command, cpus=pin, nice=0 if cls == 'compile' else 10)
             cap = registry.memory_bytes(memory) if self.caps_memory() else 0
             p2p = self.p2p if cls in P2P_CLASSES else []
@@ -1015,7 +1041,10 @@ class Executor:
             argv = scope_argv(self.unit, proj.name, memory, sup, self.oom_policy()) if self.scope else sup
             if self.stopped:
                 return self._end(record, rec, a, stopped=True)
-            held = tuple(fd for fd in {slot_fd, env_fd, *every, *leases.fds} if fd is not None)
+            # the supervisor keeps the host lock with the slot: the command's own requests find it
+            # held by an ancestor (the cover), and it is let go when the scope ends
+            held = tuple(fd for fd in {slot_fd, env_fd, *every, *leases.fds, *(hold.fds if hold else ())}
+                         if fd is not None)
             self.proc = self.spawn(argv, cwd=self.env.get('GITHUB_WORKSPACE') or os.getcwd(), env=env, pass_fds=held)
             smp, done, thread = None, threading.Event(), None
             if cards:
@@ -1043,6 +1072,8 @@ class Executor:
                              watchdog=read_tail(log) if log and cards else '',
                              cool_card=self.cool_elsewhere(cards) if cards else None)
         finally:
+            if hold is not None:
+                hold.close()  # not release: a supervisor that outlives us keeps the hold
             leases.release()
             for fd in {slot_fd, env_fd, *every} - {None}:
                 os.close(fd)

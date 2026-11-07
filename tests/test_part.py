@@ -12,6 +12,7 @@ import os
 import pathlib
 import subprocess
 import tempfile
+import threading
 import unittest
 
 from ci_runners import envuse, inventory, part, registry
@@ -312,13 +313,15 @@ class Classes(Host):
             return subprocess.CompletedProcess(argv, 0, text, '')
         return subprocess.run(argv, **kw)
 
-    def go(self, cls, *, card='', p2p=P2P_OK, release=str(ROOT), **kw):
+    def go(self, cls, *, card='', p2p=P2P_OK, release=str(ROOT), env_cover='', **kw):
         kw.setdefault('project', 'p')
         kw.setdefault('id', 'c')
         kw.setdefault('timeout_minutes', 1)
         kw.setdefault('queue_timeout_minutes', 0.02)
         kw.setdefault('command', 'touch "$CI_PART_DIR/ran"')
         env = {**self.env, 'CI_RUNNER_CLASS': cls, 'RUNNER_NAME': f'hb-{cls}-1', 'CI_RUNNER_CARD': card}
+        if env_cover:
+            env['BRAINSPIKE_HOST_LOCK'] = env_cover  # a stale cover in the job's environment
         ex = part.Executor(self.inv, str(self.etc), env, release=release, scope=False, poll=0.05, run=self.run_fake,
                            sample_s=0.05, p2p=p2p)
         return ex.execute(part.Inputs(**kw))
@@ -382,6 +385,99 @@ class Classes(Host):
         self.inv = inventory.load(self.inv_text.replace('compile_cpus = "0"\n', ''))
         _, out = self.go('compile', id='nocpus')
         self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'this host has no compile_cpus for compile parts'))
+
+    def test_a_compile_part_holds_x_and_covers_its_commands_requests(self):
+        """Decision 12.7 and 12.9: a compile part holds the host lock exclusively for its whole
+        command; the command's own ``host_lock.sh -s`` is covered, not deadlocked, and the
+        lock is free again after the part."""
+        sh = ROOT / 'tests/fixtures/brainspike/host_lock.sh'
+        probe = (
+            'flock -n -s "$CI_HOST_LOCK" true && echo free > "$CI_PART_DIR/probe" || echo held > "$CI_PART_DIR/probe"; '
+            'echo "$BRAINSPIKE_HOST_LOCK" > "$CI_PART_DIR/cover"; '
+            # brainspike's script finds the file by LOCAL_CI_HOST_LOCK: never let it reach the host's real one
+            f'if [ "$LOCAL_CI_HOST_LOCK" = "$CI_HOST_LOCK" ]; then timeout 10 {sh} -s true 2> "$CI_PART_DIR/sh"; '
+            'echo $? > "$CI_PART_DIR/rc"; else echo nolocal > "$CI_PART_DIR/rc"; fi')
+        _, out = self.go('compile', command=probe)
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
+        self.assertEqual((self.work(out, 'probe'), self.work(out, 'cover'), self.work(out, 'rc')), ('held', 'x', '0'))
+        self.assertIn("covered by the caller's x hold", self.work(out, 'sh'))
+        self.assertEqual(subprocess.run(['flock', '-n', '-x', str(self.hl), 'true'], timeout=10).returncode, 0)
+        _, out = self.go('part', command=probe, id='s', lock='s')  # a shared hold: -s covered too
+        self.assertEqual((self.work(out, 'probe'), self.work(out, 'cover'), self.work(out, 'rc')), ('free', 's', '0'))
+        _, out = self.go('part', command='echo "${BRAINSPIKE_HOST_LOCK-unset} $CI_HOST_LOCK" > "$CI_PART_DIR/cover"',
+                         id='none', env_cover='x')
+        self.assertEqual(self.work(out, 'cover'), f'unset {self.hl}')  # lock none: no cover, a job's is dropped
+
+    def test_a_part_waits_for_the_host_lock_within_its_queue_timeout(self):
+        hold = subprocess.Popen(['flock', '-x', str(self.hl), 'sleep', '20'], start_new_session=True)
+        try:
+            for _ in range(500):
+                if part.slots._flocked(str(self.hl)):
+                    break
+                time.sleep(0.01)
+            code, out = self.go('compile')
+        finally:
+            os.killpg(hold.pid, signal.SIGKILL)
+            hold.wait()
+        self.assertEqual((code, out['outcome'], out['reason']), (0, 'unavailable', 'queue timeout: no host lock (x)'))
+        self.assertFalse(self.ran(out))
+        for p in (self.slot, self.slot.parent / 's.2.lock'):  # its slot is free again
+            self.assertEqual(subprocess.run(['flock', '-n', '-x', str(p), 'true'], timeout=10).returncode, 0)
+
+    def test_the_supervisor_keeps_the_host_lock_after_the_executor_is_gone(self):
+        """The hold lasts as long as the command (§5.5 item 3: released when the scope ends),
+        not as long as the executor: a stopped runner does not let a timing part's x go."""
+        pathlib.Path(self.tmp.name, 'inv.toml').write_text(self.inv_text)
+        env = {**self.env, 'CI_RUNNER_CLASS': 'compile', 'RUNNER_NAME': 'hb-compile-1'}
+        code = (f'import sys, json; sys.path.insert(0, {str(ROOT)!r}); from ci_runners import inventory, part; '
+                f'inv = inventory.load(open({str(self.tmp.name + "/inv.toml")!r}).read()); '
+                f'ex = part.Executor(inv, {str(self.etc)!r}, json.loads(sys.argv[1]), release={str(ROOT)!r}, '
+                f'scope=False, poll=0.05); '
+                f'ex.execute(part.Inputs(project="p", id="long", timeout_minutes=1, command="sleep 2"))')
+        child = subprocess.Popen([sys.executable, '-I', '-c', code, json.dumps(env)], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+        rec = self.data / 'ci-runners/state/parts/org/repo/77-1/long-1'
+        for _ in range(200):
+            if (rec / 'scope.json').exists():
+                break
+            time.sleep(0.05)
+        os.killpg(child.pid, signal.SIGKILL)  # the runner and its executor are gone
+        child.wait(timeout=20)
+        held = subprocess.run(['flock', '-n', '-s', str(self.hl), 'true'], timeout=10).returncode
+        self.assertEqual(held, 1, 'the command still runs, so its x hold stands')
+        for _ in range(200):
+            if (rec / 'exit.json').exists():
+                break
+            time.sleep(0.05)
+        self.assertEqual(subprocess.run(['flock', '-w', '10', '-x', str(self.hl), 'true'], timeout=20).returncode, 0)
+
+    def test_a_part_waiting_for_a_slot_holds_no_host_lock(self):
+        """The order (§5.5 item 3): slots, then leases, then the host lock. A compile part
+        that waits behind a nightly part holding every slot holds no lock meanwhile, so
+        the two cannot wait for each other."""
+        fds = []
+        for p in (self.slot, self.slot.parent / 's.2.lock'):  # every slot taken, as by a nightly part
+            fd = os.open(p, os.O_WRONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            fds.append(fd)
+        seen, stop = [], threading.Event()
+
+        def watch():
+            while not stop.is_set():
+                seen.append(part.slots._flocked(str(self.hl)))
+                time.sleep(0.01)
+        t = threading.Thread(target=watch)
+        t.start()
+        try:
+            _, out = self.go('compile', queue_timeout_minutes=0.01)
+        finally:
+            stop.set()
+            t.join()
+            for fd in fds:
+                os.close(fd)
+        self.assertEqual(out['reason'], 'queue timeout: no CI slot')
+        self.assertTrue(seen)
+        self.assertFalse(any(seen), 'the host lock was held while the part waited for a slot')
 
     def test_a_multi_part_runs_after_the_p2p_self_test(self):
         _, out = self.go('multi', gpus=2, command='echo $CUDA_VISIBLE_DEVICES > "$CI_PART_DIR/cards"')
@@ -462,6 +558,25 @@ class Classes(Host):
         finally:
             other.release()
         self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no card fits'))
+
+
+class H100(Host):
+    """h100 has no host lock (no ``files.host_lock``, D5): it refuses any ``lock`` but
+    ``none`` and takes no lock (decision 12.9)."""
+
+    def test_no_lock_on_h100(self):
+        self.inv = inventory.load(self.inv_text.replace(
+            'pools = { light = 1, part = 1 }', 'pools = { light = 1, part = 1, h100 = { per_card = true, labels = ["h100"] } }'))
+        for n, (cls, kw) in enumerate((('part', {'lock': 's'}), ('part', {'lock': 'x'}), ('part', {'lock': 'l'}),
+                                        ('h100', {'lock': 'x', 'gpus': 1}))):
+            env = {**self.env, 'CI_RUNNER_CLASS': cls, 'CI_RUNNER_CARD': '0'}
+            _, out = self.execute(env=env, id=f'h{n}', **kw)
+            self.assertEqual((out['outcome'], out['reason']), ('unavailable', f'lock {kw["lock"]}: this host has no '
+                                                                              'host lock'), (cls, kw))
+        _, out = self.execute(command='echo "${BRAINSPIKE_HOST_LOCK-unset} ${CI_HOST_LOCK-unset}" > "$CI_PART_DIR/c"',
+                              id='none', lock='none')
+        self.assertEqual(out['outcome'], 'pass')
+        self.assertEqual(pathlib.Path(self.path(out), 'work', 'c').read_text().strip(), 'unset unset')
 
 
 class LeaseQueue(Host):

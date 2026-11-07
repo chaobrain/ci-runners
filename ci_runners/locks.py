@@ -199,6 +199,20 @@ class HostLock:
         self.mode = want
         return self.waited
 
+    @property
+    def fds(self) -> tuple[int, ...]:
+        """The descriptors the hold is on, to pass to a process that keeps it (``part``'s
+        supervisor): the hold lasts while any process has them open."""
+        return tuple(self._fds)
+
+    def close(self) -> None:
+        """Close our descriptors without unlocking: a process they were passed to keeps
+        the hold until it ends (``release`` would end it for every holder of them)."""
+        for fd in self._fds:
+            os.close(fd)
+        self._fds = []
+        self.mode, self.covered = None, False
+
     def release(self) -> None:
         """Let go of what ``acquire`` took; the marker first, the turnstile last."""
         self._close()

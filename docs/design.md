@@ -181,6 +181,8 @@ the first path.
 
 ## Lead decisions (2026-11-07): the 3090 hosts return (RUN-7)
 
+Approved by the lead on 2026-11-07 (#40), each open choice as recommended.
+
 The request: brainspike moves all of its test CI onto these runners while it stays
 private. It needs live NEST from conda, compile gates timed on pinned CPUs of its
 reference host, gates that use two cards, and its nightly. h100 gives none of the last

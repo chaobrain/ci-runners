@@ -8,7 +8,8 @@ path. The design as it stood before is the one at tag `v1.2.0`. Decision 12 (202
 RUN-7) brings 3090b and 3090a back as local hosts under the RUN-5 model, with the pools,
 the host-lock and slot interop and the classes that brainspike's test CI needs.
 Decision 12.17 (2026-11-07) retires h100 and `h100-test.yml`: the CI runs on the two
-3090 hosts only.
+3090 hosts only. Decision 13 (`v1.5.0`, RUN-8) adds a drain switch and busy-host
+avoidance, deletes the h100 class and the watchdog, and moves the hooks' path off the disk.
 
 Guides, in Chinese: [consumers.md](consumers.md) for the repositories that use the CI,
 [operations.md](operations.md) for the maintainer of the hosts. This file is the contract;
@@ -362,6 +363,165 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
         they go. The example inventory and the installed units keep their comments, so
         no host's plan changes. h100 comes back, if it returns healthy, by a setup plan
         approved by the lead, a registration and a canary, as any new host (§10).
+        Decision 13.4 reviews them: they go.
+
+## Lead decisions (2026-11-07): `v1.5.0` (RUN-8)
+
+The lead approved the scope on 2026-11-07 (a drain switch; busy-host avoidance; the h100
+class and the watchdog clean-up; the runner's hook line, option (a)) and delegated the
+approval of this text to the maintainer. The defaults below are starting values, tuned
+from the load record they add.
+
+13. **Operating two shared hosts.**
+    1. **The drain switch.** `ci-run drain on [--pool P]`, `ci-run drain off [--pool P]`
+       and `ci-run drain status`, run as the CI account on its host. `on` drains the
+       host, or with `--pool` one pool, named by its inventory key or its class (each is
+       unique on a host). The state is one file, `state/drain.json`, replaced whole (a
+       rename) under `state/drain.lock`, so it survives a restart of the runners, the
+       user manager or the host. A missing file is "not drained"; an unreadable or
+       malformed one drains the host (fail closed, reason `drain state unreadable`).
+       - A drained host or pool takes no new part. `part` reads the drain in its gate,
+         before it takes anything, and again once it holds its slot and leases, just
+         before the command. Either way the part releases what it took and ends
+         `unavailable` (`drained: host` or `drained: pool <P>`), with `next` and
+         `retry-on` pointing at the other host's pool of its class (13.3).
+       - A part whose command has started finishes. `claim`, `salvage` and `verdict` are
+         not parts and are never refused, so runs in flight end and their records stay
+         readable. A light part (a plan job) is refused like any other.
+       - `off` without `--pool` clears the host and every pool; with `--pool`, that pool
+         only. `status` prints the host's and each drained pool's state with the time it
+         was set, and the part scopes still running (`ci-part-*.scope`), so the operator
+         sees when a drained host is idle before restarting its runners.
+       - The hook does not read the drain: a refusal there fails the job without outputs,
+         which a consumer cannot retry. Job code runs as the CI account and can change
+         the file, as it can the hook (T13): the drain is the operator's tool, not a
+         boundary.
+    2. **Busy-host avoidance.** Both 3090 hosts run work outside the runners: the local
+       brainspike account's runs on both, and other people's on 3090a. A part's first
+       attempt reads the host's load record before it takes its slot. If one of the rules
+       below held in every sample of its window (the last `busy.window_minutes`, or
+       `busy.lock_minutes` for the host lock), the part ends `unavailable` (`busy:
+       <rule>`) with `next` `fallback` and `retry-on` the other host's pool of its class
+       (13.3). "Other accounts" are every account but the CI account, the local
+       maintainer's included: local runs on 3090b send parts to 3090a, as other people's
+       work on 3090a sends them to 3090b. A `busy:` reason names the rule, the value
+       measured and the threshold (e.g. `busy: cpu 17.2 >= 14 cores for 10 min`), as does
+       the part's summary, so the defaults can be tuned from the runs. The rules:
+       - **CPU**: other accounts' CPU use at or above `busy.cpu_cores`: the busy time of
+         `/proc/stat` (user, nice, system, irq, softirq, steal) minus the CI account's
+         (`cpu.stat` of its `user@<uid>.service`), per second between two samples;
+       - **memory**: other accounts' memory at or above `busy.memory_gib`: `MemTotal`
+         minus `MemAvailable`, minus the CI account's anonymous memory (`anon` in its
+         `memory.stat`);
+       - **GPU**, for a part that leases cards, on the cards it may lease: other accounts'
+         compute memory on one of them at or above `busy.gpu_mib`
+         (`nvidia-smi --query-compute-apps`). A process whose `/proc/<pid>` the account
+         cannot see is another account's: under `ProtectProc=invisible` (12.16) the
+         account sees only its own, so this fails closed;
+       - **the host lock** (12.9): an exclusive hold by another account for
+         `busy.lock_minutes` or more: a `FLOCK WRITE` in `/proc/locks` on the host lock's
+         inode, by a PID the account cannot see, the same PID in every sample of the
+         window.
+
+       The load record: a new user timer, `ci-hostload.timer`, runs `ci-run hostload
+       sample` every 60 s, which appends one line (the raw counters and the four values)
+       to `state/hostload/<date>.jsonl`; the reaper deletes the files of days more than 2
+       days old. A window with fewer than half its samples (the timer stopped, a fresh
+       host) is not busy: busy avoidance places load and is no boundary, so it fails
+       open, and the part waits for its slot as in `v1.4`.
+
+       It is checked only where the part can go elsewhere and only once:
+       - for a class with a peer pool (13.3), except `light` (short, no slot);
+       - never on a retry (`attempt-of` set), so a retry does not bounce back;
+       - once per head and part on a host: a part refused as busy leaves a marker under
+         `state/hostload/refused/` named by its repository, head (`GITHUB_SHA`) and id,
+         and a later first attempt of the same head and part there (a re-run) waits for
+         its slot instead. The reaper deletes markers after 14 days.
+
+       The thresholds are the inventory's optional `busy` table (§3.3), with these
+       defaults: `window_minutes` 10; `cpu_cores` half the host's online CPUs (14 on each
+       3090 host); `memory_gib` half its `MemTotal`, rounded down (94 on 3090b, 62 on
+       3090a); `gpu_mib` 2048; `lock_minutes` 20 (brainspike's shared holds last at most
+       about 15 min, so a longer exclusive one is a timing run).
+
+       *Measured on 3090a* (2026-11-07, `sar`'s 10-min means, 28 CPUs; most of the load
+       was niced, as the local brainspike account's test runs are). A mean at or above a
+       threshold is needed for every sample to be, so these counts bound from above what
+       the rule would have found. Other accounts' CPU use
+       (user, nice and system, which also hold the CI parts' few minutes) was at or above
+       14 cores in 62 of 143 intervals (about 10 h, in spans of up to 130 min), above 16
+       cores in 46 and above 20 cores in 25. Memory used reached 62 GiB in 1 interval
+       (peak 62.6 GiB). All 6 intervals in which a CI part ran on 3090a were at or above
+       14 cores: with these defaults those parts' first attempts would have gone to 3090b,
+       which was at or above 14 cores in 14 of its 143 intervals that day. A snapshot on
+       2026-11-08 at 00:03: 25 cores and 31 GiB of the local account's, and its 2.6 GiB on
+       card 0 at 89 % use. No GPU or host-lock history exists on either host (`sar` has
+       no GPU, the lock writes no log); the load record keeps both from `v1.5.0` on.
+    3. **Where a refused part goes, and retries across hosts.** A new optional inventory
+       key, `peer_labels`, maps a runner class to the labels of the other host's pool of
+       that class (on 3090b: `light = ["3090a-light"]`, `part = ["3090a-cpu"]`,
+       `gpu = ["3090a-gpu"]`, `multi = ["3090a-multi"]`). A drained or busy part's
+       `retry-on` is `self-hosted` and those labels, with `next` `fallback`, within the
+       retry budget of §4.4 (on its last attempt, `next` is `none`). A class with no
+       entry (`compile` on 3090b, `nightly` on 3090a) has nowhere to go: a drained part
+       of it ends `unavailable` with `next` `none`, which the verdict reports as error,
+       and busy is not checked for it.
+       - **A retry on another host.** `attempt-of` names the first attempt's record, on
+         the host that ran it, which no other host can read: `v1.4` refused it there
+         (exit 2), although §4.8 rule 4 allows a `fallback` on another host's pool. From
+         `v1.5.0` a record of another host is taken by its name alone: the attempt is the
+         `n` of its `<id>-<n>` plus one, and its id must be the part's; nothing else is
+         read. A record of this host is read as before.
+    4. **The h100 clean-up** (12.17's review). These go, with their tests, fixtures and
+       mutants:
+       - the `h100` runner class: in the policy's classes, the executor's class rows and
+         the per-card classes;
+       - the h100-style host test and what hangs on it: D7's refusal of a part with
+         `gpus > 1`, and a reboot counted as thermal (`reboot` is retried on the same
+         host, as on the 3090 hosts now);
+       - the watchdog: the inventory keys `watchdog_log` and `watchdog_notice` (an
+         inventory that sets one is refused as having an unknown key; no host's does),
+         the notice in the health gate, the log read after a part and the kill-line match
+         in the classification (`thermal` comes from the early stop only, as it already
+         does on the 3090 hosts);
+       - §5.4, folded into §5.5, and h100 in §4.3, §4.4 and §5.1. h100's rows in §3,
+         §5.3, §6 and §8 stay as history, since the 3090 rows cite them.
+
+       What stays: the per-card pools (class `gpu`), the health gate on temperature, the
+       sampler and its early stop, the boot id, and the supervisor's memory cap (11.11)
+       for a host without a memory controller. Nothing on the 3090 path changes
+       behaviour: the hosts' inventories and policies load as before, and every class's
+       row, gate and outcome there is as in `v1.4.1`. The installed units keep their text
+       (the comment in `ci-tunnel.service` that names h100 included), so the clean-up
+       alone changes no host's plan. h100 comes back, if it does, as a new host with a
+       `gpu` pool (§10).
+    5. **The hook's path names no disk** (`v1.4.0` notes item 5, option (a)). A new user
+       unit, `ci-hooks.service` (oneshot, `RemainAfterExit=yes`), runs `ci-run hooks
+       copy`: it copies `job-started.sh` and `job-completed.sh` from
+       `<data>/ci-runners/hooks/` into `/tmp/ci-runners-hooks/`, in the CI account's
+       private `/tmp` (12.16).
+       - The directory is the account's, mode 700, and refused if it is a link or another
+         account's; each copy is written under a temporary name, mode 500, and renamed.
+       - The hooks find their release through a line setup writes into them
+         (`base=<data>/ci-runners`, as it writes the interpreter's), not through their own
+         path, so a copy runs the same release as its source. This changes the hook files
+         once.
+       - Every runner's `.env` names the copies, so the runner's "Run '<hook path>'" line
+         in every job log names `/tmp/ci-runners-hooks/`, not the data disk.
+       - **Fail closed.** `ci-runner@.service` gets `Requires=` and `After=ci-hooks.service`
+         and an `ExecStartPre=` that checks both copies are executable files, so a runner
+         does not come up without them. The reaper compares the copies with their sources
+         every 10 min and rewrites a missing or different one, and logs it (`/tmp`'s age
+         cleaning, 10 days, reaches into a private `/tmp` too). A hook missing when a job
+         starts fails that job: the runner fails "Set up runner" when its hook file does
+         not exist (checked live, RUN-8 acceptance 4).
+       - Setup plans the unit on a host whose CI account has the private namespace
+         (12.16): both 3090 hosts. Elsewhere the runners keep the hooks under `data`,
+         since in a shared `/tmp` another account could plant the directory first. Apply
+         starts `ci-hooks.service` before the runners, and restarts it when a hook
+         changes.
+       - Known limit, unchanged: the runner still writes the machine name into every job
+         log.
 
 ## Decisions of this spec
 
@@ -388,9 +548,8 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
   its own slot files under `state/` and has no host lock.
 - **D6. A part exits 1 only when the run is red.** Every infrastructure end exits 0, with
   its outcome and a `next` hint for the retry job.
-- **D7. One card per h100 part** (lapsed with h100, 12.17). No multi-GPU part ran on h100 in v1 (see the P2P
-  fault in §5.4). The 3090 hosts' `multi` pool runs two-card parts behind a P2P self-test
-  (decision 12.6).
+- **D7.** *One card per h100 part.* Lapsed with h100 (12.17), its code deleted by 13.4. The
+  3090 hosts' `multi` pool runs two-card parts behind a P2P self-test (decision 12.6).
 - **D8.** *The keyed verify draw.* Retired by 11.12.
 
 ## 1. Scope
@@ -443,7 +602,9 @@ ci_runners/           stdlib-only Python: pure functions, thin I/O
                       suffix) on 443, run on the egress host (11.10)
   claim.py github.py  claim decision from a sha's statuses; the status API
   part.py             the executor: gate, slot, lease, scope, supervisor, record
-  sampler.py          the GPU sampler and the early thermal stop (§5.4)
+  drain.py            the drain switch (decision 13.1)
+  hostload.py         the load record and the busy rule (decision 13.2)
+  sampler.py          the GPU sampler and the early thermal stop (§5.5)
   outcome.py          outcome classification and the retry hint
   slots.py gpus.py    fair host slots with caps, GPU leases in ticket order per card
   locks.py            `ci-lock`: brainspike's host-lock protocol on the 3090 hosts (12.9)
@@ -452,7 +613,7 @@ ci_runners/           stdlib-only Python: pure functions, thin I/O
   registry.py         the project registry
   envbuild.py         `ci-run env build` and `env refresh` (decisions 11.4, 12.10, 12.11)
   reaper.py           stale scopes, work directories, records and logs
-  hook.py             the pre-job and post-job hooks
+  hook.py             the pre-job and post-job hooks; their copy in `/tmp` (decision 13.5)
   setup.py            plan and apply
   inventory.py        schema, loader, lint
   cli.py              `ci-run`
@@ -460,7 +621,8 @@ bin/                  ci-run, ci-lock, ci-slot: CLIs over the package
 hooks/                job-started.sh, job-completed.sh -> python -I -m ci_runners.hook
 setup/                plan.sh, apply.sh, install.sh, register.sh, uninstall.sh
 setup/units/          user unit templates: ci-runner@.service, ci-reaper.{service,timer},
-                      ci-orgsync.{service,timer}, ci-envrefresh.{service,timer}, slices;
+                      ci-orgsync.{service,timer}, ci-envrefresh.{service,timer},
+                      ci-hostload.{service,timer}, ci-hooks.service, slices;
                       ci-tunnel.service (a host's forward to the egress, 11.10, 12.3)
 setup/egress/         ci-egress.service and allow: the egress host's proxy unit and its
                       allowlist (11.10), installed by root there
@@ -471,7 +633,7 @@ actions/              claim/, part/, salvage/, verdict/ (composite, action.yml);
                       lib/ci-run.sh, the launcher; RELEASE, the release stamp
 .github/workflows/    test.yml (this repository's tests, hosted only)
 tests/                unit tests; fixtures/ (sanitised): event payloads,
-                      watchdog lines, nvidia-smi CSV, boot ids, JUnit; mutants.py
+                      nvidia-smi CSV, /proc/stat, /proc/locks, boot ids, JUnit; mutants.py
 tests/test_no_inventory.py     no tracked file holds a denied token (hashed deny list)
 ```
 
@@ -491,12 +653,15 @@ subtree of the shared account (decision 11.3).
 <our subtree>/ci-runners/etc/tunnel/       the tunnel's key, ssh_config, known_hosts; mode 700
 <our subtree>/ci-runners/state/            part records parts/<repo>/<run>-<attempt>/<id>-<n>/
                                            {record.json, status.json, samples.csv, log};
-                                           leases; the slot queue; setup.json
+                                           leases; the slot queue; setup.json; drain.json
+                                           (13.1); hostload/ (the load record, 13.2)
 <our subtree>/ci-runners/logs/             hook and reaper logs, kept 14 days
 <our subtree>/ci-runners/envs/<project>/   the projects' conda envs (decision 11.4)
 <our subtree>/actions-runner/<name>/       one runner each: the app, .env, credentials
 <our subtree>/ci-work/<name>/              its work directory
 ~/.config/systemd/user/ci-*                the units: the one place outside our subtree
+/tmp/ci-runners-hooks/                     the hooks' copies the runners run, in the CI
+                                           account's private /tmp (3090 hosts, 13.5)
 ```
 
 On 3090b and 3090a the host lock and slot files are brainspike's, outside `data`: the
@@ -535,14 +700,17 @@ policy's hash, so a change shows.
 **Inventory schema 1.** `this` names the host's role, and `[hosts.<role>]` holds:
 `account`, `home`, `data` (the root of §3.2), `slots`, `memory_max`, `disk_min_gib`,
 `gpus`, `max_temp_c`, `pools` and `files` (`slot_lock`, `slot_queue`), all required;
-`cpus`, `python`, `orgsync`, `watchdog_log`, `watchdog_notice` and the `tunnel` table,
-optional. A pool is a count or a table of `count`, `labels`, `class` and `per_card`
+`cpus`, `python`, `orgsync` and the `tunnel` table, optional. A pool is a count or a table of `count`, `labels`, `class` and `per_card`
 (§5.1). `v1.4` adds, all optional: `compile_cpus` (the CPUs of `compile` parts),
 `default_project` (the project of a slot ticket without one), `files.host_lock` (the
 host lock; read again, decision 12.9), `local_accounts` (the local accounts that share
 the lock and slot files, 12.9) and `push_key` (the public key of the org snapshot's
 push, an `ssh-ed25519` line, 12.4). A host with `files.host_lock` has the host lock,
-and one without it has none. The first path's keys (`ssh`, `trusted`, `remote`,
+and one without it has none. `v1.5` adds, both optional: `peer_labels` (a table from a
+runner class to the labels of the other host's pool of that class, 13.3) and `busy` (a
+table of `window_minutes`, `cpu_cores`, `memory_gib`, `gpu_mib` and `lock_minutes`, each
+optional with the defaults of 13.2); and removes `watchdog_log` and `watchdog_notice`
+(13.4), which no host sets. The first path's keys (`ssh`, `trusted`, `remote`,
 `cpu_slowdown`, `proxy`) are accepted and ignored in `v1.3` and `v1.4` (11.12). `setup/inventory.example
 .toml` holds the schema with placeholder values.
 
@@ -588,7 +756,7 @@ h100 is the only host, and its labels choose the pool (§5.1); there is nothing 
 | `project` | required | registry key. It must match `github.repository`, or the job is refused. |
 | `id` | required | the part's name, `[A-Za-z0-9][A-Za-z0-9_.-]*`: its record, scope and artifact are named after it |
 | `command` | required | `bash -c` in the job's checkout, inside the project's env |
-| `gpus` | 0 | number of cards to lease; 0 is a CPU part. What each class accepts is in §4.8: 1 on a per-card runner (`h100`, `gpu`), 2 on `multi` (decision 12.6), any of the host's cards on `nightly` (it leases them all) |
+| `gpus` | 0 | number of cards to lease; 0 is a CPU part. What each class accepts is in §4.8: 1 on a per-card runner (`gpu`), 2 on `multi` (decision 12.6), any of the host's cards on `nightly` (it leases them all) |
 | `gpu-mem-mib` | registry | free MiB a card needs |
 | `memory` | registry | the part's memory cap, at most the registry's maximum |
 | `timeout-minutes` | required | inner bound, below the job's `timeout-minutes`; at most 240, or 600 on `nightly` (decision 12.8) |
@@ -596,10 +764,16 @@ h100 is the only host, and its labels choose the pool (§5.1); there is nothing 
 | `queue-timeout-minutes` | 60 | longest wait for a slot or a lease, then `unavailable` |
 | `results` | none | glob of JUnit XML that the command writes under `CI_RESULTS_DIR` |
 | `resume` | false | sets `CI_RESUME=1`, for a command that can resume |
-| `attempt-of` | none | the record of the attempt this one retries |
+| `attempt-of` | none | the record of the attempt this one retries; a record of another host is taken by its name (decision 13.3) |
 
 A CPU part (`gpus: 0`) takes one of the host's CI slots; a GPU part takes its card's
 lease, which is its slot (§7).
+
+Before it takes anything, the part passes its gate, in this order: low disk; its `gpus`
+and `lock` against its class's row (§4.8); the drain (decision 13.1); busy (13.2, a
+first attempt only). The health gate (§5.5) comes before the leases. Once it holds its
+slot and leases, it reads the drain again before the command. A refusal at any of these
+ends it `unavailable` and releases what it took.
 
 The command's environment holds:
 
@@ -609,15 +783,15 @@ The command's environment holds:
 - the slot path, marked as held; on a host with the host lock, its path, and with `lock`
   set, the protocol's nesting variable at the mode held (decision 12.9);
 - `CI_RESUME`;
-- the runner's `https_proxy`, `http_proxy` and `no_proxy` (h100's egress, 11.10);
+- the runner's `https_proxy`, `http_proxy` and `no_proxy` (the host's egress, 11.10, 12.3);
 - the project's registry variables.
 
 The command runs in `systemd-run --user --scope --slice=ci-<project>.slice
 -p MemoryMax=<memory> -p MemorySwapMax=0`, plus `-p OOMPolicy=continue` on systemd 253 or
 later, at nice 10 and ionice 7 (nice 0 on `compile`), with OOM score +500, pinned to
 `CI_CPUS`. A `multi` part runs the P2P self-test in the scope first (decision 12.6).
-Where the user manager has no memory controller (h100, decision 11.11), the supervisor
-enforces `memory` itself. In the scope a supervisor runs the command, ends it at the
+Where the user manager has no memory controller (decision 11.11; neither 3090 host), the
+supervisor enforces `memory` itself. In the scope a supervisor runs the command, ends it at the
 inner timeout (TERM, then KILL after 30 s) and writes the exit and the scope's OOM kills
 into the record. The scope is not in the runner's cgroup, so a stopped runner leaves the
 part running and its record finishing: the verdict salvages it (§4.5). The supervisor
@@ -629,7 +803,7 @@ the GPU leases for the part's life; the command does not inherit them.
 |---|---|
 | `outcome`, `reason` | §4.4 |
 | `next` | `none`, `retry` or `fallback` |
-| `retry-on` | label array for the retry (on h100: a cool card's `h100-gpu<M>`) |
+| `retry-on` | label array for the retry: a cool card's `<host>-gpu<M>`, the other host's pool of the class for a drained or busy part (decision 13.3), else the pool's own labels or the registry's `fallback` |
 | `resume` | whether the retry should resume |
 | `host`, `gpus`, `queue-seconds`, `run-seconds` | for the summary |
 | `record` | `<host role>:<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>`, the part record below the host's `state/parts/` |
@@ -648,16 +822,13 @@ nonzero exit with an OOM kill is `oom`, not `red`.
 | pass | exit 0 | none |
 | red | nonzero exit or the inner timeout, with no infrastructure cause | none |
 | oom | the scope's `memory.events` `oom_kill` > 0, or the supervisor's own cap (decision 11.11) | retry once with `resume` |
-| thermal | a watchdog kill line (`GPU <bus> still <t>C -> killed <user>:<pid>, ...`) within the part's window that names our card's bus and a PID the sampler recorded for our scope; or our own early stop (§5.4) | retry once on a cool card |
-| reboot | boot id differs from the one recorded at start | as thermal (the board powers off at 101 °C) |
-| unavailable | before the command: the health gate, no card fits, the queue timeout, the project's queue full, low disk, a multi-GPU part on h100, `gpus` or `lock` the class does not accept (§4.8), an unknown inventory schema, a malformed registry entry | fallback: once, on a cool card or the same pool |
+| thermal | our own early stop (§5.5) | retry once on a cool card |
+| reboot | boot id differs from the one recorded at start | retry once on the same host |
+| unavailable | before the command: the health gate, no card fits, the queue timeout, the project's queue full, low disk, `gpus` or `lock` the class does not accept (§4.8), an unknown inventory schema, a malformed registry entry | fallback: once, on a cool card or the same pool |
+| unavailable (`drained`, `busy`) | the drain (decision 13.1), or a busy host on a first attempt (13.2) | fallback: once, on the other host's pool of the class (13.3); `none` for a drained part of a class with no such pool |
 | unavailable (`p2p`) | the P2P self-test of a `multi` part failed, errored or ran over its bound (decision 12.6) | none: a host fault, which the verdict reports as error |
 | lost | the job ended without outputs: the runner stopped (`systemctl show` timestamps after the part's start), or the tunnel dropped the job's connection | the verdict salvages the record (§4.5) |
 | stopped | cancelled (concurrency group, TERM) | none |
-
-The watchdog runs on the shared account, so the `<user>` it names is everyone's.
-Matching therefore uses our recorded PIDs and the card's bus id. The sampler maps
-index to bus with `nvidia-smi --query-gpu=index,pci.bus_id`.
 
 A part is retried at most once (the registry may set 0). A second infrastructure end
 is an error in the verdict.
@@ -721,7 +892,8 @@ hosts, a coverage job). These rules are the consumer's:
    `ci-part-<id>-<attempt>` artifacts. Part ids are unique within a run.
 4. **Retries.** A part whose `next` is `retry` or `fallback` runs again at most once, with
    `attempt-of` its first record and `resume` as the hint says, on the labels `retry-on`
-   names or on a pool the consumer chooses (another host's, for a `fallback`).
+   names or on a pool the consumer chooses (another host's, for a `fallback`). A retry on
+   another host names the first host's record in `attempt-of` (decision 13.3).
 5. **The verdict** runs last, on the light pool of one host that ran parts, after a
    `salvage` job on every other host that did (§4.5), unless the run was cancelled (a
    newer head's run posts instead). It reads the parts' `ci-part-<id>-<attempt>`
@@ -764,7 +936,7 @@ branch that changes its spec still needs a maintainer's `env build`.
 
 Every runner also carries GitHub's `self-hosted`, `Linux` and `X64` labels. The runner
 class (`CI_RUNNER_CLASS`) decides what the hook and the executor allow (§6.3). h100's
-pools (`h100-light`, `h100-cpu`, the per-card `h100` pool) went with it (12.17).
+pools went with it (12.17), and its `h100` class with 13.4.
 
 | host | pool (class) | instances | labels | runs |
 |---|---|---|---|---|
@@ -785,15 +957,15 @@ Runner names are `<host role>-<pool>-<i>`, except the per-card pools'. All are o
 in Default (decision 1).
 
 **Each host's labels are its own.** GitHub gives a job to any runner that has all its
-labels. So h100's light and CPU runners carry `h100-light` and `h100-cpu`, not the bare
+labels. So the light and CPU runners carry `3090b-light` and `3090b-cpu`, not the bare
 class names: a job of any repository that asks for `[self-hosted, light]` matches no
-runner, and a job that asks for `3090b-cpu` never lands on 3090a. The 3090 hosts name
-theirs the same way (decision 12.5). `setup` takes the labels from the inventory's pool entry; a pool may not give
-itself GitHub's labels or a bare class name. The `h100` pool is `per_card`: one runner
-per card, named `h100-gpu<N>`, labelled `h100` and `h100-gpu<N>`, with
-`CI_RUNNER_CARD=<N>` in its `.env`. The 3090 hosts' `gpu` pool is `per_card` in the same
-way (`3090b-gpu<N>`, labelled `3090b-gpu` and `3090b-gpu<N>`); its class is `gpu`, and a
-pool entry names its class where it is not the pool's key (`class = "gpu"`). The `part`
+runner, and a job that asks for `3090b-cpu` never lands on 3090a (decision 12.5).
+`setup` takes the labels from the inventory's pool entry; a pool may not give itself
+GitHub's labels or a bare class name. The `gpu` pool is `per_card`: one runner per card,
+named `<host>-gpu<N>`, labelled `<host>-gpu` and `<host>-gpu<N>`, with
+`CI_RUNNER_CARD=<N>` in its `.env`; a pool entry names its class where it is not the
+pool's key (`class = "gpu"`). The inventory's `peer_labels` names the other host's pool
+of each class, for a drained or busy part's `retry-on` (decision 13.3). The `part`
 class runs CPU parts only: the executor refuses `gpus > 0` there (`unavailable`), so
 only the per-card, `multi` and `nightly` runners lease cards.
 
@@ -880,8 +1052,11 @@ refreshed from a546b92f (T17):
 | `etc/tunnel/` | as on h100, with this host's own key pair; the plan prints the egress account's line for its public key (below) |
 | directories | §3.2 under `data`; `etc/` mode 700 |
 | runner app | the pinned release, checked by sha256, into 9 runner directories on 3090b and 8 on 3090a (§5.1) |
-| `.env` per runner | as on h100; `CI_RUNNER_CARD=<N>` on a `gpu` runner; `https_proxy` at the tunnel |
-| `ci-runner@.service`, `ci-tunnel.service`, `ci-reaper.timer` | as on h100 |
+| `.env` per runner | as on h100; `CI_RUNNER_CARD=<N>` on a `gpu` runner; `https_proxy` at the tunnel; from `v1.5` the two hook variables name the copies in `/tmp/ci-runners-hooks/` (decision 13.5) |
+| the hooks (`v1.5`) | `hooks/job-started.sh` and `job-completed.sh` under `data` gain the line `base=<data>/ci-runners`, from which they find `releases/hook` (13.5) |
+| `ci-runner@.service`, `ci-tunnel.service`, `ci-reaper.timer` | as on h100; from `v1.5` the runner's unit also has `Requires=` and `After=ci-hooks.service` and an `ExecStartPre=` that checks both hook copies are executable files (13.5) |
+| `ci-hooks.service` (`v1.5`) | oneshot, `RemainAfterExit=yes`: `ci-run hooks copy` into the private `/tmp` (13.5); enabled; started before the runners and restarted by `apply` when a hook changes |
+| `ci-hostload.{service,timer}` (`v1.5`) | every 60 s, `ci-run hostload sample`: one line of the load record (decision 13.2); `Nice=10`, bounded at 30 s |
 | `ci-envrefresh.{service,timer}` | every 30 min, `ci-run env refresh` for each project whose registry sets `refresh` (decision 12.11) |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 120G of 188 GiB on 3090b, 80G of 125 GiB on 3090a) and `ci-<project>.slice` |
 | unit names | as on h100; on a dedicated account `plan.sh` still refuses a `ci-` unit that no apply wrote |
@@ -911,58 +1086,49 @@ account:
 | `ci-orgsync-push.{service,timer}` | user units of the maintainer's account, every 10 min: `ci-run org-sync --fetch` from a checkout of a release, with the login from `gh auth token`, piped to `ssh <host> <release>/bin/ci-run org-sync --receive` for each host in turn (h100, and from decision 12.4 3090b and 3090a, with the push key): the snapshot is fetched once, and each host, named by three words (ssh host, data root, interpreter), is bounded on its own (120 s); a host that fails is reported and does not hold up the others, and the run then ends with status 1; `TimeoutStartSec=10min` |
 | unchanged | the maintainer's gh login and ssh access to h100 (both exist); nothing is stored |
 
-### 5.4 The h100 executor (h100 retired by 12.17)
+### 5.4 *The h100 executor* (retired by 12.17 and 13.4)
 
-Kept as the reference for the per-card pool and the health gate, which stay (12.17).
+Its steps that still hold are in §5.5; the rest (the watchdog, D7, a reboot counted as
+thermal) went with 13.4. The text is in the design at `v1.4.1`.
 
-What the executor of §4.3 adds on h100 (a host with a per-card pool):
+### 5.5 The 3090 executor (decisions 12, 13)
 
-1. **Health gate.** Before a GPU part leases its card, the card must be below
-   `max_temp_c` (80 °C) and read, and the watchdog's notice file (inventory
-   `watchdog_notice`) must be absent. If not, the outcome is `unavailable` and
-   `retry-on` names a card that passes (`h100-gpu<M>`). A part with `gpus > 1` is
-   `unavailable` (D7). Each `h100-gpu<N>` runner leases card N alone
-   (`CI_RUNNER_CARD`).
-2. **Run.** In the scope of §4.3, with `CUDA_VISIBLE_DEVICES=N` and `taskset` to the
-   inventory's `cpus` (NUMA node 0).
-3. **Sample.** Every 30 s, record the card's temperature and use, and our compute PIDs
-   (`--query-compute-apps` intersected with the scope's `cgroup.procs`), into the
-   record's `samples.csv`. If our card stays at 85 °C or more for 3 min, stop the scope
-   (`thermal`, early stop). The watchdog throttles at 88 °C for 10 min and kills 10 min
-   later.
-4. **Classify** (§4.4): the watchdog's log (inventory `watchdog_log`) after the part,
-   matched by our PIDs and our card's bus; the boot id; the scope's OOM kills.
-5. **Clean up.** `systemctl --user stop` of the part's scope kills its whole cgroup:
-   there is no `pkill` on a shared account. The job-completed hook repeats this if the
-   step was killed, and the reaper repeats it for a scope whose job is gone.
+On 3090b and 3090a the executor of §4.3 adds:
 
-**GPU facts.**
-
-- P2P copies among cards 0-3 from a lower to a higher index silently return zeros, so a
-  part with `gpus > 1` on h100 is `unavailable` (D7).
-- The cards sit on NUMA node 1. Parts are pinned to node 0 to keep load off the hot
-  package 1.
-
-### 5.5 The 3090 executor (decision 12)
-
-On 3090b and 3090a the executor of §4.3 runs §5.4's steps with these differences:
-
-1. **Health gate**: a card below `max_temp_c` that reads. The hosts have no watchdog
-   (no `watchdog_log` or `watchdog_notice`), so `thermal` comes only from the early stop
-   and `reboot` from the boot id.
-2. **Leases**: a `gpu` runner leases its own card; a `multi` runner both cards, in ticket
-   order (decision 12.6), then runs the P2P self-test; a `nightly` runner holds them all,
-   after every CI slot, whatever its `gpus`; its command gets the `gpus` lowest-numbered
-   cool cards with `gpu-mem-mib` free, and it waits while fewer have (decision 12.8).
+1. **Gate** (§4.3), before anything is taken:
+   - **Drain** (decision 13.1): a drained host or pool ends the part `unavailable`, with
+     `retry-on` the other host's pool of its class (13.3). Read again once the slot and
+     leases are held.
+   - **Busy** (decision 13.2): on a first attempt of a class with a peer pool, other than
+     `light`, a host busy for the whole window ends the part `unavailable`, with
+     `retry-on` the other host's pool; once per head and part.
+   - **Health**, before the leases: a GPU part needs as many of its cards below
+     `max_temp_c` (80 °C) and read as it asks for. If not, it ends `unavailable`, and
+     `retry-on` names a card of the host that passes (`<host>-gpu<M>`) where one does.
+2. **Leases**: a `gpu` runner leases its own card (`CI_RUNNER_CARD`); a `multi` runner
+   both cards, in ticket order (decision 12.6), then runs the P2P self-test; a `nightly`
+   runner holds them all, after every CI slot, whatever its `gpus`; its command gets the
+   `gpus` lowest-numbered cool cards with `gpu-mem-mib` free, and it waits while fewer
+   have (decision 12.8).
 3. **The host lock**: held for the whole command when `lock` says so (`x` on `compile`),
    through `ci-lock`, after the slot and the leases; released when the scope ends.
-4. **Pinning**: `CI_CPUS` is the inventory's `cpus`, or `compile_cpus` on `compile`.
-5. **Files**: a part, like every process of the CI account's user manager, runs in the
+4. **Run**: in the scope of §4.3, with its cards in `CUDA_VISIBLE_DEVICES` and `taskset`
+   to `CI_CPUS`: the inventory's `cpus`, or `compile_cpus` on `compile`.
+5. **Sample**: every 30 s, each leased card's temperature and use, and our compute PIDs,
+   into the record's `samples.csv`. If a card of ours stays at 85 °C or more for 3 min,
+   the scope is stopped (`thermal`, the early stop of §12 item 7).
+   There is no watchdog: `thermal` comes only from the early stop, and `reboot` from the
+   boot id.
+6. **Clean up**: `systemctl --user stop` of the part's scope kills its whole cgroup. The
+   job-completed hook repeats this if the step was killed, and the reaper repeats it for
+   a scope whose job is gone.
+7. **Files**: a part, like every process of the CI account's user manager, runs in the
    account's own mount namespace (decision 12.16): its `/tmp`, `/var/tmp` and `/dev/shm`
    are the account's, shared by its parts but by no other account; `/home` and the data
    disk show only the account's own; the shared lock files and slot queue are bound in
    from the host's `/tmp`. A part's temp files are therefore also invisible to the local
    accounts. `/proc` shows only the account's own processes (`ProtectProc=invisible`).
+   The hooks the runners run are copies in that `/tmp` (decision 13.5).
 
 ## 6. Security model
 
@@ -1014,7 +1180,7 @@ bound).
 | T10 | A hostile event payload targets the hook. | JSON parsing in `python -I`; no shell interpolation; fixtures with hostile strings |
 | T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the bot's and allowlisted actors' statuses; consumers audit merges |
 | T12 | A burst of refused jobs blocks our runners. | refusal in under 10 s; the lead can pause a repository in the policy |
-| T13 | (also any co-user of h100's account, an accepted gap; on the 3090 hosts the CI account's own jobs only) An accepted job (or its dependency) edits the host layer it owns: the hook, the policy, `.env` or the units, so later jobs pass unchecked. | private consumers only (§5.3); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs |
+| T13 | (also any co-user of h100's account, an accepted gap; on the 3090 hosts the CI account's own jobs only) An accepted job (or its dependency) edits the host layer it owns: the hook (or its copy in `/tmp`, 13.5), the policy, `.env`, the units, the drain file or the load record (13.1, 13.2), so later jobs pass unchecked. | private consumers only (§5.3); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs |
 | T14 | A co-user of h100's shared account reads the org-sync token, or edits the snapshot. | no token on h100 (decision 11.9): the snapshot arrives over the maintainer's ssh access, checked by `--receive` (§6.5). A host that syncs itself holds a fine-grained read-only token (members, metadata): it shows the member list and the private repositories' names, nothing else. An edited snapshot is T13's case. |
 | T15 | A co-user of h100's shared account takes the tunnel key, or any local user of a host uses the tunnel's port on 127.0.0.1 (on the 3090 hosts, every local account can reach it). | the egress account has no shell and no listening forward, and its key opens only the egress proxy's port (decision 11.10). The proxy passes only its allowlist on port 443: HTTPS to GitHub, the Actions service's storage and the package indexes, which job code reaches through the tunnel anyway. The suffix `.blob.core.windows.net` lets them reach any Azure storage account over HTTPS, and `storage.googleapis.com` any Google Cloud Storage bucket: accepted gaps, since the Actions storage accounts have no stable names and package downloads use those buckets. They appear as the egress host's address. The allowlist is root-owned on the egress host. The lead revokes the key by deleting one line there. |
 | T16 | (3090 hosts) A job, or a local user, holds the shared host lock or a slot, and stalls the other side's work; or a local account empties the ticket queue. | the files are `flock` locks, so a hold ends with its process: a part's hold ends with its scope (inner timeout, the job-completed hook, the reaper); a waiting part ends `unavailable` at its queue timeout; the files hold no data, and a lost ticket only loses a place in the queue |
@@ -1096,6 +1262,10 @@ Rules:
    waiters apply no caps, so that project's cap is the slot count on those hosts.
 5. **Accounting** is the part records under `state/parts/`: queue time, run time and
    outcome per part. No report command is built yet.
+6. **Busy hosts and drains** (decision 13). A part does not queue on a host that another
+   account has kept busy for the whole window, nor on a drained one: it goes once to the
+   other host's pool of its class. A retry, or a re-run of a head already sent away, waits
+   for its slot where it lands, so load moves at most once per head and part.
 
 ## 8. Failure modes and bounds
 
@@ -1108,7 +1278,12 @@ Rules:
 | h100's tunnel down | the runners go offline for its length (their own traffic goes through it, decision 11.10); a running part goes on, but its job cannot report and may end `lost`, then is salvaged | ssh's keep-alive ends a dead link in 90 s, and systemd restarts it after 10 s; the runner app retries its connection on its own. The egress proxy answers 502 when its own connection fails |
 | the workstation down, or its push failing | the snapshot ages | every job of a host whose push fails refused `stale` after 60 min, until the push is back; the other hosts are not held up |
 | a 3090 host's tunnel down | as h100's | as h100's |
-| a local run holds the host lock or a slot | parts wait | their queue timeout, then `unavailable` |
+| a local run holds the host lock or a slot | parts wait | their queue timeout, then `unavailable`; an exclusive hold of `busy.lock_minutes` or more sends a first attempt to the other host (13.2) |
+| another account keeps the host busy (CPU, memory, a card) | parts would compete with it | a first attempt goes to the other host's pool (13.2) |
+| a host or pool drained | no new part runs there | `unavailable`, one retry on the other host's pool; `none` where there is none (13.1, 13.3) |
+| the drain file unreadable or malformed | | the host counts as drained (fail closed) |
+| the load timer stopped, or too few samples | busy is not known | not busy (fail open): parts wait for their slots as before |
+| a hook copy in `/tmp` missing or changed | a job would start without its hook | the runner fails "Set up runner" for a missing file; the reaper rewrites the copy within 10 min; a runner does not start without both copies (13.5) |
 | an env refresh fails | the env stays at its old upstream commits | logged; the parts' summaries name the commits, and the next refresh tries again |
 | the P2P self-test fails | the `multi` part does not run | `unavailable` (`p2p`), no retry; the verdict reports error |
 | slot or lease starvation | a part waits | `queue-timeout-minutes`, then `unavailable` and one retry |
@@ -1129,7 +1304,9 @@ Rules:
 | env refresh | every 30 min; one refresh at a time per project |
 | tunnel | keep-alive 30 s × 3; restart after 10 s |
 | org snapshot | pushed every 10 min; stale after 60 min |
-| reaper | every 10 min |
+| reaper | every 10 min, which also checks the hook copies (13.5) |
+| load record | a sample every 60 s, bounded at 30 s; kept 2 days; busy window 10 min (inventory) |
+| busy markers | 14 days |
 | runner restart | 30 s after a failure |
 | GitHub | queued 24 h fails a job; a job lasts at most 5 days; offline 14 days removes a runner |
 
@@ -1204,6 +1381,27 @@ Rules:
   `etc/envrefresh.env`. Nothing else changes; `v1` stays at `v1.3.0` until h100's checks
   (notes item 6), which then expect these two writes on h100. Decision 12.17 drops
   item 6 and h100's checks: `v1` moves to `v1.4.1` after the 3090 canary.
+- **`v1.5.0` is additive** (decision 13): the drain, the busy rule and the cross-host
+  `attempt-of` add outcomes' reasons and accept a retry `v1.4` refused; no input or
+  output a consumer passes or reads changes. The deleted `h100` class and watchdog keys
+  are used by no runner and no host's inventory (12.17). So it is a minor release.
+- **`v1.5.0` notes:**
+  1. the drain and the busy rule live in `part`, so they hold for a caller of
+     `@v1.5.0` or later; until `v1` moves, `@v1` callers' parts ignore them. The load
+     timer and the hook copies are the host's (`releases/hook`) from the apply on;
+  2. each host's plan adds `ci-hooks.service` and `ci-hostload.{service,timer}`, changes
+     `ci-runner@.service`, every runner's `.env` (the hook paths) and the two hooks (the
+     `base` line), and restarts the runners once: the lead applies it while no part runs
+     on the host (drained, `ci-run drain status` showing no scope), keeping the restart
+     short;
+  3. a consumer whose parts can be drained or found busy needs a retry job on
+     `retry-on` (§4.8 rule 4) to benefit; without one, such a part ends as error in the
+     verdict;
+  4. an inventory that sets `watchdog_log` or `watchdog_notice` is refused by `v1.5.0`;
+     none does;
+  5. a behaviour change on the 3090 path: a retry whose `attempt-of` names another
+     host's record runs (as attempt `n + 1`) instead of being refused with exit 2
+     (13.3).
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 
@@ -1358,6 +1556,66 @@ from them, so its items are not tested yet):*
    - Parts on h100: not tested (retired by 12.17).
 7. Retired with h100 (12.17), never tested: h100's plan with `v1.4.0` and the
    `h100-test.yml` canary.
+
+**RUN-8: operating two shared hosts** (decision 13; `v1.5.0`). Sub-PRs, each with its
+tests and evidence:
+
+- RUN-8a: this contract (decision 13);
+- RUN-8b: the h100 clean-up (13.4);
+- RUN-8c: the drain switch, `peer_labels` and the retry across hosts (13.1, 13.3);
+- RUN-8d: the load record, its timer and the busy rule (13.2);
+- RUN-8e: the hooks' copy in the private `/tmp` (13.5);
+- RUN-8f: the stamp and `v1.5.0`, the plans applied on both 3090 hosts, the canary, the
+  move of `v1`, and the restore.
+
+*Acceptance:*
+
+1. Unit tests, each failing on a mutant:
+   - **drain**: `on`, `off` and `status`, for the host and for a pool by key or class; a
+     drained host refuses a part of every class, a drained pool only its own; a part
+     that waited for its slot while the drain came on is refused before its command and
+     releases its slot and leases; a malformed state file drains; the state is read
+     afresh by every part (a restart keeps it); a running part's scope is not touched;
+     `claim`, `salvage` and `verdict` do not read it;
+   - **where it goes**: a drained or busy part's `retry-on` is `self-hosted` and the
+     peer pool's labels, with `next` `fallback`; `none` on its last attempt and for a
+     drained part of a class with no peer pool;
+   - **retry across hosts**: an `attempt-of` of another host gives the attempt from the
+     record's name; one naming another part id is refused; a record of this host is read
+     as before;
+   - **busy**: each of the four rules from fixtures (`/proc/stat`, `/proc/meminfo`, the
+     account's `cpu.stat` and `memory.stat`, `nvidia-smi` CSV, `/proc/locks`); a window
+     is busy only when every sample is; fewer than half the window's samples is not
+     busy; a PID the account cannot see is foreign, one it can see is its own; no check
+     on a retry, for `light`, or for a class without a peer pool; a second first attempt
+     of the same head and part on the host is not refused; the defaults of 13.2; the
+     sampler writes one line and the reaper deletes old days and markers;
+   - **clean-up**: an inventory with `watchdog_log` or `watchdog_notice` is refused; the
+     policy and the executor refuse the `h100` class; only h100-only tests and mutants
+     are deleted, and the tests of the 3090 path keep their assertions (those that used
+     h100's example inventory as a fixture use a 3090 host's instead);
+   - **hooks**: the copy refuses a linked directory and another account's, writes mode
+     500 copies by rename, and the reaper rewrites a missing or changed one; a copy runs
+     the release its `base` line names; setup plans `ci-hooks.service`, the runner
+     unit's `Requires=`, `After=` and `ExecStartPre=` and the `.env` hook paths only on
+     a host with the private namespace (12.16), and the hooks under `data` elsewhere.
+2. On each 3090 host, the plan with `v1.5.0` shows only decision 13's changes (the new
+   units, the runner unit, the `.env` hook paths, the hooks' `base` line); it is applied
+   while no part runs there, and the runners are back online within 5 min.
+3. Live, on the canary at `@v1.5.0` (the release PR's body):
+   - with 3090b's `part` pool drained, a canary CPU part there ends `unavailable`
+     (`drained: pool part`) with `retry-on` `3090a-cpu`, and its retry passes on 3090a;
+     `drain status` shows the pool, and the drain holds across a runner restart; `drain
+     off` clears it;
+   - with a local `host_lock.sh -x` hold on 3090b older than `busy.lock_minutes` (set
+     to 2 for the check, then removed), a canary CPU part's first attempt ends `busy`
+     with `retry-on` `3090a-cpu`, and its retry runs on 3090a;
+   - the load record on both hosts has a line a minute.
+4. Live: every job log's hook line names `/tmp/ci-runners-hooks/`; on a drained host
+   with a hook copy removed, a canary light job fails in "Set up runner", and the copy is
+   back within 10 min (the reaper) or at once (`systemctl --user restart ci-hooks`).
+5. The canary passes green and ends red in its own parts on `@v1.5.0` on both hosts, as
+   RUN-7 acceptance 6; then `v1` moves to `v1.5.0`.
 
 ## 11. brainspike on top of this (decision 12)
 

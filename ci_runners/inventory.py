@@ -88,7 +88,7 @@ def _pool(v: object) -> bool:
             and all(isinstance(x, str) and LABEL.match(x) and x not in RESERVED_LABELS for x in labels) and ('labels' not in v or bool(labels)))
 
 
-#: the slot files, and the retired host lock's (accepted and ignored)
+#: the slot files and the host lock (brainspike's on the 3090 hosts, decision 12.9)
 FILES = frozenset({'slot_lock', 'slot_queue', 'host_lock'})
 #: per host: key -> (check, required). Paths are absolute.
 HOST_KEYS = {
@@ -111,6 +111,8 @@ HOST_KEYS = {
     'orgsync': (lambda v: type(v) is bool, False),  # runs ci-orgsync.timer: the org snapshot (§6.5)
     'watchdog_log': (_abs, False),   # the GPU watchdog's log (h100; design §4.4 thermal)
     'watchdog_notice': (_abs, False),  # the watchdog's notice file (h100 health gate, §5.4)
+    # the project of a slot ticket without one: ci_slot.sh's (design §7 rule 4, decision 12.9)
+    'default_project': (lambda v: isinstance(v, str) and bool(re.fullmatch(r'[a-z0-9][a-z0-9-]{0,39}', v)), False),
 }
 #: the first path's keys (decision 11.12): accepted and ignored in v1.3, so that a host's
 #: inventory needs no change in the release's window (design §9); nothing reads them
@@ -221,7 +223,7 @@ def pool_labels(inv: 'Inventory', cls: str) -> list[str] | None:
 
 #: string values that are not inventory: they appear in the design already. Every other string value of the inventory and the policy is denied.
 PUBLIC_KEYS = frozenset({'this', 'memory_max', 'cpus', 'compile_cpus', 'host_lock', 'slot_lock', 'slot_queue', 'bot',
-                         'visibility', 'extra_events', 'labels', 'class', 'classes'})
+                         'visibility', 'extra_events', 'labels', 'default_project', 'class', 'classes'})
 #: ``tunnel.direct`` values the repository holds (the example, the tests): public, so not
 #: denied. Every other ``direct`` value is denied, as any inventory value is.
 #: the policy's ``[org] name`` is the org's, public as the repository is.

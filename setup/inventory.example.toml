@@ -2,9 +2,12 @@
 # real one is <data>/ci-runners/etc/inventory.toml on each host, in a mode-700
 # directory, and is never committed. `python -m ci_runners.inventory check FILE`
 # validates it; `... deny FILE etc/policy.toml` prints the hashes for tests/deny.sha256.
-# Every string value except `this`, `memory_max`, `cpus`, `compile_cpus`, a pool's
-# `labels` and `class`, and the `files` paths is treated as inventory by the deny list. The first path's keys (ssh, trusted, remote,
-# cpu_slowdown, proxy, files.host_lock) are accepted and ignored (decision 11.12).
+# Every string value except `this`, `memory_max`, `cpus`, `compile_cpus`,
+# `default_project`, a pool's `labels` and `class`, and the `files` paths is treated as
+# inventory by the deny list. The first path's keys (ssh, trusted, remote, cpu_slowdown,
+# proxy) are accepted and ignored (decision 11.12). A 3090 host's `files` name
+# brainspike's host lock and slot files (`host_lock`, `slot_lock`, `slot_queue`), and its
+# `default_project` the project of their slot tickets, which name none (decision 12.9).
 schema = 1
 this = "h100"                                   # the role of the host that reads it
 

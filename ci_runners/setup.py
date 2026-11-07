@@ -79,6 +79,8 @@ TUNNEL_ORDER = 'After=ci-tunnel.service\nWants=ci-tunnel.service'
 TUNNEL_FILES = ('id_ed25519', 'ssh_config', 'known_hosts')
 #: the root step's file (decision 12.9, §5.3): the shared lock and slot files, recreated at boot
 TMPFILES = '/etc/tmpfiles.d/ci-runners-shared.conf'
+#: the root step's drop-in (decision 12.16, §5.3): the CI account's user manager in its own mount namespace
+DROPIN = '/etc/systemd/system/user@{uid}.service.d/ci-runners-private.conf'
 #: the comment that marks the push key's line in authorized_keys (decision 12.4)
 PUSH_MARK = 'ci-runners-orgsync-push'
 #: the egress account's line for a tunnel key (decision 11.10; operations §6)
@@ -251,6 +253,169 @@ def tmpfiles_text(h: dict) -> str:
     return '\n'.join(out) + '\n'
 
 
+def private_text(h: dict) -> str:
+    """The root step's drop-in on the CI account's ``user@<uid>.service`` (decision 12.16,
+    §5.3): a private ``/tmp`` and ``/var/tmp``, an empty ``/dev/shm``, ``/home`` and the
+    data-disk root (the parent of ``data``) emptied, and only the account's ``home``, its
+    ``data`` and the shared files of 12.9 bound back in; every other account's processes
+    hidden (``ProtectProc=invisible``). Pure."""
+    home, data = h['home'], h['data']
+    for key, v in (('home', home), ('data', data)):
+        if not isinstance(v, str) or not PATH.fullmatch(v) or os.path.normpath(v) != v or v.startswith('//'):
+            raise ValueError(f'{key} must be a normal absolute path matching {PATH.pattern}')
+    root = os.path.dirname(data)
+    if root == '/':
+        raise ValueError(f'data must lie below a data-disk root, not directly in /: {data!r}')
+    if home == '/home' or root == home or root.startswith(home + '/'):
+        raise ValueError('home must not be /home, and the data-disk root (the parent of data) must not be in home')
+    files, queue = shared_files(h)
+    for x in [*files, queue]:
+        if not inventory.shared_path(x):
+            raise ValueError(f'shared file {x!r} must be a plain name directly in /tmp')
+    empty = ['/dev/shm:mode=1777', '/home', *([root] if root != '/home' else [])]
+    return '\n'.join(['# ci-runners (decision 12.16): the CI account sees no other account\'s files',
+                      '[Service]', 'PrivateTmp=yes', 'ProtectProc=invisible', f'TemporaryFileSystem={" ".join(empty)}',
+                      f'BindPaths={" ".join([home, data, *files, queue])}']) + '\n'
+
+
+#: never a data-disk root, nor below one (decision 12.16): a mount point alone would let /run, /dev or a separate /tmp pass
+SYSTEM_DIRS = ('/', '/run', '/dev', '/proc', '/sys', '/tmp', '/var/tmp', '/usr', '/etc', '/boot')
+
+
+def check_private_paths(h: dict) -> None:
+    """Refuse a drop-in whose paths are not what they say on this host (decision 12.16):
+    ``home``, ``data`` and the data-disk root each its own real path (no link in it, so a
+    bind or an emptied directory is the one named), and the data-disk root a mount point
+    (a disk, never a system tree such as ``/usr`` or ``/tmp``). Reads the file system."""
+    root = os.path.dirname(h['data'])
+    for key, v in (('home', h['home']), ('data', h['data']), ('the data-disk root', root)):
+        if os.path.realpath(v) != v:
+            raise ValueError(f'{key} {v!r} is not its real path: name it without links')
+    if any(root == d or (d != '/' and root.startswith(d + '/')) for d in SYSTEM_DIRS):
+        raise ValueError(f'the data-disk root {root!r} is a system directory or lies in one')
+    if not os.path.ismount(root):
+        raise ValueError(f'the data-disk root {root!r} (the parent of data) must be a mount point')
+
+
+def account_uid(account: str) -> int | None:
+    """The account's uid, or None if there is no such account."""
+    try:
+        return pwd.getpwnam(account).pw_uid
+    except KeyError:
+        return None
+
+
+def manager_mounts(uid: int, run=subprocess.run) -> str | None:
+    """The mount table of the account's user manager (``/proc/<pid>/mountinfo``), or None
+    if it is not running or the table cannot be read."""
+    try:
+        r = run(['systemctl', 'show', '-p', 'MainPID', '--value', f'user@{uid}.service'], capture_output=True,
+                text=True, timeout=30, stdin=subprocess.DEVNULL)
+        pid = int(r.stdout.strip()) if r.returncode == 0 else 0
+        if pid <= 0:
+            return None
+        with open(f'/proc/{pid}/mountinfo', encoding='utf-8') as f:
+            return f.read()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def private_state(h: dict, uid: int | None, *, read=None, mounts=manager_mounts, here=None) -> list[tuple[str, str]]:
+    """``(what, what is missing)`` for each part of the drop-in's root step not done: the
+    drop-in as planned, and the account's user manager running with it (its mount table,
+    ``namespace_faults``, against the plan's own: the plan runs outside the namespace, as
+    the lead runs it). Empty when both are done. Reads the files."""
+    if uid is None:
+        return [(h['account'], 'no such account')]
+    path = DROPIN.format(uid=uid)
+    todo = []
+    try:
+        with open(path if read is None else read, encoding='utf-8') as f:
+            if f.read() != private_text(h):
+                todo.append((path, 'differs from the plan'))
+    except OSError:
+        todo.append((path, 'missing'))
+    table = mounts(uid)
+    unit = f'user@{uid}.service'
+    if table is None:
+        return [*todo, (unit, 'not running, or its mount table cannot be read')]
+    try:
+        with open('/proc/self/mountinfo' if here is None else here, encoding='utf-8') as f:
+            own = f.read()
+    except OSError:
+        own = ''
+    bad = namespace_faults(h, table, own)
+    if bad:
+        todo.append((unit, f'runs without the drop-in as planned ({"; ".join(bad)}): restart it'))
+    return todo
+
+
+def namespace_faults(h: dict, table: str, here: str) -> list[str]:
+    """What in a mount table (``/proc/<pid>/mountinfo``) differs from the namespace the
+    drop-in makes, judged by the mounts a path reaches (the host's mounts below the
+    emptied trees stay in the table, shadowed): tmpfs at ``/home`` and the data-disk
+    root, and at ``/dev/shm`` one other than the host's (``here``: the plan's own
+    table, read outside the namespace); ``/tmp`` and ``/var/tmp`` private;
+    ``/proc`` with ``hidepid=invisible``; a bind at ``home``, ``data`` and each shared
+    file, none of a deleted file (one replaced since the start, which would split the
+    lock); and no other mount reached in ``/home``, the data-disk root or ``/tmp``. Empty
+    when it matches. Pure."""
+    def parse(text: str) -> dict[str, dict]:
+        out = {}
+        for line in text.splitlines():
+            left, _, right = line.partition(' - ')
+            f, r = left.split(), right.split()
+            if len(f) >= 5 and len(r) >= 3:
+                out[f[0]] = {'id': f[0], 'parent': f[1], 'dev': f[2], 'root': f[3], 'point': f[4], 'type': r[0],
+                             'opts': r[2]}
+        return out
+
+    def reacher(mounts: dict[str, dict]):
+        order = list(mounts.values())  # a later line is mounted over an earlier one
+
+        def reach(path: str) -> dict:
+            """The mount that ``path`` resolves into: from the namespace's root mount, at
+            each prefix the last mount on the one reached so far (stacked ones in turn)."""
+            cur = next((m for m in order if m['parent'] not in mounts), {'id': None})
+            parts = path.strip('/').split('/') if path != '/' else []
+            for p in ['/', *('/' + '/'.join(parts[:k]) for k in range(1, len(parts) + 1))]:
+                while True:
+                    on = [m for m in order if m['point'] == p and m['parent'] == cur['id']]
+                    if not on:
+                        break
+                    cur = on[-1]
+            return cur
+        return reach
+
+    mounts = parse(table)
+    order = list(mounts.values())
+    reach = reacher(mounts)
+
+    root = os.path.dirname(h['data'])
+    files, queue = shared_files(h)
+    binds = [h['home'], h['data'], *files, queue]
+    bad = [f'no tmpfs at {p}' for p in ('/home', root) if reach(p).get('type') != 'tmpfs' or reach(p)['point'] != p]
+    shm, host = reach('/dev/shm'), reacher(parse(here))('/dev/shm')
+    if shm.get('type') != 'tmpfs' or shm['point'] != '/dev/shm' or 'dev' not in host or shm['dev'] == host['dev']:
+        bad.append("/dev/shm is the host's (or this plan runs in the namespace)")
+    bad += [f'{p} not private' for p in ('/tmp', '/var/tmp')
+            if reach(p).get('point') != p or '/systemd-private-' not in reach(p)['root']]
+    if 'hidepid=invisible' not in reach('/proc').get('opts', '').split(','):
+        bad.append('other processes visible')
+    for p in binds:
+        m = reach(p)
+        if m.get('point') != p:
+            bad.append(f'no bind at {p}')
+        elif m['root'].endswith('//deleted'):
+            bad.append(f'{p} bound from a deleted file')
+    allowed = {'/home', root, '/tmp', *binds}
+    for m in order:
+        p = m['point']
+        if (any(p.startswith(d + '/') for d in ('/home', root, '/tmp')) and p not in allowed
+                and not any(p.startswith(b + '/') for b in (h['home'], h['data'])) and reach(p) is m):
+            bad.append(f'another mount at {p}')
+    return bad
+
 ACL_USER, ACL_MASK = 0x02, 0x10
 
 
@@ -330,10 +495,11 @@ def tunnel_public_key(etc: str, run=subprocess.run) -> str:
                 text=True, timeout=10, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         r = None
-    pub = (r.stdout.strip() if r is not None and r.returncode == 0 else '')
+    # the comment, which may hold spaces, is dropped: it often names an account and host
+    pub = ' '.join((r.stdout if r is not None and r.returncode == 0 else '').split()[:2])
     if not inventory.PUSH_KEY.fullmatch(pub):
         return '<the public key of etc/tunnel/id_ed25519>'
-    return ' '.join(pub.split()[:2])  # the comment often names an account and host: not shown
+    return pub
 
 
 class Plan:
@@ -507,9 +673,29 @@ def build(etc: str, adopt: bool = False) -> Plan:
                  '(while no local job holds them: under host_lock.sh -x, with ci_slot.sh\'s queue empty)')
         for path, why in todo:
             plan.add(f'         {path}: {why}')
-        if todo:
+        uid = account_uid(h['account'])
+        text, path = private_text(h), DROPIN.format(uid='<uid>' if uid is None else uid)
+        check_private_paths(h)
+        unit = f'user@{"<uid>" if uid is None else uid}.service'
+        private = private_state(h, uid)
+        mark = 'done ' if not private else 'to do'
+        names = [f'ci-runner@{n}.service' for n, _, _, _ in _runners(inv)]
+        plan.add(f'  {"done " if uid is not None and all(p != path for p, _ in private) else "to do"}  write {path} '
+                 f'mode 644 owner root, sha256 {_sha(text.encode())[:16]} (decision 12.16):')
+        for line in text.splitlines():
+            plan.add(f'         | {line}')
+        plan.add(f'  {mark}  as the account, first: systemctl --user disable --now {" ".join(names)}  (the restart '
+                 'starts every enabled runner, and a reboot before the drop-in would start them without it)')
+        plan.add(f'  {mark}  run    systemctl daemon-reload; systemctl restart {unit}')
+        plan.add(f'  {mark}  as the account, then: systemctl --user start {names[0]}  (only it, for the leak check '
+                 'in a live job, T18; run apply only after that check has passed in a job on it: apply enables '
+                 'every runner, and the next reboot starts them all)')
+        for p, why in private:
+            plan.add(f'         {p}: {why}')
+        if todo or private:
             plan.blocked = 'the root steps are not done'
-            plan.add('  apply refuses until they are done: run them, then plan again')
+            plan.add('  apply refuses until they are done: run them, then plan again (and apply only after the '
+                     'leak check has passed)')
     gone = sorted(p for p in ours if os.path.dirname(p) == unit_dir and p not in planned)
     if gone:  # recorded units this plan no longer holds (decision 11.10: ci-bridge.service)
         plan.add('units removed (an earlier apply wrote them; this plan no longer holds them):')
@@ -553,7 +739,11 @@ def build(etc: str, adopt: bool = False) -> Plan:
             plan.add(f'  unpack {RUNNER_URL} -> {rdir}/', kind='runner', path=rdir, cache=cache, port=port)
         _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc, card), 0o600)
         plan.add(f'         labels {",".join(labels)}; work {os.path.join(data, "ci-work", name)} (at registration)')
-    if plan.actions:  # nothing changed: a second apply is a no-op
+    # a 3090 host's root step disables the runners (decision 12.16): apply enables them again
+    wants = os.path.join(unit_dir, 'default.target.wants')
+    off = h.get('local_accounts') and any(not os.path.lexists(os.path.join(wants, f'ci-runner@{n}.service'))
+                                          for n, _, _, _ in rs)
+    if plan.actions or off:  # nothing changed: a second apply is a no-op
         plan.add('systemd --user (timers, runners):')
         cmds = [['systemctl', '--user', 'daemon-reload'],
                 ['systemctl', '--user', 'enable', '--now', *timers(h)],

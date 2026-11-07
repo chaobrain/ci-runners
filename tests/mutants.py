@@ -220,8 +220,8 @@ MUTANTS = [
      [f'{TX}.TwoAccounts.test_a_missing_shared_file_in_a_sticky_directory_is_not_created']),
     (SLO, "        if os.path.isdir(parent) and os.stat(parent).st_mode & stat.S_ISVTX:", "        if False:",
      [f'{TX}.TwoAccounts.test_a_missing_shared_file_in_a_sticky_directory_is_not_created']),
-    (SLO, "os.path.join(self.queue, 'seq.lock'), _LOCK, 0o660)",
-     "os.path.join(self.queue, 'seq.lock'), _LOCK, 0o600)",
+    (SLO, "    fd = os.open(path, _LOCK, 0o660)",
+     "    fd = os.open(path, _LOCK, 0o600)",
      [f'{TX}.TwoAccounts.test_queue_files_give_the_other_account_rw']),
     (SLO, "    fd = os.open(tmp, _NEW, 0o660)",
      "    fd = os.open(tmp, _NEW, 0o600)",
@@ -1221,14 +1221,20 @@ MUTANTS = [
     (SLO, "_NEW = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC",
      "_NEW = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_TRUNC | os.O_CLOEXEC",
      [f'{TS}.Queue.test_nothing_is_written_through_a_link_in_the_queue']),
-    (SLO, "_LOCK = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC",
-     "_LOCK = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC", [f'{TS}.Queue.test_nothing_is_written_through_a_link_in_the_queue']),
+    (SLO, "_LOCK = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC",
+     "_LOCK = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK | os.O_CLOEXEC", [f'{TS}.Queue.test_nothing_is_written_through_a_link_in_the_queue']),
     (SLO, "_READ = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC", "_READ = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC",
      [f'{TS}.Queue.test_nothing_is_written_through_a_link_in_the_queue']),
     (SLO, "        if not stat.S_ISREG(os.fstat(fd).st_mode):\n            raise", "        if False:\n            raise",
      [f'{TS}.Queue.test_nothing_is_written_through_a_link_in_the_queue']),
     (SLO, "        os.replace(tmp, path)\n", "        os.replace(tmp, os.path.realpath(path))\n",
      [f'{TS}.Queue.test_nothing_is_written_through_a_link_in_the_queue']),
+    # RUN-7f review round 2, N2: a FIFO at a queue lock never blocks
+    (SLO, "_LOCK = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC",
+     "_LOCK = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC",
+     [f'{TS}.Queue.test_a_fifo_at_a_queue_lock_is_refused_at_once']),
+    (SLO, "    if not stat.S_ISREG(os.fstat(fd).st_mode):\n        os.close(fd)", "    if False:\n        os.close(fd)",
+     [f'{TS}.Queue.test_a_fifo_at_a_queue_lock_is_refused_at_once']),
 ]
 
 

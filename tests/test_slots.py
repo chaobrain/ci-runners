@@ -15,6 +15,7 @@ from ci_runners import slots
 from ci_runners.slots import Ticket as T
 from ci_runners.slots import grants, queue_full
 
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 CAPS = {'myproj': 2, 'brainevent': 1, 'other': 1}
 
 
@@ -296,6 +297,34 @@ class Queue(unittest.TestCase):
             self.assertEqual(q.seq, 10)
             self.assertEqual([t.seq for t in q.waiting()][-1:], [10])  # the FIFO ticket is not one
             self.assertEqual(victim.read_text(), 'keep\n')
+
+    def test_a_fifo_at_a_queue_lock_is_refused_at_once(self):
+        """N2: a FIFO a job leaves at ``seq.lock`` or ``take.lock`` is refused promptly, with
+        or without a reader holding it open, never waited on. Run in a child under a hard
+        bound, so a blocked open fails the test instead of hanging the suite."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 1, poll=0.05)
+            q.take_ticket('p', 'cmd')
+            for lock in ('seq.lock', 'take.lock'):
+                path = os.path.join(q.queue, lock)
+                os.unlink(path) if os.path.exists(path) else None
+                os.mkfifo(path)
+                for reader in (False, True):
+                    r = os.open(path, os.O_RDONLY | os.O_NONBLOCK) if reader else None
+                    call = "q.take_ticket('p', 'cmd')" if lock == 'seq.lock' else "q.try_take('p', {'p': 1})"
+                    code = ('import sys; from ci_runners import slots\n'
+                            f'q = slots.SlotQueue({os.path.join(d, "s.lock")!r}, 1, poll=0.05)\n'
+                            f'q.ticket = {q.ticket!r}\n'
+                            f'try:\n    {call}\nexcept OSError as e:\n    sys.exit(3)\nsys.exit(0)\n')
+                    try:
+                        t = time.monotonic()
+                        p = subprocess.run([sys.executable, '-c', code], cwd=ROOT, timeout=20)
+                        self.assertEqual(p.returncode, 3, (lock, reader))
+                        self.assertLess(time.monotonic() - t, 10, (lock, reader))
+                    finally:
+                        if r is not None:
+                            os.close(r)
+                os.unlink(path)
 
 class Concurrent(unittest.TestCase):
     """Waiters in separate processes, as the parts of v1.2 and v1.3 share h100's queue

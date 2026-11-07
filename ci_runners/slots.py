@@ -103,12 +103,13 @@ _EVERY = re.compile(r'ci-slot project=[A-Za-z0-9_.-]+ every(?:\s|\Z)')
 # The queue directory is not sticky and both accounts write in it (decision 12.9, T17):
 # nothing here writes or creates through a link there. A file is written new, created
 # exclusively under a random name (O_EXCL, O_NOFOLLOW), then renamed over its name (a
-# rename replaces a link, never its target); a lock file there is opened O_NOFOLLOW; a
+# rename replaces a link, never its target); a lock file there is opened O_NOFOLLOW and
+# O_NONBLOCK, and used only if it is a regular file; a
 # file is read O_NOFOLLOW and O_NONBLOCK, and only if it is a regular one (a FIFO would
 # block the reader).
 _NEW = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-_LOCK = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+_LOCK = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
 def _replace(path: str, text: str) -> None:
@@ -128,6 +129,16 @@ def _replace(path: str, text: str) -> None:
         raise
     finally:
         os.close(fd)
+
+
+def _queue_lock(path: str) -> int:
+    """Open a lock file of the queue for flock: never through a link, never blocking (a
+    FIFO there would block the open), and only a regular file."""
+    fd = os.open(path, _LOCK, 0o660)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise OSError(errno.EINVAL, 'not a regular file', path)
+    return fd
 
 
 def _read(path: str) -> str:
@@ -220,7 +231,7 @@ class SlotQueue:
         ``every`` marks a ticket that waits for every slot (``ci-slot project=<p> every
         <command>``)."""
         self._make_queue()
-        fd = os.open(os.path.join(self.queue, 'seq.lock'), _LOCK, 0o660)
+        fd = _queue_lock(os.path.join(self.queue, 'seq.lock'))
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             try:
@@ -306,7 +317,7 @@ class SlotQueue:
         no project, and a project could then pass its cap."""
         if not os.path.exists(self.ticket):  # deleted while we were stopped: re-queue
             self.take_ticket(project, 'requeued')
-        lk = os.open(os.path.join(self.queue, 'take.lock'), _LOCK, 0o660)
+        lk = _queue_lock(os.path.join(self.queue, 'take.lock'))
         try:
             fcntl.flock(lk, fcntl.LOCK_EX)
             return self._take(project, caps)
@@ -321,7 +332,7 @@ class SlotQueue:
         it holds so far stay held (``self.every``) and its ticket stays queued."""
         if not os.path.exists(self.ticket):  # deleted while we were stopped: re-queue
             self.take_ticket(project, 'requeued', every=True)
-        lk = os.open(os.path.join(self.queue, 'take.lock'), _LOCK, 0o660)
+        lk = _queue_lock(os.path.join(self.queue, 'take.lock'))
         try:
             fcntl.flock(lk, fcntl.LOCK_EX)
             for _ in range(self._grants(caps).count(self.seq)):

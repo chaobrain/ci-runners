@@ -14,7 +14,14 @@
   written;
 - the runner app, checked by sha256, extracted once per runner directory;
 - each runner's ``.env``;
-- the ``systemctl --user`` commands.
+- the ``systemctl --user`` commands;
+- with ``push_key`` (a 3090 host, decision 12.4), the push key's line in the account's
+  ``~/.ssh/authorized_keys``: ``restrict``, forced to ``org-sync --receive``; other lines
+  are kept;
+- with ``local_accounts`` (a 3090 host, decision 12.9), the root steps that share the host
+  lock and slot files with the local accounts: a ``tmpfiles.d`` file that makes them
+  root-owned with ACL entries for every account, and its state. Setup does not run them
+  (it has no root): the lead does, before ``apply``, which refuses while one is not done.
 
 Units are rendered with the inventory's ``data`` (the root of §3.2: our subtree on h100)
 and ``python``. A ``ci-*`` unit file that exists but that no
@@ -38,6 +45,7 @@ import glob
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import socket
@@ -49,7 +57,7 @@ import time
 import tomllib
 import urllib.request
 
-from ci_runners import inventory
+from ci_runners import inventory, locks, slots
 
 RUNNER_VERSION = '2.338.2'
 RUNNER_SHA256 = 'baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40'
@@ -69,6 +77,12 @@ SYSTEM_PYTHON = '/usr/bin/python3'
 TUNNEL_ORDER = 'After=ci-tunnel.service\nWants=ci-tunnel.service'
 #: the lead's files in etc/tunnel/ (design §5.3): the key first, which no one else may read
 TUNNEL_FILES = ('id_ed25519', 'ssh_config', 'known_hosts')
+#: the root step's file (decision 12.9, §5.3): the shared lock and slot files, recreated at boot
+TMPFILES = '/etc/tmpfiles.d/ci-runners-shared.conf'
+#: the comment that marks the push key's line in authorized_keys (decision 12.4)
+PUSH_MARK = 'ci-runners-orgsync-push'
+#: the egress account's line for a tunnel key (decision 11.10; operations §6)
+EGRESS_LINE = 'restrict,port-forwarding,permitopen="127.0.0.1:{port}",permitlisten="127.0.0.1:9",command="/usr/sbin/nologin" {key}'
 #: etc/tunnel/ssh_config: ``Host egress`` and only where it is (the unit fixes the rest)
 SSH_CONFIG_LINE = re.compile(r'\s*(?:#.*)?|\s*(?:HostName|User|Port)[ \t=]+[A-Za-z0-9._-]+\s*|Host egress\s*')
 
@@ -202,10 +216,125 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
     return '\n'.join(lines) + '\n'
 
 
+def shared_files(h: dict) -> tuple[list[str], str]:
+    """The files the CI account shares with the local accounts (decision 12.9): the host
+    lock with its turnstile and shared marker, when the host has one, and every slot file;
+    and the slot queue directory. Pure."""
+    files = list(locks.paths(h['files']['host_lock'])) if h['files'].get('host_lock') else []
+    files += slots.slot_paths(h['files']['slot_lock'], h['slots'])
+    return files, h['files']['slot_queue']
+
+
+def tmpfiles_text(h: dict) -> str:
+    """The root step's ``tmpfiles.d`` file (§5.3): each shared file root-owned (so that
+    ``fs.protected_regular`` lets every account open it with ``O_CREAT``, as brainspike's
+    scripts do), with ``rw`` ACL entries for the CI account and each local account; the
+    queue directory with the same entries, recursively, and as default entries, so what
+    either account creates in it the other can use; all of them out of age cleaning. Pure."""
+    files, queue = shared_files(h)
+    accounts = [h['account'], *h['local_accounts']]
+    for x in [*files, queue]:
+        if not PATH.fullmatch(x):
+            raise ValueError(f'shared file {x!r} must be an absolute path matching {PATH.pattern}')
+    for a in accounts:
+        if not inventory.ACCOUNT.fullmatch(a):
+            raise ValueError(f'account {a!r} is malformed')
+    rw = ','.join(f'u:{a}:rw' for a in accounts) + ',m::rw'
+    rwx = ','.join(f'u:{a}:rwx' for a in accounts) + ',m::rwx'
+    dflt = ','.join(['d:u::rwx', 'd:g::---', 'd:o::---', *(f'd:u:{a}:rwx' for a in accounts), 'd:m::rwx'])
+    out = ['# ci-runners (decision 12.9): the host lock and slot files that the CI account shares',
+           '# with the local accounts, root-owned in /tmp, recreated at boot, never age-cleaned.']
+    for f in files:
+        out += [f'f {f} 0660 root root -', f'a+ {f} - - - - {rw}']
+    out += [f'd {queue} 0770 root root -', f'A+ {queue} - - - - {rwx},{dflt}']
+    out += [f'x {x}' for x in [*files, queue]]
+    return '\n'.join(out) + '\n'
+
+
+ACL_USER, ACL_MASK = 0x02, 0x10
+
+
+def acl_users(path: str, default: bool = False) -> dict[int, int] | None:
+    """``{uid: perm}`` of the named-user entries of ``path``'s access (or default) ACL,
+    with the mask applied; None if it has no such ACL. Read from the xattr, so no
+    ``getfacl`` is needed."""
+    try:
+        raw = os.getxattr(path, 'system.posix_acl_default' if default else 'system.posix_acl_access',
+                          follow_symlinks=False)
+    except OSError:
+        return None
+    entries = [(int.from_bytes(raw[i:i + 2], 'little'), int.from_bytes(raw[i + 2:i + 4], 'little'),
+                int.from_bytes(raw[i + 4:i + 8], 'little')) for i in range(4, len(raw) - 7, 8)]
+    mask = next((perm for tag, perm, _ in entries if tag == ACL_MASK), 7)
+    return {uid: perm & mask for tag, perm, uid in entries if tag == ACL_USER}
+
+
+def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None) -> list[tuple[str, str]]:
+    """``(path, what is missing)`` for each root step not done: the ``tmpfiles.d`` file as
+    planned, and each shared file root-owned with ``rw`` for every account (the queue with
+    its default entries too). Empty when all are done. Reads the files."""
+    todo = []
+    try:
+        with open(TMPFILES if read is None else read, encoding='utf-8') as f:
+            if f.read() != tmpfiles_text(h):
+                todo.append((TMPFILES, 'differs from the plan'))
+    except OSError:
+        todo.append((TMPFILES, 'missing'))
+    uids = {}
+    for a in [h['account'], *h['local_accounts']]:
+        try:
+            uids[a] = uid_of(a)
+        except KeyError:
+            todo.append((a, 'no such account'))
+    files, queue = shared_files(h)
+    for path in [*files, queue]:
+        try:
+            st = os.lstat(path)
+        except OSError:
+            todo.append((path, 'missing'))
+            continue
+        if st.st_uid != 0 or stat.S_ISLNK(st.st_mode):
+            todo.append((path, 'not root-owned'))
+            continue
+        for default in ((False, True) if path == queue else (False,)):
+            got = acl_users(path, default) or {}
+            short = [a for a, u in uids.items() if got.get(u, 0) & 6 != 6]
+            if short:
+                todo.append((path, f'no {"default " if default else ""}rw ACL entry for {", ".join(short)}'))
+    return todo
+
+
+def authorized_keys_text(old: str, key: str, *, etc: str, python: str, base: str) -> str:
+    """The account's ``authorized_keys`` with the push key's line (decision 12.4): the key
+    may only run ``org-sync --receive`` of the installed release, with nothing else
+    (``restrict``); a line of ours from before is replaced, every other line kept. Pure."""
+    if not inventory.PUSH_KEY.fullmatch(key):
+        raise ValueError('push_key must be an ssh-ed25519 public key')
+    for v in (etc, python, base):
+        if not PATH.fullmatch(v):
+            raise ValueError(f'{v!r} must be an absolute path matching {PATH.pattern}')
+    kind, b64 = key.split()[:2]
+    cmd = f'CI_RUNNERS_ETC={etc} CI_RUNNERS_PYTHON={python} exec {base}/releases/hook/bin/ci-run org-sync --receive'
+    keep = [line for line in old.splitlines() if line.split()[-1:] != [PUSH_MARK]]
+    return '\n'.join([*keep, f'restrict,command="{cmd}" {kind} {b64} {PUSH_MARK}']) + '\n'
+
+
+def tunnel_public_key(etc: str, run=subprocess.run) -> str:
+    """The tunnel key's public half, for the egress account's line, or a placeholder."""
+    try:
+        r = run(['ssh-keygen', '-y', '-P', '', '-f', os.path.join(etc, 'tunnel', 'id_ed25519')], capture_output=True,
+                text=True, timeout=10, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        r = None
+    pub = (r.stdout.strip() if r is not None and r.returncode == 0 else '')
+    return pub if inventory.PUSH_KEY.fullmatch(pub) else '<the public key of etc/tunnel/id_ed25519>'
+
+
 class Plan:
     def __init__(self) -> None:
         self.lines: list[str] = []
         self.actions: list[dict] = []
+        self.blocked = ''  # why apply must refuse this plan (a root step not done), or ''
 
     def add(self, line: str, **action) -> None:
         self.lines.append(line)
@@ -342,6 +471,39 @@ def build(etc: str, adopt: bool = False) -> Plan:
             plan.add(f'  keep   {os.path.join(etc, "tunnel", name)}')
         plan.add(f'  forward 127.0.0.1:{t["http_port"]} -> the egress proxy, 127.0.0.1:{t["egress_port"]} there; '
                  f'direct: {", ".join(t["direct"]) or "nothing"}')
+        plan.add("  the egress account's authorized_keys line for this key (the lead adds it there, decision 12.3):")
+        plan.add('    ' + EGRESS_LINE.format(port=t['egress_port'], key=tunnel_public_key(etc)))
+    if h.get('push_key'):
+        plan.add("the org snapshot's push key (decision 12.4):")
+        ssh_dir = os.path.join(home, '.ssh')
+        if not os.path.isdir(ssh_dir):
+            plan.add(f'  mkdir  {ssh_dir}/ mode 700', kind='mkdir', path=ssh_dir, mode=0o700)
+        elif os.stat(ssh_dir).st_mode & 0o022 or os.stat(ssh_dir).st_uid != os.getuid():
+            raise ValueError(f'{ssh_dir} must be a directory of this account, writable by it alone')
+        ak = os.path.join(ssh_dir, 'authorized_keys')
+        if os.path.islink(ak):
+            raise ValueError(f'{ak} is a link: replace it by a file first')
+        try:
+            with open(ak, encoding='utf-8') as f:
+                old = f.read()
+        except FileNotFoundError:
+            old = ''
+        _file(plan, ak, authorized_keys_text(old, h['push_key'], etc=etc, python=python, base=base), 0o600)
+    if h.get('local_accounts'):
+        text = tmpfiles_text(h)
+        todo = shared_state(h)
+        plan.add('root steps (decision 12.9, §5.3): the lead runs them as root, before apply; setup cannot:')
+        plan.add(f'  {"done " if not any(p == TMPFILES for p, _ in todo) else "to do"}  write {TMPFILES} '
+                 f'mode 644 owner root, sha256 {_sha(text.encode())[:16]}:')
+        for line in text.splitlines():
+            plan.add(f'         | {line}')
+        plan.add(f'  {"done " if not todo else "to do"}  run    systemd-tmpfiles --create {TMPFILES}  '
+                 '(while no local job holds them: under host_lock.sh -x, with ci_slot.sh\'s queue empty)')
+        for path, why in todo:
+            plan.add(f'         {path}: {why}')
+        if todo:
+            plan.blocked = 'the root steps are not done'
+            plan.add('  apply refuses until they are done: run them, then plan again')
     gone = sorted(p for p in ours if os.path.dirname(p) == unit_dir and p not in planned)
     if gone:  # recorded units this plan no longer holds (decision 11.10: ci-bridge.service)
         plan.add('units removed (an earlier apply wrote them; this plan no longer holds them):')
@@ -476,6 +638,9 @@ def apply(etc: str, plan_file: str, run=subprocess.run, adopt: bool = False) -> 
     with open(plan_file, encoding='utf-8') as f:
         approved = f.read()
     plan = build(etc, adopt)
+    if plan.blocked:
+        print(f'apply: {plan.blocked}: see the plan', file=sys.stderr)
+        return 1
     if not plan.actions:
         print(f'apply: nothing to change (plan {plan.digest()[:16]})')
         return 0

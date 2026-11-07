@@ -979,7 +979,7 @@ class Executor:
                 need = (a.gpu_mem_mib or proj.gpu_mem_mib) if a.gpus else 0
                 mine = list(h['gpus']) if nightly else self.candidates()  # a nightly part leases every card
                 n = len(mine) if nightly else a.gpus
-                use = sorted(mine)[:a.gpus] if nightly else mine  # what the health gate reads
+                use = mine  # what the health gate reads: a nightly part's command gets any cool cards of them
                 while True:
                     # the health gate (per-card hosts):
                     # a hot or unread card refuses, to a cool card's runner, else the fallback
@@ -990,10 +990,19 @@ class Executor:
                                          f'is at or above {h["max_temp_c"]} C or unread',
                                          retry_on=None if other is None else ['self-hosted', f'{self.inv.this}-gpu{other}'])
                     hot = set(use) - set(cool)
-                    got = leases.try_take(n, mine, {c: m for c, m in smi_free(self.run).items() if c not in hot}, need,
-                                          every=nightly)
+                    free = smi_free(self.run)
+                    got = None
+                    if nightly:
+                        # every lease, whatever the cards hold; gpu-mem-mib only on the cards its command
+                        # gets: the lowest cool ones with that much free (lead, 2026-11-07; §4.8, §5.5)
+                        fit = sorted(c for c in cool if free.get(c, 0) >= need)[:a.gpus]
+                        if len(fit) == a.gpus:
+                            got = leases.try_take(n, mine, free, 0, every=True)
+                    else:
+                        fit = []
+                        got = leases.try_take(n, mine, {c: m for c, m in free.items() if c not in hot}, need)
                     if got is not None:
-                        cards = sorted(got)[:a.gpus] if nightly else got
+                        cards = fit if nightly else got
                         rec['leased'] = sorted(got)
                         break
                     if self.stopped:

@@ -88,6 +88,10 @@ def _pool(v: object) -> bool:
             and all(isinstance(x, str) and LABEL.match(x) and x not in RESERVED_LABELS for x in labels) and ('labels' not in v or bool(labels)))
 
 
+#: a Unix account name (what useradd accepts, and what a tmpfiles.d ACL entry may name)
+ACCOUNT = re.compile(r'[a-z_][a-z0-9_-]{0,31}')
+#: an ed25519 public key, with or without its comment (the comment is replaced)
+PUSH_KEY = re.compile(r'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}(?: [!-~]{1,64})?')
 #: the slot files and the host lock (brainspike's on the 3090 hosts, decision 12.9)
 FILES = frozenset({'slot_lock', 'slot_queue', 'host_lock'})
 #: per host: key -> (check, required). Paths are absolute.
@@ -113,6 +117,12 @@ HOST_KEYS = {
     'watchdog_notice': (_abs, False),  # the watchdog's notice file (h100 health gate, §5.4)
     # the project of a slot ticket without one: ci_slot.sh's (design §7 rule 4, decision 12.9)
     'default_project': (lambda v: isinstance(v, str) and bool(re.fullmatch(r'[a-z0-9][a-z0-9-]{0,39}', v)), False),
+    # the local accounts that share the host lock and slot files with the CI account: the
+    # root step's ACL entries (decision 12.9, §5.3); with it, setup plans that root step
+    'local_accounts': (lambda v: isinstance(v, list) and bool(v) and len(set(v)) == len(v)
+                       and all(isinstance(x, str) and ACCOUNT.fullmatch(x) for x in v), False),
+    # the org snapshot's push key (decision 12.4): its line in the account's authorized_keys
+    'push_key': (lambda v: isinstance(v, str) and bool(PUSH_KEY.fullmatch(v)), False),
 }
 #: the first path's keys (decision 11.12): accepted and ignored in v1.3, so that a host's
 #: inventory needs no change in the release's window (design §9); nothing reads them
@@ -235,7 +245,8 @@ def _tunnel_key(path: tuple) -> str | None:
     """The key name for the path of a host's tunnel key (``direct``), else None."""
     return path[3] if len(path) == 4 and path[0] == 'hosts' and path[2] == 'tunnel' else None
 #: tokens too common to deny; a value that is one of them is left out, with a short one
-_COMMON = frozenset({'localhost', 'home', 'data', 'true', 'false', 'none'})
+#: ``ssh-ed25519``: a push key's type word, which the code names; the key itself is denied
+_COMMON = frozenset({'localhost', 'home', 'data', 'true', 'false', 'none', 'ssh-ed25519'})
 MIN_TOKEN = 4
 
 _SALT = b'ci-runners/deny/1\0'

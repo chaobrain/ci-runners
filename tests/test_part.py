@@ -304,11 +304,12 @@ class Classes(Host):
             'files = { ', f'files = {{ host_lock = "{self.hl}", ')
         self.inv = inventory.load(self.inv_text)
         self.status = SMI_STATUS
+        self.memory = SMI_MEMORY
 
     def run_fake(self, argv, **kw):
         if argv[0] == 'nvidia-smi':
             q = argv[1]
-            text = SMI_MEMORY if q.startswith('--query-gpu=index,memory') else \
+            text = self.memory if q.startswith('--query-gpu=index,memory') else \
                 self.status if q.startswith('--query-gpu=index,pci.bus_id') else ''
             return subprocess.CompletedProcess(argv, 0, text, '')
         return subprocess.run(argv, **kw)
@@ -536,6 +537,21 @@ class Classes(Host):
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             finally:
                 os.close(fd)
+
+    def test_a_nightly_parts_memory_check_covers_only_its_commands_cards(self):
+        """Lead, 2026-11-07: a nightly part leases every card whatever they hold, and
+        ``gpu-mem-mib`` is checked only on the cards its command gets, the lowest ones with
+        that much free: another user's job on card 0 leaves it card 1."""
+        self.memory = '0, 24576, 24000\n1, 24576, 576\n'  # card 0 nearly full
+        probe = 'echo "[$CUDA_VISIBLE_DEVICES]" > "$CI_PART_DIR/cards"'
+        _, out = self.go('nightly', gpus=1, gpu_mem_mib=8000, command=probe, timeout_minutes=600)
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
+        self.assertEqual(self.work(out, 'cards'), '[1]')
+        self.assertEqual(json.loads(pathlib.Path(self.path(out), 'record.json').read_text())['leased'], [0, 1])
+        _, out = self.go('nightly', gpus=2, gpu_mem_mib=8000, id='both')  # two cards: card 0 does not fit
+        self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no card fits'))
+        _, out = self.go('nightly', gpus=0, gpu_mem_mib=8000, id='none')  # no card for the command: no check
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
 
     def test_a_nightly_part_waits_for_every_slot_and_card(self):
         fd = os.open(self.slot.parent / 's.2.lock', os.O_WRONLY)

@@ -49,6 +49,22 @@ class Load(unittest.TestCase):
             with self.assertRaises(inv.InventoryError, msg=bad):
                 inv.load(EXAMPLE.replace('slots = 2', f'default_project = {bad}\nslots = 2', 1))
 
+    def test_the_local_accounts_and_the_push_key(self):
+        """Decision 12.9, §5.3: the accounts that share the lock files, and the push key's line."""
+        key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI' + 'A' * 43
+        i = inv.load(EXAMPLE.replace('slots = 2', f'local_accounts = ["user-a", "user_b"]\npush_key = "{key} c"\n'
+                                     'slots = 2', 1))
+        self.assertEqual(i.host['local_accounts'], ['user-a', 'user_b'])
+        self.assertEqual(i.host['push_key'], key + ' c')
+        for bad in ('[]', '["a", "a"]', '["A"]', '["a b"]', '"a"', '[1]'):
+            with self.assertRaises(inv.InventoryError, msg=bad):
+                inv.load(EXAMPLE.replace('slots = 2', f'local_accounts = {bad}\nslots = 2', 1))
+        for bad in (key[:-1], 'ssh-rsa ' + key[12:], key + ' a b', key + '\\n' + key, ''):
+            with self.assertRaises(inv.InventoryError, msg=bad):
+                inv.load(EXAMPLE.replace('slots = 2', f'push_key = "{bad}"\nslots = 2', 1))
+        self.assertEqual(inv.deny_tokens({'hosts': {'h': {'local_accounts': ['acct7'], 'push_key': key}}}),
+                         {'acct7', inv.normalise(key[12:])})  # the type word is the code's: not a token
+
     def test_pools_as_tables(self):
         """RUN-5: a pool may give its labels, or have one runner per card."""
         base = re.sub(r'\[hosts\.h100\.pools\].*\n(?:.*\n){3}', '', EXAMPLE).replace(

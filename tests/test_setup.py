@@ -10,6 +10,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import socket
 import subprocess
 import sys
@@ -557,7 +558,9 @@ direct = ["localhost", "127.0.0.1", "::1"]
                      '| no_proxy=localhost,127.0.0.1,::1', 'fetched through the egress tunnel',
                      f'keep   {self.tun}/id_ed25519',
                      'forward 127.0.0.1:18182 -> the egress proxy, 127.0.0.1:18443 there; direct: localhost, 127.0.0.1, ::1',
-                     'run    systemctl --user enable --now ci-tunnel.service\n'):
+                     'run    systemctl --user enable --now ci-tunnel.service\n',
+                     '    restrict,port-forwarding,permitopen="127.0.0.1:18443",permitlisten="127.0.0.1:9",'
+                     'command="/usr/sbin/nologin" <the public key of etc/tunnel/id_ed25519>\n'):
             self.assertIn(want, text)
         self.assertNotIn('ci-proxy', text)
         self.assertNotIn('ci-bridge', text)
@@ -732,3 +735,143 @@ direct = ["localhost", "127.0.0.1", "::1"]
 
 if __name__ == '__main__':
     unittest.main()
+
+
+KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIObYmbZUCCMvoLLQijA8VtgBpzN1Or0HIo1rYVmRJ8l7'
+
+
+class Shared(unittest.TestCase):
+    """A 3090 host (decisions 12.3, 12.4, 12.9; §5.3): the root steps that share brainspike's
+    host lock and slot files with the local accounts, the push key's line, and the egress
+    account's line for the tunnel key."""
+
+    setUp_ = Standalone.setUp
+    tearDown = Standalone.tearDown
+    run_ = Standalone.run_
+    apply_ = Standalone.apply
+
+    def setUp(self):
+        self.setUp_()
+        self.unpacked = []
+        t = pathlib.Path(self.tmp.name)
+        self.shared = t / 'shared'
+        self.shared.mkdir()
+        s = self.shared
+        self.inv.write_text(self.inv.read_text().replace(
+            'files = { slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }',
+            f'local_accounts = ["localuser"]\nfiles = {{ host_lock = "{s}/host.lock", slot_lock = "{s}/ci.lock", '
+            f'slot_queue = "{s}/ci.queue" }}'))
+        self.h = inventory.load(self.inv.read_text()).host
+
+    def apply(self, text):
+        return self.apply_(text)
+
+    def test_the_tmpfiles_d_file(self):
+        s = self.shared
+        rw, rwx = 'u:acct-x:rw,u:localuser:rw,m::rw', 'u:acct-x:rwx,u:localuser:rwx,m::rwx'
+        want = ['# ci-runners (decision 12.9): the host lock and slot files that the CI account shares',
+                '# with the local accounts, root-owned in /tmp, recreated at boot, never age-cleaned.']
+        files = [f'{s}/host.lock', f'{s}/host.turnstile.lock', f'{s}/host.shared.lock', f'{s}/ci.lock', f'{s}/ci.2.lock']
+        for f in files:
+            want += [f'f {f} 0660 root root -', f'a+ {f} - - - - {rw}']
+        want += [f'd {s}/ci.queue 0770 root root -',
+                 f'A+ {s}/ci.queue - - - - {rwx},d:u::rwx,d:g::---,d:o::---,d:u:acct-x:rwx,d:u:localuser:rwx,d:m::rwx']
+        want += [f'x {f}' for f in [*files, f'{s}/ci.queue']]
+        self.assertEqual(setup.tmpfiles_text(self.h).splitlines(), want)
+        for bad in ({'local_accounts': ['a b']}, {'files': {**self.h['files'], 'slot_queue': '/tmp/a b'}}):
+            with self.assertRaises(ValueError, msg=bad):
+                setup.tmpfiles_text({**self.h, **bad})
+
+    def test_root_steps_not_done_block_apply(self):
+        plan = setup.build(str(self.etc))
+        text = plan.text()
+        self.assertIn('root steps (decision 12.9, §5.3): the lead runs them as root, before apply; setup cannot:', text)
+        self.assertIn(f'to do  write {setup.TMPFILES} mode 644 owner root', text)
+        self.assertIn(f'| f {self.shared}/host.turnstile.lock 0660 root root -', text)
+        self.assertIn(f'{self.shared}/ci.2.lock: missing', text)
+        self.assertIn('apply refuses until they are done', text)
+        self.assertEqual(plan.blocked, 'the root steps are not done')
+        self.assertEqual(self.apply(text), 1)
+        self.assertFalse((self.data / 'ci-runners' / 'state' / 'setup.json').exists())  # nothing made
+        with mock.patch.object(setup, 'shared_state', lambda h: []):  # done: the plan goes ahead
+            text = setup.build(str(self.etc)).text()
+            self.assertIn(f'done   write {setup.TMPFILES}', text)
+            self.assertNotIn('apply refuses', text)
+            self.assertEqual(self.apply(text), 0)
+
+    def test_the_shared_files_state_reads_their_acls(self):
+        if not shutil.which('setfacl'):
+            self.skipTest('no setfacl')
+        me, other = os.getuid(), 65534
+        names = {'acct-x': me, 'localuser': other}
+        files, queue = setup.shared_files(self.h)
+        for f in files:
+            pathlib.Path(f).touch()
+        os.mkdir(queue)
+        conf = pathlib.Path(self.tmp.name, 'tmpfiles.conf')
+        conf.write_text(setup.tmpfiles_text(self.h))
+        real = os.lstat
+
+        def as_root(path):  # the tests cannot chown to root: the files read as root's
+            st = real(path)
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, 0, 0, *st[6:10]))
+
+        def state():
+            with mock.patch.object(setup.os, 'lstat', as_root):
+                return setup.shared_state(self.h, uid_of=names.__getitem__, read=str(conf))
+
+        def acl(*args):
+            r = subprocess.run(['setfacl', *args], capture_output=True, text=True)
+            if r.returncode:
+                self.skipTest(f'no ACL support here: {r.stderr.strip()}')
+        self.assertEqual({w for _, w in state()}, {'no rw ACL entry for acct-x, localuser',
+                                                   'no default rw ACL entry for acct-x, localuser'})
+        for f in files:
+            acl('-m', f'u:{me}:rw,u:{other}:rw,m::rw', f)
+        acl('-m', f'u:{me}:rwx,u:{other}:rwx,m::rwx,d:u:{me}:rwx,d:u:{other}:rwx,d:m::rwx', queue)
+        self.assertEqual(state(), [])
+        acl('-m', 'm::r', files[1])  # the mask takes the entries' w away
+        self.assertEqual(state(), [(files[1], 'no rw ACL entry for acct-x, localuser')])
+        acl('-m', 'm::rw', files[1])
+        acl('-x', f'd:u:{other}', queue)
+        self.assertEqual(state(), [(queue, 'no default rw ACL entry for localuser')])
+        acl('-m', f'd:u:{other}:rwx', queue)
+        conf.write_text('changed\n')
+        self.assertEqual(state(), [(setup.TMPFILES, 'differs from the plan')])
+        conf.write_text(setup.tmpfiles_text(self.h))
+        self.assertEqual(setup.shared_state(self.h, uid_of=names.__getitem__, read=str(conf))[0][1], 'not root-owned')
+
+    def test_the_push_keys_line(self):
+        old = f'ssh-ed25519 AAAA other-key\nrestrict,command="old" {KEY} {setup.PUSH_MARK}\n'
+        got = setup.authorized_keys_text(old, KEY + ' a-comment', etc='/d/ci-runners/etc', python='/usr/bin/python3',
+                                         base='/d/ci-runners').splitlines()
+        self.assertEqual(got, ['ssh-ed25519 AAAA other-key',
+                               'restrict,command="CI_RUNNERS_ETC=/d/ci-runners/etc CI_RUNNERS_PYTHON=/usr/bin/python3 exec '
+                               f'/d/ci-runners/releases/hook/bin/ci-run org-sync --receive" {KEY} {setup.PUSH_MARK}'])
+        for bad in (dict(key='ssh-rsa AAAA x'), dict(etc='/d e')):
+            kw = {'key': KEY, 'etc': '/e', **bad}
+            with self.assertRaises(ValueError, msg=bad):
+                setup.authorized_keys_text('', kw['key'], etc=kw['etc'], python='/p', base='/b')
+        self.inv.write_text(self.inv.read_text().replace('local_accounts = ["localuser"]\n', f'push_key = "{KEY}"\n'))
+        text = setup.build(str(self.etc)).text()
+        ak = self.home / '.ssh' / 'authorized_keys'
+        self.assertIn(f'mkdir  {self.home}/.ssh/ mode 700', text)
+        self.assertIn(f'write  {ak} mode 600', text)
+        self.assertEqual(self.apply(text), 0)
+        self.assertEqual(ak.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.home / '.ssh').stat().st_mode & 0o777, 0o700)
+        self.assertTrue(ak.read_text().startswith('restrict,command="CI_RUNNERS_ETC='))
+        self.assertEqual(setup.build(str(self.etc)).actions, [])  # a second run is a no-op
+        os.chmod(self.home / '.ssh', 0o775)
+        with self.assertRaisesRegex(ValueError, 'writable by it alone'):
+            setup.build(str(self.etc))
+
+    def test_the_egress_accounts_line_for_the_tunnel_key(self):
+        self.assertEqual(setup.EGRESS_LINE.format(port=18443, key=KEY),
+                         'restrict,port-forwarding,permitopen="127.0.0.1:18443",permitlisten="127.0.0.1:9",'
+                         f'command="/usr/sbin/nologin" {KEY}')
+        ok = subprocess.CompletedProcess([], 0, KEY + ' comment\n', '')
+        self.assertEqual(setup.tunnel_public_key('/e', run=lambda *a, **k: ok), KEY + ' comment')
+        for r in (subprocess.CompletedProcess([], 1, '', 'bad'), subprocess.CompletedProcess([], 0, 'ssh-rsa AAAA\n', '')):
+            self.assertEqual(setup.tunnel_public_key('/e', run=lambda *a, _r=r, **k: _r),
+                             '<the public key of etc/tunnel/id_ed25519>')

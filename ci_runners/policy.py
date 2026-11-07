@@ -24,7 +24,7 @@ from collections.abc import Mapping
 SELF = 'chaobrain/ci-runners'
 
 #: runner classes (``CI_RUNNER_CLASS``, design §5.1, decision 12.5)
-CLASSES = frozenset({'light', 'part', 'h100', 'gpu', 'multi', 'compile', 'nightly'})
+CLASSES = frozenset({'light', 'part', 'gpu', 'multi', 'compile', 'nightly'})
 #: the classes that hold a host exclusively: accepted only for a repository whose entry
 #: lists them in ``classes`` (decision 12.14); the others are open to every repository
 OPT_IN = frozenset({'compile', 'nightly'})

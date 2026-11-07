@@ -4,6 +4,7 @@ tree; the systemctl commands are recorded, not run."""
 from __future__ import annotations
 
 import contextlib
+import glob
 import hashlib
 import http.server
 import io
@@ -19,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from unittest import mock
 
 from ci_runners import inventory, setup
@@ -733,9 +735,6 @@ direct = ["localhost", "127.0.0.1", "::1"]
         example = (ROOT / 'setup' / 'inventory.example.toml').read_text()
         self.assertIn('egress_port = 18443', example)  # the unit's port
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIObYmbZUCCMvoLLQijA8VtgBpzN1Or0HIo1rYVmRJ8l7'
 
@@ -746,39 +745,43 @@ class Shared(unittest.TestCase):
     account's line for the tunnel key."""
 
     setUp_ = Standalone.setUp
-    tearDown = Standalone.tearDown
     run_ = Standalone.run_
     apply_ = Standalone.apply
 
     def setUp(self):
         self.setUp_()
         self.unpacked = []
-        t = pathlib.Path(self.tmp.name)
-        self.shared = t / 'shared'
-        self.shared.mkdir()
-        s = self.shared
+        # shared files are plain names directly in /tmp (B1): unique ones, removed after
+        self.p = s = f'/tmp/cirt{uuid.uuid4().hex[:12]}'
         self.inv.write_text(self.inv.read_text().replace(
             'files = { slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }',
-            f'local_accounts = ["localuser"]\nfiles = {{ host_lock = "{s}/host.lock", slot_lock = "{s}/ci.lock", '
-            f'slot_queue = "{s}/ci.queue" }}'))
+            f'local_accounts = ["localuser"]\nfiles = {{ host_lock = "{s}-host.lock", slot_lock = "{s}-ci.lock", '
+            f'slot_queue = "{s}-ci.queue" }}'))
         self.h = inventory.load(self.inv.read_text()).host
+
+    def tearDown(self):
+        for f in glob.glob(self.p + '*'):
+            (os.rmdir if os.path.isdir(f) and not os.path.islink(f) else os.unlink)(f)
+        self.tmp.cleanup()
 
     def apply(self, text):
         return self.apply_(text)
 
     def test_the_tmpfiles_d_file(self):
-        s = self.shared
+        s = self.p
         rw, rwx = 'u:acct-x:rw,u:localuser:rw,m::rw', 'u:acct-x:rwx,u:localuser:rwx,m::rwx'
         want = ['# ci-runners (decision 12.9): the host lock and slot files that the CI account shares',
                 '# with the local accounts, root-owned in /tmp, recreated at boot, never age-cleaned.']
-        files = [f'{s}/host.lock', f'{s}/host.turnstile.lock', f'{s}/host.shared.lock', f'{s}/ci.lock', f'{s}/ci.2.lock']
+        files = [f'{s}-host.lock', f'{s}-host.turnstile.lock', f'{s}-host.shared.lock', f'{s}-ci.lock', f'{s}-ci.2.lock']
         for f in files:
             want += [f'f {f} 0660 root root -', f'a+ {f} - - - - {rw}']
-        want += [f'd {s}/ci.queue 0770 root root -',
-                 f'A+ {s}/ci.queue - - - - {rwx},d:u::rwx,d:g::---,d:o::---,d:u:acct-x:rwx,d:u:localuser:rwx,d:m::rwx']
-        want += [f'x {f}' for f in [*files, f'{s}/ci.queue']]
+        want += [f'd {s}-ci.queue 0770 root root -',
+                 f'A+ {s}-ci.queue - - - - {rwx},d:u::rwx,d:g::---,d:o::---,d:u:acct-x:rwx,d:u:localuser:rwx,d:m::rwx']
+        want += [f'x {f}' for f in [*files, f'{s}-ci.queue']]
         self.assertEqual(setup.tmpfiles_text(self.h).splitlines(), want)
-        for bad in ({'local_accounts': ['a b']}, {'files': {**self.h['files'], 'slot_queue': '/tmp/a b'}}):
+        for bad in ({'local_accounts': ['a b']}, *({'files': {**self.h['files'], 'slot_queue': q}} for q in
+                    ('/tmp/a b', '/tmp/../etc/shadow', '/etc/shadow', '/tmp/x/../q', '/tmp//q', '/tmp/./q',
+                     '/ho' + 'me/someone/q', '/tmp/', '/tmp/.q'))):
             with self.assertRaises(ValueError, msg=bad):
                 setup.tmpfiles_text({**self.h, **bad})
 
@@ -787,8 +790,8 @@ class Shared(unittest.TestCase):
         text = plan.text()
         self.assertIn('root steps (decision 12.9, §5.3): the lead runs them as root, before apply; setup cannot:', text)
         self.assertIn(f'to do  write {setup.TMPFILES} mode 644 owner root', text)
-        self.assertIn(f'| f {self.shared}/host.turnstile.lock 0660 root root -', text)
-        self.assertIn(f'{self.shared}/ci.2.lock: missing', text)
+        self.assertIn(f'| f {self.p}-host.turnstile.lock 0660 root root -', text)
+        self.assertIn(f'{self.p}-ci.2.lock: missing', text)
         self.assertIn('apply refuses until they are done', text)
         self.assertEqual(plan.blocked, 'the root steps are not done')
         self.assertEqual(self.apply(text), 1)
@@ -825,7 +828,8 @@ class Shared(unittest.TestCase):
             if r.returncode:
                 self.skipTest(f'no ACL support here: {r.stderr.strip()}')
         self.assertEqual({w for _, w in state()}, {'no rw ACL entry for acct-x, localuser',
-                                                   'no default rw ACL entry for acct-x, localuser'})
+                                                   'no rwx ACL entry for acct-x, localuser',
+                                                   'no default rwx ACL entry for acct-x, localuser'})
         for f in files:
             acl('-m', f'u:{me}:rw,u:{other}:rw,m::rw', f)
         acl('-m', f'u:{me}:rwx,u:{other}:rwx,m::rwx,d:u:{me}:rwx,d:u:{other}:rwx,d:m::rwx', queue)
@@ -834,8 +838,31 @@ class Shared(unittest.TestCase):
         self.assertEqual(state(), [(files[1], 'no rw ACL entry for acct-x, localuser')])
         acl('-m', 'm::rw', files[1])
         acl('-x', f'd:u:{other}', queue)
-        self.assertEqual(state(), [(queue, 'no default rw ACL entry for localuser')])
+        self.assertEqual(state(), [(queue, 'no default rwx ACL entry for localuser')])
         acl('-m', f'd:u:{other}:rwx', queue)
+        acl('-m', f'u:{other}:rw', queue)  # the queue needs x too, to reach its tickets
+        self.assertEqual(state(), [(queue, 'no rwx ACL entry for localuser')])
+        acl('-m', f'u:{other}:rwx', queue)
+        self.assertEqual(state(), [])
+        os.unlink(files[0])  # a link in a file's place, even to a good file
+        os.symlink(files[1], files[0])
+        self.assertEqual(state(), [(files[0], 'not a regular file')])
+        os.unlink(files[0])
+        os.mkdir(files[0])  # a directory in a lock's place
+        self.assertEqual(state(), [(files[0], 'not a regular file')])
+        os.rmdir(files[0])
+        pathlib.Path(files[0]).touch()
+        acl('-m', f'u:{me}:rw,u:{other}:rw,m::rw', files[0])
+        os.rmdir(queue)  # a file in the queue's place
+        pathlib.Path(queue).touch()
+        self.assertEqual(state(), [(queue, 'not a directory')])
+        os.unlink(queue)
+        os.symlink(files[1], queue)
+        self.assertEqual(state(), [(queue, 'not a directory')])
+        os.unlink(queue)
+        os.mkdir(queue)
+        acl('-m', f'u:{me}:rwx,u:{other}:rwx,m::rwx,d:u:{me}:rwx,d:u:{other}:rwx,d:m::rwx', queue)
+        self.assertEqual(state(), [])
         conf.write_text('changed\n')
         self.assertEqual(state(), [(setup.TMPFILES, 'differs from the plan')])
         conf.write_text(setup.tmpfiles_text(self.h))
@@ -871,7 +898,11 @@ class Shared(unittest.TestCase):
                          'restrict,port-forwarding,permitopen="127.0.0.1:18443",permitlisten="127.0.0.1:9",'
                          f'command="/usr/sbin/nologin" {KEY}')
         ok = subprocess.CompletedProcess([], 0, KEY + ' comment\n', '')
-        self.assertEqual(setup.tunnel_public_key('/e', run=lambda *a, **k: ok), KEY + ' comment')
+        self.assertEqual(setup.tunnel_public_key('/e', run=lambda *a, **k: ok), KEY)  # the comment is not shown
         for r in (subprocess.CompletedProcess([], 1, '', 'bad'), subprocess.CompletedProcess([], 0, 'ssh-rsa AAAA\n', '')):
             self.assertEqual(setup.tunnel_public_key('/e', run=lambda *a, _r=r, **k: _r),
                              '<the public key of etc/tunnel/id_ed25519>')
+
+
+if __name__ == '__main__':
+    unittest.main()

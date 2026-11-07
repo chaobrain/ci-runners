@@ -234,8 +234,8 @@ def tmpfiles_text(h: dict) -> str:
     files, queue = shared_files(h)
     accounts = [h['account'], *h['local_accounts']]
     for x in [*files, queue]:
-        if not PATH.fullmatch(x):
-            raise ValueError(f'shared file {x!r} must be an absolute path matching {PATH.pattern}')
+        if not inventory.shared_path(x):
+            raise ValueError(f'shared file {x!r} must be a plain name directly in /tmp')
     for a in accounts:
         if not inventory.ACCOUNT.fullmatch(a):
             raise ValueError(f'account {a!r} is malformed')
@@ -293,14 +293,18 @@ def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None)
         except OSError:
             todo.append((path, 'missing'))
             continue
-        if st.st_uid != 0 or stat.S_ISLNK(st.st_mode):
+        if not (stat.S_ISDIR if path == queue else stat.S_ISREG)(st.st_mode):
+            todo.append((path, 'not a directory' if path == queue else 'not a regular file'))
+            continue
+        if st.st_uid != 0:
             todo.append((path, 'not root-owned'))
             continue
+        need, kind = (7, 'rwx') if path == queue else (6, 'rw')  # the queue: x to reach its tickets
         for default in ((False, True) if path == queue else (False,)):
             got = acl_users(path, default) or {}
-            short = [a for a, u in uids.items() if got.get(u, 0) & 6 != 6]
+            short = [a for a, u in uids.items() if got.get(u, 0) & need != need]
             if short:
-                todo.append((path, f'no {"default " if default else ""}rw ACL entry for {", ".join(short)}'))
+                todo.append((path, f'no {"default " if default else ""}{kind} ACL entry for {", ".join(short)}'))
     return todo
 
 
@@ -327,7 +331,9 @@ def tunnel_public_key(etc: str, run=subprocess.run) -> str:
     except (OSError, subprocess.SubprocessError):
         r = None
     pub = (r.stdout.strip() if r is not None and r.returncode == 0 else '')
-    return pub if inventory.PUSH_KEY.fullmatch(pub) else '<the public key of etc/tunnel/id_ed25519>'
+    if not inventory.PUSH_KEY.fullmatch(pub):
+        return '<the public key of etc/tunnel/id_ed25519>'
+    return ' '.join(pub.split()[:2])  # the comment often names an account and host: not shown
 
 
 class Plan:

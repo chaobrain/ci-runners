@@ -553,6 +553,19 @@ class Classes(Host):
         _, out = self.go('nightly', gpus=0, gpu_mem_mib=8000, id='none')  # no card for the command: no check
         self.assertEqual(out['outcome'], 'pass', out['reason'])
 
+    def test_a_nightly_part_gives_its_command_cool_cards_only(self):
+        """A hot card is still leased (the nightly holds them all) but never handed to the
+        command; with too few cool cards the health gate ends the part."""
+        self.status = SMI_STATUS.replace('40, 0', '85, 100')  # card 0 hot
+        probe = 'echo "[$CUDA_VISIBLE_DEVICES]" > "$CI_PART_DIR/cards"'
+        _, out = self.go('nightly', gpus=1, command=probe, timeout_minutes=600)
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
+        self.assertEqual(self.work(out, 'cards'), '[1]')
+        self.assertEqual(json.loads(pathlib.Path(self.path(out), 'record.json').read_text())['leased'], [0, 1])
+        _, out = self.go('nightly', gpus=2, id='both', timeout_minutes=600)
+        self.assertEqual(out['outcome'], 'unavailable')
+        self.assertIn('health gate', out['reason'])
+
     def test_a_nightly_part_waits_for_every_slot_and_card(self):
         fd = os.open(self.slot.parent / 's.2.lock', os.O_WRONLY)
         fcntl.flock(fd, fcntl.LOCK_EX)  # someone holds slot 2

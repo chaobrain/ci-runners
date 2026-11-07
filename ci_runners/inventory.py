@@ -60,6 +60,13 @@ def _abs(v: object) -> bool:
     return _str(v) and v.startswith('/')
 
 
+def shared_path(v: object) -> bool:
+    """A file the CI account shares with local accounts (decision 12.9): directly in
+    ``/tmp``, a plain name (no ``/`` after ``/tmp/``, no leading ``.``, so no ``..``). Root
+    makes it root-owned with ACL entries (§5.3), so it may name nothing else."""
+    return _str(v) and re.fullmatch(r'/tmp/[A-Za-z0-9_][A-Za-z0-9._-]*', v) is not None
+
+
 def _int(v: object, lo: int = 0) -> bool:
     return type(v) is int and v >= lo
 
@@ -197,6 +204,10 @@ def load(text: str) -> Inventory:
             if cls in seen:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: class {cls} is also the class of {seen[cls]}')
             seen[cls] = pool
+        if 'local_accounts' in h:  # shared with local accounts: root's step names /tmp only
+            for k, p in h['files'].items():
+                if not shared_path(p):
+                    raise InventoryError(f'hosts.{role}.files.{k}: with local_accounts, a plain name in /tmp')
     this = doc.get('this')
     if this not in hosts:
         raise InventoryError('inventory: this names no host')

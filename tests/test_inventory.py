@@ -15,6 +15,13 @@ from ci_runners import inventory as inv
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXAMPLE = (ROOT / 'setup' / 'inventory.example.toml').read_text()
 H = '/ho' + 'me/'  # a home-directory prefix
+_FILES = re.search(r'slot_lock = "[^"]*"\nslot_queue = "[^"]*"\n', EXAMPLE).group()
+
+
+def shared(text, host_lock='/tmp/h.lock', slot_lock='/tmp/ci.lock', slot_queue='/tmp/ci_slot.queue'):
+    """The example with local_accounts and its files in /tmp, as a 3090 host has them."""
+    return text.replace('slots = 2', 'local_accounts = ["user-a"]\nslots = 2', 1).replace(
+        _FILES, f'host_lock = "{host_lock}"\nslot_lock = "{slot_lock}"\nslot_queue = "{slot_queue}"\n', 1)
 
 
 class Load(unittest.TestCase):
@@ -52,18 +59,31 @@ class Load(unittest.TestCase):
     def test_the_local_accounts_and_the_push_key(self):
         """Decision 12.9, §5.3: the accounts that share the lock files, and the push key's line."""
         key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI' + 'A' * 43
-        i = inv.load(EXAMPLE.replace('slots = 2', f'local_accounts = ["user-a", "user_b"]\npush_key = "{key} c"\n'
-                                     'slots = 2', 1))
+        i = inv.load(shared(EXAMPLE).replace('local_accounts = ["user-a"]', f'local_accounts = ["user-a", "user_b"]\n'
+                                             f'push_key = "{key} c"', 1))
         self.assertEqual(i.host['local_accounts'], ['user-a', 'user_b'])
         self.assertEqual(i.host['push_key'], key + ' c')
         for bad in ('[]', '["a", "a"]', '["A"]', '["a b"]', '"a"', '[1]'):
             with self.assertRaises(inv.InventoryError, msg=bad):
-                inv.load(EXAMPLE.replace('slots = 2', f'local_accounts = {bad}\nslots = 2', 1))
+                inv.load(shared(EXAMPLE).replace('local_accounts = ["user-a"]', f'local_accounts = {bad}', 1))
         for bad in (key[:-1], 'ssh-rsa ' + key[12:], key + ' a b', key + '\\n' + key, ''):
             with self.assertRaises(inv.InventoryError, msg=bad):
                 inv.load(EXAMPLE.replace('slots = 2', f'push_key = "{bad}"\nslots = 2', 1))
         self.assertEqual(inv.deny_tokens({'hosts': {'h': {'local_accounts': ['acct7'], 'push_key': key}}}),
                          {'acct7', inv.normalise(key[12:])})  # the type word is the code's: not a token
+
+    def test_shared_files_are_plain_names_in_tmp(self):
+        """B1: with local_accounts, root's step makes every ``files`` path root-owned with ACL
+        entries, so each must be a plain name directly in /tmp."""
+        self.assertEqual(inv.load(shared(EXAMPLE)).host['files']['slot_queue'], '/tmp/ci_slot.queue')
+        for bad in ('/tmp/../etc/shadow', '/etc/shadow', '/tmp/x/../q', '/tmp//q', '/tmp/./q', '/tmp/a/q',
+                    H + 'u/q', '/tmp/', '/tmp/.q', '/tmp/a b'):
+            for key in ('host_lock', 'slot_lock', 'slot_queue'):
+                with self.assertRaises(inv.InventoryError, msg=(key, bad)):
+                    inv.load(shared(EXAMPLE, **{key: bad}))
+        self.assertEqual(inv.load(EXAMPLE).host['files']['slot_queue'][:1], '/')  # without them: any absolute path
+        self.assertFalse(inv.shared_path('/tmp/a/../b'))
+        self.assertTrue(inv.shared_path('/tmp/a.b-c_d'))
 
     def test_pools_as_tables(self):
         """RUN-5: a pool may give its labels, or have one runner per card."""

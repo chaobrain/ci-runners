@@ -153,7 +153,7 @@ class Started(unittest.TestCase):
         rel = self.base / 'releases'
         rel.mkdir()
         os.symlink(ROOT, rel / 'hook')
-        hooks = self.base / 'hooks'
+        hooks = self.base / 'copies'  # a copy away from <base>/hooks, as in the private /tmp (decision 13.5)
         hooks.mkdir()
         mark = self.base / 'ran'
         fake = self.base / 'py' / 'python3'
@@ -161,7 +161,7 @@ class Started(unittest.TestCase):
         fake.write_text(f'#!/bin/sh\necho "$@" >> {mark}\nexec {sys.executable} "$@"\n')
         fake.chmod(0o755)
         for n in ('job-started.sh', 'job-completed.sh'):
-            (hooks / n).write_text(setup.hook_text((ROOT / 'hooks' / n).read_text(), str(fake)))
+            (hooks / n).write_text(setup.hook_text((ROOT / 'hooks' / n).read_text(), str(fake), str(self.base)))
         (self.etc / 'policy.toml').write_text('schema = 2\n')  # refuses every job
         trap = self.base / 'trap'  # a job may put its own dirname and readlink first in PATH
         for tool in ('dirname', 'readlink'):
@@ -178,7 +178,18 @@ class Started(unittest.TestCase):
                 self.assertEqual(r.returncode, code, (n, py, r.stdout, r.stderr))
                 self.assertTrue(mark.read_text().startswith('-I -c '), (n, py))
         with self.assertRaises(ValueError):
-            setup.hook_text('#!/bin/sh\nexec python3 -I\n', str(fake))
+            setup.hook_text('#!/bin/sh\nexec python3 -I\n', str(fake), str(self.base))
+        src = (ROOT / 'hooks' / 'job-started.sh').read_text()
+        with self.assertRaisesRegex(ValueError, 'no release line'):
+            setup.hook_text(src.replace(setup.HOOK_BASE, ''), str(fake), str(self.base))
+        # a copy whose release line names no release refuses every job (fail closed)
+        (hooks / 'job-started.sh').write_text(setup.hook_text(src, str(fake), str(self.base / 'nowhere')))
+        r = subprocess.run(['sh', str(hooks / 'job-started.sh')], env={**self.env, 'PATH': '/usr/bin:/bin'},
+                           capture_output=True, text=True, timeout=60, cwd=self.base)
+        self.assertEqual((r.returncode, r.stdout), (1, 'ci-runners: refused error policy=none\n'))
+        text = setup.hook_text(src, '/opt/py/bin/python3', '/data/x/ci-runners')
+        self.assertIn('\nbase=/data/x/ci-runners\nroot=', text)
+        self.assertNotIn('@CI_', text)
 
 if __name__ == '__main__':
     unittest.main()

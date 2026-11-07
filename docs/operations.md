@@ -119,6 +119,14 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 - 样本不到窗口的一半（timer 停了、刚开机）就不算忙（fail open）。卡的规则只看部件能租的卡。
 - `ci-run hostload status` 按部件的读法打印当前结果。reaper 删掉 2 天前的记录和 14 天前的标记。
 
+**hook 的副本**（design 决定 13.5）。在 CI 账户有私有命名空间的主机上（inventory 写了 `local_accounts`，即两台 3090），`ci-hooks.service` 运行 `ci-run hooks copy`，把 `<data>/ci-runners/hooks/` 里的两个 hook 复制到账户私有 `/tmp` 里的 `/tmp/ci-runners-hooks/`（目录 700、文件 500），runner 的 `.env` 指向副本，所以作业日志里 "Run '<hook 路径>'" 那一行不出现数据盘路径。
+
+- hook 靠 setup 写进去的 `base=<data>/ci-runners` 一行找 release，不靠自己的路径，所以副本跑的是同一个 release。
+- runner 单元 `Requires=`/`After=ci-hooks.service`，`ExecStartPre=` 检查两个副本都是可执行文件：缺一个 runner 就起不来。作业开始时 hook 文件不在，runner 在 "Set up runner" 失败。
+- reaper 每 10 分钟比对副本和源文件，缺的或不同的重写，并在日志里记一行 `hook copies: rewrote …`。
+- `apply` 在启用 runner 之前 `enable --now ci-hooks.service`；hook 变了就 `reload`（重新复制）。不要 `restart` 它：`Requires=` 会把每个 runner 一起重启。
+- 只能在 CI 账户的 user manager 里（systemd 单元）运行：`sudo -u` 进来的 shell 不在那个命名空间，看到的是主机的 `/tmp`，`ci-run hooks copy` 在那里写的副本 runner 看不到。
+
 ## 5. 发布流程
 
 一次发布的六步（design §9）：

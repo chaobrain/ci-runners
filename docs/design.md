@@ -518,8 +518,9 @@ from the load record they add.
        - Setup plans the unit on a host whose CI account has the private namespace
          (12.16): both 3090 hosts. Elsewhere the runners keep the hooks under `data`,
          since in a shared `/tmp` another account could plant the directory first. Apply
-         starts `ci-hooks.service` before the runners, and restarts it when a hook
-         changes.
+         starts `ci-hooks.service` before the runners, and reloads it when a hook
+         changes (its `ExecReload=` copies again; a restart would restart every runner
+         through `Requires=`).
        - Known limit, unchanged: the runner still writes the machine name into every job
          log.
 
@@ -1055,7 +1056,7 @@ refreshed from a546b92f (T17):
 | `.env` per runner | as on h100; `CI_RUNNER_CARD=<N>` on a `gpu` runner; `https_proxy` at the tunnel; from `v1.5` the two hook variables name the copies in `/tmp/ci-runners-hooks/` (decision 13.5) |
 | the hooks (`v1.5`) | `hooks/job-started.sh` and `job-completed.sh` under `data` gain the line `base=<data>/ci-runners`, from which they find `releases/hook` (13.5) |
 | `ci-runner@.service`, `ci-tunnel.service`, `ci-reaper.timer` | as on h100; from `v1.5` the runner's unit also has `Requires=` and `After=ci-hooks.service` and an `ExecStartPre=` that checks both hook copies are executable files (13.5) |
-| `ci-hooks.service` (`v1.5`) | oneshot, `RemainAfterExit=yes`: `ci-run hooks copy` into the private `/tmp` (13.5); enabled; started before the runners and restarted by `apply` when a hook changes |
+| `ci-hooks.service` (`v1.5`) | oneshot, `RemainAfterExit=yes`: `ci-run hooks copy` into the private `/tmp` (13.5); enabled; started before the runners, and reloaded (`ExecReload=`, the same copy) by `apply` when a hook changes: a restart would restart every runner through `Requires=` |
 | `ci-hostload.{service,timer}` (`v1.5`) | every 60 s, `ci-run hostload sample`: one line of the load record (decision 13.2); `Nice=10`, bounded at 30 s |
 | `ci-envrefresh.{service,timer}` | every 30 min, `ci-run env refresh` for each project whose registry sets `refresh` (decision 12.11) |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 120G of 188 GiB on 3090b, 80G of 125 GiB on 3090a) and `ci-<project>.slice` |

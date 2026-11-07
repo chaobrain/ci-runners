@@ -66,14 +66,9 @@ TK = 'tests.test_scripts'
 TA = 'tests.test_actions'
 VRD = 'ci_runners/verdict.py'
 ENB = 'ci_runners/envbuild.py'
-WFL = '.github/workflows/h100-test.yml'
-#: the ref the workflow calls its actions at: @v1 on main, the release in a release (design §9)
-_STAMP = (pathlib.Path(__file__).resolve().parents[1] / 'actions' / 'RELEASE').read_text().strip()
-AREF = 'v1' if _STAMP == 'hook' else _STAMP
 AVD = 'actions/verdict/action.yml'
 TV = 'tests.test_verdict'
 TB = 'tests.test_envbuild'
-TW = 'tests.test_workflow'
 TM = 'tests.test_thermal'
 TZ = 'tests.test_orgsync'
 TBR = 'tests.test_bridge'
@@ -481,26 +476,16 @@ MUTANTS = [
      [f'{TB}.Main.test_a_build_is_linked_when_complete']),
     (ENB, "    return ('systemd-run',", "    return () and ('systemd-run',",
      [f'{TB}.Main.test_a_build_is_linked_when_complete']),
-    # h100-test.yml (design §4.7)
-    (WFL, "    if: ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.claim.outputs.run == 'true' && inputs.cpu-command != ''",
-     "    if: needs.claim.outputs.run == 'true' && inputs.cpu-command != ''",
-     [f'{TW}.Workflow.test_every_job_carries_the_guard']),
-    (WFL, " && inputs.gpu-command != ''", "", [f'{TW}.Workflow.test_a_part_without_command_is_skipped']),
-    (WFL, "    if: ${{ !cancelled() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.claim.outputs.run == 'true' }}",
-     "    if: ${{ always() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.claim.outputs.run == 'true' }}",
-     [f'{TW}.Workflow.test_a_part_without_command_is_skipped']),
-    (WFL, "    runs-on: [self-hosted, h100-cpu]\n    timeout-minutes: ${{ fromJSON(needs.claim.outputs.job-timeout) }}\n    outputs:",
-     "    runs-on: [self-hosted, part]\n    timeout-minutes: ${{ fromJSON(needs.claim.outputs.job-timeout) }}\n    outputs:",
-     [f'{TW}.Workflow.test_the_jobs_run_on_h100_only']),
-    (WFL, "contains(needs.gpu.outputs.retry-on, '\"h100-gpu') && ", "", [f'{TW}.Workflow.test_the_jobs_run_on_h100_only']),
-    (WFL, "permissions:\n  contents: read\njobs:", "permissions:\n  contents: write\njobs:",
-     [f'{TW}.Workflow.test_permissions_stay_minimal']),
-    (WFL, f"          persist-credentials: false\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@{AREF}\n        with:\n          project: ${{{{ inputs.project }}}}\n          id: cpu",
-     f"          persist-credentials: true\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@{AREF}\n        with:\n          project: ${{{{ inputs.project }}}}\n          id: cpu",
-     [f'{TW}.Workflow.test_checkouts_keep_no_credentials']),
-    (WFL, "&& (( IN_TIMEOUT >= 1 && IN_TIMEOUT <= 240 ))", "&& true", [f'{TW}.Prep.test_refusals']),
-    (WFL, "[[ $IN_PROJECT =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]]", "true", [f'{TW}.Prep.test_refusals']),
     (AVD, ' --parts "$IN_PARTS"', '', [f'{TA}.Actions.test_inputs_reach_their_flags']),
+    # the action refs and the release stamp, with no reusable workflow left (decision 12.17)
+    ('docs/consumers.md', '/actions/salvage@v1\n', '/actions/salvage@v1.4.1\n',
+     [f'{TA}.Actions.test_the_action_refs_follow_the_release_stamp']),
+    ('.github/workflows/test.yml', '      - uses: actions/checkout@v4\n',
+     '      - uses: chaobrain/ci-runners/actions/claim@v1.4.1\n      - uses: actions/checkout@v4\n',
+     [f'{TA}.Actions.test_the_action_refs_follow_the_release_stamp']),
+    # the docs' indented YAML examples are checked too (design §4.8)
+    ('docs/consumers.md', '     if: always()\n', '     with: {a: ${{ x }}, b: 1}\n     if: always()\n',
+     ['tests.test_workflow.FlowExpressions.test_no_workflow_or_example_has_one']),
     # RUN-5: h100 as a standalone host (its own python, labelled pools, a shared account)
     (INV, "    if type(per_card) is not bool or per_card == ('count' in v):", "    if type(per_card) is not bool:",
      [f'{TI}.Load.test_pools_as_tables']),
@@ -1058,14 +1043,13 @@ MUTANTS = [
     (SLO, "range(self._grants(caps).count(self.seq))",
      "range(grants(self.waiting(), self.held()[0], caps, self.held()[1], self.default).count(self.seq))",
      [f'{TS}.Queue.test_a_nightly_waits_behind_an_older_ci_slot_sh_ticket']),
-    # review round 1: the release's own P2P entry point, the hard bound, the h100 card count
+    # review round 1: the release's own P2P entry point, the hard bound
     (P2P, "    return 1 if why else 0", "    return 0",
      [f'{T2}.Entry.test_the_default_command_fails_on_zeros', f'{TT}.Classes.test_the_release_s_own_p2p_test_keeps_the_command_out']),
     (PRT, "'from ci_runners.p2p import main; sys.exit(main())'", "'from ci_runners.p2p import main; main()'",
      [f'{T2}.Entry.test_the_default_command_fails_on_zeros', f'{TT}.Classes.test_the_release_s_own_p2p_test_keeps_the_command_out']),
     (PRT, "            child.communicate(timeout=P2P_KILL_WAIT)", "            child.communicate()",
      [f'{T2}.HardBound.test_a_test_that_does_not_go_is_given_up']),
-    (WFL, '[ "$HAS_GPU" != true ] || [ "$IN_GPUS" = 1 ] ||', 'true ||', [f'{TW}.Prep.test_the_gpu_part_takes_one_card']),
     # the env spec's conda table and env refresh (design §4.9, decisions 12.10, 12.11)
     (ENB, "'variables', 'conda'}", "'variables'}", [f'{TB}.Spec.test_the_conda_table_can_ask_for_live_nest_on_python_313']),
     (ENB, "    conda = _conda(doc['conda']) if 'conda' in doc else Conda()", "    conda = Conda()",

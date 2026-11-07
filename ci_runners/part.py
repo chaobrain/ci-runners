@@ -34,7 +34,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 
 from ci_runners import gpus as gpus_mod
-from ci_runners import inventory, outcome, registry, slots
+from ci_runners import envuse, inventory, outcome, registry, slots
 from ci_runners import p2p as p2p_mod
 from ci_runners import sampler as sampler_mod
 
@@ -911,7 +911,7 @@ class Executor:
         t0 = time.monotonic()
         deadline = t0 + a.queue_timeout_minutes * 60
         leases = Leases(os.path.join(h['data'], 'ci-runners', 'state', 'leases'))
-        slot_fd, slot_path = None, ''
+        slot_fd, slot_path, env_fd = None, '', None
         every: list[int] = []  # a nightly part's slots, every one of them (decision 12.8)
         nightly = cls == EVERY_SLOT
         lock = a.lock or ('x' if cls == 'compile' else 'none')  # held by ci-lock (RUN-7d, 7e); checked here
@@ -980,7 +980,11 @@ class Executor:
             rec.update(queue_seconds=round(time.monotonic() - t0), cards=cards, slot=slot_path, run_epoch=time.time())
             pin = str(h.get('compile_cpus') if cls == 'compile' else h.get('cpus') or '')  # design §5.5 item 4
             cpus = pin or str(len(os.sched_getaffinity(0)))
-            env = part_env(self.env, role=self.inv.this, project=proj, part_dir=work, results=results, cards=cards,
+            build, env_fd = envuse.hold(proj.env) if proj.env else ('', None)  # the link, resolved once
+            if build:
+                rec['env_build'] = os.path.basename(build)  # the one env this part runs in (design 12.11)
+            env = part_env(self.env, role=self.inv.this, project=dataclasses.replace(proj, env=build), part_dir=work,
+                           results=results, cards=cards,
                            cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume)
             inner = command_argv(a.command, cpus=pin, nice=0 if cls == 'compile' else 10)
             cap = registry.memory_bytes(memory) if self.caps_memory() else 0
@@ -997,7 +1001,7 @@ class Executor:
             argv = scope_argv(self.unit, proj.name, memory, sup, self.oom_policy()) if self.scope else sup
             if self.stopped:
                 return self._end(record, rec, a, stopped=True)
-            held = tuple(fd for fd in {slot_fd, *every, *leases.fds} if fd is not None)
+            held = tuple(fd for fd in {slot_fd, env_fd, *every, *leases.fds} if fd is not None)
             self.proc = self.spawn(argv, cwd=self.env.get('GITHUB_WORKSPACE') or os.getcwd(), env=env, pass_fds=held)
             smp, done, thread = None, threading.Event(), None
             if cards:
@@ -1026,7 +1030,7 @@ class Executor:
                              cool_card=self.cool_elsewhere(cards) if cards else None)
         finally:
             leases.release()
-            for fd in {slot_fd, *every} - {None}:
+            for fd in {slot_fd, env_fd, *every} - {None}:
                 os.close(fd)
 
     def _end(self, record: str, rec: dict[str, object], a: Inputs, *, ex: Mapping[str, object] | None = None,

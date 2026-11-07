@@ -1,0 +1,11 @@
+[Unit]
+Description=ci-runners: one line of the host's load record (busy-host avoidance)
+
+[Service]
+Type=oneshot
+ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run hostload sample
+Environment=CI_RUNNERS_ETC=@CI_ETC@
+Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
+NoNewPrivileges=yes
+Nice=10
+TimeoutStartSec=30s

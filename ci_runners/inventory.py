@@ -104,6 +104,15 @@ def _peer_labels(v: object) -> bool:
         for k, ls in v.items())
 
 
+#: the ``busy`` table's keys (decision 13.2): the windows in whole minutes, the rest positive
+BUSY_KEYS = {'window_minutes': int, 'lock_minutes': int, 'cpu_cores': float, 'memory_gib': float, 'gpu_mib': float}
+
+
+def _busy(v: object) -> bool:
+    return isinstance(v, dict) and set(v) <= set(BUSY_KEYS) and all(
+        (_int(x, 1) if BUSY_KEYS[k] is int else _num(x)) for k, x in v.items())
+
+
 def peer_labels(inv: 'Inventory', cls: str) -> list[str] | None:
     """The labels of the other host's pool of class ``cls`` (decision 13.3), or None where
     the inventory names none. Pure."""
@@ -146,6 +155,8 @@ HOST_KEYS = {
     'push_key': (lambda v: isinstance(v, str) and bool(PUSH_KEY.fullmatch(v)), False),
     # the other host's pool of each runner class: where a drained or busy part goes (decision 13.3)
     'peer_labels': (lambda v: _peer_labels(v), False),
+    # the busy rule's thresholds (decision 13.2); each optional, with the rule's defaults
+    'busy': (lambda v: _busy(v), False),
 }
 #: the first path's keys (decision 11.12): accepted and ignored in v1.3, so that a host's
 #: inventory needs no change in the release's window (design §9); nothing reads them

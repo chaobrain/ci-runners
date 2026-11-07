@@ -84,8 +84,8 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         self.assertEqual(self.apply(text), 0)
         self.assertEqual((self.etc.stat().st_mode & 0o777), 0o700)
         self.assertEqual(sorted(p.name for p in (self.home / '.config' / 'systemd' / 'user').glob('ci-*')),
-                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-p.slice', 'ci-reaper.service',
-                          'ci-reaper.timer', 'ci-runner@.service'])
+                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-hostload.service', 'ci-hostload.timer',
+                          'ci-p.slice', 'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service'])
         self.assertIn(['systemctl', '--user', 'enable', 'ci-runner@hb-light-1.service', 'ci-runner@hb-part-1.service',
                        'ci-runner@hb-part-2.service'], self.ran)
         state = json.loads((self.data / 'ci-runners' / 'state' / 'setup.json').read_text())
@@ -264,9 +264,10 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         enable = [a['argv'] for a in plan.actions if a.get('kind') == 'run' and '--now' in a['argv']
                   and 'ci-reaper.timer' in a['argv']]
         self.assertEqual(enable, [['systemctl', '--user', 'enable', '--now', 'ci-reaper.timer', 'ci-orgsync.timer',
-                                   'ci-envrefresh.timer']])
-        self.assertEqual(setup.timers({}), ['ci-reaper.timer', 'ci-envrefresh.timer'])
-        self.assertEqual(setup.timers({'orgsync': True}), ['ci-reaper.timer', 'ci-orgsync.timer', 'ci-envrefresh.timer'])
+                                   'ci-envrefresh.timer', 'ci-hostload.timer']])
+        self.assertEqual(setup.timers({}), ['ci-reaper.timer', 'ci-envrefresh.timer', 'ci-hostload.timer'])
+        self.assertEqual(setup.timers({'orgsync': True}), ['ci-reaper.timer', 'ci-orgsync.timer', 'ci-envrefresh.timer',
+                                                           'ci-hostload.timer'])
 
     def test_runner_names_and_labels(self):
         inv = inventory.load((self.etc / 'inventory.toml').read_text())
@@ -406,12 +407,17 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
         for want in ('labels hx-light;', 'labels hx-cpu;', 'labels hx-gpu,hx-gpu0;', 'labels hx-gpu,hx-gpu3;',
                      '| CI_RUNNER_CARD=3', f'| CI_RUNNERS_PYTHON={sys.executable}', '| MemoryMax=512G',
                      'fetched directly',
-                     'run    systemctl --user enable --now ci-reaper.timer ci-orgsync.timer ci-envrefresh.timer\n'):
+                     'run    systemctl --user enable --now ci-reaper.timer ci-orgsync.timer ci-envrefresh.timer '
+                     'ci-hostload.timer\n'):
             self.assertIn(want, text)
         self.assertEqual(self.apply(text), 0)
         self.assertEqual(sorted(p.name for p in self.units.iterdir()),
-                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-orgsync.service', 'ci-orgsync.timer',
-                          'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service', 'ci.slice'])
+                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-hostload.service', 'ci-hostload.timer',
+                          'ci-orgsync.service', 'ci-orgsync.timer', 'ci-reaper.service', 'ci-reaper.timer',
+                          'ci-runner@.service', 'ci.slice'])
+        load = (self.units / 'ci-hostload.service').read_text()  # decision 13.2: the load record
+        self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run hostload sample\n', load)
+        self.assertIn('OnUnitActiveSec=60s\n', (self.units / 'ci-hostload.timer').read_text())
         orgsync = (self.units / 'ci-orgsync.service').read_text()
         self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run org-sync\n', orgsync)
         refresh = (self.units / 'ci-envrefresh.service').read_text()  # decision 12.11: every host refreshes
@@ -586,8 +592,8 @@ direct = ["localhost", "127.0.0.1", "::1"]
         self.assertNotIn('egress.example', text)  # the lead's files are not shown
         self.assertEqual(self.apply(text), 0)
         self.assertEqual(sorted(p.name for p in self.units.iterdir()),
-                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-reaper.service', 'ci-reaper.timer',
-                          'ci-runner@.service', 'ci-tunnel.service', 'ci.slice'])
+                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-hostload.service', 'ci-hostload.timer',
+                          'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service', 'ci-tunnel.service', 'ci.slice'])
         tunnel = (self.units / 'ci-tunnel.service').read_text()
         for want in (f'ExecStart=/usr/bin/ssh -F {self.etc}/tunnel/ssh_config -N -L 127.0.0.1:18182:127.0.0.1:18443 ',
                      f'-o IdentityFile={self.etc}/tunnel/id_ed25519 ', '-o StrictHostKeyChecking=yes ',

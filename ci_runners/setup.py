@@ -278,6 +278,10 @@ def private_text(h: dict) -> str:
                       f'BindPaths={" ".join([home, data, *files, queue])}']) + '\n'
 
 
+#: never a data-disk root, nor below one (decision 12.16): a mount point alone would let /run, /dev or a separate /tmp pass
+SYSTEM_DIRS = ('/', '/run', '/dev', '/proc', '/sys', '/tmp', '/var/tmp', '/usr', '/etc', '/boot')
+
+
 def check_private_paths(h: dict) -> None:
     """Refuse a drop-in whose paths are not what they say on this host (decision 12.16):
     ``home``, ``data`` and the data-disk root each its own real path (no link in it, so a
@@ -287,6 +291,8 @@ def check_private_paths(h: dict) -> None:
     for key, v in (('home', h['home']), ('data', h['data']), ('the data-disk root', root)):
         if os.path.realpath(v) != v:
             raise ValueError(f'{key} {v!r} is not its real path: name it without links')
+    if any(root == d or (d != '/' and root.startswith(d + '/')) for d in SYSTEM_DIRS):
+        raise ValueError(f'the data-disk root {root!r} is a system directory or lies in one')
     if not os.path.ismount(root):
         raise ValueError(f'the data-disk root {root!r} (the parent of data) must be a mount point')
 
@@ -682,12 +688,14 @@ def build(etc: str, adopt: bool = False) -> Plan:
                  'starts every enabled runner, and a reboot before the drop-in would start them without it)')
         plan.add(f'  {mark}  run    systemctl daemon-reload; systemctl restart {unit}')
         plan.add(f'  {mark}  as the account, then: systemctl --user start {names[0]}  (only it, for the leak check '
-                 'in a live job, T18; apply enables the others)')
+                 'in a live job, T18; run apply only after that check has passed in a job on it: apply enables '
+                 'every runner, and the next reboot starts them all)')
         for p, why in private:
             plan.add(f'         {p}: {why}')
         if todo or private:
             plan.blocked = 'the root steps are not done'
-            plan.add('  apply refuses until they are done: run them, then plan again')
+            plan.add('  apply refuses until they are done: run them, then plan again (and apply only after the '
+                     'leak check has passed)')
     gone = sorted(p for p in ours if os.path.dirname(p) == unit_dir and p not in planned)
     if gone:  # recorded units this plan no longer holds (decision 11.10: ci-bridge.service)
         plan.add('units removed (an earlier apply wrote them; this plan no longer holds them):')

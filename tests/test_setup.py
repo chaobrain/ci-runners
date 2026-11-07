@@ -26,6 +26,7 @@ from unittest import mock
 from ci_runners import inventory, setup
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+SYSTEM_DIRS = setup.SYSTEM_DIRS  # before any test patches it
 
 
 class Setup(unittest.TestCase):
@@ -769,6 +770,10 @@ class Shared(unittest.TestCase):
         patcher = mock.patch.object(setup.os.path, 'ismount', lambda p: p == disk or mounted(p))
         patcher.start()
         self.addCleanup(patcher.stop)
+        # the fixture's data disk lies in /tmp: not a system directory here, but in its own test
+        patcher = mock.patch.object(setup, 'SYSTEM_DIRS', tuple(d for d in SYSTEM_DIRS if d != '/tmp'))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         for f in glob.glob(self.p + '*'):
@@ -814,7 +819,8 @@ class Shared(unittest.TestCase):
                  'enabled runner, and a reboot before the drop-in would start them without it)',
                  '  to do  run    systemctl daemon-reload; systemctl restart user@<uid>.service',
                  '  to do  as the account, then: systemctl --user start ci-runner@hx-light-1.service  (only it, for '
-                 'the leak check in a live job, T18; apply enables the others)']
+                 'the leak check in a live job, T18; run apply only after that check has passed in a job on it: apply '
+                 'enables every runner, and the next reboot starts them all)']
         at = [next(i for i, line in enumerate(text.splitlines()) if line.startswith(step)) for step in steps]
         self.assertEqual(at, sorted(at))  # in this order: disabled before the restart, one started after it
         self.assertIn('         | TemporaryFileSystem=/dev/shm:mode=1777 /home ' + str(self.data.parent), text)
@@ -901,9 +907,18 @@ class Shared(unittest.TestCase):
         for bad, why in (({'home': str(t / 'link')}, 'home .* is not its real path'),
                          ({'data': str(t / 'disklink' / 'ci')}, 'data .* is not its real path'),
                          ({'data': str(t / 'other' / 'ci')}, 'must be a mount point'),  # not a disk
-                         ({'data': '/usr/ci'}, 'must be a mount point'), ({'data': '/etc/ci'}, 'must be a mount point')):
+                         ({'data': '/usr/ci'}, 'is a system directory'), ({'data': '/etc/ci'}, 'is a system directory')):
             with self.assertRaisesRegex(ValueError, why, msg=bad):
                 setup.check_private_paths({**self.h, **bad})
+        with mock.patch.object(setup, 'SYSTEM_DIRS', SYSTEM_DIRS), \
+                mock.patch.object(setup.os.path, 'ismount', lambda p: True):  # each a separate file system
+            for root in ('/', '/run', '/dev', '/proc', '/sys', '/tmp', '/var/tmp', '/usr', '/etc', '/boot', '/run/user',
+                         '/usr/local', '/tmp/x', str(self.data.parent)):
+                data = '/ci' if root == '/' else root + '/ci'
+                with self.assertRaisesRegex(ValueError, 'is a system directory', msg=root):
+                    setup.check_private_paths({**self.h, 'home': '/srv/h', 'data': data})
+            setup.check_private_paths({**self.h, 'home': '/srv/h', 'data': '/data/ci'})  # a disk: passes
+            setup.check_private_paths({**self.h, 'home': '/srv/h', 'data': '/runner-disk/ci'})  # only a prefix of /run
         self.inv.write_text(self.inv.read_text().replace(f'home = "{self.home}"', f'home = "{t / "link"}"'))
         with self.assertRaisesRegex(ValueError, 'home .* is not its real path'):  # the plan refuses it
             setup.build(str(self.etc))

@@ -298,9 +298,9 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
 
 
 class Standalone(unittest.TestCase):
-    """h100 with RUN-5 (decision 11.3, 11.6): no CI proxy, its own interpreter, labelled
-    pools and a runner per card, on a shared account whose unit directory may hold
-    another user's ci-* unit."""
+    """A standalone host of the RUN-5 model (decision 11.3, 11.6; h100's, while it ran): no
+    CI proxy, its own interpreter, labelled pools and a runner per card, on an account
+    whose unit directory may hold another user's ci-* unit."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -329,7 +329,7 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
 [hosts.hx.pools]
 light = {{ count = 1, labels = ["hx-light"] }}
 part = {{ count = 1, labels = ["hx-cpu"] }}
-h100 = {{ per_card = true, labels = ["h100"] }}
+cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
 ''')
         self.units = self.home / '.config' / 'systemd' / 'user'
         self.ran = []
@@ -362,25 +362,27 @@ h100 = {{ per_card = true, labels = ["h100"] }}
     def test_runners_labels_and_cards(self):
         inv = inventory.load(self.inv.read_text())
         self.assertEqual(setup.runners(inv), [('hx-light-1', ['hx-light'], 'light'), ('hx-part-1', ['hx-cpu'], 'part'),
-                                              ('hx-gpu0', ['h100', 'hx-gpu0'], 'h100'),
-                                              ('hx-gpu3', ['h100', 'hx-gpu3'], 'h100')])
-        self.assertEqual(setup.env_file(inv, 'h100', '/e', 3).splitlines(),
+                                              ('hx-gpu0', ['hx-gpu', 'hx-gpu0'], 'gpu'),
+                                              ('hx-gpu3', ['hx-gpu', 'hx-gpu3'], 'gpu')])
+        self.assertEqual(setup.env_file(inv, 'gpu', '/e', 3).splitlines(),
                          [f'ACTIONS_RUNNER_HOOK_JOB_STARTED={self.data}/ci-runners/hooks/job-started.sh',
                           f'ACTIONS_RUNNER_HOOK_JOB_COMPLETED={self.data}/ci-runners/hooks/job-completed.sh',
-                          'CI_RUNNER_CLASS=h100', 'CI_RUNNERS_ETC=/e', 'CI_RUNNER_POOL_LABELS=h100', 'CI_RUNNER_CARD=3',
+                          'CI_RUNNER_CLASS=gpu', 'CI_RUNNERS_ETC=/e', 'CI_RUNNER_POOL_LABELS=hx-gpu', 'CI_RUNNER_CARD=3',
                           f'CI_RUNNERS_PYTHON={sys.executable}', 'LANG=C.UTF-8'])
-        self.assertIn('CI_RUNNER_CARD=0\n', setup.env_file(inv, 'h100', '/e', 0))  # card 0 is a card
+        self.assertIn('CI_RUNNER_CARD=0\n', setup.env_file(inv, 'gpu', '/e', 0))  # card 0 is a card
         self.assertNotIn('CI_RUNNER_CARD', setup.env_file(inv, 'part', '/e'))
         self.assertIn('CI_RUNNER_POOL_LABELS=hx-cpu\n', setup.env_file(inv, 'part', '/e'))
         self.assertEqual((inventory.pool_labels(inv, 'part'), inventory.pool_labels(inv, 'nope')), (['hx-cpu'], None))
-        two = inventory.load(self.inv.read_text().replace('h100 = {', 'gpu = { per_card = true }\nh100 = {'))
+        # two per-card pools cannot load (one pool per class); built by hand, setup still refuses them
+        two = inventory.Inventory('hx', {'hx': {**inv.host, 'pools': {**inv.host['pools'],
+                                                                     'more': {'per_card': True, 'class': 'gpu'}}}})
         with self.assertRaisesRegex(ValueError, 'same name'):
             setup.runners(two)  # both per-card pools would name their runners hx-gpu0, hx-gpu3
 
     def test_a_3090_host_s_runners(self):
         """Decision 12.5, design §5.1: the 3090 pools, each labelled with the host's own
         labels; the per-card pool's class is gpu, which its runners' .env names."""
-        text = self.inv.read_text().replace('h100 = { per_card = true, labels = ["h100"] }',
+        text = self.inv.read_text().replace('cards = { per_card = true, class = "gpu", labels = ["hx-gpu"] }',
                                             'cards = { per_card = true, class = "gpu", labels = ["hx-gpu"] }\n'
                                             'multi = { count = 1, labels = ["hx-multi"] }\n'
                                             'compile = { count = 1, labels = ["hx-compile"] }\n'
@@ -401,7 +403,7 @@ h100 = {{ per_card = true, labels = ["h100"] }}
         text = setup.build(str(self.etc)).text()
         for no in ('ci-proxy', '_proxy=', 'through the CI proxy', 'socks'):
             self.assertNotIn(no, text)
-        for want in ('labels hx-light;', 'labels hx-cpu;', 'labels h100,hx-gpu0;', 'labels h100,hx-gpu3;',
+        for want in ('labels hx-light;', 'labels hx-cpu;', 'labels hx-gpu,hx-gpu0;', 'labels hx-gpu,hx-gpu3;',
                      '| CI_RUNNER_CARD=3', f'| CI_RUNNERS_PYTHON={sys.executable}', '| MemoryMax=512G',
                      'fetched directly',
                      'run    systemctl --user enable --now ci-reaper.timer ci-orgsync.timer ci-envrefresh.timer\n'):

@@ -42,9 +42,9 @@ verdict        [self-hosted, <host>-light]
 | `pass` | 命令退出码 0 | — |
 | `red` | 命令失败或超时，不是基础设施的原因 | 状态为 failure |
 | `oom` | 超出内存上限，被杀 | 带 `CI_RESUME=1` 重试一次 |
-| `thermal` | 卡过热，被提前停止（有 watchdog 的主机上也可能被它杀掉） | 换一张凉卡重试一次 |
-| `reboot` | 运行期间主机重启 | 同 thermal |
-| `unavailable` | 开跑前就不满足条件：卡太热、没有空卡、排队超时、磁盘不足、`gpus > 1` 等 | 重试一次 |
+| `thermal` | 卡过热，被提前停止 | 换一张凉卡重试一次 |
+| `reboot` | 运行期间主机重启 | 在同一台主机上重试一次 |
+| `unavailable` | 开跑前就不满足条件：卡太热、没有空卡、排队超时、磁盘不足、`gpus` 不合该类 runner 等 | 重试一次 |
 | `unavailable`（`p2p: …`） | 双卡部件（`multi`）开跑前的 P2P 自检失败：主机故障 | 不重试，状态为 `error` |
 | `lost` | 作业没留下输出就结束了，例如 runner 被停 | verdict 从主机上的记录 salvage |
 | `stopped` | 被取消，例如同一个 PR 推了新 head | — |

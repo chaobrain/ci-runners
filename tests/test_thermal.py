@@ -1,6 +1,5 @@
-"""The h100 health gate, the GPU sampler, the early thermal stop and the watchdog's kill
-lines, run locally by the executor (design §5.4 phases 1, 5 and 6, D7, §5.1 RUN-5), on
-nvidia-smi and watchdog fixtures."""
+"""The health gate of a per-card host, the GPU sampler and the early thermal stop, run
+locally by the executor (design §5.5 items 1, 5 and 6, §5.1), on nvidia-smi fixtures."""
 from __future__ import annotations
 
 import pathlib
@@ -15,7 +14,6 @@ from tests.test_part import ROOT, Host
 HOST = ROOT / 'tests' / 'fixtures' / 'host'
 STATUS = (HOST / 'smi_status.csv').read_text()
 APPS = (HOST / 'smi_apps.csv').read_text()
-WATCHDOG = (HOST / 'watchdog.log').read_text()
 
 
 def epoch(local: str) -> float:
@@ -117,55 +115,41 @@ class Sample(unittest.TestCase):
 
 
 class Finish(unittest.TestCase):
-    REC = {'class': 'h100', 'host': 'hx', 'attempt': 1, 'retries': 1, 'boot_start': 'b1', 'h100': True,
+    REC = {'class': 'gpu', 'host': 'hx', 'attempt': 1, 'retries': 1, 'boot_start': 'b1',
            'run_epoch': epoch('2026-11-05 09:59:00'), 'buses': ['00000000:A8:00.0'], 'pids': [12345],
            'fallback': ['self-hosted', 'gpu']}
     EX = {'rc': 0, 'boot_end': 'b1', 'end_epoch': epoch('2026-11-05 10:01:00')}
 
-    def test_a_kill_line_counts_with_our_pid_on_our_card(self):
-        out = part.finish('/r', self.REC, self.EX, watchdog=WATCHDOG, cool_card=2)
+    def test_the_early_stop_retries_on_a_cool_card(self):
+        out = part.finish('/r', {**self.REC, 'early_stop': True}, {**self.EX, 'rc': -9}, cool_card=2)
         self.assertEqual((out['outcome'], out['next'], out['retry-on']), ('thermal', 'retry', ['self-hosted', 'hx-gpu2']))
-        self.assertIn('bus a8', out['reason'])
-
-    def test_a_kill_line_of_another_pid_or_time_does_not(self):
-        self.assertEqual(part.finish('/r', {**self.REC, 'pids': [999]}, self.EX, watchdog=WATCHDOG)['outcome'], 'pass')
-        late = {**self.REC, 'run_epoch': epoch('2026-11-05 10:00:30')}
-        self.assertEqual(part.finish('/r', late, self.EX, watchdog=WATCHDOG)['outcome'], 'pass')
-        other_card = {**self.REC, 'buses': ['00000000:9E:00.0']}
-        self.assertEqual(part.finish('/r', other_card, self.EX, watchdog=WATCHDOG)['outcome'], 'pass')
 
     def test_thermal_without_a_cool_card_falls_back(self):
         out = part.finish('/r', {**self.REC, 'early_stop': True}, {**self.EX, 'rc': -9})
         self.assertEqual((out['outcome'], out['next'], out['retry-on']), ('thermal', 'fallback', ['self-hosted', 'gpu']))
 
-    def test_a_reboot_on_h100_is_thermal(self):
+    def test_a_reboot_is_retried_on_the_same_host(self):
+        """Decision 13.4: no host counts a reboot as thermal any more, a cool card or not."""
         out = part.finish('/r', self.REC, {**self.EX, 'boot_end': 'b2'}, cool_card=0)
-        self.assertEqual((out['outcome'], out['next'], out['retry-on']), ('reboot', 'retry', ['self-hosted', 'hx-gpu0']))
-        out = part.finish('/r', {**self.REC, 'h100': False, 'class': 'part'}, {**self.EX, 'boot_end': 'b2'}, cool_card=0)
-        self.assertEqual(out['retry-on'], ['self-hosted', 'part', 'hx'])  # elsewhere: the same host
-
-    def test_read_tail(self):
-        self.assertEqual(part.read_tail(str(HOST / 'watchdog.log'), 10), WATCHDOG[-10:])
-        self.assertEqual(part.read_tail('/nonexistent/log'), '')
+        self.assertEqual((out['outcome'], out['next'], out['retry-on']), ('reboot', 'retry', ['self-hosted', 'gpu', 'hx']))
+        out = part.finish('/r', {**self.REC, 'class': 'part'}, {**self.EX, 'boot_end': 'b2'}, cool_card=0)
+        self.assertEqual(out['retry-on'], ['self-hosted', 'part', 'hx'])
 
 
-class H100(Host):
-    """The executor on an h100-style host: a runner per card, an ``h100`` pool."""
+class PerCard(Host):
+    """The executor on a host with a per-card pool (class ``gpu``, design §5.1)."""
 
     def setUp(self):
         super().setUp()
-        t = pathlib.Path(self.tmp.name)
-        self.notice, self.log = t / 'notice', t / 'watchdog.log'
         self.inv_text = self.inv_text.replace('gpus = [0, 1]', 'gpus = [0, 1, 2, 3, 4]').replace(
             'pools = { light = 1, part = 1 }',
-            f'cpus = "0"\nwatchdog_log = "{self.log}"\nwatchdog_notice = "{self.notice}"\n'
-            'pools = { light = 1, part = 1, h100 = 5 }')
+            'cpus = "0"\npools = { light = 1, part = 1, cards = { per_card = true, class = "gpu" } }')
         self.inv = inventory.load(self.inv_text)
         (self.etc / 'projects' / 'p.toml').write_text(
             'name = "p"\nrepository = "Org/Repo"\ncontext = "p/ci"\nmemory = "1G"\n'
-            '[fallback]\nh100 = ["self-hosted", "gpu", "other"]\n'
+            '[fallback]\ngpu = ["self-hosted", "gpu", "other"]\n'
             '[hosts.hb]\nmemory_max = "2G"\n')
-        self.env = {**self.env, 'CI_RUNNER_CLASS': 'h100', 'RUNNER_NAME': 'hb-h100-3', 'CI_RUNNER_CARD': '3'}
+        self.env = {**self.env, 'CI_RUNNER_CLASS': 'gpu', 'RUNNER_NAME': 'hb-gpu3', 'CI_RUNNER_CARD': '3'}
         self.status = [STATUS]  # successive answers; the last one repeats
         self.apps = APPS
 
@@ -211,15 +195,12 @@ class H100(Host):
         code, out = self.go()
         self.assertEqual((out['outcome'], out['retry-on']), ('unavailable', ['self-hosted', 'gpu', 'other']))
 
-    def test_the_watchdog_notice_makes_gpu_parts_unavailable(self):
-        self.notice.write_text('')
-        code, out = self.go(env={**self.env, 'CI_RUNNER_CARD': '2'})
-        self.assertEqual((out['outcome'], out['reason']), ('unavailable', "the GPU watchdog's notice is up"))
-        self.assertFalse(self.ran(out))
-
-    def test_one_card_per_part_on_h100(self):
+    def test_a_gpu_runner_takes_one_card(self):
+        """The class row (design §4.8): one card on a per-card runner; D7's own refusal is gone (13.4)."""
         code, out = self.go(env={**self.env, 'CI_RUNNER_CARD': '2'}, gpus=2)
-        self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'multi-GPU part on h100 (D7)'))
+        self.assertEqual(out['outcome'], 'unavailable')
+        self.assertIn('take 1 card', out['reason'])
+        self.assertNotIn('D7', out['reason'])
 
     def test_cpu_runners_take_no_card(self):
         code, out = self.go(env={**self.env, 'CI_RUNNER_CLASS': 'part', 'CI_RUNNER_CARD': ''}, id='c')
@@ -252,22 +233,6 @@ class H100(Host):
         self.assertEqual((out['outcome'], out['reason']), ('thermal', 'our card stayed hot: stopped early'))
         self.assertEqual((out['next'], out['retry-on']), ('retry', ['self-hosted', 'hb-gpu0']))
         self.assertLess(out['run-seconds'], 20)
-
-    def test_a_watchdog_kill_of_our_process_is_thermal(self):
-        self.apps = '4242, 00000000:9D:00.0\n'
-        line = '$(date "+%Y-%m-%d %H:%M:%S") CRIT GPU 9d still 91C -> killed someone:4242'
-        code, out = self.go(env={**self.env, 'CI_RUNNER_CARD': '2'}, procs=lambda: {4242},
-                            command=f'sleep 1.2; echo "{line}" >> {self.log}; sleep 1.2')
-        self.assertEqual(out['outcome'], 'thermal')
-        self.assertIn('bus 9d', out['reason'])
-        self.assertEqual(out['retry-on'], ['self-hosted', 'hb-gpu0'])
-
-    def test_a_kill_of_another_users_process_is_not_ours(self):
-        self.apps = '4242, 00000000:9D:00.0\n'
-        line = '$(date "+%Y-%m-%d %H:%M:%S") CRIT GPU 9d still 91C -> killed someone:4242'
-        code, out = self.go(env={**self.env, 'CI_RUNNER_CARD': '2'}, procs=lambda: {1},
-                            command=f'sleep 1.2; echo "{line}" >> {self.log}; sleep 1.2')
-        self.assertEqual(out['outcome'], 'pass')
 
 
 if __name__ == '__main__':

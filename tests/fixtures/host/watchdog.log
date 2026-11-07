@@ -1,5 +1,0 @@
-2026-11-05 01:47:56 CRIT GPU a8 >= 88C for 10 min -> power limit 200 W; its jobs get killed if still hot in 10 min
-2026-11-05 02:19:47 WARN GPU a8 below 80C for 30 min -> power limit back to 250 W
-2026-11-05 10:00:00 CRIT GPU a8 still 91C -> killed user2:222, user1:12345
-2026-11-05 10:05:00 CRIT GPU 9a still 90C -> killed nothing (no compute processes)
-2026-11-05 11:00:00 CRIT GPU b8 still 92C -> killed user1:777

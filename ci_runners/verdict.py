@@ -1,4 +1,4 @@
-"""The verdict of a run of ``h100-test.yml`` (design §4.7, job 5).
+"""The verdict of a run (design §4.8 rule 5).
 
 ``ci-run verdict --context C --sha S --parts "cpu gpu" --artifacts DIR`` reads the
 parts' ``ci-part-<id>-<attempt>`` artifacts (``outcome.json``, ``summary.md``) that the

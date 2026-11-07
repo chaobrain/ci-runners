@@ -188,8 +188,9 @@ class Refused(unittest.TestCase):
         self.assertEqual(P.repos['chaobrain/brainkit'].classes, frozenset())
 
     def test_an_unknown_runner_class(self):
-        for cls in (None, '', 'PART', 'part ', 'h100-gpu0'):
+        for cls in (None, '', 'PART', 'part ', 'h100-gpu0', 'h100'):  # h100: gone with decision 13.4
             self.assertEqual(reason(P, env(cls=cls), event('pr_same_repo')), 'runner-class', cls)
+        self.assertEqual(reason(P, env(cls='gpu'), event('pr_same_repo')), 'ok')
 
     def test_the_bot_dispatch_switch_is_off_by_default(self):
         bot = 'github-actions[bot]'

@@ -8,7 +8,7 @@
     ci-run role            this host's role
     ci-run claim ...       claim a head (actions/claim; design §4.1)
     ci-run part ...        run one part (actions/part; design §4.3)
-    ci-run verdict ...     post a run's verdict (actions/verdict; h100-test.yml, §4.7)
+    ci-run verdict ...     post a run's verdict (actions/verdict; §4.8)
     ci-run salvage ...     this host's parts of a run that stop short (actions/salvage; §4.5)
     ci-run env build P     build project P's env from its default branch's spec (decision 11.4)
 

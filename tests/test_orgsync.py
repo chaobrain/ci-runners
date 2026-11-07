@@ -81,7 +81,7 @@ class Merge(unittest.TestCase):
     def test_members_act_only_in_the_snapshots_private_repositories(self):
         # a hand-listed public repository is never opened to members, and is refused anyway
         self.assertEqual(policy.actors_for(MERGED, 'chaobrain/brainevent'), frozenset({'alice'}))
-        self.assertEqual(reason(MERGED, env('chaobrain/brainevent', '2002', actor='alice', cls='h100'),
+        self.assertEqual(reason(MERGED, env('chaobrain/brainevent', '2002', actor='alice', cls='gpu'),
                                 push('alice', 'chaobrain/brainevent', 2002)), 'repository')
         # a hand-listed private repository: open to members only if the snapshot holds it with its id
         text = POLICY2 + ('[repositories."chaobrain/handkept"]\nid = 6006\nvisibility = "private"\n'

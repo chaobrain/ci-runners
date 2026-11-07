@@ -134,7 +134,7 @@ class Execute(Host):
         self.assertFalse(os.path.exists(os.path.join(self.path(out), 'work', 'ran')))
 
     def test_a_labelled_pool_names_its_labels_in_the_record(self):
-        """h100 (RUN-5): its CPU pool's runners carry `h100-cpu`, not `part`; a retry goes there."""
+        """RUN-5: a CPU pool's runners carry `hb-cpu`, not `part`; a retry goes there."""
         self.inv = inventory.load(self.inv_text.replace('disk_min_gib = 0', 'disk_min_gib = 100000000').replace(
             'pools = { light = 1, part = 1 }', 'pools = { light = 1, part = { count = 1, labels = ["hb-cpu"] } }'))
         (self.etc / 'projects' / 'p.toml').write_text((self.etc / 'projects' / 'p.toml').read_text().replace(
@@ -336,7 +336,7 @@ class Classes(Host):
     def test_each_class_refuses_gpus_and_lock_outside_its_row(self):
         bad = [('light', {'gpus': 1}, 'take no card'), ('part', {'gpus': 1}, 'take no card'),
                ('compile', {'gpus': 2}, 'take no card'), ('gpu', {'gpus': 0}, 'take 1 card'),
-               ('gpu', {'gpus': 2}, 'take 1 card'), ('h100', {'gpus': 0}, 'take 1 card'),
+               ('gpu', {'gpus': 2}, 'take 1 card'),
                ('multi', {'gpus': 1}, 'take 2 cards'), ('multi', {'gpus': 0}, 'take 2 cards'),
                ('light', {'lock': 's'}, 'take lock none'), ('light', {'lock': 'x'}, 'take lock none'),
                ('compile', {'lock': 'none'}, 'take lock x'), ('compile', {'lock': 's'}, 'take lock x')]
@@ -360,6 +360,9 @@ class Classes(Host):
             self.assertEqual(self.go(cls, timeout_minutes=top, gpus=gpus, id=f'{cls}-top')[1]['outcome'], 'pass', cls)
         with self.assertRaises(part.Refused):
             self.go('cpu-ish')  # no class of ours
+        with self.assertRaisesRegex(part.Refused, 'is no runner class'):
+            self.go('h100', gpus=1, card='0', id='h100')  # gone with decision 13.4
+        self.assertNotIn('h100', part.ROWS)
 
     def test_a_lock_needs_the_host_lock(self):
         self.inv = inventory.load(self.inv_text.replace(f'host_lock = "{self.hl}", ', ''))
@@ -589,15 +592,15 @@ class Classes(Host):
         self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no card fits'))
 
 
-class H100(Host):
-    """h100 has no host lock (no ``files.host_lock``, D5): it refuses any ``lock`` but
-    ``none`` and takes no lock (decision 12.9)."""
+class NoHostLock(Host):
+    """A host without ``files.host_lock`` (D5) refuses any ``lock`` but ``none`` and takes
+    no lock (decision 12.9)."""
 
-    def test_no_lock_on_h100(self):
+    def test_no_lock_without_files_host_lock(self):
         self.inv = inventory.load(self.inv_text.replace(
-            'pools = { light = 1, part = 1 }', 'pools = { light = 1, part = 1, h100 = { per_card = true, labels = ["h100"] } }'))
+            'pools = { light = 1, part = 1 }', 'pools = { light = 1, part = 1, cards = { per_card = true, class = "gpu" } }'))
         for n, (cls, kw) in enumerate((('part', {'lock': 's'}), ('part', {'lock': 'x'}), ('part', {'lock': 'l'}),
-                                        ('h100', {'lock': 'x', 'gpus': 1}))):
+                                        ('gpu', {'lock': 'x', 'gpus': 1}))):
             env = {**self.env, 'CI_RUNNER_CLASS': cls, 'CI_RUNNER_CARD': '0'}
             _, out = self.execute(env=env, id=f'h{n}', **kw)
             self.assertEqual((out['outcome'], out['reason']), ('unavailable', f'lock {kw["lock"]}: this host has no '
@@ -833,12 +836,12 @@ class Pure(unittest.TestCase):
         self.assertEqual((out['outcome'], out['next']), ('oom', 'none'))  # the second end is the consumer's
 
     def test_a_pool_with_its_own_labels_retries_on_them(self):
-        """h100 (RUN-5): `part` is not a label of h100's CPU runners; `h100-cpu` is."""
-        rec = {**self.REC, 'host': 'h100', 'pool_labels': ['h100-cpu']}
-        self.assertEqual(part.finish('/r', rec, {'rc': 0, 'boot_end': 'b2'})['retry-on'], ['self-hosted', 'h100-cpu'])
-        self.assertEqual(part.finish('/r', rec, None)['retry-on'], ['self-hosted', 'h100-cpu'])
+        """RUN-5: `part` is not a label of a host's CPU runners; `3090b-cpu` is."""
+        rec = {**self.REC, 'host': '3090b', 'pool_labels': ['3090b-cpu']}
+        self.assertEqual(part.finish('/r', rec, {'rc': 0, 'boot_end': 'b2'})['retry-on'], ['self-hosted', '3090b-cpu'])
+        self.assertEqual(part.finish('/r', rec, None)['retry-on'], ['self-hosted', '3090b-cpu'])
         out = part.finish('/r', rec, None, unavailable='low disk')
-        self.assertEqual((out['next'], out['retry-on']), ('fallback', ['self-hosted', 'h100-cpu']))
+        self.assertEqual((out['next'], out['retry-on']), ('fallback', ['self-hosted', '3090b-cpu']))
         out = part.finish('/r', {**rec, 'fallback': ['self-hosted', 'x']}, None, unavailable='low disk')
         self.assertEqual(out['retry-on'], ['self-hosted', 'x'])  # the registry's fallback still wins
 

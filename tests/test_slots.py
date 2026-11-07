@@ -1,4 +1,4 @@
-"""The fair slot queue (design §7, rules 1 and 2)."""
+"""The fair slot queue (design §7, rules 1, 2 and 4)."""
 from __future__ import annotations
 
 import os
@@ -41,6 +41,14 @@ class Grants(unittest.TestCase):
     def test_a_ticket_without_a_project_gets_no_slot(self):
         self.assertEqual(g([T(1), T(2, 'other')]), [2])
         self.assertEqual(g([T(1), T(2)], free=2), [])
+
+    def test_tickets_without_a_project_are_the_default_projects(self):
+        """Rule 4: ci_slot.sh's tickets name no project and count as the host's default."""
+        def gd(waiting, held=None, free=1):
+            return grants(waiting, held or {}, CAPS, free, 'myproj')
+        self.assertEqual(gd([T(1), T(2)], held={'myproj': 1}, free=2), [1])  # myproj's cap is 2
+        self.assertEqual(gd([T(1), T(2, 'other')], held={'myproj': 1}), [2])  # myproj holds more
+        self.assertEqual(gd([T(1), T(2)], free=2), [1, 2])
 
     def test_queue_full(self):
         self.assertTrue(queue_full(1, 1))
@@ -105,6 +113,57 @@ class Queue(unittest.TestCase):
                 self.assertGreater(waited, 0.5)
             finally:
                 hold.wait()
+
+    def _outside_holder(self, path):
+        """A slot flocked by a process with no holder record: a ci_slot.sh holder."""
+        hold = subprocess.Popen(['flock', '-x', path, 'sleep', '30'], start_new_session=True)
+        self.addCleanup(lambda: (os.killpg(hold.pid, 9), hold.wait()))
+        for _ in range(500):
+            if slots._flocked(path):
+                return
+            time.sleep(0.01)
+        self.fail('the outside holder did not take the slot')
+
+    def _sh_ticket(self, q, seq):
+        """A live ci_slot.sh ticket (this process's pid) in ``q``'s queue."""
+        os.makedirs(q.queue, exist_ok=True)
+        with open(os.path.join(q.queue, f'{seq:012d}.ticket'), 'w') as f:
+            f.write(f'{seq} {os.getpid()} {int(time.time())} /x scripts/local_ci.sh affected\n')
+
+    def test_ci_slot_sh_holders_and_tickets_are_the_default_projects(self):
+        """Rule 4 on disk: a slot held without our holder record is the default project's,
+        so another project that holds fewer takes the free slot before an older ci_slot.sh
+        ticket."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05, default_project='p')
+            self._outside_holder(q.slots[0])
+            self._sh_ticket(q, 1)
+            q.take_ticket('q', 'cmd')
+            fd = q.try_take('q', {'p': 2, 'q': 1})
+            self.assertIsNotNone(fd)  # p holds 1 (ci_slot.sh's), q holds 0: q first
+            os.close(fd)
+
+    def test_an_older_ci_slot_sh_ticket_goes_first(self):
+        """A ci_slot.sh ticket is in the order: a newer ticket of the same project waits
+        behind it."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05, default_project='p')
+            self._outside_holder(q.slots[0])
+            self._sh_ticket(q, 1)
+            q.take_ticket('p', 'cmd')
+            self.assertEqual(q.seq, 2)
+            self.assertIsNone(q.try_take('p', {'p': 2}))
+
+    def test_the_default_projects_cap_is_the_slot_count(self):
+        """Rule 4: ci_slot.sh's waiters apply no caps, so the default project's is the
+        slot count, whatever its registry says."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05, default_project='p')
+            self._outside_holder(q.slots[0])
+            q.take_ticket('p', 'cmd')
+            fd = q.try_take('p', {'p': 1})
+            self.assertIsNotNone(fd)
+            os.close(fd)
 
     def test_tickets_share_the_counter_and_dead_ones_go(self):
         with tempfile.TemporaryDirectory() as d:

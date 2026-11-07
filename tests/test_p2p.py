@@ -4,66 +4,17 @@ leaves the destination as it was, and one whose driver call fails."""
 from __future__ import annotations
 
 import os
+import pathlib
+import signal
+import subprocess
 import sys
+import tempfile
+import time
 import unittest
+from unittest import mock
 
 from ci_runners import p2p, part
-
-
-class Fake:
-    """A CUDA driver stand-in: ``cards`` cards whose memory is ``bytearray``s."""
-
-    def __init__(self, cards: int = 2, mode: str = 'ok', fail: str = '') -> None:
-        self.cards, self.mode, self.fail = cards, mode, fail
-        self.mem: dict[int, bytearray] = {}
-        self.copies: list[tuple[int, int]] = []
-        self.closed = self.peers = False
-
-    def _check(self, name: str) -> None:
-        if name == self.fail:
-            raise p2p.P2PError(f'{name} returned CUDA_ERROR_UNKNOWN')
-
-    def count(self) -> int:
-        self._check('count')
-        return self.cards
-
-    def context(self, i: int) -> int:
-        return 100 + i
-
-    def enable_peers(self, ctxs) -> None:
-        self.peers = True
-
-    def alloc(self, ctx: int, size: int) -> int:
-        self.mem[ctx] = bytearray(size)
-        return ctx
-
-    def free(self, ctx: int, ptr: int) -> None:
-        self.mem.pop(ptr, None)
-
-    def upload(self, ctx: int, ptr: int, data: bytes) -> None:
-        self.mem[ptr][:] = data
-
-    def fill(self, ctx: int, ptr: int, value: int, size: int) -> None:
-        self.mem[ptr][:] = bytes([value]) * size
-
-    def peer(self, dst_ctx: int, dst: int, src_ctx: int, src: int, size: int) -> None:
-        self._check('peer')
-        self.copies.append((src - 100, dst - 100))
-        if self.mode == 'ok':
-            self.mem[dst][:] = self.mem[src]
-        elif self.mode == 'zeros':
-            self.mem[dst][:] = bytes(size)
-        elif self.mode == 'tail' and src == 100:  # the last byte of card 0's copies goes wrong
-            self.mem[dst][:] = self.mem[src][:-1] + b'\x00'
-        elif self.mode == 'tail':
-            self.mem[dst][:] = self.mem[src]
-        # 'none': the copy does nothing, the destination stays cleared
-
-    def download(self, ctx: int, ptr: int, size: int) -> bytes:
-        return bytes(self.mem[ptr])
-
-    def close(self) -> None:
-        self.closed = True
+from tests.p2p_fake import Fake, zeros_release
 
 
 SIZE = 4096
@@ -117,6 +68,43 @@ class Bound(unittest.TestCase):
         self.assertEqual(part.run_p2p([*py, 'import sys; sys.exit(3)'], 10), 'the self-test exited 3')
         self.assertEqual(part.run_p2p([*py, 'import time; time.sleep(30)'], 0.5), 'the self-test ran over its 0.5 s bound')
         self.assertIn('did not start', part.run_p2p(['/nonexistent/p2p'], 10))
+
+
+class Entry(unittest.TestCase):
+    """The release's own entry point, the supervisor's default command (``part.p2p_argv``),
+    over the zeros fixture in place of the CUDA driver: it must exit 1."""
+
+    def test_the_default_command_fails_on_zeros(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run(part.p2p_argv(zeros_release(d)), capture_output=True, text=True, timeout=60,
+                               env={'PATH': '/usr/bin:/bin', 'CUDA_VISIBLE_DEVICES': '3,5'})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r'^p2p: card 3 -> 5: byte 0 reads 0x00, not 0x[0-9a-f]{2} \(zeros\)\n\Z')
+
+
+class HardBound(unittest.TestCase):
+    """The bound holds when the killed test does not go: here a process of its own session
+    keeps the pipe open, as a call stuck in the driver keeps the test alive."""
+
+    def test_a_test_that_does_not_go_is_given_up(self):
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = pathlib.Path(d, 'pid')
+            argv = [sys.executable, '-I', '-c', 'import subprocess, sys, time; '
+                    'p = subprocess.Popen(["sleep", "30"], start_new_session=True); '
+                    f'open({str(pidfile)!r}, "w").write(str(p.pid)); time.sleep(30)']
+            t0 = time.monotonic()
+            try:
+                with mock.patch.object(part, 'P2P_KILL_WAIT', 0.5):
+                    why = part.run_p2p(argv, 0.5)
+                took = time.monotonic() - t0
+            finally:
+                for _ in range(100):
+                    if pidfile.exists() and pidfile.read_text():
+                        break
+                    time.sleep(0.05)
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+        self.assertEqual(why, 'the self-test ran over its 0.5 s bound')
+        self.assertLess(took, 5)
 
 
 @unittest.skipUnless(os.environ.get('CI_RUNNERS_P2P_LIVE') == '1', 'set CI_RUNNERS_P2P_LIVE=1 on a host with two cards')

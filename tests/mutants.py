@@ -1012,6 +1012,14 @@ MUTANTS = [
      [f'{TT}.LeaseQueue.test_a_waiting_two_card_lease_holds_back_a_later_one_card_lease']),
     (PRT, "            self._drop()\n            return chosen", "            return chosen",
      [f'{TT}.LeaseQueue.test_a_waiting_two_card_lease_holds_back_a_later_one_card_lease']),
+    # review round 1: the release's own P2P entry point, the hard bound, the h100 card count
+    (P2P, "    return 1 if why else 0", "    return 0",
+     [f'{T2}.Entry.test_the_default_command_fails_on_zeros', f'{TT}.Classes.test_the_release_s_own_p2p_test_keeps_the_command_out']),
+    (PRT, "'from ci_runners.p2p import main; sys.exit(main())'", "'from ci_runners.p2p import main; main()'",
+     [f'{T2}.Entry.test_the_default_command_fails_on_zeros', f'{TT}.Classes.test_the_release_s_own_p2p_test_keeps_the_command_out']),
+    (PRT, "            child.communicate(timeout=P2P_KILL_WAIT)", "            child.communicate()",
+     [f'{T2}.HardBound.test_a_test_that_does_not_go_is_given_up']),
+    (WFL, '[ "$HAS_GPU" != true ] || [ "$IN_GPUS" = 1 ] ||', 'true ||', [f'{TW}.Prep.test_the_gpu_part_takes_one_card']),
     # the env spec's conda table and env refresh (design §4.9, decisions 12.10, 12.11)
     (ENB, "'variables', 'conda'}", "'variables'}", [f'{TB}.Spec.test_the_conda_table_can_ask_for_live_nest_on_python_313']),
     (ENB, "    conda = _conda(doc['conda']) if 'conda' in doc else Conda()", "    conda = Conda()",

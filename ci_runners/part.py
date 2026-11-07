@@ -54,6 +54,7 @@ ROWS: dict[str, tuple[int, int | None, tuple[str, ...], int]] = {
     'nightly': (0, None, LOCKS, 600),
 }
 P2P_CLASSES = ('multi',)  # the classes whose parts run the P2P self-test first (decision 12.6)
+P2P_KILL_WAIT = 5.0  # s the supervisor waits for the self-test after killing it at its bound
 KILL_GRACE = 30  # s between TERM and KILL at the inner timeout
 RELAY_DRAIN = 5  # s the relay may still copy once the command has ended
 WATCHDOG_TAIL = 4 << 20  # bytes of the GPU watchdog's log read after a part
@@ -291,10 +292,20 @@ def _relay(src: int, dst: int) -> None:
                 alive = False
 
 
+def p2p_argv(release: str) -> list[str]:
+    """The P2P self-test as the supervisor runs it: ``ci_runners.p2p.main`` of the
+    release, its result the exit status. Pure."""
+    return [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
+            'from ci_runners.p2p import main; sys.exit(main())', release]
+
+
 def run_p2p(argv: Sequence[str], bound: float) -> str:
     """Run the P2P self-test ``argv`` (``ci_runners.p2p``) in a session of its own, at
     most ``bound`` s. Returns ``''`` on a pass, else the reason: its last line, its exit,
-    or the bound (decision 12.6)."""
+    or the bound (decision 12.6). The bound is hard: after the kill at ``bound`` the
+    supervisor waits ``P2P_KILL_WAIT`` s more, at most, for the test to go (a process
+    stuck in the driver does not die of SIGKILL until its call returns, and one that
+    holds the pipe keeps it open); then it gives up on it and the scope's stop reaps it."""
     try:
         child = subprocess.Popen(list(argv), start_new_session=True, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
@@ -307,7 +318,11 @@ def run_p2p(argv: Sequence[str], bound: float) -> str:
             os.killpg(child.pid, signal.SIGKILL)
         except OSError:
             pass
-        child.communicate()
+        try:
+            child.communicate(timeout=P2P_KILL_WAIT)
+        except subprocess.TimeoutExpired:  # give it up: the pipe closed, reaped if it went
+            child.stdout.close()
+            child.poll()
         return f'the self-test ran over its {bound:g} s bound'
     lines = text.decode('utf-8', 'replace').strip().splitlines()
     last = re.sub(r'[^\x20-\x7e]', '?', lines[-1])[:200] if lines else ''
@@ -728,9 +743,7 @@ class Executor:
                  p2p: Sequence[str] | None = None) -> None:
         self.inv, self.etc, self.env, self.release = inv, etc, dict(env), release
         # the P2P self-test of a multi part (decision 12.6); a fixture in the tests
-        self.p2p = list(p2p) if p2p is not None else [
-            sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
-            'from ci_runners.p2p import main; sys.exit(main())', release]
+        self.p2p = list(p2p) if p2p is not None else p2p_argv(release)
         self.own_cap = own_cap  # None: the supervisor caps memory where systemd does not (11.11)
         self.run, self.spawn, self.scope, self.poll = run, spawn, scope, poll
         self.procs, self.stop_part, self.clock, self.sample_s = procs, stop_part, clock, sample_s
@@ -979,7 +992,7 @@ class Executor:
                         return self._end(record, rec, a, unavailable='queue timeout: no card fits')
                     time.sleep(self.poll)
             rec.update(queue_seconds=round(time.monotonic() - t0), cards=cards, slot=slot_path, run_epoch=time.time())
-            pin = str(h.get('compile_cpus') if cls == 'compile' else h.get('cpus') or '')  # design §5.5 item 4
+            pin = str((h.get('compile_cpus') if cls == 'compile' else h.get('cpus')) or '')  # design §5.5 item 4
             cpus = pin or str(len(os.sched_getaffinity(0)))
             build, env_fd = envuse.hold(proj.env) if proj.env else ('', None)  # the link, resolved once
             if build:

@@ -15,6 +15,7 @@ import tempfile
 import unittest
 
 from ci_runners import envuse, inventory, part, registry
+from tests.p2p_fake import zeros_release
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -280,7 +281,7 @@ SMI_MEMORY = '0, 24576, 576\n1, 24576, 576\n'
 SMI_STATUS = '0, 00000000:01:00.0, 40, 0\n1, 00000000:02:00.0, 41, 0\n'
 #: a P2P self-test whose peer copies read zeros (h100's fault, design §5.4), over the fixture driver
 P2P_ZEROS = [sys.executable, '-I', '-c', f'import sys; sys.path.insert(0, {str(ROOT)!r}); '
-             'from ci_runners import p2p; from tests.test_p2p import Fake; '
+             'from ci_runners import p2p; from tests.p2p_fake import Fake; '
              'why = p2p.self_test(Fake(mode="zeros"), 4096); print("p2p: " + (why or "ok")); sys.exit(1 if why else 0)']
 #: one that passes, and leaves what it saw in the part's directory
 P2P_OK = [sys.executable, '-I', '-c', 'import os; open(os.environ["CI_PART_DIR"] + "/p2p", "w").write('
@@ -311,14 +312,14 @@ class Classes(Host):
             return subprocess.CompletedProcess(argv, 0, text, '')
         return subprocess.run(argv, **kw)
 
-    def go(self, cls, *, card='', p2p=P2P_OK, **kw):
+    def go(self, cls, *, card='', p2p=P2P_OK, release=str(ROOT), **kw):
         kw.setdefault('project', 'p')
         kw.setdefault('id', 'c')
         kw.setdefault('timeout_minutes', 1)
         kw.setdefault('queue_timeout_minutes', 0.02)
         kw.setdefault('command', 'touch "$CI_PART_DIR/ran"')
         env = {**self.env, 'CI_RUNNER_CLASS': cls, 'RUNNER_NAME': f'hb-{cls}-1', 'CI_RUNNER_CARD': card}
-        ex = part.Executor(self.inv, str(self.etc), env, release=str(ROOT), scope=False, poll=0.05, run=self.run_fake,
+        ex = part.Executor(self.inv, str(self.etc), env, release=release, scope=False, poll=0.05, run=self.run_fake,
                            sample_s=0.05, p2p=p2p)
         return ex.execute(part.Inputs(**kw))
 
@@ -398,6 +399,15 @@ class Classes(Host):
         self.assertEqual(leases.leased([0, 1]), {0: 0, 1: 0})  # and the cards are free again
         _, out = self.go('gpu', card='1', gpus=1, p2p=P2P_ZEROS, id='one')  # one card: no P2P self-test
         self.assertEqual(out['outcome'], 'pass')
+
+    def test_the_release_s_own_p2p_test_keeps_the_command_out(self):
+        """The default self-test (``part.p2p_argv``, the release's ``p2p.main``) over the
+        zeros fixture: the part ends unavailable (p2p), next none, and its command never runs."""
+        with tempfile.TemporaryDirectory() as d:
+            code, out = self.go('multi', gpus=2, p2p=None, release=zeros_release(d))
+        self.assertEqual((code, out['outcome'], out['next']), (0, 'unavailable', 'none'))
+        self.assertRegex(out['reason'], r'^p2p: card 0 -> 1: byte 0 reads 0x00, not 0x[0-9a-f]{2} \(zeros\)$')
+        self.assertFalse(self.ran(out))
 
     def test_a_hot_card_keeps_a_multi_part_out(self):
         self.status = SMI_STATUS.replace('41, 0', '85, 100')

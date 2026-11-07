@@ -108,7 +108,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE = "false"
 6. **权限**：`contents: read`，claim 和 verdict 还要 `statuses: write`。要读别的 run 的 artifact 时再加 `actions: read`。
 7. `concurrency` 必须写成块格式。行内映射 `{group: ...${{ }}...}` 里含表达式时，YAML 会解析失败，GitHub 会直接拒绝整个文件。`tests/test_workflow.py` 会检查本文档里的示例。
 
-各 action 的输入见 `actions/<name>/action.yml`，引用 `@v1`。brainspike 的 `ci.yml` 是一个完整的例子。
+各 action 的输入见 `actions/<name>/action.yml`，引用 `@v1`。不要钉某个发布 tag（如 `@v1.4.1`）：主机升级后，inventory 里新加的键（v1.5 的 `peer_labels`、`busy`）会让更旧的 action 在那台主机上全部失败（design §9，`v1.5.0` notes 第 6 条）。brainspike 的 `ci.yml` 是一个完整的例子。
 
 ## 4. 命令约定
 

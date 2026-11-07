@@ -30,6 +30,9 @@ paused = true
 P = policy.load(POLICY)
 P_BOT = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nbot_dispatch = true\n'))
 P_TARGET = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["pull_request_target"]\n'))
+#: brainkit may use the exclusive classes (decision 12.14): compile and nightly, or compile alone
+P_BOTH = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nclasses = ["compile", "nightly"]\n'))
+P_COMPILE = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nclasses = ["compile"]\n'))
 
 REPOS = {'chaobrain/brainkit': '1001', 'chaobrain/brainevent': '2002'}
 #: the public repository, as a payload names it
@@ -65,8 +68,16 @@ def reason(p, e, ev):
 
 class Accepted(unittest.TestCase):
     def test_same_repository_pull_request_by_a_member(self):
-        for cls in sorted(policy.CLASSES):
+        for cls in sorted(policy.CLASSES - policy.OPT_IN):
             self.assertEqual(reason(P, env(cls=cls), event('pr_same_repo')), 'ok', cls)
+        for cls in sorted(policy.CLASSES):
+            self.assertEqual(reason(P_BOTH, env(cls=cls), event('pr_same_repo')), 'ok', cls)
+
+    def test_the_3090_classes_are_open(self):
+        """Decision 12.5: gpu and multi are open to every private repository, as part is."""
+        for cls in ('gpu', 'multi'):
+            self.assertIn(cls, policy.CLASSES)
+            self.assertEqual(reason(P, env(cls=cls, event='push'), event('push')), 'ok', cls)
 
     def test_push_dispatch_schedule_workflow_run(self):
         self.assertEqual(reason(P, env(event='push'), event('push')), 'ok')
@@ -166,9 +177,15 @@ class Refused(unittest.TestCase):
             self.assertEqual(reason(P, env('chaobrain/brainevent', cls=cls), public('pr_same_repo')), 'repository', cls)
             self.assertEqual(reason(P, env('chaobrain/brainevent', 'push', cls=cls), public('push')), 'repository', cls)
 
-    def test_the_retired_runner_classes(self):
-        for cls in ('compile', 'nightly', 'gpu'):
+    def test_the_exclusive_classes_only_where_listed(self):
+        """Decision 12.14: compile and nightly only for a repository whose entry lists them."""
+        for cls in ('compile', 'nightly'):
             self.assertEqual(reason(P, env(cls=cls), event('pr_same_repo')), 'runner-class', cls)
+            self.assertEqual(reason(P, env(cls=cls, event='push'), event('push')), 'runner-class', cls)
+        self.assertEqual(reason(P_COMPILE, env(cls='compile'), event('pr_same_repo')), 'ok')
+        self.assertEqual(reason(P_COMPILE, env(cls='nightly'), event('pr_same_repo')), 'runner-class')
+        self.assertEqual(P_BOTH.repos['chaobrain/brainkit'].classes, {'compile', 'nightly'})
+        self.assertEqual(P.repos['chaobrain/brainkit'].classes, frozenset())
 
     def test_an_unknown_runner_class(self):
         for cls in (None, '', 'PART', 'part ', 'h100-gpu0'):
@@ -262,6 +279,11 @@ class Load(unittest.TestCase):
             'listed twice': POLICY + '[repositories."Chaobrain/Brainkit"]\nid = 9\nvisibility = "private"\n',
             'repo key': POLICY + '[repositories."brainkit"]\nid = 9\nvisibility = "private"\n',
             'repo unknown key': POLICY.replace('id = 1001\n', 'id = 1001\nactors = ["x"]\n'),
+            'classes not a list': POLICY.replace('id = 1001\n', 'id = 1001\nclasses = "compile"\n'),
+            'classes an open class': POLICY.replace('id = 1001\n', 'id = 1001\nclasses = ["part"]\n'),
+            'classes unknown': POLICY.replace('id = 1001\n', 'id = 1001\nclasses = ["Compile"]\n'),
+            'classes not str': POLICY.replace('id = 1001\n', 'id = 1001\nclasses = [1]\n'),
+            'public classes': POLICY.replace('id = 2002\n', 'id = 2002\nclasses = ["nightly"]\n'),
             'not toml': 'schema = = 1',
             'not utf-8': b'\xff\xfe',
         }

@@ -223,7 +223,8 @@ class Execute(Host):
             if argv[0] == 'nvidia-smi':
                 return subprocess.CompletedProcess(argv, 0, smi, '')
             return subprocess.run(argv, **kw)
-        ex = part.Executor(self.inv, str(self.etc), self.env, release=str(ROOT), scope=False, poll=0.1, run=run)
+        ex = part.Executor(self.inv, str(self.etc), {**self.env, 'CI_RUNNER_CLASS': 'gpu'}, release=str(ROOT),
+                           scope=False, poll=0.1, run=run)
         code, out = ex.execute(part.Inputs(project='p', id='g', timeout_minutes=1, queue_timeout_minutes=0.02, gpus=1,
                                            gpu_mem_mib=6000,
                                            command='echo $CUDA_VISIBLE_DEVICES > "$CI_PART_DIR/cards"'))
@@ -273,6 +274,235 @@ class Execute(Host):
             time.sleep(0.05)
         code, out = part.salvage(self.inv, 'hb:org/repo/77-1/long-1', self.env)
         self.assertEqual((out['outcome'], (rec / 'work' / 'done').exists()), ('pass', True))
+
+
+SMI_MEMORY = '0, 24576, 576\n1, 24576, 576\n'
+SMI_STATUS = '0, 00000000:01:00.0, 40, 0\n1, 00000000:02:00.0, 41, 0\n'
+#: a P2P self-test whose peer copies read zeros (h100's fault, design §5.4), over the fixture driver
+P2P_ZEROS = [sys.executable, '-I', '-c', f'import sys; sys.path.insert(0, {str(ROOT)!r}); '
+             'from ci_runners import p2p; from tests.test_p2p import Fake; '
+             'why = p2p.self_test(Fake(mode="zeros"), 4096); print("p2p: " + (why or "ok")); sys.exit(1 if why else 0)']
+#: one that passes, and leaves what it saw in the part's directory
+P2P_OK = [sys.executable, '-I', '-c', 'import os; open(os.environ["CI_PART_DIR"] + "/p2p", "w").write('
+          'os.environ["CUDA_VISIBLE_DEVICES"]); print("p2p: ok")']
+
+
+class Classes(Host):
+    """The 3090 classes (decisions 12.5 to 12.8, design §4.8, §5.5) on a 3090-style host:
+    two cards, two slots, a per-card ``gpu`` pool, ``multi``, ``compile`` and ``nightly``."""
+
+    def setUp(self):
+        super().setUp()
+        (self.slot.parent / 's.2.lock').write_text('')
+        self.hl = pathlib.Path(self.tmp.name, 'locks', 'h.lock')
+        self.inv_text = self.inv_text.replace('slots = 1\n', 'slots = 2\n').replace(
+            'pools = { light = 1, part = 1 }',
+            'cpus = "1"\ncompile_cpus = "0"\npools = { light = 1, part = 1, cards = { per_card = true, class = "gpu", '
+            'labels = ["hb-gpu"] }, multi = 1, compile = 1, nightly = 1 }').replace(
+            'files = { ', f'files = {{ host_lock = "{self.hl}", ')
+        self.inv = inventory.load(self.inv_text)
+        self.status = SMI_STATUS
+
+    def run_fake(self, argv, **kw):
+        if argv[0] == 'nvidia-smi':
+            q = argv[1]
+            text = SMI_MEMORY if q.startswith('--query-gpu=index,memory') else \
+                self.status if q.startswith('--query-gpu=index,pci.bus_id') else ''
+            return subprocess.CompletedProcess(argv, 0, text, '')
+        return subprocess.run(argv, **kw)
+
+    def go(self, cls, *, card='', p2p=P2P_OK, **kw):
+        kw.setdefault('project', 'p')
+        kw.setdefault('id', 'c')
+        kw.setdefault('timeout_minutes', 1)
+        kw.setdefault('queue_timeout_minutes', 0.02)
+        kw.setdefault('command', 'touch "$CI_PART_DIR/ran"')
+        env = {**self.env, 'CI_RUNNER_CLASS': cls, 'RUNNER_NAME': f'hb-{cls}-1', 'CI_RUNNER_CARD': card}
+        ex = part.Executor(self.inv, str(self.etc), env, release=str(ROOT), scope=False, poll=0.05, run=self.run_fake,
+                           sample_s=0.05, p2p=p2p)
+        return ex.execute(part.Inputs(**kw))
+
+    def ran(self, out):
+        return pathlib.Path(self.path(out), 'work', 'ran').exists()
+
+    def work(self, out, name):
+        return pathlib.Path(self.path(out), 'work', name).read_text().strip()
+
+    def test_each_class_refuses_gpus_and_lock_outside_its_row(self):
+        bad = [('light', {'gpus': 1}, 'take no card'), ('part', {'gpus': 1}, 'take no card'),
+               ('compile', {'gpus': 2}, 'take no card'), ('gpu', {'gpus': 0}, 'take 1 card'),
+               ('gpu', {'gpus': 2}, 'take 1 card'), ('h100', {'gpus': 0}, 'take 1 card'),
+               ('multi', {'gpus': 1}, 'take 2 cards'), ('multi', {'gpus': 0}, 'take 2 cards'),
+               ('light', {'lock': 's'}, 'take lock none'), ('light', {'lock': 'x'}, 'take lock none'),
+               ('compile', {'lock': 'none'}, 'take lock x'), ('compile', {'lock': 's'}, 'take lock x')]
+        for n, (cls, kw, why) in enumerate(bad):
+            code, out = self.go(cls, card='0' if cls == 'gpu' else '', id=f'b{n}', **kw)
+            self.assertEqual((code, out['outcome'], out['next']), (0, 'unavailable', 'fallback'), (cls, kw))
+            self.assertIn(why, out['reason'], (cls, kw))
+            self.assertFalse(self.ran(out), (cls, kw))
+        good = [('light', {}), ('part', {'lock': 's'}), ('gpu', {'gpus': 1, 'lock': 'x'}), ('multi', {'gpus': 2}),
+                ('compile', {}), ('compile', {'lock': 'x'}), ('nightly', {'gpus': 0}), ('nightly', {'gpus': 1}),
+                ('nightly', {'gpus': 2, 'lock': 'l'})]
+        for n, (cls, kw) in enumerate(good):
+            code, out = self.go(cls, card='0' if cls == 'gpu' else '', id=f'g{n}', **kw)
+            self.assertEqual(out['outcome'], 'pass', (cls, kw, out['reason']))
+
+    def test_each_class_refuses_a_timeout_outside_its_row(self):
+        for cls, top in (('light', 30), ('part', 240), ('compile', 240), ('multi', 240), ('nightly', 600)):
+            gpus = 2 if cls == 'multi' else 0
+            with self.assertRaises(part.Refused, msg=cls):
+                self.go(cls, timeout_minutes=top + 1, gpus=gpus, id=f'{cls}-over')
+            self.assertEqual(self.go(cls, timeout_minutes=top, gpus=gpus, id=f'{cls}-top')[1]['outcome'], 'pass', cls)
+        with self.assertRaises(part.Refused):
+            self.go('cpu-ish')  # no class of ours
+
+    def test_a_lock_needs_the_host_lock(self):
+        self.inv = inventory.load(self.inv_text.replace(f'host_lock = "{self.hl}", ', ''))
+        for n, (cls, kw) in enumerate((('part', {'lock': 's'}), ('compile', {}), ('nightly', {'lock': 'x'}))):
+            code, out = self.go(cls, id=f'n{n}', **kw)
+            self.assertEqual((out['outcome'], out['reason']), ('unavailable', f'lock {kw.get("lock", "x")}: this host '
+                                                                              'has no host lock'), cls)
+        self.assertEqual(self.go('part', id='none')[1]['outcome'], 'pass')  # lock none needs none
+        with self.assertRaises(part.Refused):
+            self.go('part', id='bad', lock='X')
+
+    def test_a_compile_part_is_pinned_at_nice_0_and_takes_a_slot(self):
+        probe = ('nice > "$CI_PART_DIR/nice"; grep Cpus_allowed_list /proc/self/status > "$CI_PART_DIR/cpus"; '
+                 'echo "$CI_CPUS $CI_SLOT_HELD" > "$CI_PART_DIR/env"')
+        _, out = self.go('compile', command=probe)
+        rec = json.loads(pathlib.Path(self.path(out), 'record.json').read_text())
+        self.assertEqual((out['outcome'], rec['lock']), ('pass', 'x'))  # lock defaults to x on compile
+        self.assertEqual(self.work(out, 'nice'), str(os.nice(0)))
+        self.assertEqual(self.work(out, 'cpus').split()[-1], '0')  # compile_cpus
+        self.assertEqual(self.work(out, 'env'), f'0 {self.slot}')
+        _, out = self.go('part', command=probe, id='p')
+        self.assertEqual(self.work(out, 'nice'), str(min(19, os.nice(0) + 10)))
+        self.assertEqual(self.work(out, 'cpus').split()[-1], '1')  # cpus
+        self.inv = inventory.load(self.inv_text.replace('compile_cpus = "0"\n', ''))
+        _, out = self.go('compile', id='nocpus')
+        self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'this host has no compile_cpus for compile parts'))
+
+    def test_a_multi_part_runs_after_the_p2p_self_test(self):
+        _, out = self.go('multi', gpus=2, command='echo $CUDA_VISIBLE_DEVICES > "$CI_PART_DIR/cards"')
+        self.assertEqual((out['outcome'], out['gpus']), ('pass', '0,1'))
+        self.assertEqual((self.work(out, 'p2p'), self.work(out, 'cards')), ('0,1', '0,1'))
+        self.assertIsNone(json.loads(pathlib.Path(self.path(out), 'exit.json').read_text()).get('p2p'))
+
+    def test_a_failed_p2p_self_test_is_unavailable_p2p_with_next_none(self):
+        code, out = self.go('multi', gpus=2, p2p=P2P_ZEROS)
+        self.assertEqual((code, out['outcome'], out['next'], out['retry-on']), (0, 'unavailable', 'none', []))
+        self.assertTrue(out['reason'].startswith('p2p: card 0 -> 1: byte 0 reads 0x00'), out['reason'])
+        self.assertIn('(zeros)', out['reason'])
+        self.assertFalse(self.ran(out))  # the command never ran
+        leases = part.Leases(str(self.data / 'ci-runners/state/leases'))
+        self.assertEqual(leases.leased([0, 1]), {0: 0, 1: 0})  # and the cards are free again
+        _, out = self.go('gpu', card='1', gpus=1, p2p=P2P_ZEROS, id='one')  # one card: no P2P self-test
+        self.assertEqual(out['outcome'], 'pass')
+
+    def test_a_hot_card_keeps_a_multi_part_out(self):
+        self.status = SMI_STATUS.replace('41, 0', '85, 100')
+        _, out = self.go('multi', gpus=2)
+        self.assertEqual((out['outcome'], out['next']), ('unavailable', 'fallback'))
+        self.assertIn('health gate', out['reason'])
+        _, out = self.go('gpu', card='0', gpus=1, id='cool')  # the other card's runner still runs
+        self.assertEqual(out['outcome'], 'pass')
+
+    def test_a_hot_card_is_not_leased(self):
+        """A part that may take any card takes a cool one on a per-card host."""
+        self.status = SMI_STATUS.replace('40, 0', '85, 100')
+        _, out = self.go('gpu', gpus=1)
+        self.assertEqual((out['outcome'], out['gpus']), ('pass', '1'))
+
+    def test_a_nightly_part_takes_every_slot_and_card(self):
+        leases = self.data / 'ci-runners/state/leases'
+        held = ' '.join(f'"{p}"' for p in (self.slot, self.slot.parent / 's.2.lock', leases / 'card0.0.lock',
+                                           leases / 'card1.0.lock'))
+        probe = (f'for f in {held}; do flock -n "$f" true && echo free || echo held; done > "$CI_PART_DIR/probe"; '
+                 'echo "[$CUDA_VISIBLE_DEVICES]" > "$CI_PART_DIR/cards"')
+        for n, (gpus, cards) in enumerate(((0, '[]'), (1, '[0]'), (2, '[0,1]'))):
+            _, out = self.go('nightly', gpus=gpus, command=probe, id=f'n{n}', timeout_minutes=600)
+            self.assertEqual(out['outcome'], 'pass')
+            self.assertEqual(self.work(out, 'probe').split(), ['held'] * 4, gpus)
+            self.assertEqual(self.work(out, 'cards'), cards)
+        for p in (self.slot, self.slot.parent / 's.2.lock'):  # released at the end
+            fd = os.open(p, os.O_WRONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+
+    def test_a_nightly_part_waits_for_every_slot_and_card(self):
+        fd = os.open(self.slot.parent / 's.2.lock', os.O_WRONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # someone holds slot 2
+        try:
+            _, out = self.go('nightly')
+        finally:
+            os.close(fd)
+        self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no CI slot'))
+        self.assertFalse(self.ran(out))
+        fd = os.open(self.slot, os.O_WRONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # the slot it held meanwhile is free again
+        finally:
+            os.close(fd)
+        other = part.Leases(str(self.data / 'ci-runners/state/leases'))
+        self.assertEqual(other.try_take(1, [1], {0: 24000, 1: 24000}, 0), [1])  # a part on card 1
+        try:
+            _, out = self.go('nightly', id='n2')
+        finally:
+            other.release()
+        self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no card fits'))
+
+
+class LeaseQueue(Host):
+    """Card leases in ticket order (decision 12.6), on the lease files and tickets."""
+    FREE = {0: 24000, 1: 24000}
+
+    def leases(self):
+        return part.Leases(str(self.data / 'ci-runners/state/leases'))
+
+    def test_a_waiting_two_card_lease_holds_back_a_later_one_card_lease(self):
+        x, a, b = self.leases(), self.leases(), self.leases()
+        try:
+            self.assertEqual(x.try_take(1, [1], self.FREE, 0), [1])  # a one-card part holds card 1
+            self.assertIsNone(a.try_take(2, [0, 1], self.FREE, 0))  # the multi part waits
+            self.assertIsNone(b.try_take(1, [0], self.FREE, 0))  # card 0 is free, but held back for it
+            x.release()
+            self.assertIsNone(b.try_take(1, [0], self.FREE, 0))  # still behind the multi part's ticket
+            self.assertEqual(a.try_take(2, [0, 1], self.FREE, 0), [0, 1])
+            self.assertFalse(os.path.exists(a.ticket or '/nonexistent'))
+            self.assertIsNone(b.try_take(1, [0], self.FREE, 0))
+            a.release()
+            self.assertEqual(b.try_take(1, [0], self.FREE, 0), [0])
+        finally:
+            for le in (x, a, b):
+                le.release()
+
+    def test_every_takes_each_card_whole(self):
+        """A nightly part (decision 12.8) holds every lease of its cards, where a card has more."""
+        d = str(self.data / 'ci-runners/state/leases')
+        night, other = part.Leases(d, max_parts=2), part.Leases(d, max_parts=2)
+        try:
+            self.assertEqual(night.try_take(2, [0, 1], self.FREE, 0, every=True), [0, 1])
+            self.assertEqual(len(night.fds), 4)
+            self.assertIsNone(other.try_take(1, [0, 1], self.FREE, 0))
+        finally:
+            night.release()
+            other.release()
+
+    def test_a_dead_or_malformed_ticket_holds_nothing_back(self):
+        q = self.data / 'ci-runners/state/leases/queue'
+        q.mkdir(parents=True)
+        (q / '000000000001.json').write_text(json.dumps({'pid': 999999999, 'start': 1, 'n': 2, 'cards': [0, 1],
+                                                         'need_mib': 0, 'every': False}))
+        (q / '000000000002.json').write_text('{"pid": "x"}')
+        b = self.leases()
+        try:
+            self.assertEqual(b.try_take(1, [0], self.FREE, 0), [0])
+            self.assertEqual(b.seq, 3)  # after the others
+            self.assertEqual(sorted(os.listdir(q)), ['seq'])
+        finally:
+            b.release()
 
 
 class OwnCap(Host):

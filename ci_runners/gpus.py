@@ -4,6 +4,7 @@ Pure functions; the lease files and the ``nvidia-smi`` calls are the host layer'
 """
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping, Sequence
 
 
@@ -51,6 +52,43 @@ def choose_lease(n: int, *, cards: Sequence[int], free: Mapping[int, int], need_
         return []
     ok = [i for i in rank_gpus({i: free[i] for i in cards if i in free}, need_mib) if leased.get(i, 0) < max_parts]
     return ok[:n] if len(ok) >= n else None
+
+
+@dataclasses.dataclass(frozen=True)
+class LeaseTicket:
+    """A part waiting for cards (design §7): ``n`` of ``cards``, each with ``need_mib``
+    free; ``every`` takes every lease of each card it gets, so no part shares them
+    (a ``nightly`` part, decision 12.8)."""
+    seq: int  # lower is older
+    n: int
+    cards: tuple[int, ...]
+    need_mib: int = 0
+    every: bool = False
+
+
+def lease_grants(tickets: Sequence[LeaseTicket], *, free: Mapping[int, int], leased: Mapping[int, int],
+                 max_parts: int = 1) -> dict[int, list[int] | None]:
+    """The cards each waiting ticket takes now, by ``seq``, or None where it waits.
+
+    Tickets are served in ticket order per card (decision 12.6): an older ticket that
+    cannot take its cards now holds them back, so no later ticket takes any of its
+    ``cards`` before it; a two-card part is not starved by a stream of one-card parts.
+    Each ticket otherwise chooses as ``choose_lease`` does, among the cards older tickets
+    neither took nor hold back. Pure."""
+    leased = dict(leased)
+    held_back: set[int] = set()
+    out: dict[int, list[int] | None] = {}
+    for t in sorted(tickets, key=lambda t: t.seq):
+        open_cards = [c for c in t.cards if c not in held_back]
+        got = choose_lease(t.n, cards=open_cards, free=free, need_mib=t.need_mib, leased=leased,
+                           max_parts=1 if t.every else max_parts)
+        out[t.seq] = got
+        if got is None:
+            held_back.update(t.cards)
+            continue
+        for c in got:
+            leased[c] = max_parts if t.every else leased.get(c, 0) + 1
+    return out
 
 
 def _num(s: str) -> float | None:

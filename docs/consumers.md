@@ -53,6 +53,7 @@ verdict        [self-hosted, h100-light]
 | `thermal` | 卡过热，被 watchdog 杀掉或被提前停止 | 换一张凉卡重试一次 |
 | `reboot` | 运行期间主机重启 | 同 thermal |
 | `unavailable` | 开跑前就不满足条件：卡太热、没有空卡、排队超时、磁盘不足、`gpus > 1` 等 | 重试一次 |
+| `unavailable`（`p2p: …`） | 双卡部件（`multi`）开跑前的 P2P 自检失败：主机故障 | 不重试，状态为 `error` |
 | `lost` | 作业没留下输出就结束了，例如 runner 被停 | verdict 从主机上的记录 salvage |
 | `stopped` | 被取消，例如同一个 PR 推了新 head | — |
 
@@ -158,7 +159,7 @@ jobs:
   | `event` | 这个事件不被接受，例如 `pull_request_target` |
   | `paused` | 维护者暂停了这个仓库 |
   | `stale` | org 快照超过 60 分钟没更新：同步出了问题，请联系维护者 |
-  | `runner-class` | 这个 runner 不接这一类任务 |
+  | `runner-class` | 这个 runner 不接这一类任务；`compile` 和 `nightly` 只接 `policy.toml` 里列了这一类的仓库 |
   | `policy` / `timeout` / `error` | hook 无法做出判断，请联系维护者 |
 
 - **新建的私有仓库或新成员**：最多等 10 分钟，下一次同步后就能用。

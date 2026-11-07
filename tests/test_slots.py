@@ -42,6 +42,16 @@ class Grants(unittest.TestCase):
         self.assertEqual(g([T(1), T(2, 'other')]), [2])
         self.assertEqual(g([T(1), T(2)], free=2), [])
 
+    def test_a_ticket_for_every_slot_holds_back_later_ones(self):
+        """Decision 12.8: a nightly part's ticket is served after the older ones, takes every
+        slot left whatever its cap, and no later ticket passes it."""
+        every = T(2, 'myproj', every=True)
+        self.assertEqual(g([T(1, 'other'), every, T(3, 'brainevent')], free=2), [1, 2])
+        self.assertEqual(g([every, T(3, 'brainevent')], free=2), [2, 2])
+        self.assertEqual(g([every, T(3, 'brainevent')], held={'myproj': 1}, free=1), [2])  # past its cap of 2
+        self.assertEqual(g([every, T(3, 'brainevent')], free=0), [])
+        self.assertEqual(g([T(1, 'other'), T(3, 'brainevent')], free=2), [1, 3])
+
     def test_queue_full(self):
         self.assertTrue(queue_full(1, 1))
         self.assertFalse(queue_full(0, 1))
@@ -105,6 +115,40 @@ class Queue(unittest.TestCase):
                 self.assertGreater(waited, 0.5)
             finally:
                 hold.wait()
+
+    def test_a_ticket_for_every_slot_takes_them_all(self):
+        """Decision 12.8: ``try_take_every`` keeps what it gets until it holds every slot."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05)
+            for p in q.slots:
+                pathlib.Path(p).touch()
+            hold = subprocess.Popen(['flock', '-x', q.slots[1], 'sleep', '30'], start_new_session=True)
+            try:
+                for _ in range(200):
+                    if slots._flocked(q.slots[1]):
+                        break
+                    time.sleep(0.01)
+                older = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05)
+                older.take_ticket('q', 'cmd')  # an older ticket goes first, within its cap
+                q.take_ticket('p', 'cmd', every=True)
+                self.assertEqual(q.waiting(), [T(older.seq, 'q'), T(q.seq, 'p', every=True)])
+                self.assertIsNone(q.try_take_every('p', {'q': 1}))
+                self.assertEqual(q.every, [])  # the one free slot is the older ticket's
+                fd = older.try_take('q', {'q': 1})
+                os.close(fd)
+                self.assertIsNone(q.try_take_every('p', {}))  # slot 2 is held: it keeps slot 1 and waits
+                self.assertEqual((len(q.every), q.held()[1], os.path.exists(q.ticket)), (1, 0, True))
+                later = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05)
+                later.take_ticket('p', 'cmd')
+                self.assertIsNone(later.try_take('p', {'p': 2}))
+            finally:
+                os.killpg(hold.pid, 9)
+                hold.wait()
+            fds = q.try_take_every('p', {})
+            self.assertEqual((len(fds), q.held()[:2], os.path.exists(q.ticket)), (2, ({'p': 2}, 0), False))
+            self.assertIsNone(later.try_take('p', {'p': 2}))
+            for fd in fds:
+                os.close(fd)
 
     def test_tickets_share_the_counter_and_dead_ones_go(self):
         with tempfile.TemporaryDirectory() as d:

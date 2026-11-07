@@ -23,8 +23,11 @@ from collections.abc import Mapping
 #: this repository: its jobs are refused on every runner (AGENTS.md, design §6.2)
 SELF = 'chaobrain/ci-runners'
 
-#: runner classes (``CI_RUNNER_CLASS``, design §5.1)
-CLASSES = frozenset({'light', 'part', 'h100'})
+#: runner classes (``CI_RUNNER_CLASS``, design §5.1, decision 12.5)
+CLASSES = frozenset({'light', 'part', 'h100', 'gpu', 'multi', 'compile', 'nightly'})
+#: the classes that hold a host exclusively: accepted only for a repository whose entry
+#: lists them in ``classes`` (decision 12.14); the others are open to every repository
+OPT_IN = frozenset({'compile', 'nightly'})
 
 #: events accepted per repository class (design §6.2)
 PRIVATE_EVENTS = frozenset({'pull_request', 'push', 'workflow_dispatch', 'schedule', 'workflow_run', 'status',
@@ -70,6 +73,7 @@ class Repo:
     extra_events: frozenset[str] = frozenset()  # private only: events beyond PRIVATE_EVENTS
     bot_dispatch: bool = False  # private only: the bot may start BOT_EVENTS (lead, 2026-11-05)
     org_members: bool = False  # set by ``with_snapshot`` only: the org's members may run here too
+    classes: frozenset[str] = frozenset()  # private only: the OPT_IN classes it may use (decision 12.14)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -152,7 +156,7 @@ def load(data: bytes | str) -> Policy:
             raise PolicyError('policy: a repository key is not owner/name')
         if name == SELF:
             raise PolicyError(f'policy: {SELF} may not be listed')
-        unknown = set(r) - {'id', 'visibility', 'paused', 'extra_events', 'bot_dispatch'}
+        unknown = set(r) - {'id', 'visibility', 'paused', 'extra_events', 'bot_dispatch', 'classes'}
         if unknown:
             raise PolicyError(f'policy: {name}: unknown keys {sorted(unknown)}')
         rid, vis, paused = r.get('id'), r.get('visibility'), r.get('paused', False)
@@ -172,9 +176,14 @@ def load(data: bytes | str) -> Policy:
             raise PolicyError(f'policy: {name}: bot_dispatch must be a boolean')
         if bot_dispatch and vis == 'public':
             raise PolicyError(f'policy: {name}: a public repository takes no bot dispatch')
+        classes = r.get('classes', [])
+        if not isinstance(classes, list) or not all(isinstance(c, str) and c in OPT_IN for c in classes):
+            raise PolicyError(f'policy: {name}: classes must name classes of {sorted(OPT_IN)}')
+        if classes and vis == 'public':
+            raise PolicyError(f'policy: {name}: a public repository takes no classes')
         if name in repos:
             raise PolicyError(f'policy: {name} is listed twice')
-        repos[name] = Repo(name, rid, vis, paused, frozenset(extra), bot_dispatch)
+        repos[name] = Repo(name, rid, vis, paused, frozenset(extra), bot_dispatch, classes=frozenset(classes))
     return Policy(frozenset(actors), repos, bot, hashlib.sha256(raw).hexdigest(), org)
 
 
@@ -332,6 +341,8 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
         return no('paused')
     if repo.visibility != 'private':  # public repositories stay on hosted runners (design §6.2)
         return no('repository')
+    if cls in OPT_IN and cls not in repo.classes:  # an exclusive class, not listed for it (12.14)
+        return no('runner-class')
     if event_name not in PRIVATE_EVENTS | repo.extra_events:
         return no('event')
     # not a fork: a pull request's head and base, and a workflow_run's head, are this repository

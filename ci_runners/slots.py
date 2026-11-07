@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 class Ticket:
     seq: int  # the queue's number: lower is older
     project: str = ''  # empty: a ticket that names no project, which no cap admits
+    every: bool = False  # it waits for every slot of the host (a ``nightly`` part, decision 12.8)
 
 
 def grants(waiting: Sequence[Ticket], held: Mapping[str, int], caps: Mapping[str, int], free: int) -> list[int]:
@@ -26,10 +27,17 @@ def grants(waiting: Sequence[Ticket], held: Mapping[str, int], caps: Mapping[str
     A ticket whose project already holds its cap (``caps``; a project not listed has
     cap 0) is skipped. Each
     free slot goes to the waiting project that holds the fewest slots, and among
-    those to the oldest ticket. Pure.
+    those to the oldest ticket.
+
+    A ticket that waits for ``every`` slot holds back every later ticket: the tickets
+    older than it are served first, as above, and it takes each slot left, whatever its
+    project's cap, so its seq may appear more than once. Pure.
     """
     held = {p: n for p, n in held.items()}
     queue = sorted(waiting, key=lambda t: t.seq)
+    first = next((t for t in queue if t.every), None)
+    if first is not None:
+        queue = [t for t in queue if t.seq < first.seq]
     out: list[int] = []
     for _ in range(max(0, free)):
         best = None
@@ -46,6 +54,8 @@ def grants(waiting: Sequence[Ticket], held: Mapping[str, int], caps: Mapping[str
         out.append(t.seq)
         p = t.project
         held[p] = held.get(p, 0) + 1
+    if first is not None:
+        out += [first.seq] * (max(0, free) - len(out))
     return out
 
 
@@ -65,6 +75,7 @@ def queue_full(waiting: int, max_waiting: int) -> bool:
 
 _TICKET = re.compile(r'([0-9]{12})\.wait\Z')
 _TAG = re.compile(r'ci-slot project=([A-Za-z0-9_.-]+)(?:\s|\Z)')
+_EVERY = re.compile(r'ci-slot project=[A-Za-z0-9_.-]+ every(?:\s|\Z)')
 
 
 def slot_paths(lock: str, n: int) -> list[str]:
@@ -135,11 +146,13 @@ class SlotQueue:
         self.poll = poll
         self.seq = 0
         self.ticket = ''
+        self.every: list[int] = []  # the slots ``try_take_every`` holds so far
 
     # -------------------------------------------------------------- tickets
 
-    def take_ticket(self, project: str, cmd: str) -> str:
-        """Write our ticket after every queued one, under ``seq.lock``."""
+    def take_ticket(self, project: str, cmd: str, every: bool = False) -> str:
+        """Write our ticket after every queued one, under ``seq.lock``; ``every`` marks
+        a ticket that waits for every slot (``ci-slot project=<p> every <command>``)."""
         os.makedirs(self.queue, exist_ok=True)
         fd = os.open(os.path.join(self.queue, 'seq.lock'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)
         try:
@@ -161,7 +174,7 @@ class SlotQueue:
             os.replace(tmp, os.path.join(self.queue, 'seq'))
             self.ticket = os.path.join(self.queue, f'{self.seq:012d}.wait')
             line = ' '.join([str(self.seq), str(os.getpid()), str(int(time.time())), os.getcwd(),
-                             f'ci-slot project={project}', cmd.replace('\n', ' ')])
+                             f'ci-slot project={project}', *(['every'] if every else []), cmd.replace('\n', ' ')])
             with open(self.ticket + f'.{os.getpid()}', 'w') as f:
                 f.write(line + '\n')
             os.replace(self.ticket + f'.{os.getpid()}', self.ticket)
@@ -198,7 +211,8 @@ class SlotQueue:
                     pass
                 continue
             tag = _TAG.search(parts[3]) if len(parts) > 3 else None
-            out.append(Ticket(int(m.group(1)), tag.group(1) if tag else ''))
+            every = bool(_EVERY.search(parts[3])) if len(parts) > 3 else False
+            out.append(Ticket(int(m.group(1)), tag.group(1) if tag else '', every))
         return out
 
     def held(self) -> tuple[dict[str, int], int, set[int]]:
@@ -239,10 +253,42 @@ class SlotQueue:
         finally:
             os.close(lk)
 
+    def try_take_every(self, project: str, caps: dict[str, int]) -> list[int] | None:
+        """One round for a ticket that waits for every slot (``take_ticket(...,
+        every=True)``): take the free slots ``grants`` gives it, after the older tickets
+        within their ``caps``, and keep them. Returns the
+        fds of all the slots (inheritable) once it holds every one, else None; the slots
+        it holds so far stay held (``self.every``) and its ticket stays queued."""
+        if not os.path.exists(self.ticket):  # deleted while we were stopped: re-queue
+            self.take_ticket(project, 'requeued', every=True)
+        lk = os.open(os.path.join(self.queue, 'take.lock'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            per, nfree, _ = self.held()
+            for _ in range(grants(self.waiting(), per, caps, nfree).count(self.seq)):
+                fd = self._grab(project, unlink=False)
+                if fd is None:
+                    break
+                self.every.append(fd)
+        finally:
+            os.close(lk)
+        if len(self.every) < len(self.slots):
+            return None
+        try:
+            os.unlink(self.ticket)
+        except OSError:
+            pass
+        return list(self.every)
+
     def _take(self, project: str, caps: dict[str, int]) -> int | None:
         per, nfree, _ = self.held()
         if self.seq not in grants(self.waiting(), per, caps, nfree):
             return None
+        return self._grab(project)
+
+    def _grab(self, project: str, unlink: bool = True) -> int | None:
+        """Take a free slot with a non-blocking flock and write its holder record; with
+        ``unlink``, our ticket is done."""
         for i, path in enumerate(self.slots, 1):
             fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660) if not os.path.exists(path) \
                 else os.open(path, os.O_WRONLY | os.O_APPEND)
@@ -257,10 +303,11 @@ class SlotQueue:
             with open(rec + f'.{os.getpid()}', 'w') as f:
                 f.write(f'{os.getpid()} {_start_of(os.getpid()):.0f} {project}\n')
             os.replace(rec + f'.{os.getpid()}', rec)
-            try:
-                os.unlink(self.ticket)
-            except OSError:
-                pass
+            if unlink:
+                try:
+                    os.unlink(self.ticket)
+                except OSError:
+                    pass
             os.set_inheritable(fd, True)
             return fd
         return None

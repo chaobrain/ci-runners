@@ -25,6 +25,8 @@ import sys
 import tomllib
 from collections.abc import Iterable, Iterator, Mapping
 
+from ci_runners.policy import CLASSES
+
 SCHEMA = 1
 
 # ------------------------------------------------------------------ schema 1
@@ -37,9 +39,12 @@ _CPUS = re.compile(r'[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*\Z')
 LABEL = re.compile(r'[a-z0-9][a-z0-9-]{0,39}\Z')
 #: labels a pool may not give itself: GitHub's own and the bare class names, which any
 #: runner's job could ask for (design §5.1: h100's labels are its own)
-RESERVED_LABELS = frozenset({'self-hosted', 'linux', 'x64', 'light', 'part', 'compile', 'nightly', 'gpu'})
-#: what a pool's runners run with, besides the count (RUN-5)
-POOL_KEYS = frozenset({'count', 'labels', 'per_card'})
+RESERVED_LABELS = frozenset({'self-hosted', 'linux', 'x64', 'light', 'part', 'compile', 'nightly', 'gpu', 'multi'})
+#: what a pool's runners run with, besides the count (RUN-5), and their class where it is
+#: not the pool's key (decision 12.5)
+POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class'})
+#: the classes whose runners lease one card each, the runner's own: a per-card pool's
+PER_CARD_CLASSES = frozenset({'h100', 'gpu'})
 
 
 class InventoryError(ValueError):
@@ -76,6 +81,8 @@ def _pool(v: object) -> bool:
         return False
     if 'count' in v and not _int(v['count'], 1):
         return False
+    if 'class' in v and not isinstance(v['class'], str):
+        return False
     labels = v.get('labels', [])
     return (isinstance(labels, list) and len(labels) <= 8 and len(set(labels)) == len(labels)
             and all(isinstance(x, str) and LABEL.match(x) and x not in RESERVED_LABELS for x in labels) and ('labels' not in v or bool(labels)))
@@ -94,6 +101,7 @@ HOST_KEYS = {
     'gpus': (lambda v: isinstance(v, list) and all(_int(i) for i in v), True),
     'max_temp_c': (lambda v: _int(v, 1), True),
     'cpus': (lambda v: isinstance(v, str) and bool(_CPUS.match(v)), False),  # taskset list
+    'compile_cpus': (lambda v: isinstance(v, str) and bool(_CPUS.match(v)), False),  # compile parts' (12.7)
     'pools': (lambda v: isinstance(v, dict) and bool(v) and all(isinstance(k, str) and _POOL.match(k) and _pool(n)
                                                                 for k, n in v.items()), True),
     'files': (lambda v: isinstance(v, dict) and {'slot_lock', 'slot_queue'} <= set(v) <= FILES
@@ -165,20 +173,45 @@ def load(text: str) -> Inventory:
         _check_table(f'hosts.{role}', h, HOST_KEYS)
         if 'tunnel' in h:
             _check_table(f'hosts.{role}.tunnel', h['tunnel'], TUNNEL_KEYS)
+        seen: dict[str, str] = {}
         for pool, v in h['pools'].items():
             if isinstance(v, dict) and v.get('per_card') and not h['gpus']:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: per_card on a host without gpus')
+            cls = _class(pool, v)
+            if cls not in CLASSES:
+                raise InventoryError(f'hosts.{role}.pools.{pool}: no runner class {cls!r}: name one in its class')
+            if isinstance(v, dict) and v.get('per_card') and cls not in PER_CARD_CLASSES:
+                raise InventoryError(f'hosts.{role}.pools.{pool}: per_card for a class of {sorted(PER_CARD_CLASSES)} only')
+            if cls in seen:
+                raise InventoryError(f'hosts.{role}.pools.{pool}: class {cls} is also the class of {seen[cls]}')
+            seen[cls] = pool
     this = doc.get('this')
     if this not in hosts:
         raise InventoryError('inventory: this names no host')
     return Inventory(this, hosts)
 
 
-def pool_labels(inv: 'Inventory', pool: str) -> list[str] | None:
-    """The labels a pool of this host gives its runners (RUN-5, design §5.1), or None
-    where it gives none and the runners carry ``<pool>, <role>``. A per-card pool's runners
-    carry also their card's ``<role>-gpu<N>``, which is not the pool's."""
-    v = inv.host['pools'].get(pool)
+def _class(pool: str, v: object) -> str:
+    """A pool's runner class: its ``class``, else its key (decision 12.5). Pure."""
+    return str(v['class']) if isinstance(v, dict) and 'class' in v else pool
+
+
+def pool_class(host: Mapping[str, object], pool: str) -> str:
+    """The runner class of a pool of ``host`` (design §5.1). Pure."""
+    return _class(pool, host['pools'][pool])
+
+
+def pool_of(host: Mapping[str, object], cls: str) -> str | None:
+    """The pool of ``host`` whose runners have class ``cls`` (one at most), or None. Pure."""
+    return next((p for p, v in host['pools'].items() if _class(p, v) == cls), None)
+
+
+def pool_labels(inv: 'Inventory', cls: str) -> list[str] | None:
+    """The labels the pool of class ``cls`` of this host gives its runners (RUN-5, design
+    §5.1), or None where it gives none and the runners carry ``<pool>, <role>``. A per-card
+    pool's runners carry also their card's ``<role>-gpu<N>``, which is not the pool's."""
+    pool = pool_of(inv.host, cls)
+    v = inv.host['pools'].get(pool) if pool is not None else None
     if isinstance(v, dict) and v.get('labels'):
         return list(v['labels'])
     return None
@@ -187,8 +220,8 @@ def pool_labels(inv: 'Inventory', pool: str) -> list[str] | None:
 # ------------------------------------------------------------------ deny list
 
 #: string values that are not inventory: they appear in the design already. Every other string value of the inventory and the policy is denied.
-PUBLIC_KEYS = frozenset({'this', 'memory_max', 'cpus', 'host_lock', 'slot_lock', 'slot_queue', 'bot', 'visibility',
-                         'extra_events', 'labels'})
+PUBLIC_KEYS = frozenset({'this', 'memory_max', 'cpus', 'compile_cpus', 'host_lock', 'slot_lock', 'slot_queue', 'bot',
+                         'visibility', 'extra_events', 'labels', 'class', 'classes'})
 #: ``tunnel.direct`` values the repository holds (the example, the tests): public, so not
 #: denied. Every other ``direct`` value is denied, as any inventory value is.
 #: the policy's ``[org] name`` is the org's, public as the repository is.

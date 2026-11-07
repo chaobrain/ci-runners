@@ -62,6 +62,30 @@ class Load(unittest.TestCase):
         with self.assertRaises(inv.InventoryError):
             inv.load(base.replace('{ @ }', '{}'))
 
+    def test_pools_name_their_class(self):
+        """Decision 12.5: a pool's class is its key, or its ``class`` where it names one; each
+        class has one pool per host; only h100 and gpu pools run a runner per card."""
+        base = re.sub(r'\[hosts\.h100\.pools\].*\n(?:.*\n){3}', '', EXAMPLE).replace(
+            'max_temp_c = 80\n', 'max_temp_c = 80\ncompile_cpus = "4-15"\npools = { @ }\n')
+        i = inv.load(base.replace('@', 'light = 1, cards = { per_card = true, class = "gpu", labels = ["hx-gpu"] }, '
+                                       'multi = { count = 1, labels = ["hx-multi"] }, compile = 1, nightly = 1'))
+        self.assertEqual(i.host['compile_cpus'], '4-15')
+        self.assertEqual((inv.pool_class(i.host, 'cards'), inv.pool_class(i.host, 'multi')), ('gpu', 'multi'))
+        self.assertEqual((inv.pool_of(i.host, 'gpu'), inv.pool_of(i.host, 'cards'), inv.pool_of(i.host, 'part')),
+                         ('cards', None, None))
+        self.assertEqual((inv.pool_labels(i, 'gpu'), inv.pool_labels(i, 'multi'), inv.pool_labels(i, 'light')),
+                         (['hx-gpu'], ['hx-multi'], None))
+        bad = ('cards = 1',  # no class of that name
+               'cards = { count = 1, class = "gpus" }', 'cards = { count = 1, class = 1 }',
+               'cards = { per_card = true, class = "multi" }', 'multi = { per_card = true }',
+               'part = 1, cpu = { count = 1, class = "part" }',  # two pools of one class
+               'multi = { count = 1, labels = ["multi"] }')  # a bare class name as a label
+        for b in bad:
+            with self.assertRaises(inv.InventoryError, msg=b):
+                inv.load(base.replace('@', b))
+        with self.assertRaises(inv.InventoryError):
+            inv.load(base.replace('@', 'light = 1').replace('compile_cpus = "4-15"', 'compile_cpus = "4-15;x"'))
+
     def test_python_and_orgsync(self):
         for bad in ('python = "python3"', 'python = ""', 'python = 3', 'orgsync = "yes"'):
             key = bad.split(' ')[0]

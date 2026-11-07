@@ -100,6 +100,58 @@ _TAG = re.compile(r'ci-slot project=([A-Za-z0-9_.-]+)(?:\s|\Z)')
 _EVERY = re.compile(r'ci-slot project=[A-Za-z0-9_.-]+ every(?:\s|\Z)')
 
 
+# The queue directory is not sticky and both accounts write in it (decision 12.9, T17):
+# nothing here writes or creates through a link there. A file is written new, created
+# exclusively under a random name (O_EXCL, O_NOFOLLOW), then renamed over its name (a
+# rename replaces a link, never its target); a lock file there is opened O_NOFOLLOW and
+# O_NONBLOCK, and used only if it is a regular file; a
+# file is read O_NOFOLLOW and O_NONBLOCK, and only if it is a regular one (a FIFO would
+# block the reader).
+_NEW = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+_READ = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+_LOCK = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+def _replace(path: str, text: str) -> None:
+    """Write ``text`` to ``path`` by an exclusive new file and a rename (mode 660, so the
+    queue's default ACL entries give the other account its access)."""
+    tmp = f'{path}.{os.getpid()}.{os.urandom(6).hex()}'
+    fd = os.open(tmp, _NEW, 0o660)
+    try:
+        with os.fdopen(fd, 'w', closefd=False) as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(fd)
+
+
+def _queue_lock(path: str) -> int:
+    """Open a lock file of the queue for flock: never through a link, never blocking (a
+    FIFO there would block the open), and only a regular file."""
+    fd = os.open(path, _LOCK, 0o660)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise OSError(errno.EINVAL, 'not a regular file', path)
+    return fd
+
+
+def _read(path: str) -> str:
+    """A small regular file's text; OSError for a link, a FIFO or anything else."""
+    fd = os.open(path, _READ)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, 'not a regular file', path)
+        return os.read(fd, 65536).decode('utf-8', 'replace')
+    finally:
+        os.close(fd)
+
+
 def slot_paths(lock: str, n: int) -> list[str]:
     stem = lock[:-len('.lock')] if lock.endswith('.lock') else lock
     return [lock] + [f'{stem}.{i}.lock' for i in range(2, n + 1)]
@@ -179,12 +231,11 @@ class SlotQueue:
         ``every`` marks a ticket that waits for every slot (``ci-slot project=<p> every
         <command>``)."""
         self._make_queue()
-        fd = os.open(os.path.join(self.queue, 'seq.lock'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)
+        fd = _queue_lock(os.path.join(self.queue, 'seq.lock'))
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             try:
-                with open(os.path.join(self.queue, 'seq')) as f:
-                    n = int(f.read().strip() or 0)
+                n = int(_read(os.path.join(self.queue, 'seq')).strip() or 0)
             except (OSError, ValueError):
                 n = 0
             n = max(n, self.seq)
@@ -193,16 +244,11 @@ class SlotQueue:
                 if m:
                     n = max(n, int(m.group(1)))
             self.seq = n + 1
-            tmp = os.path.join(self.queue, f'seq.{os.getpid()}')
-            with open(tmp, 'w') as f:
-                f.write(f'{self.seq}\n')
-            os.replace(tmp, os.path.join(self.queue, 'seq'))
+            _replace(os.path.join(self.queue, 'seq'), f'{self.seq}\n')
             self.ticket = os.path.join(self.queue, f'{self.seq:012d}.wait')
             line = ' '.join([str(self.seq), str(os.getpid()), str(int(time.time())), os.getcwd(),
                              f'ci-slot project={project}', *(['every'] if every else []), cmd.replace('\n', ' ')])
-            with open(self.ticket + f'.{os.getpid()}', 'w') as f:
-                f.write(line + '\n')
-            os.replace(self.ticket + f'.{os.getpid()}', self.ticket)
+            _replace(self.ticket, line + '\n')
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
@@ -222,8 +268,7 @@ class SlotQueue:
                 continue
             path = os.path.join(self.queue, name)
             try:
-                with open(path) as f:
-                    text = f.read()
+                text = _read(path)
             except OSError:
                 continue
             parts = text.split(maxsplit=3)
@@ -253,8 +298,7 @@ class SlotQueue:
                 continue
             project = ''
             try:
-                with open(os.path.join(self.queue, f'holder.{i}')) as f:
-                    pid, start, project = f.read().split()[:3]
+                pid, start, project = _read(os.path.join(self.queue, f'holder.{i}')).split()[:3]
                 if not alive(int(pid), float(start)):
                     project = ''
             except (OSError, ValueError):
@@ -273,7 +317,7 @@ class SlotQueue:
         no project, and a project could then pass its cap."""
         if not os.path.exists(self.ticket):  # deleted while we were stopped: re-queue
             self.take_ticket(project, 'requeued')
-        lk = os.open(os.path.join(self.queue, 'take.lock'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)
+        lk = _queue_lock(os.path.join(self.queue, 'take.lock'))
         try:
             fcntl.flock(lk, fcntl.LOCK_EX)
             return self._take(project, caps)
@@ -288,7 +332,7 @@ class SlotQueue:
         it holds so far stay held (``self.every``) and its ticket stays queued."""
         if not os.path.exists(self.ticket):  # deleted while we were stopped: re-queue
             self.take_ticket(project, 'requeued', every=True)
-        lk = os.open(os.path.join(self.queue, 'take.lock'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)
+        lk = _queue_lock(os.path.join(self.queue, 'take.lock'))
         try:
             fcntl.flock(lk, fcntl.LOCK_EX)
             for _ in range(self._grants(caps).count(self.seq)):
@@ -333,9 +377,7 @@ class SlotQueue:
                     continue
                 raise
             rec = os.path.join(self.queue, f'holder.{i}')
-            with open(rec + f'.{os.getpid()}', 'w') as f:
-                f.write(f'{os.getpid()} {_start_of(os.getpid()):.0f} {project}\n')
-            os.replace(rec + f'.{os.getpid()}', rec)
+            _replace(rec, f'{os.getpid()} {_start_of(os.getpid()):.0f} {project}\n')
             if unlink:
                 try:
                     os.unlink(self.ticket)

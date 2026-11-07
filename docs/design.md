@@ -245,7 +245,10 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
     8. **The `nightly` class returns, on 3090a only.** One runner; a part may run 600 min
        (its job 615). A `nightly` part holds every CI slot and every card lease of its
        host for its life, so no other part runs beside it; parts queued behind it wait up
-       to their queue timeout and then end `unavailable`. This replaces the first path's
+       to their queue timeout and then end `unavailable`. Its `gpu-mem-mib` is checked on
+       the cards its command gets only: the lowest-numbered cool cards with that much
+       free, `gpus` of them (lead, 2026-11-07); a local user's job on another card does
+       not hold it back. This replaces the first path's
        reservation, grace period and `yielded`, which stay retired.
     9. **The host lock and the slots interoperate with brainspike's again** (D5 returns
        for the 3090 hosts). Both hosts also run work outside the runners: brainspike's
@@ -260,7 +263,12 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
        `tmpfiles.d` entry recreates them at boot (`/tmp` is emptied then, and
        `fs.protected_regular` forbids one account to open another's file there with
        `O_CREAT`). A `ci_slot.sh` ticket carries no project and counts as the host's
-       default project (brainspike, inventory `default_project`).
+       default project (brainspike, inventory `default_project`). A `nightly` part's
+       ticket carries one more word, `every`, so that later tickets wait behind it for
+       every slot; `ci_slot.sh` reads only its own `.ticket` files and never sees it
+       (read at the stamp, 2026-11-07). The local accounts that share the files are
+       inventory (`local_accounts`); the plan prints the root steps (§5.3) and `apply`
+       refuses until they are done.
     10. **The env spec gains an optional `conda` table** (§4.9). It is additive, so it
         ships in `v1.4.0`, not `v2` (§9). brainspike's spec asks for `nest-simulator=3.10`
         from `conda-forge`.
@@ -465,8 +473,10 @@ policy's hash, so a change shows.
 `cpus`, `python`, `orgsync`, `watchdog_log`, `watchdog_notice` and the `tunnel` table,
 optional. A pool is a count or a table of `count`, `labels`, `class` and `per_card`
 (§5.1). `v1.4` adds, all optional: `compile_cpus` (the CPUs of `compile` parts),
-`default_project` (the project of a slot ticket without one) and `files.host_lock` (the
-host lock; read again, decision 12.9). A host with `files.host_lock` has the host lock,
+`default_project` (the project of a slot ticket without one), `files.host_lock` (the
+host lock; read again, decision 12.9), `local_accounts` (the local accounts that share
+the lock and slot files, 12.9) and `push_key` (the public key of the org snapshot's
+push, an `ssh-ed25519` line, 12.4). A host with `files.host_lock` has the host lock,
 and one without it has none. The first path's keys (`ssh`, `trusted`, `remote`,
 `cpu_slowdown`, `proxy`) are accepted and ignored in `v1.3` and `v1.4` (11.12). `setup/inventory.example
 .toml` holds the schema with placeholder values.
@@ -603,7 +613,11 @@ several hosts adds a `salvage` job on each such host's light pool (decision 12.1
 
 For each part whose newest record on this host belongs to this run and attempt, and
 whose artifacts stop short, it uploads `outcome.json` as `ci-part-<id>-<attempt>`, with
-`salvaged: true`. A part it does not find on this host is left alone. Salvage jobs run
+`salvaged: true`. A part it does not find on this host is left alone. "Newest" is read
+across runs: when a later run's part of the same id ran on this host, the older run's
+part has no record of its own here and ends `lost`. A composite action cannot loop, so
+`salvage` uploads at most 16 parts per host and fails beyond that (read at the stamp,
+2026-11-07). Salvage jobs run
 before the verdict, which then reads every artifact as usual. `h100-test.yml` needs none:
 its parts all run on h100.
 
@@ -674,7 +688,9 @@ consumer's:
    | `compile` | `<host>-compile` (3090b), opt-in (12.14) | exclusive timing parts on `compile_cpus` | 0 | `x` | one | ≤ 240 |
    | `nightly` | `<host>-nightly` (3090a), opt-in (12.14) | the consumer's nightly | 0 to all cards | any | every slot and card lease | ≤ 600 |
 
-   `part` refuses a `gpus` or `lock` value outside its class's row (`unavailable`).
+   `part` refuses a `gpus` or `lock` value outside its class's row (`unavailable`). A
+   `nightly` part holds every lease, whatever `gpus` says; its `gpu-mem-mib` is checked
+   only on the cards its command gets (decision 12.8).
 3. **One `part` per job**, with the job's `timeout-minutes` at least the part's plus 15.
    A matrix leg's outputs do not reach later jobs one by one, so later jobs read the
    `ci-part-<id>-<attempt>` artifacts. Part ids are unique within a run.
@@ -763,7 +779,8 @@ All are idempotent and run as the runner account. None needs sudo.
   files with their diffs, units, `.env` lines and runner directories. It changes
   nothing. The lead approves this output. Save only its standard output as the plan.
 - `setup/apply.sh <host> --plan <file>` applies exactly an approved plan. It refuses if
-  the plan's text differs from a fresh `plan.sh` output. It writes a state file, and a
+  the plan's text differs from a fresh `plan.sh` output, or while a root step the plan
+  lists (§5.3) is not done. It writes a state file, and a
   second run is a no-op.
 - `setup/install.sh --tag <tag> --expect <sha>` installs a release into
   `releases/<tag>/` after checking that the tag resolves to the commit the lead
@@ -823,14 +840,17 @@ root-owned template after each job; both need the dedicated account of decision 
 both, so the user manager's memory controller enforces each part's cap and the slices
 (decision 11.11 does not apply); 28 CPUs and 2 × RTX 3090 each; 188 GiB on 3090b and
 125 GiB on 3090a; the GitHub and package names of decision 12.3. The root steps come
-first, made by the lead, then the plan:
+first, made by the lead, then the plan. Their condition is met: brainspike's `ci_slot.sh`
+writes nothing through a link in the shared queue (brainspike ceb68a77) and opens nothing
+there that can block (a546b92f), both merged, and `tests/fixtures/brainspike/ci_slot.sh` is
+refreshed from a546b92f (T17):
 
 | change | detail |
 |---|---|
 | the CI account (root) | a new account with no password and no sudo, linger on, its `data` directory on the data disk (decision 12.2) |
-| shared lock and slot files (root) | brainspike's host lock (with its `.shared` and `.turnstile` files), its slot files and its ticket queue directory become root-owned, with ACL entries (and default ACL entries on the queue) giving the CI account and the local account `rw`; a `tmpfiles.d` file recreates them at boot and excludes them from age cleaning. Their paths do not change (decision 12.9). |
-| the push key (root, or the account) | one line in the CI account's `authorized_keys`: `restrict`, forced to `<release>/bin/ci-run org-sync --receive` (decision 12.4) |
-| `etc/tunnel/` | as on h100, with this host's own key pair; the egress host gets its line (below) |
+| shared lock and slot files (root) | brainspike's host lock (with its `.shared` and `.turnstile` files), its slot files and its ticket queue directory become root-owned, with ACL entries (and default ACL entries on the queue) giving the CI account and each of the inventory's `local_accounts` `rw`; a `tmpfiles.d` file (`/etc/tmpfiles.d/ci-runners-shared.conf`) recreates them at boot and excludes them from age cleaning. Their paths do not change (decision 12.9). Root-owned, because brainspike's scripts open them with `O_CREAT` (`exec N>>file`): `fs.protected_regular` lets any account do that on a file in sticky `/tmp` that `/tmp`'s owner, root, owns, and refuses it on a file another account owns. `plan.sh` prints the file's text and checks each step (the file as printed, each account present, each file root-owned, not a link, with its `rw` entries after the mask); the lead writes it as root and runs `systemd-tmpfiles --create` on it while no local job holds the files (under `host_lock.sh -x`, with `ci_slot.sh`'s queue empty). `apply` refuses until every step is done. Setup never runs as root, and nothing root runs reads the inventory. |
+| the push key (the account) | inventory `push_key`; the plan writes one line in the CI account's `~/.ssh/authorized_keys` (mode 600, in `~/.ssh` of mode 700): `restrict`, forced to `<data>/ci-runners/releases/hook/bin/ci-run org-sync --receive` with `CI_RUNNERS_ETC` and `CI_RUNNERS_PYTHON` set, marked `ci-runners-orgsync-push` so that a new key replaces it; every other line is kept (decision 12.4) |
+| `etc/tunnel/` | as on h100, with this host's own key pair; the plan prints the egress account's line for its public key (below) |
 | directories | §3.2 under `data`; `etc/` mode 700 |
 | runner app | the pinned release, checked by sha256, into 9 runner directories on 3090b and 8 on 3090a (§5.1) |
 | `.env` per runner | as on h100; `CI_RUNNER_CARD=<N>` on a `gpu` runner; `https_proxy` at the tunnel |
@@ -849,7 +869,7 @@ credential of theirs.
 | change | detail |
 |---|---|
 | the egress account | a system account with no password and `nologin` as its shell (done 2026-11-06) |
-| `authorized_keys` | one line per host's tunnel key (h100, and from decision 12.3 3090b and 3090a), each restricted as decision 11.10 states: one `permitopen`, to the egress proxy's port |
+| `authorized_keys` | one line per host's tunnel key (h100, and from decision 12.3 3090b and 3090a), each restricted as decision 11.10 states: one `permitopen`, to the egress proxy's port. A host's plan prints its line: `restrict,port-forwarding,permitopen="127.0.0.1:<egress port>",permitlisten="127.0.0.1:9",command="/usr/sbin/nologin" <key>` |
 | the release | `setup/install.sh` run by root with `CI_RUNNERS_ETC=/opt/ci-runners/etc`, so the release is root-owned under `/opt/ci-runners/releases/`, readable by others (mode 555); `/usr/bin/python3` is 3.11 or later; git is installed |
 | `/opt/ci-runners/etc/egress-allow` | a root-owned copy of the release's `setup/egress/allow`, mode 644, in a directory of mode 755 |
 | `ci-egress.service` | the release's `setup/egress/ci-egress.service` in `/etc/systemd/system/`, enabled: `ci-run egress` as a dynamic user on 127.0.0.1:<egress port>, at most 256 connections, journal lines per connection (refused, or open and closed, with the name); hardened (no new privileges, a read-only system, no home, its own `/tmp`, IP and Unix sockets only, no capabilities) and capped at 512 MB |
@@ -861,7 +881,7 @@ account:
 | change | detail |
 |---|---|
 | prerequisites | linger for the maintainer's account; an ssh key for h100 usable without an agent prompt; gh's login in its config file, not a keyring that needs a session |
-| `ci-orgsync-push.{service,timer}` | user units of the maintainer's account, every 10 min: `ci-run org-sync --fetch` from a checkout of a release, with the login from `gh auth token`, piped to `ssh <host> <release>/bin/ci-run org-sync --receive` for each host in turn (h100, and from decision 12.4 3090b and 3090a, with the push key), each bounded on its own; `TimeoutStartSec=5min` |
+| `ci-orgsync-push.{service,timer}` | user units of the maintainer's account, every 10 min: `ci-run org-sync --fetch` from a checkout of a release, with the login from `gh auth token`, piped to `ssh <host> <release>/bin/ci-run org-sync --receive` for each host in turn (h100, and from decision 12.4 3090b and 3090a, with the push key): the snapshot is fetched once, and each host, named by three words (ssh host, data root, interpreter), is bounded on its own (120 s); a host that fails is reported and does not hold up the others, and the run then ends with status 1; `TimeoutStartSec=10min` |
 | unchanged | the maintainer's gh login and ssh access to h100 (both exist); nothing is stored |
 
 ### 5.4 The h100 executor
@@ -902,8 +922,9 @@ On 3090b and 3090a the executor of §4.3 runs §5.4's steps with these differenc
    (no `watchdog_log` or `watchdog_notice`), so `thermal` comes only from the early stop
    and `reboot` from the boot id.
 2. **Leases**: a `gpu` runner leases its own card; a `multi` runner both cards, in ticket
-   order (decision 12.6), then runs the P2P self-test; a `nightly` runner every card it
-   asks for, after every CI slot.
+   order (decision 12.6), then runs the P2P self-test; a `nightly` runner holds them all,
+   after every CI slot, whatever its `gpus`; its command gets the `gpus` lowest-numbered
+   cool cards with `gpu-mem-mib` free, and it waits while fewer have (decision 12.8).
 3. **The host lock**: held for the whole command when `lock` says so (`x` on `compile`),
    through `ci-lock`, after the slot and the leases; released when the scope ends.
 4. **Pinning**: `CI_CPUS` is the inventory's `cpus`, or `compile_cpus` on `compile`.
@@ -962,6 +983,7 @@ bound).
 | T14 | A co-user of h100's shared account reads the org-sync token, or edits the snapshot. | no token on h100 (decision 11.9): the snapshot arrives over the maintainer's ssh access, checked by `--receive` (§6.5). A host that syncs itself holds a fine-grained read-only token (members, metadata): it shows the member list and the private repositories' names, nothing else. An edited snapshot is T13's case. |
 | T15 | A co-user of h100's shared account takes the tunnel key, or any local user of a host uses the tunnel's port on 127.0.0.1 (on the 3090 hosts, every local account can reach it). | the egress account has no shell and no listening forward, and its key opens only the egress proxy's port (decision 11.10). The proxy passes only its allowlist on port 443: HTTPS to GitHub, the Actions service's storage and the package indexes, which job code reaches through the tunnel anyway. The suffix `.blob.core.windows.net` lets them reach any Azure storage account over HTTPS, and `storage.googleapis.com` any Google Cloud Storage bucket: accepted gaps, since the Actions storage accounts have no stable names and package downloads use those buckets. They appear as the egress host's address. The allowlist is root-owned on the egress host. The lead revokes the key by deleting one line there. |
 | T16 | (3090 hosts) A job, or a local user, holds the shared host lock or a slot, and stalls the other side's work; or a local account empties the ticket queue. | the files are `flock` locks, so a hold ends with its process: a part's hold ends with its scope (inner timeout, the job-completed hook, the reaper); a waiting part ends `unavailable` at its queue timeout; the files hold no data, and a lost ticket only loses a place in the queue |
+| T17 | (3090 hosts) A job plants a link in the shared ticket queue (a `seq`, a ticket, a holder record, a temp name or a lock file there) so that a script of the other account writes, creates or truncates a file the link names, or blocks on a FIFO it reads. | the queue directory is not sticky and both accounts write in it (decision 12.9; lead, 2026-11-07), so no script of either account writes or creates through a link there. `slots.py` creates each file exclusively under a random name (`O_EXCL`, `O_NOFOLLOW`) and renames it over its name (a rename replaces a link, never its target). A FIFO is covered on each side: `slots.py` opens `seq.lock` and `take.lock` `O_NOFOLLOW` and `O_NONBLOCK` and uses them only if `fstat` shows a regular file, and reads `seq`, tickets and holder records the same way, so a FIFO there is refused at once; brainspike's `ci_slot.sh` (since ceb68a77) writes through exclusive temporaries renamed into place, exits 2 on a linked queue directory or a `seq.lock` that is not a regular file, and deletes a ticket that is a link or not a regular file as malformed, and (since a546b92f) opens every entry of the queue `O_NOFOLLOW` and `O_NONBLOCK` and checks it with `fstat` before it reads, locks or writes, creating `seq.lock` with `O_EXCL`. The plan checks that the queue is a root-owned directory, not a link. Residual: a job can delete or forge tickets and holder records, which disturbs the queueing only (T16), never a file of a local account; and a FIFO or a directory a job leaves at `seq` or `seq.lock` makes the other side refuse or fail until it is removed, never hang. |
 
 ### 6.5 The org snapshot
 
@@ -1118,6 +1140,16 @@ Rules:
   `salvage` action, the env spec's `conda` table and the inventory's optional keys. No
   input a consumer passes is removed or renamed, and h100's inventory and `h100-test.yml`
   callers need no change, so it is a minor release.
+- **`v1.4.0` notes** (to be stamped at the tag). Read when the contract was stamped
+  (2026-11-07), each recorded where it applies:
+  1. a `nightly` part holds every card lease; its `gpu-mem-mib` is checked only on the
+     cards its command gets (12.8, §4.8, §5.5);
+  2. a `nightly` slot ticket carries the `every` marker, which `ci_slot.sh` never reads
+     (12.9);
+  3. `salvage` reads the newest record across runs, and uploads at most 16 parts per host
+     (§4.5);
+  4. on h100, `gpus: 0` is now refused (the `h100` class row of §4.8), and `h100-test.yml`
+     checks `gpus == 1`. No caller passing `gpus: 0` was found.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

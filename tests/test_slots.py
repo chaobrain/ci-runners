@@ -9,11 +9,13 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 from ci_runners import slots
 from ci_runners.slots import Ticket as T
 from ci_runners.slots import grants, queue_full
 
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 CAPS = {'myproj': 2, 'brainevent': 1, 'other': 1}
 
 
@@ -243,6 +245,86 @@ class Queue(unittest.TestCase):
             self.assertEqual(q.waiting(), [T(8, 'p')])
             self.assertFalse(os.path.exists(dead))
 
+
+    def test_nothing_is_written_through_a_link_in_the_queue(self):
+        """T17: the queue is writable by both accounts and not sticky, so a link planted
+        there (at a file's name, at a temp name, at a lock) never leads a write, a create
+        or a blocking read elsewhere."""
+        with tempfile.TemporaryDirectory() as d:
+            victim = pathlib.Path(d, 'victim')
+            victim.write_text('keep\n')
+            gone = pathlib.Path(d, 'gone')  # a dangling link's target must not appear
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 1, poll=0.05)
+            os.makedirs(q.queue)
+            for name in ('seq', '000000000001.wait', 'holder.1'):
+                os.symlink(victim, os.path.join(q.queue, name))
+            q.take_ticket('p', 'cmd')  # a link at seq: read as no number; replaced, not followed
+            fd = q.try_take('p', {'p': 1})
+            os.close(fd)
+            self.assertEqual(victim.read_text(), 'keep\n')
+            for name in ('seq', 'holder.1'):  # replaced by our files
+                self.assertFalse(os.path.islink(os.path.join(q.queue, name)), name)
+            self.assertEqual(q.seq, 2)  # after the planted ticket's number, which is never read
+            with unittest.mock.patch.object(slots.os, 'urandom', lambda n: b'\0' * n):  # a planted temp name
+                tmp = os.path.join(q.queue, f'seq.{os.getpid()}.{"00" * 6}')
+                os.symlink(victim, tmp)
+                with self.assertRaises(FileExistsError):
+                    q.take_ticket('p', 'cmd')
+            self.assertEqual(victim.read_text(), 'keep\n')
+            os.unlink(tmp)
+            for lock in ('seq.lock', 'take.lock'):
+                os.unlink(os.path.join(q.queue, lock))
+                os.symlink(gone, os.path.join(q.queue, lock))
+                with self.assertRaises(OSError):
+                    q.take_ticket('p', 'cmd') if lock == 'seq.lock' else q.try_take('p', {'p': 1})
+                self.assertFalse(gone.exists(), lock)
+                os.unlink(os.path.join(q.queue, lock))
+            num = pathlib.Path(d, 'num')
+            num.write_text('41\n')
+            os.unlink(os.path.join(q.queue, 'seq'))
+            os.symlink(num, os.path.join(q.queue, 'seq'))  # a linked number is not read
+            q.take_ticket('p', 'cmd')
+            self.assertLess(q.seq, 41)
+            os.unlink(os.path.join(q.queue, 'seq'))
+            os.mkfifo(os.path.join(q.queue, 'seq'))  # nor a FIFO's, which a writer feeds (or it blocks)
+            w = os.open(os.path.join(q.queue, 'seq'), os.O_RDWR | os.O_NONBLOCK)
+            try:
+                os.write(w, b'41\n')
+                os.mkfifo(os.path.join(q.queue, '000000000009.ticket'))
+                q.take_ticket('p', 'cmd')
+            finally:
+                os.close(w)
+            self.assertEqual(q.seq, 10)
+            self.assertEqual([t.seq for t in q.waiting()][-1:], [10])  # the FIFO ticket is not one
+            self.assertEqual(victim.read_text(), 'keep\n')
+
+    def test_a_fifo_at_a_queue_lock_is_refused_at_once(self):
+        """N2: a FIFO a job leaves at ``seq.lock`` or ``take.lock`` is refused promptly, with
+        or without a reader holding it open, never waited on. Run in a child under a hard
+        bound, so a blocked open fails the test instead of hanging the suite."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 1, poll=0.05)
+            q.take_ticket('p', 'cmd')
+            for lock in ('seq.lock', 'take.lock'):
+                path = os.path.join(q.queue, lock)
+                os.unlink(path) if os.path.exists(path) else None
+                os.mkfifo(path)
+                for reader in (False, True):
+                    r = os.open(path, os.O_RDONLY | os.O_NONBLOCK) if reader else None
+                    call = "q.take_ticket('p', 'cmd')" if lock == 'seq.lock' else "q.try_take('p', {'p': 1})"
+                    code = ('import sys; from ci_runners import slots\n'
+                            f'q = slots.SlotQueue({os.path.join(d, "s.lock")!r}, 1, poll=0.05)\n'
+                            f'q.ticket = {q.ticket!r}\n'
+                            f'try:\n    {call}\nexcept OSError as e:\n    sys.exit(3)\nsys.exit(0)\n')
+                    try:
+                        t = time.monotonic()
+                        p = subprocess.run([sys.executable, '-c', code], cwd=ROOT, timeout=20)
+                        self.assertEqual(p.returncode, 3, (lock, reader))
+                        self.assertLess(time.monotonic() - t, 10, (lock, reader))
+                    finally:
+                        if r is not None:
+                            os.close(r)
+                os.unlink(path)
 
 class Concurrent(unittest.TestCase):
     """Waiters in separate processes, as the parts of v1.2 and v1.3 share h100's queue

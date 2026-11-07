@@ -7,7 +7,9 @@
 # inventory by the deny list. The first path's keys (ssh, trusted, remote, cpu_slowdown,
 # proxy) are accepted and ignored (decision 11.12). A 3090 host's `files` name
 # brainspike's host lock and slot files (`host_lock`, `slot_lock`, `slot_queue`), and its
-# `default_project` the project of their slot tickets, which name none (decision 12.9).
+# `default_project` the project of their slot tickets, which name none (decision 12.9);
+# its `local_accounts` (a list) the accounts that share those files, for the plan's root
+# steps, and its `push_key` the org snapshot's push key (`ssh-ed25519 ...`, decision 12.4).
 schema = 1
 this = "h100"                                   # the role of the host that reads it
 

@@ -555,7 +555,10 @@ class PushScript(unittest.TestCase):
         rel = t / 'data' / 'ci-runners' / 'releases'
         rel.mkdir()
         os.symlink(self.ROOT, rel / 'hook')
-        (self.bin / 'ssh').write_text(f'#!/bin/sh\nfor a; do last=$a; done\nprintf "%s\\n" "$@" > {t}/ssh.args\n'
+        (self.bin / 'ssh').write_text(f'#!/bin/sh\nfor a; do host=$last; last=$a; done\n'
+                                      f'echo "$host" >> {t}/ssh.hosts\n'
+                                      f'case $host in bad) exit 255 ;; hang) exec sleep 60 ;; esac\n'
+                                      f'printf "%s\\n" "$@" > {t}/ssh.args\n'
                                       'env | grep -c tok-xyz > ' + f'{t}/ssh.token\nexec sh -c "$last"\n')
         for f in ('gh', 'ssh'):
             (self.bin / f).chmod(0o755)
@@ -564,12 +567,55 @@ class PushScript(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_script(self, *args, api=''):
-        env = {'PATH': f'{self.bin}:/usr/bin:/bin', 'HOME': self.tmp.name, 'LANG': 'C.UTF-8'}
+    def run_script(self, *args, api='', **extra):
+        env = {'PATH': f'{self.bin}:/usr/bin:/bin', 'HOME': self.tmp.name, 'LANG': 'C.UTF-8', **extra}
         if api:
             env['GITHUB_API_URL'] = api
         return subprocess.run([str(self.ROOT / 'setup' / 'workstation' / 'orgsync-push.sh'), *args], env=env,
                               capture_output=True, text=True, timeout=60)
+
+    def serve(self, seen):
+        members = [{'login': 'Dave', 'type': 'User'}]
+        repos = [{'full_name': 'chaobrain/p1', 'id': 7, 'private': True}]
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.headers.get('Authorization'))
+                body = json.dumps(members if '/members?' in self.path else repos).encode()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return f'http://127.0.0.1:{srv.server_address[1]}'
+
+    def test_each_host_in_turn_bounded_on_its_own(self):
+        """Decision 12.4: one fetch, then each host; a failed or hung host does not hold up
+        the next one, and the run says it failed."""
+        seen = []
+        api = self.serve(seen)
+        data = str(self.t / 'data')
+        t0 = time.monotonic()
+        r = self.run_script('chaobrain', 'bad', data, sys.executable, 'hang', data, sys.executable,
+                            'good', data, sys.executable, api=api, PUSH_TIMEOUT='2')
+        self.assertLess(time.monotonic() - t0, 30)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual((self.t / 'ssh.hosts').read_text().split(), ['bad', 'hang', 'good'])
+        self.assertIn('good: pushed', r.stdout)
+        self.assertIn('bad: failed', r.stderr)
+        self.assertIn('hang: failed', r.stderr)
+        self.assertEqual(len(seen), 2)  # fetched once (members and repositories), not per host
+        self.assertTrue((self.etc / 'org.json').exists())
+        r = self.run_script('chaobrain', 'good', data, sys.executable, 'good', data, sys.executable, api=api)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for bad in (('chaobrain', 'h', data, sys.executable, 'h2'), ('chaobrain', 'h', data, sys.executable, 'h2', data)):
+            self.assertEqual(self.run_script(*bad, api=api).returncode, 2, bad)  # three words per host
 
     def test_the_snapshot_reaches_receive(self):
         members = [{'login': 'Dave', 'type': 'User'}]

@@ -1,6 +1,6 @@
 """``ci-run``: the host layer's commands (design §3.1).
 
-    ci-run reap            the reaper's pass (ci-reaper.timer)
+    ci-run reap            the reaper's pass (ci-reaper.timer), which also rewrites a hook copy
     ci-run egress --port P --allow FILE   the egress proxy (ci-egress.service on the egress host; 11.10)
     ci-run org-sync [--fetch --org NAME | --receive]   the org snapshot (§6.5, decision 11.9)
     ci-run plan|apply ...  host setup (setup/plan.sh, setup/apply.sh)
@@ -13,6 +13,7 @@
     ci-run env build P     build project P's env from its default branch's spec (decision 11.4)
     ci-run drain on|off [--pool P] | status   the drain switch (decision 13.1)
     ci-run hostload sample|status   the load record and the busy rule (decision 13.2)
+    ci-run hooks copy      the hooks' copies in the private /tmp (ci-hooks.service; decision 13.5)
 
 The inventory is ``$CI_RUNNERS_ETC/inventory.toml``, else ``~/data/ci-runners/etc``.
 """
@@ -45,8 +46,12 @@ def main(argv: list[str]) -> int:
         from ci_runners import bridge
         return bridge.main(args)
     if cmd == 'reap':
-        from ci_runners import reaper
-        print(reaper.reap(load_inventory().host['data']))
+        from ci_runners import hookcopy, reaper
+        h = load_inventory().host
+        print(reaper.reap(h['data']))
+        line = hookcopy.refresh(h)  # a copy /tmp's cleaning took, or one that changed (decision 13.5)
+        if line:
+            print(line)
         return 0
     if cmd == 'org-sync':
         from ci_runners import orgsync
@@ -69,6 +74,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'hostload':
         from ci_runners import hostload
         return hostload.main(args, load_inventory())
+    if cmd == 'hooks':
+        from ci_runners import hookcopy
+        return hookcopy.main(args, load_inventory().host)
     if cmd == 'drain':
         from ci_runners import drain
         return drain.main(args, load_inventory())

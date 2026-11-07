@@ -1,9 +1,12 @@
 #!/bin/sh
 # The runner's job-completed hook (ACTIONS_RUNNER_HOOK_JOB_COMPLETED), installed as
-# <data>/ci-runners/hooks/job-completed.sh (design §3.2, §6.3). It runs the hook of the
-# release that ../releases/hook points at, isolated.
-here=$(/usr/bin/dirname "$(/usr/bin/readlink -f "$0")")
-root=$(/usr/bin/readlink -f "$here/../releases/hook") || root=
+# <data>/ci-runners/hooks/job-completed.sh (design §3.2, §6.3), and copied into the CI
+# account's private /tmp on a 3090 host (13.5). It runs the hook of the release that
+# <base>/releases/hook points at, isolated.
+# the release: setup writes this host's <data>/ci-runners into this line when it installs
+# the hook (decision 13.5), so that a copy in /tmp/ci-runners-hooks runs the same release
+base=$(/usr/bin/dirname "$(/usr/bin/dirname "$(/usr/bin/readlink -f "$0")")")  # @CI_BASE@
+root=$(/usr/bin/readlink -f "$base/releases/hook") || root=
 if [ -z "$root" ] || [ ! -d "$root/ci_runners" ]; then
   exit 0  # nothing to clean up with
 fi

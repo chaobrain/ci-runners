@@ -428,7 +428,12 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
         hook = (self.data / 'ci-runners' / 'hooks' / 'job-started.sh').read_text()
         self.assertIn(f'\npy={sys.executable}\n', hook)  # written in: no job's environment picks it
         self.assertNotIn('CI_RUNNERS_PYTHON', hook)
+        self.assertIn(f'\nbase={self.data}/ci-runners\n', hook)  # its release, wherever it is copied (13.5)
+        self.assertFalse((self.units / 'ci-hooks.service').exists())  # no private /tmp: hooks stay under data
+        env = (self.data / 'actions-runner' / 'hx-part-1' / '.env').read_text()
+        self.assertIn(f'ACTIONS_RUNNER_HOOK_JOB_STARTED={self.data}/ci-runners/hooks/job-started.sh\n', env)
         runner = (self.units / 'ci-runner@.service').read_text()
+        self.assertNotIn('ci-hooks', runner)
         self.assertNotIn('ci-proxy', runner)
         self.assertIn('Description=ci-runners: GitHub Actions runner %i\n\n[Service]', runner)
         self.assertIn(f'ExecStart={self.data}/actions-runner/%i/run.sh\n', runner)
@@ -888,6 +893,45 @@ class Shared(unittest.TestCase):
             self.assertIn(enable, [a.get('argv') for a in plan.actions])
             self.assertEqual(self.apply(plan.text()), 0)
             self.assertIn(enable, self.ran)
+
+    def test_the_runners_run_the_hooks_copies(self):
+        """Decision 13.5: on a host with the private namespace the runners' .env names the
+        copies in /tmp, each runner requires ci-hooks.service and checks both copies before it
+        starts, and apply starts the copies before it enables the runners; a changed hook is
+        copied again by a reload, never a restart (which would restart every runner)."""
+        with mock.patch.object(setup, 'shared_state', lambda h: []), \
+                mock.patch.object(setup, 'account_uid', lambda a: 4242), \
+                mock.patch.object(setup, 'private_state', lambda h, uid: []):
+            plan = setup.build(str(self.etc))
+            argv = [a['argv'] for a in plan.actions if a['kind'] == 'run']
+            start = ['systemctl', '--user', 'enable', '--now', 'ci-hooks.service']
+            reload = ['systemctl', '--user', 'reload', 'ci-hooks.service']
+            enable = next(i for i, x in enumerate(argv) if x[:3] == ['systemctl', '--user', 'enable']
+                          and x[3].startswith('ci-runner@'))
+            self.assertLess(argv.index(start), argv.index(reload))
+            self.assertLess(argv.index(reload), enable)  # the copies before the runners
+            self.assertNotIn(['systemctl', '--user', 'restart', 'ci-hooks.service'], argv)
+            self.assertEqual(self.apply(plan.text()), 0)
+            hooks = (self.units / 'ci-hooks.service').read_text()
+            self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run hooks copy\n', hooks)
+            self.assertIn(f'ExecReload={self.data}/ci-runners/releases/hook/bin/ci-run hooks copy\n', hooks)
+            self.assertIn('RemainAfterExit=yes\n', hooks)
+            runner = (self.units / 'ci-runner@.service').read_text()
+            self.assertIn('[Unit]\nDescription=ci-runners: GitHub Actions runner %i\n'
+                          'Requires=ci-hooks.service\nAfter=ci-hooks.service\n', runner)
+            for n in ('job-started.sh', 'job-completed.sh'):
+                self.assertIn(f'\nExecStartPre=/usr/bin/test -f /tmp/ci-runners-hooks/{n} -a -x '
+                              f'/tmp/ci-runners-hooks/{n}\n', runner)
+            env = (self.data / 'actions-runner' / 'hx-part-1' / '.env').read_text()
+            self.assertIn('ACTIONS_RUNNER_HOOK_JOB_STARTED=/tmp/ci-runners-hooks/job-started.sh\n'
+                          'ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/tmp/ci-runners-hooks/job-completed.sh\n', env)
+            hook = (self.data / 'ci-runners' / 'hooks' / 'job-started.sh').read_text()
+            self.assertIn(f'\nbase={self.data}/ci-runners\n', hook)
+            argv = [a['argv'] for a in setup.build(str(self.etc)).actions if a['kind'] == 'run']
+            self.assertNotIn(reload, argv)  # the hooks unchanged: no copy again
+            (self.data / 'ci-runners' / 'hooks' / 'job-started.sh').write_text('#!/bin/sh\nexit 1\n')
+            argv = [a['argv'] for a in setup.build(str(self.etc)).actions if a['kind'] == 'run']
+            self.assertIn(reload, argv)
 
     def test_the_private_drop_in(self):
         s, home, data = self.p, str(self.home), str(self.data)

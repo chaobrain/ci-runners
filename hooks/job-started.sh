@@ -1,10 +1,13 @@
 #!/bin/sh
 # The runner's job-started hook (ACTIONS_RUNNER_HOOK_JOB_STARTED), installed as
-# <data>/ci-runners/hooks/job-started.sh (design §3.2, §6.3). It runs the hook of the
-# release that ../releases/hook points at, isolated, and kills it if its own 60 s bound
+# <data>/ci-runners/hooks/job-started.sh (design §3.2, §6.3), and copied into the CI
+# account's private /tmp on a 3090 host (13.5). It runs the hook of the release that
+# <base>/releases/hook points at, isolated, and kills it if its own 60 s bound
 # fails (a refusal: any non-zero exit refuses the job).
-here=$(/usr/bin/dirname "$(/usr/bin/readlink -f "$0")")
-root=$(/usr/bin/readlink -f "$here/../releases/hook") || root=
+# the release: setup writes this host's <data>/ci-runners into this line when it installs
+# the hook (decision 13.5), so that a copy in /tmp/ci-runners-hooks runs the same release
+base=$(/usr/bin/dirname "$(/usr/bin/dirname "$(/usr/bin/readlink -f "$0")")")  # @CI_BASE@
+root=$(/usr/bin/readlink -f "$base/releases/hook") || root=
 if [ -z "$root" ] || [ ! -d "$root/ci_runners" ]; then
   echo "ci-runners: refused error policy=none"
   exit 1

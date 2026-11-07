@@ -57,7 +57,7 @@ import time
 import tomllib
 import urllib.request
 
-from ci_runners import inventory, locks, slots
+from ci_runners import hookcopy, inventory, locks, slots
 
 RUNNER_VERSION = '2.338.2'
 RUNNER_SHA256 = 'baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40'
@@ -66,7 +66,7 @@ RUNNER_URL = (f'https://github.com/actions/runner/releases/download/v{RUNNER_VER
               f'actions-runner-linux-x64-{RUNNER_VERSION}.tar.gz')
 UNITS = ('ci-runner@.service', 'ci-tunnel.service', 'ci-reaper.service', 'ci-reaper.timer', 'ci-orgsync.service',
          'ci-orgsync.timer', 'ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-hostload.service',
-         'ci-hostload.timer', 'ci.slice')
+         'ci-hostload.timer', 'ci-hooks.service', 'ci.slice')
 RUNNER_FILES = ('config.sh', 'run.sh', os.path.join('bin', 'Runner.Listener'))
 # what goes into a unit file: one word each, so nothing can add a line
 PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,39}')
@@ -82,6 +82,8 @@ TUNNEL_ORDER = 'After=ci-tunnel.service\nWants=ci-tunnel.service'
 TUNNEL_FILES = ('id_ed25519', 'ssh_config', 'known_hosts')
 #: the root step's file (decision 12.9, §5.3): the shared lock and slot files, recreated at boot
 TMPFILES = '/etc/tmpfiles.d/ci-runners-shared.conf'
+#: the runner unit's order after the hooks' copies (decision 13.5)
+HOOKS_ORDER = 'Requires=ci-hooks.service\nAfter=ci-hooks.service'
 #: the root step's drop-in (decision 12.16, §5.3): the CI account's user manager in its own mount namespace
 DROPIN = '/etc/systemd/system/user@{uid}.service.d/ci-runners-private.conf'
 #: the comment that marks the push key's line in authorized_keys (decision 12.4)
@@ -130,14 +132,26 @@ def python_of(inv: inventory.Inventory) -> str:
 
 
 HOOK_PYTHON = 'py=/usr/bin/python3  # @CI_PYTHON@\n'
+#: the hook's release line (decision 13.5): its own path's grandparent until setup names the base
+HOOK_BASE = 'base=$(/usr/bin/dirname "$(/usr/bin/dirname "$(/usr/bin/readlink -f "$0")")")  # @CI_BASE@\n'
 
 
-def hook_text(src: str, python: str) -> str:
-    """A hook as installed: its interpreter line names ``python`` (validated by the
-    caller as one absolute path). Raises ValueError if the hook has no such line. Pure."""
+def hooks_check() -> str:
+    """The runner unit's check that both hook copies are executable files (decision
+    13.5): a runner does not start without them. Pure."""
+    return '\n'.join(f'ExecStartPre=/usr/bin/test -f {hookcopy.DIR}/{n} -a -x {hookcopy.DIR}/{n}' for n in hookcopy.NAMES)
+
+
+def hook_text(src: str, python: str, base: str) -> str:
+    """A hook as installed: its interpreter line names ``python`` and its release line
+    ``base`` (``<data>/ci-runners``), both validated by the caller as one absolute path, so
+    that a copy of it elsewhere runs the same release (decision 13.5). Raises ValueError if
+    the hook lacks either line. Pure."""
     if src.count(HOOK_PYTHON) != 1:
         raise ValueError('a hook has no interpreter line')
-    return src.replace(HOOK_PYTHON, f'py={python}\n')
+    if src.count(HOOK_BASE) != 1:
+        raise ValueError('a hook has no release line')
+    return src.replace(HOOK_PYTHON, f'py={python}\n').replace(HOOK_BASE, f'base={base}\n')
 
 
 def check_python(path: str, run=subprocess.run) -> None:
@@ -201,7 +215,7 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
     which its hooks and its jobs' steps inherit. A per-card runner names its card in
     ``CI_RUNNER_CARD``."""
     h = inv.host
-    hooks = os.path.join(h['data'], 'ci-runners', 'hooks')
+    hooks = hookcopy.hooks_dir(h)  # the copies in the private /tmp on a 3090 host (decision 13.5)
     lines = []
     if 'tunnel' in h:
         t = h['tunnel']
@@ -589,12 +603,17 @@ def build(etc: str, adopt: bool = False) -> Plan:
     if 'tunnel' in h:
         check_tunnel(etc)
     plan.add('hooks:')
-    for name in ('job-started.sh', 'job-completed.sh'):
+    before = len(plan.actions)
+    for name in hookcopy.NAMES:
         with open(os.path.join(release, 'hooks', name)) as f:
-            _file(plan, os.path.join(base, 'hooks', name), hook_text(f.read(), python), 0o755)
+            _file(plan, os.path.join(base, 'hooks', name), hook_text(f.read(), python, base), 0o755)
+    hooks_changed = len(plan.actions) > before
     plan.add('units:')
     subs = {'CI_MEMORY_MAX': h['memory_max'], 'CI_DATA': data, 'CI_ETC': etc,
             'CI_PYTHON': python, 'PROXY_ORDER': TUNNEL_ORDER if 'tunnel' in h else '',
+            # the runners run the hooks' copies, and start only with both there (decision 13.5)
+            'HOOKS_ORDER': HOOKS_ORDER if hookcopy.used(h) else '',
+            'HOOKS_CHECK': hooks_check() if hookcopy.used(h) else '',
             # the forward's ports are in its unit: a changed port changes the unit, which restarts it
             'TUNNEL_HTTP': str(h['tunnel']['http_port']) if 'tunnel' in h else '',
             'TUNNEL_EGRESS': str(h['tunnel']['egress_port']) if 'tunnel' in h else ''}
@@ -622,7 +641,8 @@ def build(etc: str, adopt: bool = False) -> Plan:
         _file(plan, path, content, 0o644)
 
     for name in UNITS:
-        if name.startswith('ci-orgsync') and not h.get('orgsync') or name == 'ci-tunnel.service' and 'tunnel' not in h:
+        if (name.startswith('ci-orgsync') and not h.get('orgsync') or name == 'ci-tunnel.service' and 'tunnel' not in h
+                or name == 'ci-hooks.service' and not hookcopy.used(h)):
             continue
         with open(os.path.join(release, 'setup', 'units', name)) as f:
             unit(name, render(f.read(), subs))
@@ -749,8 +769,12 @@ def build(etc: str, adopt: bool = False) -> Plan:
     if plan.actions or off:  # nothing changed: a second apply is a no-op
         plan.add('systemd --user (timers, runners):')
         cmds = [['systemctl', '--user', 'daemon-reload'],
-                ['systemctl', '--user', 'enable', '--now', *timers(h)],
-                ['systemctl', '--user', 'enable', *[f'ci-runner@{n}.service' for n, _, _, _ in rs]]]
+                ['systemctl', '--user', 'enable', '--now', *timers(h)]]
+        if hookcopy.used(h):  # the copies before the runners; a changed hook is copied again (decision 13.5)
+            cmds.append(['systemctl', '--user', 'enable', '--now', 'ci-hooks.service'])
+            if hooks_changed:  # a reload, not a restart: a restart would restart every runner (Requires=)
+                cmds.append(['systemctl', '--user', 'reload', 'ci-hooks.service'])
+        cmds.append(['systemctl', '--user', 'enable', *[f'ci-runner@{n}.service' for n, _, _, _ in rs]])
         for c in cmds:
             plan.add(f'  run    {" ".join(c)}', kind='run', argv=c)
     plan.add('  (a runner starts at its registration: setup/register.sh, run by the lead)')

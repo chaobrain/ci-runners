@@ -19,6 +19,8 @@ import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tests'))
+import leaks  # noqa: E402  (tests/leaks.py)
 
 WORKERS = 4  # a hosted runner's cores; each worker has its own copy of the tree
 HANG = 60  # seconds: the slowest guarded test takes about 9 s, so a mutant's tests still running have hung
@@ -196,6 +198,13 @@ MUTANTS = [
      [f'{TX}.LockInterop.test_a_timeout']),
     (SLO, "                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n", "                pass\n",
      [f'{TX}.SlotInterop.test_together_never_more_than_the_slot_count']),
+    # no test run leaves a process behind (tests/leaks.py): a skipped cleanup is caught by the check itself
+    ('tests/test_interop.py', "            os.kill(child, 9)\n", "            pass\n",
+     [f'{TX}.LockInterop.test_the_command_does_not_inherit_the_lock']),
+    ('tests/leaks.py', "                os.kill(pid, signal.SIGKILL)\n", "                pass\n",
+     ['tests.test_leaks.Leaks.test_a_process_left_in_a_new_session_is_found_and_killed']),
+    ('tests/leaks.py', "        reap(mark, grace=0)\n        return 124, []", "        return 124, []",
+     ['tests.test_leaks.Leaks.test_a_hang_kills_the_whole_tree']),
     # two accounts: no O_CREAT on an existing shared file, none created in a sticky directory,
     # the queue's files keep the default ACL's rw (decision 12.9)
     (LCK, "        return os.open(path, os.O_WRONLY | os.O_APPEND)\n    except FileNotFoundError",
@@ -963,13 +972,14 @@ MUTANTS = [
 
 
 def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:
-    # -B: a stale .pyc of an earlier mutant of the same size and second would be used
-    try:  # no pipes: a holder a mutant leaves behind must not keep the run waiting
-        return subprocess.run([sys.executable, '-B', '-m', 'unittest', '-q', *tests], cwd=tree,
-                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              timeout=hang).returncode
-    except subprocess.TimeoutExpired:
-        return 124  # a hang fails the tests
+    """The tests' status: 124 for a hang, 125 when a process of the run outlived it
+    (``tests/leaks.py``). Either way every process of the run is killed, in a new
+    session or not, so no mutant leaves one behind."""
+    # -B: a stale .pyc of an earlier mutant of the same size and second would be used.
+    # No pipes: a holder a mutant leaves behind must not keep the run waiting.
+    code, left = leaks.run([sys.executable, '-B', '-m', 'unittest', '-q', *tests], cwd=tree, timeout=hang,
+                           quiet=True)
+    return 125 if code == 0 and left else code
 
 
 def one(tree: pathlib.Path, rel: str, old: str, new: str, tests: list[str]) -> tuple[bool, float]:
@@ -1000,7 +1010,7 @@ def main() -> int:
         every = sorted({t for *_, ts in MUTANTS for t in ts})
         tree0 = trees.get()
         if run(tree0, every, hang=600):
-            print('the unmutated tree fails its tests', file=sys.stderr)
+            print('the unmutated tree fails its tests or leaves a process behind', file=sys.stderr)
             return 2
         trees.put(tree0)
 

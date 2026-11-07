@@ -42,6 +42,7 @@ CI_LOCK = ROOT / 'bin' / 'ci-lock'
 CI_SLOT = ROOT / 'bin' / 'ci-slot'
 PY = sys.executable
 
+BOUND = 120  # seconds: no holder outlives a test that never lets it go (tests/leaks.py)
 RUNNABLE = sys.platform.startswith('linux') and shutil.which('flock') and shutil.which('bash')
 
 
@@ -77,8 +78,8 @@ class LockInterop(unittest.TestCase):
         """A holder that marks ``<tag>.in``, runs ``body``, waits for ``<tag>.go`` and
         marks ``<tag>.out``."""
         d = self.dir
-        script = (f'touch {d}/{tag}.in; {body} while [ ! -e {d}/{tag}.go ] && [ -d {d} ]; do sleep 0.01; done; '
-                  f'touch {d}/{tag}.out')  # the loop ends with the test's directory
+        script = (f'touch {d}/{tag}.in; {body} while [ ! -e {d}/{tag}.go ] && [ -d {d} ] && [ $SECONDS -lt {BOUND} ]; '
+                  f'do sleep 0.01; done; touch {d}/{tag}.out')  # it ends with the test's directory, or at the bound
         if impl == 'bp':  # brainspike's host_lock.py: a HostLock held around the command (s or x only)
             drive = ('import subprocess, sys; sys.path.insert(0, sys.argv[1]); from host_lock import HostLock; '
                      'h = HostLock(); h.acquire(sys.argv[2]); r = subprocess.call(sys.argv[3:]); h.release(); '

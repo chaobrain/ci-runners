@@ -1195,7 +1195,16 @@ Rules:
   3. `salvage` reads the newest record across runs, and uploads at most 16 parts per host
      (§4.5);
   4. on h100, `gpus: 0` is now refused (the `h100` class row of §4.8), and `h100-test.yml`
-     checks `gpus == 1`. No caller passing `gpus: 0` was found.
+     checks `gpus == 1`. No caller passing `gpus: 0` was found;
+  5. a known limit (lead, 2026-11-07): during "Set up job", before any step, the actions
+     runner itself writes the machine name and the hook's path (under `data`) into every
+     job log, on every host. No runner option changes either, and a mask acts only on
+     later output. The logs are visible to members of the private repositories only
+     (11.1). A follow-up points the runners at a copy of the hooks in the account's
+     private `/tmp` (12.16), so that the path names no disk;
+  6. `v1.4.0` is tagged before h100's checks (acceptance 7): h100 is offline at the tag.
+     They run before h100 installs `v1.4.0` and before `v1` moves; until then h100 and
+     every `@v1` caller keep `v1.3.0` (lead, 2026-11-07).
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 
@@ -1337,7 +1346,7 @@ from them, so its items are not tested yet):*
    - Four `3090b-cpu` jobs all ran on 3090b.
    - "Print no inventory" holds for the hook's line. The runner itself writes the
      machine name and the hook's path (under `data`) into every job log, on every host,
-     h100 included; the lead decides (see the stamp PR).
+     h100 included: a known limit of `v1.4.0` (§9, notes item 5).
 5. The P2P self-test passed on both hosts, outside a job and in each two-card part.
    A two-card part ran end to end on each host.
 6. The canary repository composes the four actions at `main` across both 3090 hosts.
@@ -1350,7 +1359,8 @@ from them, so its items are not tested yet):*
      verdict on 3090b.
    - Parts on h100: not tested.
 7. Not tested yet: h100's plan with `v1.4.0`, and the `h100-test.yml` canary on
-   `@v1.4.0` and `@v1`.
+   `@v1.4.0` and `@v1`. They gate h100's install of `v1.4.0` and the move of `v1`, not
+   the tag (§9, notes item 6).
 
 ## 11. brainspike on top of this (decision 12)
 

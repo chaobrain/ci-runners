@@ -2,12 +2,12 @@
 # real one is <data>/ci-runners/etc/inventory.toml on each host, in a mode-700
 # directory, and is never committed. `python -m ci_runners.inventory check FILE`
 # validates it; `... deny FILE etc/policy.toml` prints the hashes for tests/deny.sha256.
-# Every string value except `this`, `memory_max`, `cpus`, `default_project` and the
-# `files` paths is treated as inventory by the deny list. The first path's keys (ssh,
-# trusted, remote, cpu_slowdown, proxy) are accepted and ignored (decision 11.12). A 3090
-# host's `files` name brainspike's host lock and slot files (`host_lock`, `slot_lock`,
-# `slot_queue`), and its `default_project` the project of their slot tickets, which
-# name none (decision 12.9).
+# Every string value except `this`, `memory_max`, `cpus`, `compile_cpus`,
+# `default_project`, a pool's `labels` and `class`, and the `files` paths is treated as
+# inventory by the deny list. The first path's keys (ssh, trusted, remote, cpu_slowdown,
+# proxy) are accepted and ignored (decision 11.12). A 3090 host's `files` name
+# brainspike's host lock and slot files (`host_lock`, `slot_lock`, `slot_queue`), and its
+# `default_project` the project of their slot tickets, which name none (decision 12.9).
 schema = 1
 this = "h100"                                   # the role of the host that reads it
 
@@ -40,6 +40,8 @@ direct = ["localhost", "127.0.0.1", "::1"]
 light = { count = 2, labels = ["h100-light"] }
 part = { count = 2, labels = ["h100-cpu"] }
 h100 = { per_card = true, labels = ["h100"] }   # runners h100-gpu<N>, labelled h100 and h100-gpu<N>
+# A pool names its class where its key is not one (decision 12.5), as a 3090 host's
+# per-card pool does: cards = { per_card = true, class = "gpu", labels = ["<role>-gpu"] }
 
 [hosts.h100.files]                              # the CI slots' files, under state/ (§7)
 slot_lock = "/home/<shared account>/<our subtree>/ci-runners/state/slot.lock"

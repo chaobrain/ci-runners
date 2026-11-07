@@ -365,6 +365,25 @@ h100 = {{ per_card = true, labels = ["h100"] }}
         with self.assertRaisesRegex(ValueError, 'same name'):
             setup.runners(two)  # both per-card pools would name their runners hx-gpu0, hx-gpu3
 
+    def test_a_3090_host_s_runners(self):
+        """Decision 12.5, design §5.1: the 3090 pools, each labelled with the host's own
+        labels; the per-card pool's class is gpu, which its runners' .env names."""
+        text = self.inv.read_text().replace('h100 = { per_card = true, labels = ["h100"] }',
+                                            'cards = { per_card = true, class = "gpu", labels = ["hx-gpu"] }\n'
+                                            'multi = { count = 1, labels = ["hx-multi"] }\n'
+                                            'compile = { count = 1, labels = ["hx-compile"] }\n'
+                                            'nightly = { count = 1, labels = ["hx-nightly"] }')
+        inv = inventory.load(text)
+        self.assertEqual(setup.runners(inv)[2:], [('hx-gpu0', ['hx-gpu', 'hx-gpu0'], 'gpu'),
+                                                  ('hx-gpu3', ['hx-gpu', 'hx-gpu3'], 'gpu'),
+                                                  ('hx-multi-1', ['hx-multi'], 'multi'),
+                                                  ('hx-compile-1', ['hx-compile'], 'compile'),
+                                                  ('hx-nightly-1', ['hx-nightly'], 'nightly')])
+        env = setup.env_file(inv, 'gpu', '/e', 3)
+        for line in ('CI_RUNNER_CLASS=gpu\n', 'CI_RUNNER_POOL_LABELS=hx-gpu\n', 'CI_RUNNER_CARD=3\n'):
+            self.assertIn(line, env)
+        self.assertIn('CI_RUNNER_POOL_LABELS=hx-multi\n', setup.env_file(inv, 'multi', '/e'))
+
     def test_plan_without_a_proxy(self):
         self.unpacked = []
         text = setup.build(str(self.etc)).text()

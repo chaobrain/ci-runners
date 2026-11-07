@@ -77,13 +77,14 @@ def _runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str, int | 
     out = []
     for pool, v in inv.host['pools'].items():
         spec = v if isinstance(v, dict) else {'count': v}
-        labels = inventory.pool_labels(inv, pool) or list(dict.fromkeys([pool, inv.this]))
+        cls = inventory.pool_class(inv.host, pool)  # the pool's key unless it names its class (12.5)
+        labels = inventory.pool_labels(inv, cls) or list(dict.fromkeys([pool, inv.this]))
         if spec.get('per_card'):
             for card in inv.host['gpus']:
-                out.append((f'{inv.this}-gpu{card}', [*labels, f'{inv.this}-gpu{card}'], pool, card))
+                out.append((f'{inv.this}-gpu{card}', [*labels, f'{inv.this}-gpu{card}'], cls, card))
         else:
             for i in range(1, spec['count'] + 1):
-                out.append((f'{inv.this}-{pool}-{i}', labels, pool, None))
+                out.append((f'{inv.this}-{pool}-{i}', labels, cls, None))
     names = [n for n, _, _, _ in out]
     if len(set(names)) != len(names):
         raise ValueError('two runners of this host have the same name')
@@ -98,9 +99,9 @@ def timers(h: dict) -> list[str]:
 
 def runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str]]:
     """``(name, labels, class)`` of this host's runners (design §5.1): ``<role>-<pool>-<i>``,
-    labelled with the pool (the class) and the host role, or with the pool's own
-    ``labels``; a ``per_card`` pool has one runner per card, ``<role>-gpu<N>``, labelled
-    also ``<role>-gpu<N>``."""
+    labelled with the pool and the host role, or with the pool's own ``labels``; a
+    ``per_card`` pool has one runner per card, ``<role>-gpu<N>``, labelled also
+    ``<role>-gpu<N>``. The class is the pool's ``class``, else its key (decision 12.5)."""
     return [(n, labels, cls) for n, labels, cls, _ in _runners(inv)]
 
 

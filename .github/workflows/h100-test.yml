@@ -56,11 +56,13 @@ jobs:
           IN_TIMEOUT: ${{ inputs.timeout-minutes }}
           IN_PROJECT: ${{ inputs.project }}
           IN_CONTEXT: ${{ inputs.context }}
+          IN_GPUS: ${{ inputs.gpus }}
           HAS_CPU: ${{ inputs.cpu-command != '' }}
           HAS_GPU: ${{ inputs.gpu-command != '' }}
         run: |
           [[ $IN_TIMEOUT =~ ^[0-9]+$ ]] && (( IN_TIMEOUT >= 1 && IN_TIMEOUT <= 240 )) || { echo "::error::timeout-minutes must be 1 to 240"; exit 2; }
           [[ $IN_PROJECT =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || { echo "::error::project is not a registry key"; exit 2; }
+          [ "$HAS_GPU" != true ] || [ "$IN_GPUS" = 1 ] || { echo "::error::gpus must be 1: an h100 part takes one card (D7)"; exit 2; }
           parts=; [ "$HAS_CPU" = true ] && parts=cpu; [ "$HAS_GPU" = true ] && parts="${parts:+$parts }gpu"
           [ -n "$parts" ] || { echo "::error::set cpu-command or gpu-command"; exit 2; }
           { echo "parts=$parts"; echo "context=${IN_CONTEXT:-$IN_PROJECT/ci}"; echo "job-timeout=$((IN_TIMEOUT + 15))"; } >> "$GITHUB_OUTPUT"

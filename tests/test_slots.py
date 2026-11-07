@@ -42,6 +42,16 @@ class Grants(unittest.TestCase):
         self.assertEqual(g([T(1), T(2, 'other')]), [2])
         self.assertEqual(g([T(1), T(2)], free=2), [])
 
+    def test_a_ticket_for_every_slot_holds_back_later_ones(self):
+        """Decision 12.8: a nightly part's ticket is served after the older ones, takes every
+        slot left whatever its cap, and no later ticket passes it."""
+        every = T(2, 'myproj', every=True)
+        self.assertEqual(g([T(1, 'other'), every, T(3, 'brainevent')], free=2), [1, 2])
+        self.assertEqual(g([every, T(3, 'brainevent')], free=2), [2, 2])
+        self.assertEqual(g([every, T(3, 'brainevent')], held={'myproj': 1}, free=1), [2])  # past its cap of 2
+        self.assertEqual(g([every, T(3, 'brainevent')], free=0), [])
+        self.assertEqual(g([T(1, 'other'), T(3, 'brainevent')], free=2), [1, 3])
+
     def test_tickets_without_a_project_are_the_default_projects(self):
         """Rule 4: ci_slot.sh's tickets name no project and count as the host's default."""
         def gd(waiting, held=None, free=1):
@@ -114,6 +124,44 @@ class Queue(unittest.TestCase):
             finally:
                 hold.wait()
 
+    def test_a_ticket_for_every_slot_takes_them_all(self):
+        """Decision 12.8: ``try_take_every`` keeps what it gets until it holds every slot."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05)
+            for p in q.slots:
+                pathlib.Path(p).touch()
+            hold = subprocess.Popen(['flock', '-x', q.slots[1], 'sleep', '30'], start_new_session=True)
+            try:
+                for _ in range(200):
+                    if slots._flocked(q.slots[1]):
+                        break
+                    time.sleep(0.01)
+                older = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05)
+                older.take_ticket('q', 'cmd')  # an older ticket goes first, within its cap
+                q.take_ticket('p', 'cmd', every=True)
+                self.assertEqual(q.waiting(), [T(older.seq, 'q'), T(q.seq, 'p', every=True)])
+                self.assertIsNone(q.try_take_every('p', {'q': 1}))
+                self.assertEqual(q.every, [])  # the one free slot is the older ticket's
+                fd = older.try_take('q', {'q': 1})
+                os.close(fd)
+                self.assertIsNone(q.try_take_every('p', {}))  # slot 2 is held: it keeps slot 1 and waits
+                self.assertEqual((len(q.every), q.held()[1], os.path.exists(q.ticket)), (1, 0, True))
+                later = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05)
+                later.take_ticket('p', 'cmd')
+                self.assertIsNone(later.try_take('p', {'p': 2}))
+            finally:
+                os.killpg(hold.pid, 9)
+                hold.wait()
+            for _ in range(500):  # flock(1)'s orphaned sleep holds the lock until the kernel reaps it
+                if not slots._flocked(q.slots[1]):
+                    break
+                time.sleep(0.01)
+            fds = q.try_take_every('p', {})
+            self.assertEqual((len(fds), q.held()[:2], os.path.exists(q.ticket)), (2, ({'p': 2}, 0), False))
+            self.assertIsNone(later.try_take('p', {'p': 2}))
+            for fd in fds:
+                os.close(fd)
+
     def _outside_holder(self, path):
         """A slot flocked by a process with no holder record: a ci_slot.sh holder."""
         hold = subprocess.Popen(['flock', '-x', path, 'sleep', '30'], start_new_session=True)
@@ -153,6 +201,23 @@ class Queue(unittest.TestCase):
             q.take_ticket('p', 'cmd')
             self.assertEqual(q.seq, 2)
             self.assertIsNone(q.try_take('p', {'p': 2}))
+
+    def test_a_nightly_waits_behind_an_older_ci_slot_sh_ticket(self):
+        """Rule 4 on the nightly path: an older ci_slot.sh ticket is the default project's,
+        whose cap is the slot count whatever its registry says, so it keeps its turn for the
+        one free slot and a nightly of that project takes none."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05, default_project='p')
+            for path in q.slots:
+                pathlib.Path(path).touch()
+            self._outside_holder(q.slots[0])  # ci_slot.sh holds slot 1, with no holder record
+            self._sh_ticket(q, 1)  # and waits for another
+            q.take_ticket('p', 'nightly', every=True)
+            self.assertEqual(q.seq, 2)
+            self.assertIsNone(q.try_take_every('p', {'p': 0}))
+            self.assertEqual(q.every, [])  # it took no slot
+            self.assertFalse(slots._flocked(q.slots[1]))  # slot 2 stays free for the older ticket
+            self.assertTrue(os.path.exists(os.path.join(q.queue, '000000000001.ticket')))
 
     def test_the_default_projects_cap_is_the_slot_count(self):
         """Rule 4: ci_slot.sh's waiters apply no caps, so the default project's is the

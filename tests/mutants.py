@@ -962,7 +962,7 @@ MUTANTS = [
      [f'{TT}.Classes.test_a_compile_part_is_pinned_at_nice_0_and_takes_a_slot', f'{TT}.Classes.test_a_lock_needs_the_host_lock']),
     (PRT, "        if cls == 'compile' and not h.get('compile_cpus'):", "        if False:",
      [f'{TT}.Classes.test_a_compile_part_is_pinned_at_nice_0_and_takes_a_slot']),
-    (PRT, "pin = str(h.get('compile_cpus') if cls == 'compile' else h.get('cpus') or '')", "pin = str(h.get('cpus') or '')",
+    (PRT, "pin = str((h.get('compile_cpus') if cls == 'compile' else h.get('cpus')) or '')", "pin = str(h.get('cpus') or '')",
      [f'{TT}.Classes.test_a_compile_part_is_pinned_at_nice_0_and_takes_a_slot']),
     (PRT, "nice=0 if cls == 'compile' else 10)", "nice=10)", [f'{TT}.Classes.test_a_compile_part_is_pinned_at_nice_0_and_takes_a_slot']),
     (PRT, "SLOT_CLASSES = ('part', 'compile')", "SLOT_CLASSES = ('part',)",

@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import unittest
 
-from ci_runners import inventory, part, registry
+from ci_runners import envuse, inventory, part, registry
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -273,6 +273,79 @@ class Execute(Host):
             time.sleep(0.05)
         code, out = part.salvage(self.inv, 'hb:org/repo/77-1/long-1', self.env)
         self.assertEqual((out['outcome'], (rec / 'work' / 'done').exists()), ('pass', True))
+
+
+class EnvLink(Host):
+    """The project's env is a link that ``env refresh`` moves (design §4.9, decision 12.11):
+    a part runs in the build the link named at its start, and holds it."""
+
+    def setUp(self):
+        super().setUp()
+        self.envs = self.data / 'ci-runners' / 'envs'
+        for b in ('p-20261107T000001Z', 'p-20261107T000002Z'):
+            (self.envs / b / 'bin').mkdir(parents=True)
+        self.link = self.envs / 'p'
+        self.link.symlink_to('p-20261107T000001Z')
+        entry = self.etc / 'projects' / 'p.toml'
+        entry.write_text(entry.read_text().replace('/opt/env-p', str(self.link)))
+        self.probe = pathlib.Path(self.tmp.name) / 'probe.py'
+        self.probe.write_text('import fcntl, sys\nf = open(sys.argv[1])\ntry:\n'
+                              '    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n    print("free")\n'
+                              'except OSError:\n    print("held")\n')
+
+    def test_the_part_resolves_the_link_once_and_names_the_build(self):
+        a, b = 'p-20261107T000001Z', 'p-20261107T000002Z'
+        # the link moves while the part runs: its later commands must see the first env
+        code, out = self.execute(command=f'ln -sfn {b} {self.link}; env > "$CI_PART_DIR/env.txt"')
+        self.assertEqual(code, 0, out)
+        rec = self.path(out)
+        env = dict(x.split('=', 1) for x in pathlib.Path(rec, 'work', 'env.txt').read_text().splitlines() if '=' in x)
+        self.assertEqual(env['CONDA_PREFIX'], str(self.envs / a))  # the build, not the link
+        self.assertTrue(env['PATH'].startswith(f'{self.envs / a}/bin:'), env['PATH'])
+        self.assertEqual(json.loads(pathlib.Path(rec, 'record.json').read_text())['env_build'], a)
+        self.assertEqual(os.readlink(self.link), b)  # and the link did move
+
+    def test_the_build_is_held_for_the_parts_life_and_released_after(self):
+        a = self.envs / 'p-20261107T000001Z'
+        code, out = self.execute(command=f'{sys.executable} {self.probe} {a}/.inuse > "$CI_PART_DIR/lock.txt"')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(pathlib.Path(self.path(out), 'work', 'lock.txt').read_text().strip(), 'held')
+        self.assertTrue(envuse.remove_unused(str(a)))  # the part is over: nothing holds it
+        self.assertFalse(a.exists())
+
+    def test_the_supervisor_holds_the_build_after_the_executor_is_gone(self):
+        code = (f'import sys, json; sys.path.insert(0, {str(ROOT)!r}); from ci_runners import inventory, part; '
+                f'inv = inventory.load(open({str(self.tmp.name + "/inv.toml")!r}).read()); '
+                f'ex = part.Executor(inv, {str(self.etc)!r}, json.loads(sys.argv[1]), release={str(ROOT)!r}, '
+                f'scope=False, poll=0.1); '
+                f'ex.execute(part.Inputs(project="p", id="long", timeout_minutes=1, command="sleep 2"))')
+        pathlib.Path(self.tmp.name, 'inv.toml').write_text(self.inv_text)
+        child = subprocess.Popen([sys.executable, '-I', '-c', code, json.dumps(self.env)], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+        rec = self.data / 'ci-runners/state/parts/org/repo/77-1/long-1'
+        for _ in range(100):
+            if (rec / 'scope.json').exists():
+                break
+            time.sleep(0.05)
+        os.killpg(child.pid, signal.SIGTERM)  # the runner stops
+        child.wait(timeout=20)
+        build = self.envs / 'p-20261107T000001Z'
+        self.assertFalse(envuse.remove_unused(str(build)))  # the supervisor still runs the command in it
+        self.assertTrue(build.is_dir())
+        for _ in range(200):
+            if (rec / 'exit.json').exists():
+                break
+            time.sleep(0.05)
+        time.sleep(0.3)  # the supervisor exits after writing exit.json
+        self.assertTrue(envuse.remove_unused(str(build)))
+
+    def test_a_part_with_no_env_directory_is_as_before(self):
+        entry = self.etc / 'projects' / 'p.toml'
+        entry.write_text(entry.read_text().replace(str(self.link), '/opt/env-p'))
+        code, out = self.execute(command='env > "$CI_PART_DIR/env.txt"')
+        env = dict(x.split('=', 1) for x in pathlib.Path(self.path(out), 'work', 'env.txt').read_text().splitlines() if '=' in x)
+        self.assertEqual(env['CONDA_PREFIX'], '/opt/env-p')
+        self.assertEqual(json.loads(pathlib.Path(self.path(out), 'record.json').read_text())['env_build'], 'env-p')
 
 
 class OwnCap(Host):

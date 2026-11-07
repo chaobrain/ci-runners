@@ -110,7 +110,7 @@ ci-run drain status             # 看状态，以及还在跑的部件 scope
 ci-run drain off                # 恢复整台主机和所有池子；--pool P 只恢复那个池子
 ```
 
-被排空的部件以 `unavailable`（`drained: …`）结束，`retry-on` 指向 inventory `peer_labels` 写的另一台主机的同类池子；已经开跑的部件会跑完，`claim`、`salvage`、`verdict` 不受影响。`drain status` 显示没有部件 scope 后再重启 runner。状态文件是 `state/drain.json`，重启后仍有效；文件坏了按整台主机已排空处理，`drain off` 会重写它。这只对用 `@v1.5.0` 以后版本的调用方有效。
+被排空的部件以 `unavailable`（`drained: …`）结束，`retry-on` 指向 inventory `peer_labels` 写的另一台主机的同类池子；已经开跑的部件会跑完，`claim`、`salvage`、`verdict` 不受影响。`drain status` 显示没有部件 scope 后再重启 runner。状态文件是 `state/drain.json`，重启后仍有效；文件坏了按整台主机已排空处理：只有不带 `--pool` 的 `drain off` 会重写它（同时恢复整台主机），带 `--pool` 的命令和 `drain on` 会拒绝，免得从空状态开始悄悄恢复整台主机。这只对用 `@v1.5.0` 以后版本的调用方有效。
 
 **主机忙时让出部件**（design 决定 13.2）。`ci-hostload.timer` 每 60 秒运行 `ci-run hostload sample`，往 `state/hostload/<日期>.jsonl` 追加一行：其他账户（CI 账户以外的所有账户，维护者本人的也算）占用的 CPU 核数、内存 GiB、每张卡的显存 MiB，以及别的账户对 host lock 的独占持有。一个部件的第一次尝试在 gate 里读最近的窗口：某条规则在窗口内每个样本都达到阈值，部件就以 `unavailable`（`busy: …`）结束，去 `peer_labels` 写的另一台主机的同类池子。原因写出规则、测到的值和阈值，例如 `busy: cpu 17.2 >= 14 cores for 10 min`，可以照着调阈值。
 
@@ -124,7 +124,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 - hook 靠 setup 写进去的 `base=<data>/ci-runners` 一行找 release，不靠自己的路径，所以副本跑的是同一个 release。
 - runner 单元 `Requires=`/`After=ci-hooks.service`，`ExecStartPre=` 检查两个副本都是可执行文件：缺一个 runner 就起不来。作业开始时 hook 文件不在，runner 在 "Set up runner" 失败。
 - reaper 每 10 分钟比对副本和源文件，缺的或不同的重写，并在日志里记一行 `hook copies: rewrote …`。
-- `apply` 在启用 runner 之前 `enable --now ci-hooks.service`；hook 变了就 `reload`（重新复制）。不要 `restart` 它：`Requires=` 会把每个 runner 一起重启。
+- `apply` 在启用 runner 之前 `enable --now ci-hooks.service`；hook 变了就 `reload`（重新复制）。不要 `restart` 或 `stop` 它：因为 `Requires=`，restart 会把每个 runner 一起重启，stop 会把每个 runner 一起停掉（正在跑的作业也会被杀）。
 - 只能在 CI 账户的 user manager 里（systemd 单元）运行：`sudo -u` 进来的 shell 不在那个命名空间，看到的是主机的 `/tmp`，`ci-run hooks copy` 在那里写的副本 runner 看不到。
 
 ## 5. 发布流程

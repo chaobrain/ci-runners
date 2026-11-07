@@ -177,9 +177,9 @@ class Started(unittest.TestCase):
                                    capture_output=True, text=True, timeout=60, cwd=self.base)
                 self.assertEqual(r.returncode, code, (n, py, r.stdout, r.stderr))
                 self.assertTrue(mark.read_text().startswith('-I -c '), (n, py))
-        with self.assertRaises(ValueError):
-            setup.hook_text('#!/bin/sh\nexec python3 -I\n', str(fake), str(self.base))
         src = (ROOT / 'hooks' / 'job-started.sh').read_text()
+        with self.assertRaisesRegex(ValueError, 'no interpreter line'):
+            setup.hook_text(src.replace(setup.HOOK_PYTHON, 'exec python3 -I\n'), str(fake), str(self.base))
         with self.assertRaisesRegex(ValueError, 'no release line'):
             setup.hook_text(src.replace(setup.HOOK_BASE, ''), str(fake), str(self.base))
         # a copy whose release line names no release refuses every job (fail closed)

@@ -12,9 +12,9 @@ from unittest import mock
 
 from ci_runners import hookcopy
 
-HOST = '22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n'
-PRIVATE = (HOST + '600 22 259:2 /tmp/systemd-private-0123abcd-user@1009.service-XyZ/tmp /tmp rw,relatime '
-                  'shared:300 - ext4 /dev/nvme0n1p2 rw\n')
+HOST = '22 1 250:2 / / rw,relatime shared:1 - ext4 /dev/x rw\n'
+PRIVATE = (HOST + '600 22 250:2 /tmp/systemd-private-0123abcd-user@4242.service-XyZ/tmp /tmp rw,relatime '
+                  'shared:300 - ext4 /dev/x rw\n')
 STARTED, COMPLETED = b'#!/bin/sh\necho started\n', b'#!/bin/sh\necho completed\n'
 
 

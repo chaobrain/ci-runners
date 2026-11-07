@@ -19,8 +19,8 @@ from tests.test_part import Host
 PEER = 'peer_labels = { part = ["hz-cpu"], light = ["hz-light"] }\n'
 STAT = 'cpu  100 20 30 1000 50 5 5 10 0 0\ncpu0 1 1 1 1 1 1 1 1 0 0\nintr 1\n'
 MEMINFO = 'MemTotal:       197000000 kB\nMemFree:  1 kB\nMemAvailable:   187000000 kB\n'
-CGROUP = '0::/user.slice/user-1009.slice/user@1009.service/app.slice/ci-hostload.service\n'
-MANAGER = '/user.slice/user-1009.slice/user@1009.service'
+CGROUP = '0::/user.slice/user-4242.slice/user@4242.service/app.slice/ci-hostload.service\n'
+MANAGER = '/user.slice/user-4242.slice/user@4242.service'
 TH = {'window_minutes': 10, 'cpu_cores': 14, 'memory_gib': 94.0, 'gpu_mib': 2048, 'lock_minutes': 20}
 NOW = 1_800_000_000.0
 
@@ -52,14 +52,14 @@ class Parsers(unittest.TestCase):
         self.assertEqual(hostload.manager_cgroup(''), '')
 
     def test_exclusive_flocks_on_one_file(self):
-        locks = ('1: FLOCK  ADVISORY  WRITE 4242 103:02:1234 0 EOF\n'
-                 '2: FLOCK  ADVISORY  READ  4343 103:02:1234 0 EOF\n'   # shared: not exclusive
-                 '3: POSIX  ADVISORY  WRITE 4444 103:02:1234 0 EOF\n'   # fcntl, not flock
-                 '4: FLOCK  ADVISORY  WRITE 4545 103:02:9999 0 EOF\n'   # another file
-                 '5: FLOCK  ADVISORY  WRITE 4646 103:03:1234 0 EOF\n'   # another device
+        locks = ('1: FLOCK  ADVISORY  WRITE 4242 fa:02:1234 0 EOF\n'
+                 '2: FLOCK  ADVISORY  READ  4343 fa:02:1234 0 EOF\n'   # shared: not exclusive
+                 '3: POSIX  ADVISORY  WRITE 4444 fa:02:1234 0 EOF\n'   # fcntl, not flock
+                 '4: FLOCK  ADVISORY  WRITE 4545 fa:02:9999 0 EOF\n'   # another file
+                 '5: FLOCK  ADVISORY  WRITE 4646 fa:03:1234 0 EOF\n'   # another device
                  '6: FLOCK  ADVISORY  WRITE 4747 zz:02:1234 0 EOF\n'
-                 '7: FLOCK  ADVISORY  WRITE 4848 103:02:1234 0 EOF\n')
-        self.assertEqual(hostload.write_flocks(locks, (0x103, 2), 1234), [4242, 4848])
+                 '7: FLOCK  ADVISORY  WRITE 4848 fa:02:1234 0 EOF\n')
+        self.assertEqual(hostload.write_flocks(locks, (0xfa, 2), 1234), [4242, 4848])
 
     def test_compute_apps(self):
         csv = '123, 00000000:01:00.0, 500\n[N/A], 00000000:01:00.0, 1\n7, 00000000:4D:00.0, [N/A]\n8, x\n'
@@ -105,6 +105,13 @@ class Sample(unittest.TestCase):
         self.assertIsNone(hostload.raw('', **self.kw(NOW))['lock'])  # no host lock on this host
         self.assertIsNone(hostload.raw(str(self.lock) + '.gone', **self.kw(NOW))['lock'])
 
+    def test_without_the_ci_accounts_memory_no_memory_sample(self):
+        """Its own parts would count as another account's: fail open, as for the CPU."""
+        del self.files[f'/sys/fs/cgroup{MANAGER}/memory.stat']
+        r = hostload.raw('', **self.kw(NOW))
+        self.assertIsNone(r['mem'])
+        self.assertIsNotNone(r['mem_total'])
+
     def test_unreadable_values_are_none(self):
         r = hostload.raw('', **self.kw(NOW, read=lambda p: '', run=mock.Mock(side_effect=OSError)))
         self.assertEqual({k: r[k] for k in ('cpu_s', 'ci_cpu_s', 'mem_total', 'mem', 'gpu', 'lock')},
@@ -113,19 +120,24 @@ class Sample(unittest.TestCase):
     def test_derive_the_cpu_rate(self):
         prev = {'t': NOW - 60, 'cpu_s': 1000.0, 'ci_cpu_s': 100.0}
         line = {'t': NOW, 'cpu_s': 1960.0, 'ci_cpu_s': 160.0}
-        self.assertEqual(hostload.derive(line, prev)['cpu'], 15.0)  # (960 - 60) / 60
-        self.assertIsNone(hostload.derive(line, None)['cpu'])
-        self.assertIsNone(hostload.derive(line, {**prev, 't': NOW - 301})['cpu'])  # too old a previous line
-        self.assertIsNone(hostload.derive(line, {**prev, 't': NOW})['cpu'])
-        self.assertIsNone(hostload.derive(line, {**prev, 'ci_cpu_s': None})['cpu'])
-        self.assertEqual(hostload.derive({**line, 'ci_cpu_s': 2000.0}, prev)['cpu'], 0.0)  # never negative
+        self.assertEqual(hostload.derive(line, prev, 28)['cpu'], 15.0)  # (960 - 60) / 60
+        self.assertIsNone(hostload.derive(line, None, 28)['cpu'])
+        self.assertIsNone(hostload.derive(line, {**prev, 't': NOW - 301}, 28)['cpu'])  # too old a previous line
+        self.assertIsNone(hostload.derive(line, {**prev, 't': NOW}, 28)['cpu'])
+        self.assertIsNone(hostload.derive(line, {**prev, 'ci_cpu_s': None}, 28)['cpu'])
+        self.assertEqual(hostload.derive({**line, 'ci_cpu_s': 1120.0}, prev, 28)['cpu'], 0.0)  # never negative (17 > 16)
+        # the user manager restarted: its counter went back, and the delta would be the host's busy time
+        self.assertIsNone(hostload.derive({**line, 'ci_cpu_s': 5.0}, prev, 28)['cpu'])
+        self.assertIsNone(hostload.derive({**line, 'ci_cpu_s': 2000.0}, prev, 28)['cpu'])  # more than 28 cores
+        self.assertIsNone(hostload.derive(line, prev, 14)['cpu'])  # 16 host cores on a 14-CPU host
+        self.assertEqual(hostload.derive(line, prev, 16)['cpu'], 15.0)  # at the bound
 
     def test_sample_appends_a_line(self):
-        first = hostload.sample(self.data, str(self.lock), **self.kw(NOW - 60))
+        first = hostload.sample(self.data, str(self.lock), cpus=28, **self.kw(NOW - 60))
         self.assertIsNone(first['cpu'])
         self.files['/proc/stat'] = 'cpu  60100 20 30 1000 50 5 5 10 0 0\n'  # +600 s busy
         self.files[f'/sys/fs/cgroup{MANAGER}/cpu.stat'] = 'usage_usec 60300000\n'  # +60 s the CI account's
-        second = hostload.sample(self.data, str(self.lock), **self.kw(NOW))
+        second = hostload.sample(self.data, str(self.lock), cpus=28, **self.kw(NOW))
         self.assertEqual(second['cpu'], 9.0)
         path = hostload.day_file(self.data, NOW)
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
@@ -274,6 +286,31 @@ class Gate(Host):
         _, out = self.execute(id='p')
         self.assertEqual(out['outcome'], 'pass')
         self.assertFalse(os.path.isdir(os.path.join(hostload.record_dir(str(self.data)), 'refused')))
+
+    def test_no_retry_budget_queues_here(self):
+        """A project with ``retries = 0`` cannot go elsewhere: sent away it would end an
+        error, so it waits here as before v1.5."""
+        self.busy_host()
+        p = self.etc / 'projects' / 'p.toml'
+        p.write_text(p.read_text().replace('memory = "1G"\n', 'memory = "1G"\nretries = 0\n'))
+        _, out = self.execute()
+        self.assertEqual(out['outcome'], 'pass')
+        self.assertFalse(os.path.isdir(os.path.join(hostload.record_dir(str(self.data)), 'refused')))
+
+    def test_the_card_rule_through_part(self):
+        """A GPU part is sent when another account holds its card; a CPU part on the same
+        host is not."""
+        text = self.inv_text.replace('pools = { light = 1, part = 1 }',
+                                     'pools = { light = 1, part = 1, cards = { per_card = true, class = "gpu" } }')
+        self.inv = inventory.load(text.replace(PEER, 'peer_labels = { part = ["hz-cpu"], gpu = ["hz-gpu"] }\n'))
+        self.record(minutes(10, now=self.now - 1, cpu=0.5, mem=1.0, gpu={'0': 0, '1': 5000}, lock=None))
+        gpu = {**self.env, 'CI_RUNNER_CLASS': 'gpu', 'RUNNER_NAME': 'hb-gpu1', 'CI_RUNNER_CARD': '1'}
+        code, out = self.execute(gpu, id='g', gpus=1, command='touch "$CI_PART_DIR/ran"')
+        self.assertEqual((out['outcome'], out['reason'], out['retry-on']),
+                         ('unavailable', 'busy: card 1 5000 >= 2048 MiB for 10 min', ['self-hosted', 'hz-gpu']))
+        self.assertFalse(self.ran(out))
+        _, out = self.execute(id='c')  # the same host, a CPU part
+        self.assertEqual(out['outcome'], 'pass')
 
     def test_an_idle_or_unrecorded_host_runs_it(self):
         _, out = self.execute(id='a')  # no record: fail open

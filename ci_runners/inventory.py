@@ -358,7 +358,18 @@ _PATTERNS = {
     'home-path': re.compile(r'/(?:home|Users)/(?!runner(?![\w.-]))(?=\w)[\w.-]+'),
     'github-token': re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})'),
     'private-key': re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----'),
+    # a host's account uid (user@<uid>.service, user-<uid>.slice, uid=<uid>): the inventory
+    # names accounts, never uids, so a real one can only come from a host (RUN-8 review)
+    'uid': re.compile(r'(?:\buser[@-]|\buid\s*[=:]\s*)(\d{4,5})(?!\d)', re.I),
+    # a block device's numbers, as mountinfo (decimal) and /proc/locks (hex) print them
+    'device': re.compile(r'(?<![\w:.])\d+ \d+ (\d+):\d+ /'
+                         r'|\b(?:FLOCK|POSIX|OFDLCK)\s+\S+\s+(?:READ|WRITE)\s+\d+\s+([0-9a-f]+):[0-9a-f]+:\d+'),
 }
+#: the uids and device majors that are not a host's: a fixture uses these
+FAKE_UIDS = frozenset({4242})
+#: majors that name no real disk: 0 (anonymous: tmpfs, proc) and 240-254 (local or
+#: experimental use, Linux's devices.txt)
+FAKE_MAJORS = frozenset({0, *range(240, 255)})
 #: IPv4 addresses that are not inventory: loopback, the unspecified address, the
 #: documentation ranges (RFC 5737)
 _PUBLIC_IP = re.compile(r'127\.|0\.0\.0\.0$|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.')
@@ -378,7 +389,7 @@ def _candidates(text: str) -> Iterator[str]:
 class Finding:
     path: str
     line: int
-    kind: str  # denied, ipv4, home-path, github-token, private-key
+    kind: str  # denied, ipv4, home-path, github-token, private-key, uid, device
 
     def __str__(self) -> str:
         return f'{self.path}:{self.line}: {self.kind}'
@@ -395,6 +406,10 @@ def scan(text: str, deny: frozenset[str] | set[str], path: str = '') -> list[Fin
         for kind, rx in _PATTERNS.items():
             for m in rx.finditer(line):
                 if kind == 'ipv4' and (not all(int(g) <= 255 for g in m.groups()) or _PUBLIC_IP.match(m.group())):
+                    continue
+                if kind == 'uid' and not (1000 <= int(m.group(1)) <= 65533 and int(m.group(1)) not in FAKE_UIDS):
+                    continue  # a system account's, or a fixture's
+                if kind == 'device' and (int(m.group(1)) if m.group(1) else int(m.group(2), 16)) in FAKE_MAJORS:
                     continue
                 kinds.append(kind)
                 break

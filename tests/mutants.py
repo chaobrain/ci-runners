@@ -971,12 +971,17 @@ def one(tree: pathlib.Path, rel: str, old: str, new: str, tests: list[str]) -> t
     """Whether the tests kill one mutant, and their time, applied to ``tree`` (one worker's own copy)."""
     path = tree / rel
     src = path.read_text()
+    # the tests' own interpreters (the supervisor, the P2P self-test, run with -I) write
+    # bytecode, and a mutant of the same size within the same second would load it: drop it
+    cache = path.parent / '__pycache__'
+    shutil.rmtree(cache, ignore_errors=True)
     path.write_text(src.replace(old, new))
     t0 = time.monotonic()
     try:
         return run(tree, tests) != 0, time.monotonic() - t0
     finally:
         path.write_text(src)
+        shutil.rmtree(cache, ignore_errors=True)
 
 
 def main() -> int:

@@ -75,6 +75,8 @@ TBR = 'tests.test_bridge'
 P2P = 'ci_runners/p2p.py'
 T2 = 'tests.test_p2p'
 TX = 'tests.test_interop'
+DRN = 'ci_runners/drain.py'
+TD = 'tests.test_drain'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
@@ -1307,6 +1309,47 @@ MUTANTS = [
     (SET, "    pub = ' '.join((r.stdout if r is not None and r.returncode == 0 else '').split()[:2])",
      "    pub = (r.stdout.strip() if r is not None and r.returncode == 0 else '')",
      [f'{TU}.Shared.test_the_egress_accounts_line_for_the_tunnel_key']),
+    # RUN-8c: the drain switch (decision 13.1), the peer pool and a retry on another host (13.3)
+    (DRN, "    if state is None:\n        return UNREADABLE", "    if state is None:\n        return ''",
+     [f'{TD}.State.test_unreadable_or_malformed_drains_the_host']),
+    (DRN, "    if state['host'] is not None:\n        return 'drained: host'", "    if False:\n        return 'drained: host'",
+     [f'{TD}.State.test_on_and_off_for_the_host_and_a_pool', f'{TD}.Gate.test_a_drained_host_refuses_to_the_peer_pool']),
+    (DRN, "    if pool is not None and pool in state['pools']:", "    if False:",
+     [f'{TD}.State.test_on_and_off_for_the_host_and_a_pool', f'{TD}.Gate.test_a_drained_pool_refuses_only_its_class']),
+    (DRN, "    except FileNotFoundError:\n        return {'host': None, 'pools': {}}", "    except FileNotFoundError:\n        return None",
+     [f'{TD}.State.test_missing_is_not_drained']),
+    (DRN, "    if not isinstance(doc, dict) or set(doc) != {'host', 'pools'}:", "    if not isinstance(doc, dict):",
+     [f'{TD}.State.test_unreadable_or_malformed_drains_the_host']),
+    (DRN, "    if not (host is None or (type(host) in num and not isinstance(host, bool))):", "    if False:",
+     [f'{TD}.State.test_unreadable_or_malformed_drains_the_host']),
+    (DRN, "            st['host'] = st['host'] if st['host'] is not None else now()", "            st['host'] = now()",
+     [f'{TD}.State.test_on_and_off_for_the_host_and_a_pool']),
+    (DRN, "        elif pool:\n            st['pools'].pop(pool, None)", "        elif False:\n            pass",
+     [f'{TD}.State.test_on_and_off_for_the_host_and_a_pool']),
+    (DRN, "    if name in pools:\n        return name", "    if False:\n        return name",
+     [f'{TD}.State.test_a_pool_by_key_or_class']),
+    (PRT, "drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # decision 13.1", "''  # decision 13.1",
+     [f'{TD}.Gate.test_the_gate_refuses_before_the_slot']),
+    (PRT, "drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # drained while it waited (13.1)",
+     "''  # drained while it waited (13.1)", [f'{TD}.Gate.test_drained_while_it_waited_for_its_slot']),
+    (PRT, "        return self._end(record, rec, a, unavailable=why, retry_on=['self-hosted', *peer] if peer else [],",
+     "        return self._end(record, rec, a, unavailable=why, retry_on=None,",
+     [f'{TD}.Gate.test_a_drained_host_refuses_to_the_peer_pool']),
+    (PRT, "                         nowhere=not peer)", "                         nowhere=False)",
+     [f'{TD}.Gate.test_no_peer_pool_is_nowhere_to_go']),
+    (PRT, "                     host_fault=bool(p2p) or nowhere)", "                     host_fault=bool(p2p))",
+     [f'{TD}.Gate.test_no_peer_pool_is_nowhere_to_go']),
+    (PRT, "        if a.attempt_of.partition(':')[0] != self.inv.this:", "        if False:",
+     [f'{TD}.AcrossHosts.test_another_hosts_record_gives_the_attempt_by_name']),
+    (PRT, "            if m is None or m['id'] != a.id:", "            if m is None:",
+     [f'{TD}.AcrossHosts.test_another_parts_record_is_refused']),
+    (PRT, "            return int(m['n']) + 1", "            return int(m['n'])",
+     [f'{TD}.AcrossHosts.test_another_hosts_record_gives_the_attempt_by_name']),
+    (INV, "        k in CLASSES and isinstance(ls, list)", "        isinstance(ls, list)", [f'{TI}.Load.test_peer_labels']),
+    (INV, "and all(isinstance(x, str) and LABEL.match(x) and x not in RESERVED_LABELS for x in ls)\n        for k, ls",
+     "and all(isinstance(x, str) and LABEL.match(x) for x in ls)\n        for k, ls", [f'{TI}.Load.test_peer_labels']),
+    (INV, "                         'peer_labels'})", "                         })", [f'{TI}.Load.test_peer_labels']),
+    (CLI, "    if cmd == 'drain':", "    if cmd == 'drain-x':", [f'{TD}.State.test_ci_run_drain']),
 ]
 
 

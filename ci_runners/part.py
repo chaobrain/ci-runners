@@ -34,11 +34,16 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 
 from ci_runners import gpus as gpus_mod
+from ci_runners import drain as drain_mod
 from ci_runners import envuse, inventory, locks, outcome, registry, slots
 from ci_runners import p2p as p2p_mod
 from ci_runners import sampler as sampler_mod
 
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
+#: a part record of any host, ``<role>:<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>``
+#: (design §4.3 ``record``): a retry on another host takes its attempt from the name (13.3)
+RECORD_REF = re.compile(r'[a-z0-9][a-z0-9-]{0,30}:[^/:]+/[^/:]+/[0-9]+-[0-9]+/'
+                        r'(?P<id>[A-Za-z0-9][A-Za-z0-9_.-]{0,63})-(?P<n>[1-9][0-9]{0,2})')
 SLOT_CLASSES = ('part', 'compile')  # the classes whose parts take one host CI slot (design §4.3, §7)
 EVERY_SLOT = 'nightly'  # the class whose parts take every slot and every card lease (decision 12.8)
 LOCKS = ('none', 's', 'x', 'l')  # the ``lock`` input: hold the host lock for the command, or not
@@ -611,12 +616,14 @@ def summary_md(out: Mapping[str, object], part_id: str) -> str:
 
 def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | None, *, stopped: bool = False,
            unavailable: str = '', unit_result: str = '', cool_card: int | None = None,
-           retry_on: Sequence[str] | None = None) -> dict[str, object]:
+           retry_on: Sequence[str] | None = None, nowhere: bool = False) -> dict[str, object]:
     """The outputs of a part from its record and exit (design §4.4). ``cool_card`` is a
     card of this per-card host that passes the health gate, for a thermal retry;
-    ``retry_on`` overrides the labels of a retry or fallback. Pure but for the clock when
-    the exit has no end time. A failed P2P self-test in the exit (``p2p``) ends the part
-    ``unavailable`` (``p2p: <why>``) with ``next`` ``none`` (decision 12.6)."""
+    ``retry_on`` overrides the labels of a retry or fallback; ``nowhere`` marks a part
+    refused here with no other host to go to (decision 13.3): ``next`` ``none``. Pure but
+    for the clock when the exit has no end time. A failed P2P self-test in the exit
+    (``p2p``) ends the part ``unavailable`` (``p2p: <why>``) with ``next`` ``none``
+    (decision 12.6)."""
     end = float((ex or {}).get('end_epoch') or time.time())
     p2p = str((ex or {}).get('p2p') or '')
     unavailable = unavailable or (f'p2p: {p2p}' if p2p else '')
@@ -630,7 +637,7 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
     o = outcome.classify(ev)
     attempt = int(rec.get('attempt', 1))
     h = outcome.hint(o.kind, attempt=attempt, retries=int(rec.get('retries', 1)), cool_card=cool_card is not None,
-                     host_fault=bool(p2p))
+                     host_fault=bool(p2p) or nowhere)
     cls, role = str(rec.get('class', '')), str(rec.get('host', ''))
     own = [str(x) for x in rec.get('pool_labels') or ()]  # the pool's labels name its host already (RUN-5)
     if h.next != 'none' and retry_on is not None:
@@ -850,8 +857,16 @@ class Executor:
         return os.path.join(self.inv.host['data'], 'ci-runners', 'state', 'parts', repo, run, f'{a.id}-{attempt}')
 
     def attempt(self, a: Inputs) -> int:
+        """This part's attempt: 1, or one more than ``attempt-of``'s. A record of another
+        host, which this host cannot read, is taken by its name: its ``<id>-<n>`` gives
+        ``n``, and its id must be this part's (decision 13.3)."""
         if not a.attempt_of:
             return 1
+        if a.attempt_of.partition(':')[0] != self.inv.this:
+            m = RECORD_REF.fullmatch(a.attempt_of)
+            if m is None or m['id'] != a.id:
+                raise Refused(f'attempt-of {a.attempt_of!r} is no record of part {a.id}')
+            return int(m['n']) + 1
         prev = read_record(self.inv, a.attempt_of)
         return int((prev or {}).get('attempt', 1)) + 1
 
@@ -908,6 +923,9 @@ class Executor:
             why = self.gate(a, cls, lock)
             if why:
                 return self._end(record, rec, a, unavailable=why)
+            why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # decision 13.1
+            if why:
+                return self._away(record, rec, a, why, cls)
             if cls in SLOT_CLASSES or nightly:
                 q = slots.SlotQueue(h['files']['slot_lock'], h['slots'], h['files']['slot_queue'], poll=self.poll,
                                     default_project=h.get('default_project', ''))
@@ -1012,6 +1030,9 @@ class Executor:
             argv = scope_argv(self.unit, proj.name, memory, sup, self.oom_policy()) if self.scope else sup
             if self.stopped:
                 return self._end(record, rec, a, stopped=True)
+            why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # drained while it waited (13.1)
+            if why:
+                return self._away(record, rec, a, why, cls)
             # the supervisor keeps the host lock with the slot: the command's own requests find it
             # held by an ancestor (the cover), and it is let go when the scope ends
             held = tuple(fd for fd in {slot_fd, env_fd, *every, *leases.fds, *(hold.fds if hold else ())}
@@ -1047,12 +1068,21 @@ class Executor:
             for fd in {slot_fd, env_fd, *every} - {None}:
                 os.close(fd)
 
+    def _away(self, record: str, rec: dict[str, object], a: Inputs, why: str, cls: str) -> tuple[int, dict[str, object]]:
+        """End a part this host refuses as drained or busy: ``unavailable``, to the other
+        host's pool of its class, or ``next`` ``none`` where the inventory names none
+        (decision 13.3)."""
+        peer = inventory.peer_labels(self.inv, cls)
+        return self._end(record, rec, a, unavailable=why, retry_on=['self-hosted', *peer] if peer else [],
+                         nowhere=not peer)
+
     def _end(self, record: str, rec: dict[str, object], a: Inputs, *, ex: Mapping[str, object] | None = None,
              stopped: bool = False, unavailable: str = '', unit_result: str = '',
-             cool_card: int | None = None, retry_on: Sequence[str] | None = None) -> tuple[int, dict[str, object]]:
+             cool_card: int | None = None, retry_on: Sequence[str] | None = None,
+             nowhere: bool = False) -> tuple[int, dict[str, object]]:
         _write_json(os.path.join(record, 'record.json'), rec)
         out = finish(record, rec, ex, stopped=stopped, unavailable=unavailable, unit_result=unit_result,
-                     cool_card=cool_card, retry_on=retry_on)
+                     cool_card=cool_card, retry_on=retry_on, nowhere=nowhere)
         _publish(record, out, a.id, self.env)
         return (1 if out['outcome'] == 'red' else 0), out
 

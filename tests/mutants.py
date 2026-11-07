@@ -1508,6 +1508,8 @@ MUTANTS = [
     (INV, " and int(m.group(1)) not in FAKE_UIDS):", "):", [f'{TI}.Scan.test_a_hosts_uid_or_disk_numbers']),
     (INV, "not (1000 <= int(m.group(1)) <= 65533 and ", "not (", [f'{TI}.Scan.test_a_hosts_uid_or_disk_numbers']),
     (INV, "(\\d{4,5})(?!\\d)', re.I),", "(\\d{4,5})(?!\\d)'),", [f'{TI}.Scan.test_a_hosts_uid_or_disk_numbers']),
+    (INV, "|/run/user/|", "|", [f'{TI}.Scan.test_a_hosts_uid_or_disk_numbers']),
+    (INV, "\\buid\\s*[=:]?\\s*)", "\\buid\\s*[=:]\\s*)", [f'{TI}.Scan.test_a_hosts_uid_or_disk_numbers']),
     (INV, "if m.group(1) else int(m.group(2), 16)) in FAKE_MAJORS:", "if m.group(1) else 0) in FAKE_MAJORS:",
      [f'{TI}.Scan.test_a_hosts_uid_or_disk_numbers']),
     (INV, "(int(m.group(1)) if m.group(1) else int(m.group(2), 16)) in FAKE_MAJORS:", "False:",

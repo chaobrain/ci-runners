@@ -115,24 +115,67 @@ on_term() {
 
 # The traps come first, so that no signal leaves a ticket behind.
 TICKET= sleeper=
-trap 'rm -f "$QUEUE/seq.$$"; [ -z "$TICKET" ] || rm -f "$TICKET" "$TICKET.$$"; [ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null; finish_run' EXIT
+trap '[ -z "$TICKET" ] || rm -f "$TICKET"; [ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null; finish_run' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap on_term TERM
 register_run
 
+# put_files: write the files named in the arguments (DIR NAME TEXT [NAME TEXT]...), in
+# order, each as TEXT and a newline: to a temporary file in DIR created exclusively and
+# without following a link, mode 0660, then renamed onto NAME, all relative to DIR opened
+# as a directory without following a link. Exit 1 on any error; the temporary file is
+# removed then.
+PUT_PY='
+import os, sys
+d, rest = sys.argv[1], sys.argv[2:]
+dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+for name, text in zip(rest[0::2], rest[1::2]):
+    for _ in range(100):
+        tmp = ".tmp.%d.%s" % (os.getpid(), os.urandom(8).hex())
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o660, dir_fd=dfd)
+            break
+        except FileExistsError:
+            pass
+    else:
+        sys.exit(1)
+    try:
+        os.fchmod(fd, 0o660)
+        os.write(fd, os.fsencode(text) + b"\n")
+        os.close(fd)
+        os.rename(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except BaseException:
+        os.unlink(tmp, dir_fd=dfd)
+        raise
+'
+PY=$(command -v python3 || command -v python)
+
 # take_ticket: the counter and the ticket file change under one lock, so ticket n exists
 # before ticket n + 1 is handed out; the number is past the counter, every ticket queued
 # and our own earlier ticket, so a new ticket is always at the back. The ticket appears
-# by rename, never half written.
+# by rename, never half written. Status 1 with REFUSE set: the queue holds a link or the
+# like where it must not (see the header), which is no use to retry.
 SEQ=0 START=$(date +%s) CMD=$*
 CMD=${CMD//$'\n'/ }
+REFUSE=
 take_ticket() {
-  local qfd n t ok
+  local qfd n t ok lk=$QUEUE/seq.lock
+  REFUSE=
+  [ ! -L "$QUEUE" ] || { REFUSE="$QUEUE is a link, not a directory"; return 1; }
   mkdir -p "$QUEUE" 2>/dev/null || return 1
-  exec {qfd}>>"$QUEUE/seq.lock" || return 1
+  [ -n "$PY" ] || { REFUSE="no python3 to write the queue safely"; return 1; }
+  if [ ! -e "$lk" ] && [ ! -L "$lk" ]; then (umask 007; set -o noclobber; : > "$lk") 2>/dev/null; fi
+  if [ -L "$lk" ] || [ ! -f "$lk" ]; then REFUSE="$lk is not a regular file"; return 1; fi
+  exec {qfd}< "$lk" || return 1  # read-only: it creates and writes nothing, through a link or not
+  if [ -L "$lk" ] || [ ! "$lk" -ef "/proc/self/fd/$qfd" ] || [ ! -f "/proc/self/fd/$qfd" ]; then
+    exec {qfd}>&-
+    REFUSE="$lk is not a regular file"
+    return 1
+  fi
   flock -x "$qfd"
-  n=$(cat "$QUEUE/seq" 2>/dev/null)
+  n=0
+  if [ -f "$QUEUE/seq" ] && [ ! -L "$QUEUE/seq" ]; then read -r -n 32 n < "$QUEUE/seq" 2>/dev/null; fi
   [[ $n =~ ^[0-9]{1,15}$ ]] && n=$((10#$n)) || n=0
   ((SEQ > n)) && n=$SEQ
   for t in "$QUEUE"/*.ticket; do
@@ -141,15 +184,14 @@ take_ticket() {
   done
   SEQ=$((n + 1))
   TICKET=$(printf '%s/%012d.ticket' "$QUEUE" "$SEQ")
-  echo "$SEQ" > "$QUEUE/seq.$$" && mv -f "$QUEUE/seq.$$" "$QUEUE/seq" &&
-    echo "$SEQ $$ $START $PWD $CMD" > "$TICKET.$$" && mv -f "$TICKET.$$" "$TICKET"
+  "$PY" -I -c "$PUT_PY" "$QUEUE" seq "$SEQ" "${TICKET##*/}" "$SEQ $$ $START $PWD $CMD"
   ok=$?
-  rm -f "$QUEUE/seq.$$" "$TICKET.$$"
   flock -u "$qfd"
   exec {qfd}>&-
   return $ok
 }
-take_ticket 2>/dev/null || { echo "brainspike-ci-slot: cannot write a ticket in $QUEUE" >&2; exit 2; }
+refused() { echo "brainspike-ci-slot: refusing to use $QUEUE: $REFUSE" >&2; exit 2; }
+take_ticket 2>/dev/null || { [ -z "$REFUSE" ] || refused; echo "brainspike-ci-slot: cannot write a ticket in $QUEUE" >&2; exit 2; }
 
 shown=
 while true; do
@@ -159,13 +201,18 @@ while true; do
       echo "brainspike-ci-slot: the ticket was gone, re-queued as ticket $SEQ" >&2
       shown=
     else
+      [ -z "$REFUSE" ] || refused
       msg="the ticket is gone and $QUEUE is not writable, retrying"
     fi
   fi
   [ -n "$msg" ] || for t in "$QUEUE"/*.ticket; do
     [[ ${t##*/} =~ ^([0-9]{12})\.ticket$ ]] || continue  # a stray file, or no ticket at all
     named=${BASH_REMATCH[1]} seq= pid= start= rest=
-    read -r seq pid start rest 2>/dev/null < "$t"
+    if [ -L "$t" ] || [ ! -f "$t" ]; then  # a link or a device, never ours: delete the entry (a link, not its target)
+      rm -f "$t" 2>/dev/null
+      continue
+    fi
+    read -r -n 4096 seq pid start rest 2>/dev/null < "$t"
     if [ "$t" != "$TICKET" ]; then
       if [[ ! "$seq $pid $start" =~ ^[0-9]{1,15}\ [1-9][0-9]{0,9}\ [0-9]{1,12}$ ]] ||
         ((10#$seq != 10#$named)) || ! alive "$((10#$pid))" "$((10#$start))"; then

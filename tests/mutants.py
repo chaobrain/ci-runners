@@ -445,15 +445,21 @@ MUTANTS = [
     (VRD, "    if len(set(ids)) != len(ids):", "    if False:", [f'{TV}.Artifacts.test_part_ids']),
     (VRD, "        if not token:", "        if False:", [f'{TV}.Main.test_malformed_inputs_post_nothing']),
     # salvage, per host (design §4.5, decision 12.13)
-    (VRD, "if got is None or got[0] != run or got[1] != n:", "if got is None or got[1] != n:",
-     [f'{TV}.Salvage.test_a_newer_record_of_another_run_or_attempt_is_left_alone']),
-    (VRD, "if got is None or got[0] != run or got[1] != n:", "if got is None or got[0] != run:",
-     [f'{TV}.Salvage.test_a_retry_that_ran_elsewhere_is_left_alone']),
-    (VRD, "                when = float(rec.get('start_epoch') or os.stat(path).st_mtime)", "                when = 0.0",
-     [f'{TV}.Salvage.test_a_newer_record_of_another_run_or_attempt_is_left_alone']),
-    (VRD, "            if best is None or key > best[0]:", "            if best is None or key < best[0]:",
-     [f'{TV}.Salvage.test_a_newer_record_of_another_run_or_attempt_is_left_alone']),
-    (VRD, "            if not isinstance(rec, dict) or rec.get('id') != pid:", "            if not isinstance(rec, dict):",
+    # the old lookup: the part's newest record across the repository's runs
+    (VRD, "    best = None\n    for n in range(1, MAX_ATTEMPT + 1):\n",
+     "    base = os.path.join(parts_root, repo)\n"
+     "    starts = {r: json.loads(_read(os.path.join(base, r, f'{pid}-1', 'record.json')) or '{}').get('start_epoch', 0)\n"
+     "              for r in os.listdir(base)}\n"
+     "    run = max(starts, key=starts.get, default=run)\n"
+     "    best = None\n    for n in range(1, MAX_ATTEMPT + 1):\n",
+     [f'{TV}.Salvage.test_another_runs_part_of_the_same_id_changes_nothing']),
+    (VRD, "        if got is None or got[0] != n:", "        if got is None:",
+     [f'{TV}.Salvage.test_a_retry_that_ran_elsewhere_is_left_alone',
+      f'{TV}.Salvage.test_another_runs_part_of_the_same_id_changes_nothing']),
+    (VRD, "    for n in range(1, MAX_ATTEMPT + 1):", "    for n in range(1, MAX_ATTEMPT):",
+     [f'{TV}.Salvage.test_the_retry_whose_artifact_is_missing',
+      f'{TV}.Salvage.test_another_runs_part_of_the_same_id_changes_nothing']),
+    (VRD, "        if isinstance(rec, dict) and rec.get('id') == pid:", "        if isinstance(rec, dict):",
      [f'{TV}.Salvage.test_only_this_hosts_parts_that_stop_short']),
     (VRD, "json.dump({**got, 'salvaged': True}, f, sort_keys=True)", "json.dump(got, f, sort_keys=True)",
      [f'{TV}.Salvage.test_only_this_hosts_parts_that_stop_short']),

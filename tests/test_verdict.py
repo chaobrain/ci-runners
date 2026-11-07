@@ -249,15 +249,22 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
         self.assertEqual((got['outcome'], got['salvaged']), ('red', True))
         self.assertEqual(self.output.read_text(), 'count=1\nname-1=ci-part-here-1\n')
 
-    def test_a_newer_record_of_another_run_or_attempt_is_left_alone(self):
-        self.record('77-1', 'cpu', start=1000)
-        self.record('78-1', 'cpu', start=2000)  # a later run ran its own cpu here
-        self.record('77-1', 'gpu', start=1000)
-        self.record('77-2', 'gpu', start=2000)  # this run's second attempt did too
-        self.record('77-1', 'lnt', start=2000)
-        self.record('9-1', 'lnt', start=1000)  # an older run's record does not matter (start time, not name)
+    def test_another_runs_part_of_the_same_id_changes_nothing(self):
+        # this run's cpu: its scope finished, its job was lost before the outcome was written
+        old = self.record('77-1', 'cpu', start=1000, outcome='', unit='ci-part-a.scope')
+        (old / 'exit.json').write_text(json.dumps({'rc': 0, 'end_epoch': 1010.0}))
+        # a later run's cpu ran here too, and is just as unfinished
+        new = self.record('78-1', 'cpu', start=2000, outcome='', unit='ci-part-b.scope')
+        (new / 'exit.json').write_text(json.dumps({'rc': 1, 'end_epoch': 2010.0}))
+        self.record('77-1', 'lnt', start=1000, outcome='red')
+        self.record('77-2', 'lnt', start=2000)  # this run's re-run is another run
+        self.record('77-1', 'gpu', 1, start=1000)
+        self.record('77-1', 'gpu', 2, start=2000)  # its newest attempt here is not the one that stops short
         self.assertEqual(self.main('cpu gpu lnt'), 0)
-        self.assertEqual(self.uploaded(), ['ci-part-lnt-1'])
+        self.assertEqual(self.uploaded(), ['ci-part-cpu-1', 'ci-part-lnt-1'])
+        got = {i: json.loads((self.outdir / f'ci-part-{i}-1' / 'outcome.json').read_text()) for i in ('cpu', 'lnt')}
+        self.assertEqual([(g['outcome'], g['salvaged']) for g in got.values()], [('pass', True), ('red', True)])
+        self.assertFalse((new / 'outcome.json').exists())  # the later run's record is untouched
 
     def test_the_retry_whose_artifact_is_missing(self):
         art(self.arts, 'ci-part-cpu-1', {'outcome': 'thermal', 'next': 'retry'})

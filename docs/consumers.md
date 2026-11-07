@@ -73,6 +73,9 @@ schema = 1
 python = "3.12"                                   # 环境的 Python 版本（conda）
 requirements = ["requirements-dev.txt"]           # pip -r，按顺序；仓库内的路径，-r/-c 引用的文件会一并读取
 install = ["pytest-xdist"]                        # 额外的依赖说明符：不能带选项、URL 或路径
+[conda]                                           # 可选：pip 装不了的包（例如 NEST）
+channels = ["conda-forge"]                        # 按顺序；构建时带 --override-channels
+packages = ["nest-simulator=3.10"]                # conda match spec：不能带选项、URL、路径或 channel 前缀
 [[upstream]]                                      # 可选：以 editable 方式安装的兄弟仓库
 repository = "chaobrain/brainstate"
 ref = "origin/main"
@@ -80,7 +83,11 @@ ref = "origin/main"
 XLA_PYTHON_CLIENT_PREALLOCATE = "false"
 ```
 
+`conda` 表（design §4.9，决定 12.10）是可选的，不写时与以前完全一样。`packages` 和 `python` 在同一次 `conda create` 里一起求解，之后才跑 pip 的各步（`requirements`、`install`、upstream）。`python` 由 `python` 键决定，`packages` 里不能再写 `python`，同一个包也不能写两次。表里有未知的键、`channels` 里是 URL 或路径、`packages` 里有选项或 URL，整个规格都会被拒绝，什么都不会构建。例如需要 Python 3.13 加 conda-forge 的 `nest-simulator=3.10`，就写 `python = "3.13"` 加上面的 `[conda]` 表。
+
 项目本身**不会**装进环境：部件在作业的 checkout 里运行，`python -m pytest` 会直接从 checkout 导入项目。upstream 在建环境时 clone 并以 editable 方式安装，版本是当时分支的 head。
+
+**让环境跟着 upstream 走**（design §4.9，决定 12.11）。环境会保存建它时用的规格、requirements 文件和每个 upstream 的 commit。维护者在 registry 条目里写 `refresh = true` 后，主机上的 `ci-envrefresh.timer` 每 30 分钟对这个项目运行 `ci-run env refresh`：用 `git ls-remote` 比较每个 upstream 分支的 head 和环境记录的 commit，有分支动了就按保存的规格重建，建好后一次 rename 换上，正在运行的部件继续用它开始时的环境。刷新不带任何令牌，所以**只能用于公开的 upstream**；有私有 upstream 的项目会被拒绝，仍然要维护者用 `env build` 重建。刷新失败时旧环境原样保留，原因写进日志，下一轮再试。默认分支上的规格改了，仍然要维护者手动 `env build`。
 
 **工作流**（`.github/workflows/test.yml`）：
 

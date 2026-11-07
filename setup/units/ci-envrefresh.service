@@ -1,0 +1,12 @@
+[Unit]
+Description=ci-runners: rebuild the envs whose upstreams moved
+
+[Service]
+Type=oneshot
+ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run env refresh --all
+Environment=CI_RUNNERS_ETC=@CI_ETC@
+Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
+# the lead's file: the egress proxy variables of the runners' .env, and CI_RUNNERS_CONDA
+EnvironmentFile=-@CI_ETC@/envrefresh.env
+NoNewPrivileges=yes
+TimeoutStartSec=2h

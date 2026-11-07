@@ -10,6 +10,7 @@ host, added by the lead. It holds what a consumer's inputs may leave out.
     gpu_mem_mib = 6000                    # free MiB a leased card needs
     memory = "40G"                        # a part's MemoryMax unless the input sets one
     max_waiting = 1                       # waiting parts per pool (design §7 rule 2)
+    refresh = true                        # ci-envrefresh.timer rebuilds its env when an upstream moves (§4.9)
     [fallback]                            # labels per runner class, for next=fallback
     part = ["self-hosted", "part"]
     [hosts.<role>]
@@ -35,7 +36,7 @@ VAR = re.compile(r'[A-Z_][A-Z0-9_]{0,63}')
 #: names a project may not set: the executor's own, and what changes how code loads
 RESERVED = re.compile(r'(CI_|GITHUB_|ACTIONS_|RUNNER_|LD_|PYTHON).*|CUDA_VISIBLE_DEVICES|CUDA_DEVICE_ORDER|PATH|'
                       r'BASH_ENV|ENV|HOME|USER|SHELL|IFS')
-TOP = {'name', 'repository', 'context', 'retries', 'gpu_mem_mib', 'memory', 'max_waiting', 'fallback', 'hosts'}
+TOP = {'name', 'repository', 'context', 'retries', 'gpu_mem_mib', 'memory', 'max_waiting', 'refresh', 'fallback', 'hosts'}
 HOST = {'memory_max', 'env', 'max_slots', 'variables'}
 
 
@@ -52,6 +53,7 @@ class Project:
     gpu_mem_mib: int = 0
     memory: str = ''
     max_waiting: int = 1
+    refresh: bool = False
     fallback: Mapping[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
     memory_max: str = ''  # this host's
     env: str = ''  # this host's
@@ -92,6 +94,9 @@ def parse(doc: Mapping[str, object], role: str, stem: str = '') -> Project:
     retries = _int('retries', doc.get('retries', 1), 0, 1)
     gpu_mem = _int('gpu_mem_mib', doc.get('gpu_mem_mib', 0), 0, 1 << 20)
     max_waiting = _int('max_waiting', doc.get('max_waiting', 1), 1, 64)
+    refresh = doc.get('refresh', False)
+    if type(refresh) is not bool:
+        raise RegistryError('refresh must be true or false')
     memory = doc.get('memory', '')
     if memory:
         memory_bytes(memory)
@@ -123,7 +128,7 @@ def parse(doc: Mapping[str, object], role: str, stem: str = '') -> Project:
             raise RegistryError(f'hosts.{role}.variables: {k!r} is not a name a project may set')
         if not isinstance(v, str) or '\0' in v or '\n' in v:
             raise RegistryError(f'hosts.{role}.variables.{k} must be a one-line string')
-    return Project(name, repo.lower(), context, retries, gpu_mem, memory, max_waiting,
+    return Project(name, repo.lower(), context, retries, gpu_mem, memory, max_waiting, refresh,
                    {k: tuple(v) for k, v in fallback.items()}, memory_max, env, max_slots, dict(variables))
 
 
@@ -154,3 +159,20 @@ def slot_caps(etc: str, role: str) -> dict[str, int]:
             continue
         caps[p.name] = p.max_slots
     return caps
+
+
+def refresh_projects(etc: str, role: str) -> list[str]:
+    """The projects of this host whose entry sets ``refresh = true`` (design §4.9). A
+    malformed entry, or one with no entry for this host, is left out."""
+    out = []
+    try:
+        names = sorted(n[:-5] for n in os.listdir(os.path.join(etc, 'projects')) if n.endswith('.toml'))
+    except OSError:
+        names = []
+    for n in names:
+        try:
+            if load_file(etc, n, role).refresh:
+                out.append(n)
+        except RegistryError:
+            continue
+    return out

@@ -198,6 +198,23 @@ class Queue(unittest.TestCase):
             self.assertEqual(q.seq, 2)
             self.assertIsNone(q.try_take('p', {'p': 2}))
 
+    def test_a_nightly_waits_behind_an_older_ci_slot_sh_ticket(self):
+        """Rule 4 on the nightly path: an older ci_slot.sh ticket is the default project's,
+        whose cap is the slot count whatever its registry says, so it keeps its turn for the
+        one free slot and a nightly of that project takes none."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05, default_project='p')
+            for path in q.slots:
+                pathlib.Path(path).touch()
+            self._outside_holder(q.slots[0])  # ci_slot.sh holds slot 1, with no holder record
+            self._sh_ticket(q, 1)  # and waits for another
+            q.take_ticket('p', 'nightly', every=True)
+            self.assertEqual(q.seq, 2)
+            self.assertIsNone(q.try_take_every('p', {'p': 0}))
+            self.assertEqual(q.every, [])  # it took no slot
+            self.assertFalse(slots._flocked(q.slots[1]))  # slot 2 stays free for the older ticket
+            self.assertTrue(os.path.exists(os.path.join(q.queue, '000000000001.ticket')))
+
     def test_the_default_projects_cap_is_the_slot_count(self):
         """Rule 4: ci_slot.sh's waiters apply no caps, so the default project's is the
         slot count, whatever its registry says."""

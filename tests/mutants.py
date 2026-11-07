@@ -1012,6 +1012,10 @@ MUTANTS = [
      [f'{TT}.LeaseQueue.test_a_waiting_two_card_lease_holds_back_a_later_one_card_lease']),
     (PRT, "            self._drop()\n            return chosen", "            return chosen",
      [f'{TT}.LeaseQueue.test_a_waiting_two_card_lease_holds_back_a_later_one_card_lease']),
+    # review round 2: rule 4 on the nightly path (ci_slot.sh's tickets and holders are the default project's)
+    (SLO, "range(self._grants(caps).count(self.seq))",
+     "range(grants(self.waiting(), self.held()[0], caps, self.held()[1], self.default).count(self.seq))",
+     [f'{TS}.Queue.test_a_nightly_waits_behind_an_older_ci_slot_sh_ticket']),
     # review round 1: the release's own P2P entry point, the hard bound, the h100 card count
     (P2P, "    return 1 if why else 0", "    return 0",
      [f'{T2}.Entry.test_the_default_command_fails_on_zeros', f'{TT}.Classes.test_the_release_s_own_p2p_test_keeps_the_command_out']),

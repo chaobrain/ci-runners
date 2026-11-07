@@ -173,3 +173,30 @@ jobs:
 - **想对同一个 head 重跑**：已经绿的 head 会被 claim 跳过，要重跑就推一个新 commit。红的 head 或 error 的 head 重新触发会再跑一次。
 - **`unavailable: health gate`**：分到的卡太热，会自动换一张凉卡重试。
 - **作业排队很久**：CPU 部件共用 2 个 CI 槽位，GPU 部件一张卡一次只跑一个。每个项目在每个池子里最多有 1 个等待中的部件，再多就直接 `unavailable`（"project queue full"）。
+
+## 6. 自己组合 actions（3090 主机）
+
+不用 `h100-test.yml` 的仓库，可以在自己的 workflow 里直接调用 `claim`、`part`、`salvage`、`verdict` 这四个 action，比如先跑一个 plan 作业，再把部件以 matrix 的方式分到几台主机上（design §4.8，决定 12.12）。这时 `h100-test.yml` 替调用方守住的规则，要由你自己守住：
+
+1. **每个作业都要加 guard**：`pull_request` 只接受 `head.repo.full_name == github.repository`，此外是 `push`、`workflow_dispatch`、`schedule`。
+2. **标签**：写 `self-hosted` 加上某台主机的池子标签，比如 `3090b-cpu`、`3090b-gpu`、`3090b-gpu1`、`3090b-multi`、`3090b-compile`、`3090a-nightly`。不要只写类名。每一类接受的 `gpus`、`lock`、`timeout-minutes` 见 design §4.8 的表，超出范围的部件直接 `unavailable`。`compile` 和 `nightly` 需要仓库在 `policy.toml` 里登记了这一类（design 决定 12.14）。
+3. **一个作业只跑一个 `part`**，作业的 `timeout-minutes` 至少比部件的多 15。部件 id 在一次 run 里不能重复。matrix 各分支的输出到不了后面的作业，所以后面的作业要读 `ci-part-<id>-<attempt>` artifact。
+4. **重试**：`next` 为 `retry` 或 `fallback` 的部件最多再跑一次，带上 `attempt-of`（第一次的 `record`）和 `resume`，跑在 `retry-on` 给出的标签上，`fallback` 时也可以换到别的主机。
+5. **salvage 和 verdict**：verdict 放在最后，跑在某一台跑过部件的主机的 light 池上。它能直接读这台主机上的记录。其他跑过部件的主机，每台在 verdict 之前加一个 `salvage` 作业，跑在那台主机的 light 池上：
+
+   ```yaml
+   salvage-3090a:
+     needs: [parts]
+     if: always()
+     runs-on: [self-hosted, 3090a-light]
+     steps:
+       - uses: chaobrain/ci-runners/actions/salvage@v1
+         with:
+           parts: cpu gpu multi        # 这次 run 启动的全部部件 id
+           wait-seconds: '300'         # 等一个还在跑的本机部件多久
+   ```
+
+   对每个 artifact 不全、并且在这台主机上的最新记录属于本次 run 和这次 attempt 的部件，`salvage` 会把记录里的结果作为 `ci-part-<id>-<attempt>` 上传，并带上 `salvaged: true`。不在这台主机上跑的部件不处理；还在跑的部件最多等 `wait-seconds`，超时就是 `lost`。一个 salvage 作业最多上传 16 个部件。
+6. **权限**同 `h100-test.yml`：`contents: read`，claim 和 verdict 还要 `statuses: write`。要读别的 run 的 artifact 时再加 `actions: read`。
+
+**主机锁（3090 主机）。** `part` 的 `lock` 输入可以是 `s`、`x`、`l` 或 `none`，表示整条命令执行期间持有主机锁（brainspike 的 `host_lock.sh` 协议，design 决定 12.9）。`compile` 默认 `x`，其他类默认 `none`。`none` 时命令按需自己加锁，比如 brainspike 的 `local_ci.sh` 每一步单独加锁。持锁时，命令能读到 `CI_HOST_LOCK` 和 `LOCAL_CI_HOST_LOCK`（锁文件路径）以及 `BRAINSPIKE_HOST_LOCK`（所持的模式）。命令里再调用 `host_lock.sh`，已持有的锁能覆盖的请求就不再等待：在 `x` 下的任何请求，或在 `s` 下的 `-s`。在 `s` 下请求 `-x` 会失败（状态 3），因为它要等的正是自己。部件先拿槽位和卡，最后才拿锁，拿锁的等待也计入 `queue-timeout-minutes`，超时就是 `unavailable`。h100 没有主机锁，只接受 `lock: none`。

@@ -34,6 +34,9 @@ inputs:
   attempt-of:
     description: the record of the attempt this one retries
     default: ''
+  lock:
+    description: hold the host lock for the whole command, s, x, l or none (default x on compile, else none; 3090 hosts only)
+    default: ''
 outputs:
   outcome:
     description: "pass, red, oom, thermal, reboot, unavailable, lost or stopped"
@@ -88,11 +91,12 @@ runs:
         IN_RESULTS: ${{ inputs.results }}
         IN_RESUME: ${{ inputs.resume }}
         IN_ATTEMPT_OF: ${{ inputs.attempt-of }}
+        IN_LOCK: ${{ inputs.lock }}
       run: >-
         "$GITHUB_ACTION_PATH/../lib/ci-run.sh" part --project "$IN_PROJECT" --id "$IN_ID" --command "$IN_COMMAND"
         --timeout-minutes "$IN_TIMEOUT" --gpus "$IN_GPUS" --gpu-mem-mib "$IN_GPU_MEM" --memory "$IN_MEMORY"
         --queue-timeout-minutes "$IN_QUEUE" --results "$IN_RESULTS"
-        --resume "$IN_RESUME" --attempt-of "$IN_ATTEMPT_OF"
+        --resume "$IN_RESUME" --attempt-of "$IN_ATTEMPT_OF" --lock "$IN_LOCK"
     - if: always() && steps.part.outputs.outcome != ''
       uses: actions/upload-artifact@v4
       with:

@@ -133,15 +133,17 @@ class Hint:
     where: str = ''  # cool-card (same host), same-host, more-memory, any; empty for none and fallback
 
 
-def hint(kind: str, *, attempt: int = 1, retries: int = 1, remote: bool = False, cool_card: bool = False) -> Hint:
+def hint(kind: str, *, attempt: int = 1, retries: int = 1, remote: bool = False, cool_card: bool = False,
+         host_fault: bool = False) -> Hint:
     """``next`` for an outcome (design §4.4). ``attempt`` is 1 for the first run of a
     part; a part is retried at most ``retries`` times (the registry's 0 or 1), so an
     infrastructure end of the last allowed attempt is final, the consumer's verdict.
     ``remote`` marks an h100 part, where a reboot counts as thermal; ``cool_card``
-    whether the host has a cool card for a thermal retry. Pure."""
+    whether the host has a cool card for a thermal retry. ``host_fault`` marks an end
+    that a retry does not cure, a failed P2P self-test (decision 12.6): ``none``. Pure."""
     if kind not in KINDS:
         raise ValueError(f'unknown outcome {kind!r}')
-    if kind in FINAL or attempt > retries:
+    if kind in FINAL or attempt > retries or host_fault:
         return Hint('none')
     if kind == 'reboot' and remote:
         kind = 'thermal'  # the board powers off at 101 C

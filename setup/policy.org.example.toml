@@ -13,8 +13,9 @@ private_repositories = true
 max_age_minutes = 60
 
 # A repository listed here keeps this entry over the snapshot's, so the lead can pause
-# one, or let its bot dispatch:
+# one, let its bot dispatch, or open the exclusive classes to it (decision 12.14):
 # [repositories."chaobrain/a-private-repo"]
 # id = 1
 # visibility = "private"
 # paused = true
+# classes = ["compile", "nightly"]               # the hosts' compile and nightly runners

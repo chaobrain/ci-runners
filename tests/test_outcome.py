@@ -111,6 +111,11 @@ class Hint(unittest.TestCase):
         self.assertEqual(oc.hint('reboot', remote=True), H('fallback'))  # h100: as thermal
         self.assertEqual(oc.hint('reboot', remote=True, cool_card=True), H('retry', where='cool-card'))
 
+    def test_a_host_fault_is_not_retried(self):
+        """Decision 12.6: a failed P2P self-test is a host fault, so ``next`` is ``none``."""
+        self.assertEqual(oc.hint('unavailable', host_fault=True), oc.Hint('none'))
+        self.assertEqual(oc.hint('unavailable', host_fault=False), oc.Hint('fallback'))
+
     def test_at_most_one_retry(self):
         for k in oc.KINDS:
             self.assertEqual(oc.hint(k, attempt=2), oc.Hint('none'), k)  # a second infrastructure end

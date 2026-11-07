@@ -35,16 +35,33 @@ from collections.abc import Callable, Mapping, Sequence
 
 from ci_runners import gpus as gpus_mod
 from ci_runners import envuse, inventory, outcome, registry, slots
+from ci_runners import p2p as p2p_mod
 from ci_runners import sampler as sampler_mod
 
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
-SLOT_CLASSES = ('part',)  # the classes whose parts take a host CI slot (design §4.3, §7)
+SLOT_CLASSES = ('part', 'compile')  # the classes whose parts take one host CI slot (design §4.3, §7)
+EVERY_SLOT = 'nightly'  # the class whose parts take every slot and every card lease (decision 12.8)
+LOCKS = ('none', 's', 'x', 'l')  # the ``lock`` input: hold the host lock for the command, or not
+#: what each class's ``part`` accepts (design §4.8): ``(least cards, most cards, locks,
+#: longest timeout-minutes)``; most None: every card of the host
+ROWS: dict[str, tuple[int, int | None, tuple[str, ...], int]] = {
+    'light': (0, 0, ('none',), 30),
+    'part': (0, 0, LOCKS, 240),
+    'h100': (1, 1, LOCKS, 240),
+    'gpu': (1, 1, LOCKS, 240),
+    'multi': (2, 2, LOCKS, 240),
+    'compile': (0, 0, ('x',), 240),
+    'nightly': (0, None, LOCKS, 600),
+}
+P2P_CLASSES = ('multi',)  # the classes whose parts run the P2P self-test first (decision 12.6)
+P2P_KILL_WAIT = 5.0  # s the supervisor waits for the self-test after killing it at its bound
 KILL_GRACE = 30  # s between TERM and KILL at the inner timeout
 RELAY_DRAIN = 5  # s the relay may still copy once the command has ended
 WATCHDOG_TAIL = 4 << 20  # bytes of the GPU watchdog's log read after a part
 CAP_POLL = 2.0  # s between the supervisor's memory readings, where it enforces the cap
 OOM_POLICY_SYSTEMD = 253  # the first systemd that takes OOMPolicy on a scope
 SCOPE = re.compile(r'ci-part-[^/]*\.scope')  # a part's scope, the only cgroup the cap kills in
+_LEASE_TICKET = re.compile(r'([0-9]{12})\.json\Z')  # a lease ticket in ``state/leases/queue``
 #: the pool that marks an h100-style host: one runner per card, labelled h100-gpu<N> (design §5.1)
 H100_POOL = 'h100'
 #: the step's own files: the command must not write the part's outputs or the job's env
@@ -212,11 +229,12 @@ class MemoryCap:
         return self.killed
 
 
-def command_argv(command: str, *, cpus: str = '') -> list[str]:
+def command_argv(command: str, *, cpus: str = '', nice: int = 10) -> list[str]:
     """What the supervisor runs: ``taskset`` to the inventory's ``cpus`` where it gives
-    them (h100: NUMA node 0, design §5.4), nice and ionice, then ``bash -c``. Pure."""
+    them (h100: NUMA node 0, design §5.4; ``compile_cpus`` on ``compile``), nice (0 on
+    ``compile``) and ionice, then ``bash -c``. Pure."""
     argv = ['taskset', '-c', cpus] if cpus else []
-    argv += ['nice', '-n', '10', 'ionice', '-c', '2', '-n', '7']
+    argv += ['nice', '-n', str(nice), 'ionice', '-c', '2', '-n', '7']
     return argv + ['bash', '-c', command]
 
 
@@ -236,6 +254,22 @@ def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, p
         'CI_SLOT_QUEUE': files['slot_queue'], 'CI_SLOT_HELD': slot, 'CI_RESUME': '1' if resume else '0',
     })
     return env
+
+
+def class_refusal(cls: str, *, gpus: int, lock: str, cards: int, host_lock: bool) -> str:
+    """Why a part's ``gpus`` or ``lock`` is outside its class's row of design §4.8, or
+    ``''``. ``cards`` is the host's card count; ``host_lock`` whether the host has the
+    host lock (inventory ``files.host_lock``). Pure."""
+    lo, hi, locks, _ = ROWS[cls]
+    hi = cards if hi is None else hi
+    if not lo <= gpus <= hi:
+        want = 'no card' if hi == 0 else (f'{lo} card{"s" if lo > 1 else ""}' if lo == hi else f'0 to {hi} cards')
+        return f'gpus {gpus}: the {cls} runners take {want} (design §4.8)'
+    if lock not in locks:
+        return f'lock {lock}: the {cls} runners take lock {" or ".join(locks)} (design §4.8)'
+    if lock != 'none' and not host_lock:
+        return f'lock {lock}: this host has no host lock'
+    return ''
 
 
 # ------------------------------------------------------------------ the supervisor (in the scope)
@@ -258,7 +292,48 @@ def _relay(src: int, dst: int) -> None:
                 alive = False
 
 
-def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0) -> int:
+def p2p_argv(release: str) -> list[str]:
+    """The P2P self-test as the supervisor runs it: ``ci_runners.p2p.main`` of the
+    release, its result the exit status. Pure."""
+    return [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
+            'from ci_runners.p2p import main; sys.exit(main())', release]
+
+
+def run_p2p(argv: Sequence[str], bound: float) -> str:
+    """Run the P2P self-test ``argv`` (``ci_runners.p2p``) in a session of its own, at
+    most ``bound`` s. Returns ``''`` on a pass, else the reason: its last line, its exit,
+    or the bound (decision 12.6). The bound is hard: after the kill at ``bound`` the
+    supervisor waits ``P2P_KILL_WAIT`` s more, at most, for the test to go (a process
+    stuck in the driver does not die of SIGKILL until its call returns, and one that
+    holds the pipe keeps it open); then it gives up on it and the scope's stop reaps it."""
+    try:
+        child = subprocess.Popen(list(argv), start_new_session=True, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    except OSError as e:
+        return f'the self-test did not start: {type(e).__name__}'
+    try:
+        text, _ = child.communicate(timeout=bound)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            child.communicate(timeout=P2P_KILL_WAIT)
+        except subprocess.TimeoutExpired:  # give it up: the pipe closed, reaped if it went
+            child.stdout.close()
+            child.poll()
+        return f'the self-test ran over its {bound:g} s bound'
+    lines = text.decode('utf-8', 'replace').strip().splitlines()
+    last = re.sub(r'[^\x20-\x7e]', '?', lines[-1])[:200] if lines else ''
+    sys.stdout.write(f'ci-runners: {last or "p2p: no output"}\n')
+    sys.stdout.flush()
+    if child.returncode == 0:
+        return ''
+    return last.removeprefix('p2p: ') or f'the self-test exited {child.returncode}'
+
+
+def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0, p2p: Sequence[str] = ()) -> int:
     """Run ``argv`` in its own session with OOM score +500, end it at ``timeout``, and
     write ``exit.json``. Runs inside the part's scope, in a session of its own, so the
     job's signals (a cancel, a stopped runner) do not reach it: only a stop of the scope
@@ -270,7 +345,11 @@ def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0) ->
     runs on, instead of dying of SIGPIPE at its next write.
 
     ``cap`` > 0 (bytes): enforce the part's memory here, every ``CAP_POLL`` s
-    (``MemoryCap``), and count a kill over it as an OOM kill."""
+    (``MemoryCap``), and count a kill over it as an OOM kill.
+
+    ``p2p``: the P2P self-test, run first, in the scope and with the part's environment
+    (decision 12.6). If it does not pass, the command does not run and ``exit.json``
+    holds its reason under ``p2p``."""
     try:
         os.setsid()
     except OSError:
@@ -292,6 +371,13 @@ def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0) ->
         with open('/proc/self/oom_score_adj', 'w') as f:
             f.write('500')
     timed_out = False
+    if p2p:
+        why = run_p2p(p2p, p2p_mod.BOUND)
+        if why or signalled:
+            _write_json(os.path.join(record, 'exit.json'), {'rc': None, 'p2p': why, 'timed_out': False, 'oom_kills': 0,
+                                                             'signalled': bool(signalled), 'end_epoch': time.time(),
+                                                             'boot_end': boot_id()})
+            return 0
     child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT)
     relay = threading.Thread(target=_relay, args=(child.stdout.fileno(), sys.stdout.fileno()), daemon=True)
@@ -350,12 +436,18 @@ def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0) ->
 
 class Leases:
     """GPU leases: per card ``max_parts`` lock files under ``state/leases``, flock-held by
-    the executor for the part's life. Choosing and taking happen under ``.lock``."""
+    the executor for the part's life. A part waits with a ticket in ``queue/``
+    (``<seq>.json``: its pid and start, and what it asks for), and the cards go out in
+    ticket order per card (``gpus.lease_grants``, decision 12.6). Tickets, choosing and
+    taking happen under ``.lock``."""
 
     def __init__(self, directory: str, max_parts: int = 1) -> None:
         self.dir, self.max_parts = directory, max_parts
-        os.makedirs(directory, mode=0o700, exist_ok=True)
+        self.queue = os.path.join(directory, 'queue')
+        os.makedirs(self.queue, mode=0o700, exist_ok=True)
         self.fds: list[int] = []
+        self.ticket = ''
+        self.seq = 0
 
     def _path(self, card: int, k: int) -> str:
         return os.path.join(self.dir, f'card{card}.{k}.lock')
@@ -363,12 +455,61 @@ class Leases:
     def leased(self, cards: Sequence[int]) -> dict[int, int]:
         return {c: sum(slots._flocked(self._path(c, k)) for k in range(self.max_parts)) for c in cards}
 
-    def try_take(self, n: int, cards: Sequence[int], free: Mapping[int, int], need_mib: int) -> list[int] | None:
+    def _enqueue(self, n: int, cards: Sequence[int], need_mib: int, every: bool) -> None:
+        """Our ticket, after every other one (under ``.lock``)."""
+        seqs = [int(m.group(1)) for m in map(_LEASE_TICKET.match, os.listdir(self.queue)) if m]
+        try:
+            with open(os.path.join(self.queue, 'seq')) as f:
+                last = int(f.read().strip() or 0)
+        except (OSError, ValueError):
+            last = 0
+        self.seq = max([last, *seqs]) + 1
+        with open(os.path.join(self.queue, f'seq.{os.getpid()}'), 'w') as f:
+            f.write(f'{self.seq}\n')
+        os.replace(os.path.join(self.queue, f'seq.{os.getpid()}'), os.path.join(self.queue, 'seq'))
+        self.ticket = os.path.join(self.queue, f'{self.seq:012d}.json')
+        _write_json(self.ticket, {'pid': os.getpid(), 'start': round(slots._start_of(os.getpid())), 'n': n,
+                                  'cards': list(cards), 'need_mib': need_mib, 'every': every})
+
+    def tickets(self) -> list[gpus_mod.LeaseTicket]:
+        """The live tickets; a dead or malformed one is deleted (ours never is)."""
+        out = []
+        for name in sorted(os.listdir(self.queue)):
+            m = _LEASE_TICKET.match(name)
+            if not m:
+                continue
+            path = os.path.join(self.queue, name)
+            t = _read_json(path) or {}
+            try:
+                ok = (type(t['pid']) is int and t['pid'] > 0 and type(t['n']) is int and t['n'] >= 0
+                      and all(type(c) is int for c in t['cards']) and type(t['need_mib']) is int
+                      and type(t['every']) is bool and slots.alive(t['pid'], float(t['start'])))
+            except (KeyError, TypeError, ValueError):
+                ok = False
+            if not ok and path != self.ticket:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                continue
+            if ok:
+                out.append(gpus_mod.LeaseTicket(int(m.group(1)), t['n'], tuple(t['cards']), t['need_mib'], t['every']))
+        return out
+
+    def try_take(self, n: int, cards: Sequence[int], free: Mapping[int, int], need_mib: int,
+                 every: bool = False) -> list[int] | None:
+        """One round: queue a ticket for ``n`` of ``cards`` on the first, then take the
+        cards ``lease_grants`` gives it, if any; ``every`` takes every lease of each card.
+        Returns the cards taken, or None (the ticket stays queued until ``release``)."""
         mutex = os.open(os.path.join(self.dir, '.lock'), os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
         try:
             fcntl.flock(mutex, fcntl.LOCK_EX)
-            chosen = gpus_mod.choose_lease(n, cards=cards, free=free, need_mib=need_mib,
-                                           leased=self.leased(cards), max_parts=self.max_parts)
+            if not self.ticket or not os.path.exists(self.ticket):
+                self._enqueue(n, cards, need_mib, every)
+            waiting = self.tickets()
+            asked = sorted({c for t in waiting for c in t.cards})
+            chosen = gpus_mod.lease_grants(waiting, free=free, leased=self.leased(asked),
+                                           max_parts=self.max_parts).get(self.seq)
             if chosen is None:
                 return None
             for c in chosen:
@@ -380,15 +521,26 @@ class Leases:
                         os.close(fd)
                         continue
                     self.fds.append(fd)
-                    break
+                    if not every:
+                        break
+            self._drop()
             return chosen
         finally:
             os.close(mutex)
+
+    def _drop(self) -> None:
+        if self.ticket:
+            try:
+                os.unlink(self.ticket)
+            except OSError:
+                pass
+            self.ticket = ''
 
     def release(self) -> None:
         for fd in self.fds:
             os.close(fd)
         self.fds = []
+        self._drop()
 
 
 def smi_free(run: Callable = subprocess.run) -> dict[int, int]:
@@ -418,11 +570,20 @@ def smi_apps(run: Callable = subprocess.run) -> list[tuple[int, str]]:
 
 
 def h100_style(host: Mapping[str, object]) -> bool:
-    """Whether a host has a runner per card (an ``h100`` pool): the health gate refuses
-    there instead of waiting, a part takes one card (D7), a thermal retry names a cool
-    card's ``h100-gpu<M>``, a reboot counts as thermal and the early stop is on. Pure."""
+    """Whether a host is h100: it has a pool of class ``h100``. A part there takes one card
+    (D7), a reboot counts as thermal, and the GPU watchdog's notice and log count. Pure."""
     pools = host.get('pools')
-    return isinstance(pools, Mapping) and H100_POOL in pools
+    return isinstance(pools, Mapping) and inventory.pool_of(host, H100_POOL) is not None
+
+
+def per_card(host: Mapping[str, object]) -> bool:
+    """Whether a host has runners per card (a pool of class ``h100`` or ``gpu``, design
+    §5.1): the health gate refuses there instead of waiting, a per-card runner leases its
+    own card, a thermal retry names a cool card's ``<role>-gpu<M>``, and the early stop is
+    on (design §5.4, §5.5). Pure."""
+    pools = host.get('pools')
+    return isinstance(pools, Mapping) and any(inventory.pool_of(host, c) is not None
+                                              for c in sorted(inventory.PER_CARD_CLASSES))
 
 
 def _local(epoch: object) -> str:
@@ -474,8 +635,11 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
     our cards (``rec['buses']``) and a PID the sampler saw (``rec['pids']``).
     ``cool_card`` is a card of this h100-style host that passes the health gate, for a
     thermal retry; ``retry_on`` overrides the labels of a retry or fallback. Pure but for
-    the clock when the exit has no end time."""
+    the clock when the exit has no end time. A failed P2P self-test in the exit (``p2p``)
+    ends the part ``unavailable`` (``p2p: <why>``) with ``next`` ``none`` (decision 12.6)."""
     end = float((ex or {}).get('end_epoch') or time.time())
+    p2p = str((ex or {}).get('p2p') or '')
+    unavailable = unavailable or (f'p2p: {p2p}' if p2p else '')
     ev = outcome.Evidence(
         rc=None if ex is None else ex.get('rc'), timed_out=bool(ex and ex.get('timed_out')),
         stopped=stopped or bool(ex and ex.get('signalled') and not ex.get('timed_out')),
@@ -488,7 +652,7 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
     o = outcome.classify(ev)
     attempt = int(rec.get('attempt', 1))
     h = outcome.hint(o.kind, attempt=attempt, retries=int(rec.get('retries', 1)), remote=bool(rec.get('h100')),
-                     cool_card=cool_card is not None)
+                     cool_card=cool_card is not None, host_fault=bool(p2p))
     cls, role = str(rec.get('class', '')), str(rec.get('host', ''))
     own = [str(x) for x in rec.get('pool_labels') or ()]  # the pool's labels name its host already (RUN-5)
     if h.next != 'none' and retry_on is not None:
@@ -543,6 +707,7 @@ class Inputs:
     results: str = ''
     resume: bool = False
     attempt_of: str = ''
+    lock: str = ''  # empty: the class's default, ``x`` on ``compile``, else ``none`` (design §4.3)
 
 
 def parse_args(argv: Sequence[str]) -> Inputs:
@@ -558,23 +723,27 @@ def parse_args(argv: Sequence[str]) -> Inputs:
     p.add_argument('--results', default='')
     p.add_argument('--resume', choices=('true', 'false', ''), default='false')
     p.add_argument('--attempt-of', default='')
+    p.add_argument('--lock', choices=('', *LOCKS), default='')
     a = p.parse_args(list(argv))
     return Inputs(a.project, a.command, a.id, a.timeout_minutes, a.gpus, a.gpu_mem_mib, a.memory,
-                  a.queue_timeout_minutes, a.results, a.resume == 'true', a.attempt_of)
+                  a.queue_timeout_minutes, a.results, a.resume == 'true', a.attempt_of, a.lock)
 
 
 class Executor:
     """One part. The I/O is injectable: ``run`` (subprocess.run), ``spawn``
     (subprocess.Popen) and ``scope`` (False runs the supervisor without systemd, for tests);
     for the GPU sampler, ``procs`` (the PIDs in the part's scope), ``stop_part`` (the early
-    stop), ``clock`` and ``sample_s``."""
+    stop), ``clock`` and ``sample_s``; ``p2p``, the P2P self-test's argv."""
 
     def __init__(self, inv: inventory.Inventory, etc: str, env: Mapping[str, str], *, release: str,
                  run: Callable = subprocess.run, spawn: Callable = subprocess.Popen, scope: bool = True,
                  poll: float = 3.0, procs: Callable[[], set[int]] | None = None,
                  stop_part: Callable[[], None] | None = None, clock: Callable[[], float] = time.time,
-                 sample_s: float = sampler_mod.SAMPLE_S, own_cap: bool | None = None) -> None:
+                 sample_s: float = sampler_mod.SAMPLE_S, own_cap: bool | None = None,
+                 p2p: Sequence[str] | None = None) -> None:
         self.inv, self.etc, self.env, self.release = inv, etc, dict(env), release
+        # the P2P self-test of a multi part (decision 12.6); a fixture in the tests
+        self.p2p = list(p2p) if p2p is not None else p2p_argv(release)
         self.own_cap = own_cap  # None: the supervisor caps memory where systemd does not (11.11)
         self.run, self.spawn, self.scope, self.poll = run, spawn, scope, poll
         self.procs, self.stop_part, self.clock, self.sample_s = procs, stop_part, clock, sample_s
@@ -618,6 +787,8 @@ class Executor:
         cls = self.env.get('CI_RUNNER_CLASS', '')
         if not cls:
             raise Refused('CI_RUNNER_CLASS is not set: not one of our runners')
+        if cls not in ROWS:
+            raise Refused(f'CI_RUNNER_CLASS {cls!r} is no runner class')
         memory = a.memory or proj.memory or proj.memory_max
         try:
             if registry.memory_bytes(memory) > registry.memory_bytes(proj.memory_max):
@@ -628,41 +799,47 @@ class Executor:
             raise Refused('gpu-mem-mib and queue-timeout-minutes must not be negative')
         if not 0 <= a.gpus <= len(self.inv.host['gpus']):
             raise Refused(f'gpus must be in [0, {len(self.inv.host["gpus"])}] here')
-        if not 0 < a.timeout_minutes <= 240:
-            raise Refused('timeout-minutes is out of range')
+        if not 0 < a.timeout_minutes <= ROWS[cls][3]:
+            raise Refused(f'timeout-minutes must be above 0 and at most {ROWS[cls][3]} on the {cls} runners')
+        if a.lock not in ('', *LOCKS):
+            raise Refused(f'lock must be one of {", ".join(LOCKS)}')
         card = self.env.get('CI_RUNNER_CARD', '')
         if card and (not card.isdigit() or int(card) not in self.inv.host['gpus']):
             raise Refused('CI_RUNNER_CARD names no card of this host')
         return proj, memory
 
     def candidates(self) -> list[int]:
-        """The cards this runner may lease: its own card on an h100-style host, where the
+        """The cards this runner may lease: its own card on a per-card host, where the
         runner of card N sets ``CI_RUNNER_CARD=N`` (design §5.1); else every card."""
         card = self.env.get('CI_RUNNER_CARD', '')
-        if card and h100_style(self.inv.host):
+        if card and per_card(self.inv.host):
             return [int(card)]
         return list(self.inv.host['gpus'])
 
-    def gate(self, a: Inputs, cls: str) -> str:
-        """Why a GPU part cannot start on this host before anything is taken, or empty
-        (design §5.4 phase 1, D7, §5.1 RUN-5)."""
+    def gate(self, a: Inputs, cls: str, lock: str) -> str:
+        """Why a part cannot start on this host before anything is taken, or empty: its
+        ``gpus`` or ``lock`` outside its class's row (design §4.8), D7, a ``compile`` part
+        on a host without ``compile_cpus``, the watchdog's notice (§5.4 phase 1)."""
         h = self.inv.host
-        if not a.gpus:
-            return ''
         if h100_style(h) and a.gpus > 1:
             return 'multi-GPU part on h100 (D7)'
-        if h100_style(h) and cls != H100_POOL:
-            return f'the {cls} runners of this host take no card: GPU parts go to h100-gpu<N>'
+        why = class_refusal(cls, gpus=a.gpus, lock=lock, cards=len(h['gpus']), host_lock=bool(h['files'].get('host_lock')))
+        if why:
+            return why
+        if cls == 'compile' and not h.get('compile_cpus'):
+            return 'this host has no compile_cpus for compile parts'
+        if not a.gpus:
+            return ''
         notice = h.get('watchdog_notice')
         if notice and os.path.lexists(str(notice)):
             return "the GPU watchdog's notice is up"
         return ''
 
     def cool_elsewhere(self, exclude: Sequence[int]) -> int | None:
-        """The coolest card of this h100-style host outside ``exclude`` that passes the
+        """The coolest card of this per-card host outside ``exclude`` that passes the
         health gate, or None (and None on any other host)."""
         h = self.inv.host
-        if not h100_style(h):
+        if not per_card(h):
             return None
         cool = gpus_mod.cool_cards([c for c in h['gpus'] if c not in exclude], smi_status(self.run), h['max_temp_c'])
         return cool[0] if cool else None
@@ -748,25 +925,33 @@ class Executor:
         deadline = t0 + a.queue_timeout_minutes * 60
         leases = Leases(os.path.join(h['data'], 'ci-runners', 'state', 'leases'))
         slot_fd, slot_path, env_fd = None, '', None
+        every: list[int] = []  # a nightly part's slots, every one of them (decision 12.8)
+        nightly = cls == EVERY_SLOT
+        lock = a.lock or ('x' if cls == 'compile' else 'none')  # held by ci-lock (RUN-7d, 7e); checked here
+        rec['lock'] = lock
         try:
             free = shutil.disk_usage(h['data']).free / (1 << 30)
             if free < h['disk_min_gib']:
                 return self._end(record, rec, a, unavailable=f'low disk: {free:.0f} GiB free under the data directory')
-            why = self.gate(a, cls)
+            why = self.gate(a, cls, lock)
             if why:
                 return self._end(record, rec, a, unavailable=why)
-            if cls in SLOT_CLASSES:
+            if cls in SLOT_CLASSES or nightly:
                 q = slots.SlotQueue(h['files']['slot_lock'], h['slots'], h['files']['slot_queue'], poll=self.poll,
                                     default_project=h.get('default_project', ''))
                 mine = sum(1 for t in q.waiting() if t.project == proj.name)
                 if slots.queue_full(mine, proj.max_waiting):
                     return self._end(record, rec, a, unavailable='project queue full')
-                q.take_ticket(proj.name, f'part {a.id}')
+                q.take_ticket(proj.name, f'part {a.id}', every=nightly)
+                every = q.every  # the slots it holds so far, closed at the end
                 try:
                     caps = registry.slot_caps(self.etc, self.inv.this)
                     caps.setdefault(proj.name, proj.max_slots)
                     while slot_fd is None:
-                        slot_fd = q.try_take(proj.name, caps)
+                        if nightly:
+                            slot_fd = (q.try_take_every(proj.name, caps) or [None])[0]
+                        else:
+                            slot_fd = q.try_take(proj.name, caps)
                         if slot_fd is None:
                             if self.stopped:
                                 return self._end(record, rec, a, stopped=True)
@@ -777,23 +962,29 @@ class Executor:
                     if q.ticket and os.path.exists(q.ticket):
                         os.unlink(q.ticket)
                 slot_path = q.slots[q._index(slot_fd)]
-                os.set_inheritable(slot_fd, False)  # passed to the supervisor alone (pass_fds)
-            cards: list[int] = []
-            if a.gpus:
-                need = a.gpu_mem_mib or proj.gpu_mem_mib
-                mine = self.candidates()
+                for fd in {slot_fd, *every}:
+                    os.set_inheritable(fd, False)  # passed to the supervisor alone (pass_fds)
+            cards: list[int] = []  # the cards the command gets (CUDA_VISIBLE_DEVICES)
+            if a.gpus or (nightly and h['gpus']):
+                need = (a.gpu_mem_mib or proj.gpu_mem_mib) if a.gpus else 0
+                mine = list(h['gpus']) if nightly else self.candidates()  # a nightly part leases every card
+                n = len(mine) if nightly else a.gpus
+                use = sorted(mine)[:a.gpus] if nightly else mine  # what the health gate reads
                 while True:
-                    # the health gate (h100-style hosts):
+                    # the health gate (per-card hosts):
                     # a hot or unread card refuses, to a cool card's runner, else the fallback
-                    cool = gpus_mod.cool_cards(mine, smi_status(self.run), h['max_temp_c']) if h100_style(h) else mine
-                    if not cool:
+                    cool = gpus_mod.cool_cards(use, smi_status(self.run), h['max_temp_c']) if per_card(h) else use
+                    if len(cool) < a.gpus:
                         other = self.cool_elsewhere(mine)
-                        return self._end(record, rec, a, unavailable=f'health gate: card {",".join(map(str, mine))} '
+                        return self._end(record, rec, a, unavailable=f'health gate: card {",".join(map(str, use))} '
                                          f'is at or above {h["max_temp_c"]} C or unread',
                                          retry_on=None if other is None else ['self-hosted', f'{self.inv.this}-gpu{other}'])
-                    got = leases.try_take(a.gpus, cool, smi_free(self.run), need)
+                    hot = set(use) - set(cool)
+                    got = leases.try_take(n, mine, {c: m for c, m in smi_free(self.run).items() if c not in hot}, need,
+                                          every=nightly)
                     if got is not None:
-                        cards = got
+                        cards = sorted(got)[:a.gpus] if nightly else got
+                        rec['leased'] = sorted(got)
                         break
                     if self.stopped:
                         return self._end(record, rec, a, stopped=True)
@@ -801,19 +992,22 @@ class Executor:
                         return self._end(record, rec, a, unavailable='queue timeout: no card fits')
                     time.sleep(self.poll)
             rec.update(queue_seconds=round(time.monotonic() - t0), cards=cards, slot=slot_path, run_epoch=time.time())
-            cpus = str(h.get('cpus') or len(os.sched_getaffinity(0)))
+            pin = str((h.get('compile_cpus') if cls == 'compile' else h.get('cpus')) or '')  # design §5.5 item 4
+            cpus = pin or str(len(os.sched_getaffinity(0)))
             build, env_fd = envuse.hold(proj.env) if proj.env else ('', None)  # the link, resolved once
             if build:
                 rec['env_build'] = os.path.basename(build)  # the one env this part runs in (design 12.11)
             env = part_env(self.env, role=self.inv.this, project=dataclasses.replace(proj, env=build), part_dir=work,
                            results=results, cards=cards,
                            cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume)
-            inner = command_argv(a.command, cpus=str(h.get('cpus') or ''))
+            inner = command_argv(a.command, cpus=pin, nice=0 if cls == 'compile' else 10)
             cap = registry.memory_bytes(memory) if self.caps_memory() else 0
-            sup = [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
+            p2p = self.p2p if cls in P2P_CLASSES else []
+            sup = [sys.executable, '-I', '-c', 'import json, sys; sys.path.insert(0, sys.argv.pop(1)); '
                    'from ci_runners.part import supervise; '
-                   'sys.exit(supervise(sys.argv[1], float(sys.argv[2]), sys.argv[4:], int(sys.argv[3])))',
-                   self.release, record, str(a.timeout_minutes * 60), str(cap), *inner]
+                   'sys.exit(supervise(sys.argv[1], float(sys.argv[2]), sys.argv[5:], int(sys.argv[3]), '
+                   'json.loads(sys.argv[4])))',
+                   self.release, record, str(a.timeout_minutes * 60), str(cap), json.dumps(p2p), *inner]
             run_id = f'{os.path.basename(os.path.dirname(record))}-{attempt}'
             self.unit = unit_name(self.env.get('RUNNER_NAME', ''), a.id, run_id) if self.scope else ''
             rec['unit'] = self.unit
@@ -821,14 +1015,14 @@ class Executor:
             argv = scope_argv(self.unit, proj.name, memory, sup, self.oom_policy()) if self.scope else sup
             if self.stopped:
                 return self._end(record, rec, a, stopped=True)
-            held = tuple(fd for fd in [slot_fd, env_fd, *leases.fds] if fd is not None)
+            held = tuple(fd for fd in {slot_fd, env_fd, *every, *leases.fds} if fd is not None)
             self.proc = self.spawn(argv, cwd=self.env.get('GITHUB_WORKSPACE') or os.getcwd(), env=env, pass_fds=held)
             smp, done, thread = None, threading.Event(), None
             if cards:
                 smp = sampler_mod.Sampler(cards, csv_path=os.path.join(record, 'samples.csv'),
                                           query=lambda: (smi_status(self.run), smi_apps(self.run)),
                                           procs=self.procs or self._scope_procs, stop=self.stop_part or self._stop_scope,
-                                          early_stop=h100_style(h), clock=self.clock)
+                                          early_stop=per_card(h), clock=self.clock)
                 thread = threading.Thread(target=smp.loop, args=(done, self.sample_s), daemon=True)
                 thread.start()
             self.proc.wait()
@@ -850,10 +1044,8 @@ class Executor:
                              cool_card=self.cool_elsewhere(cards) if cards else None)
         finally:
             leases.release()
-            if slot_fd is not None:
-                os.close(slot_fd)
-            if env_fd is not None:
-                os.close(env_fd)
+            for fd in {slot_fd, env_fd, *every} - {None}:
+                os.close(fd)
 
     def _end(self, record: str, rec: dict[str, object], a: Inputs, *, ex: Mapping[str, object] | None = None,
              stopped: bool = False, unavailable: str = '', unit_result: str = '', watchdog: str = '',

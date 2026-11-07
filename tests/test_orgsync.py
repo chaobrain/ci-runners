@@ -138,6 +138,17 @@ class Merge(unittest.TestCase):
         self.assertEqual(reason(MERGED, env('chaobrain/paused-one', '3003'), push(name='chaobrain/paused-one', rid=3003)),
                          'paused')
 
+    def test_the_exclusive_classes_need_the_lead_s_entry(self):
+        """Decision 12.14: a repository the snapshot adds may not use compile or nightly; a
+        listed entry that names them may, for the snapshot's members too."""
+        for cls in ('compile', 'nightly'):
+            self.assertEqual(reason(MERGED, env(cls=cls), push()), 'runner-class', cls)
+        self.assertEqual(reason(MERGED, env(cls='multi'), push()), 'ok')
+        listed = POLICY2 + '[repositories."chaobrain/newproj"]\nid = 5005\nvisibility = "private"\nclasses = ["nightly"]\n'
+        m = policy.with_snapshot(policy.load(listed), snap(), NOW)
+        self.assertEqual(reason(m, env(cls='nightly'), push()), 'ok')  # dave is a member of the snapshot
+        self.assertEqual(reason(m, env(cls='compile'), push()), 'runner-class')
+
     def test_the_switches_are_honoured(self):
         p = policy.load(POLICY2.replace('members = true', 'members = false'))
         m = policy.with_snapshot(p, snap(), NOW)

@@ -38,5 +38,41 @@ class Gpus(unittest.TestCase):
         self.assertEqual(gpus.choose_lease(0, cards=[], free={}, need_mib=0, leased={}), [])
 
 
+L = gpus.LeaseTicket
+FREE = {0: 24000, 1: 24000}
+
+
+class LeaseOrder(unittest.TestCase):
+    """Leases in ticket order per card (decision 12.6, design §7)."""
+
+    def grants(self, tickets, leased=None, free=FREE, max_parts=1):
+        return gpus.lease_grants(tickets, free=free, leased=leased or {}, max_parts=max_parts)
+
+    def test_a_waiting_two_card_lease_holds_back_a_later_one_card_lease(self):
+        # card 1 is leased: the multi part (1) waits, and card 0 stays free for it
+        self.assertEqual(self.grants([L(1, 2, (0, 1)), L(2, 1, (0,))], leased={1: 1}), {1: None, 2: None})
+        self.assertEqual(self.grants([L(1, 2, (0, 1)), L(2, 1, (1,))], leased={1: 1}), {1: None, 2: None})
+        # another card's later lease is not held back
+        three = {0: 24000, 1: 24000, 2: 24000}
+        self.assertEqual(self.grants([L(1, 2, (0, 1)), L(2, 1, (2,))], leased={1: 1}, free=three), {1: None, 2: [2]})
+        # once card 1 is free, the multi part takes both and the later one waits for them
+        self.assertEqual(self.grants([L(1, 2, (0, 1)), L(2, 1, (0,))]), {1: [0, 1], 2: None})
+
+    def test_an_older_one_card_lease_goes_first(self):
+        self.assertEqual(self.grants([L(2, 2, (0, 1)), L(1, 1, (0,))]), {1: [0], 2: None})
+        self.assertEqual(self.grants([L(1, 1, (0,)), L(2, 1, (1,))]), {1: [0], 2: [1]})
+        self.assertEqual(self.grants([L(1, 1, (0,)), L(2, 1, (0,))], max_parts=2), {1: [0], 2: [0]})
+
+    def test_a_ticket_short_of_memory_waits_and_holds_back(self):
+        self.assertEqual(self.grants([L(1, 1, (0,), 30000), L(2, 1, (0,), 1000)]), {1: None, 2: None})
+        self.assertEqual(self.grants([L(1, 1, (0, 1), 30000)]), {1: None})
+
+    def test_every_takes_each_card_whole(self):
+        """A nightly part (decision 12.8) takes every lease of every card, and only free cards."""
+        self.assertEqual(self.grants([L(1, 2, (0, 1), every=True), L(2, 1, (0,))], max_parts=2), {1: [0, 1], 2: None})
+        self.assertEqual(self.grants([L(1, 2, (0, 1), every=True)], leased={0: 1}, max_parts=2), {1: None})
+        self.assertEqual(self.grants([L(1, 1, (0,)), L(2, 2, (0, 1), every=True)], max_parts=2), {1: [0], 2: None})
+
+
 if __name__ == '__main__':
     unittest.main()

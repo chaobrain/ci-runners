@@ -122,6 +122,7 @@ class Prep(unittest.TestCase):
         script = '\n'.join(line[10:] for line in script.splitlines())
         with tempfile.NamedTemporaryFile('r') as out:
             base = {'IN_TIMEOUT': '60', 'IN_PROJECT': 'myproj', 'IN_CONTEXT': '', 'HAS_CPU': 'true', 'HAS_GPU': 'true',
+                    'IN_GPUS': '1',
                     'GITHUB_OUTPUT': out.name, 'PATH': '/usr/bin:/bin'}
             r = subprocess.run(['bash', '-e', '-c', script], env={**base, **env}, capture_output=True, text=True,
                                timeout=30)
@@ -138,6 +139,13 @@ class Prep(unittest.TestCase):
                     {'IN_TIMEOUT': '1; echo x'}, {'IN_PROJECT': '../p'}, {'IN_PROJECT': 'p\nq'}):
             code, out = self.run_prep(**env)
             self.assertEqual((code, out), (2, {}), env)
+
+    def test_the_gpu_part_takes_one_card(self):
+        """D7, §4.8: an h100 part takes exactly one card, so the claim job refuses another
+        count before any part is queued (it would end unavailable, retry and end in error)."""
+        for gpus in ('0', '2', '1.0', ''):
+            self.assertEqual(self.run_prep(IN_GPUS=gpus), (2, {}), gpus)
+        self.assertEqual(self.run_prep(IN_GPUS='0', HAS_GPU='false')[0], 0)  # no GPU part: the input is unused
 
 
 class FlowExpressions(unittest.TestCase):

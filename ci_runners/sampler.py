@@ -1,12 +1,10 @@
-"""The GPU sampler of a running part, and its early thermal stop (design §5.4 phase 5,
-§12 item 7; run locally on h100 by RUN-5, decision 11.3).
+"""The GPU sampler of a running part, and its early thermal stop (design §5.5 item 5,
+§12 item 7).
 
 Every ``SAMPLE_S`` the sampler records, per card of the part, the temperature, the
 utilisation and our compute PIDs (``nvidia-smi``'s compute processes on that card that
-are also in the part's scope) into the record's ``samples.csv``. The PIDs it saw are the
-ones a watchdog kill line must name to count as ours (outcome.killed_ours). Where the
-early stop is on, a card at ``HOT_C`` or more for ``HOT_S`` stops the part: its outcome is
-``thermal``, before the host's watchdog throttles (88 C for 10 min) or kills.
+are also in the part's scope) into the record's ``samples.csv``. Where the early stop is
+on, a card at ``HOT_C`` or more for ``HOT_S`` stops the part: its outcome is ``thermal``.
 
 ``HotWatch`` is pure. ``Sampler`` takes its readers, its stop and its clock as callables.
 """

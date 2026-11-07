@@ -1,6 +1,5 @@
-"""Outcome classification and retry hints (design §4.4, decision 8), on the GPU
-watchdog's sanitised kill lines, ``memory.events``, boot-id changes and a stopped
-runner."""
+"""Outcome classification and retry hints (design §4.4, decision 8), on
+``memory.events``, boot-id changes, the early stop and a stopped runner."""
 from __future__ import annotations
 
 import pathlib
@@ -9,7 +8,6 @@ import unittest
 from ci_runners import outcome as oc
 
 FX = pathlib.Path(__file__).resolve().parent / 'fixtures' / 'host'
-WATCHDOG = (FX / 'watchdog.log').read_text()
 A8 = '00000000:A8:00.0'  # card 3 in smi_bus.csv
 
 
@@ -22,26 +20,11 @@ def kind(**kw):
     return oc.classify(E(**kw)).kind
 
 
-class Watchdog(unittest.TestCase):
+class Bus(unittest.TestCase):
     def test_bus_key(self):
         for s in (A8, 'a8', 'A8', '0000:a8:00.0', 'a8:00.0', ' 00A8 '):
             self.assertEqual(oc.bus_key(s), 'a8', s)
         self.assertEqual(oc.bus_key('00000000:00:00.0'), '0')
-
-    def test_kill_lines_only(self):
-        kills = oc.watchdog_kills(WATCHDOG)
-        self.assertEqual([(k.bus, k.victims) for k in kills],
-                         [('a8', (('user2', 222), ('user1', 12345))), ('9a', ()), ('b8', (('user1', 777),))])
-        self.assertEqual([k.bus for k in oc.watchdog_kills(WATCHDOG, '2026-11-05 10:05:00')], ['9a', 'b8'])
-        self.assertEqual([k.bus for k in oc.watchdog_kills(WATCHDOG, '', '2026-11-05 10:05:00')], ['a8', '9a'])
-        self.assertEqual(oc.watchdog_kills(''), [])
-
-    def test_ours_needs_our_card_and_a_recorded_pid(self):
-        kills = oc.watchdog_kills(WATCHDOG)
-        self.assertEqual([k.bus for k in oc.killed_ours(kills, [12345], [A8])], ['a8'])
-        self.assertEqual(oc.killed_ours(kills, [12345], ['00000000:B8:00.0']), [])  # our pid, another card
-        self.assertEqual(oc.killed_ours(kills, [777, 1], [A8]), [])  # our card, another user's pid
-        self.assertEqual([k.bus for k in oc.killed_ours(kills, [777], ['b8', A8])], ['b8'])
 
 
 class Oom(unittest.TestCase):
@@ -64,15 +47,7 @@ class Classify(unittest.TestCase):
         self.assertEqual(kind(rc=None, boot_start='b1', boot_end='b1'), 'lost')
         self.assertEqual(kind(rc=None, boot_start='', boot_end='b2'), 'lost')  # no first id: no evidence
         self.assertEqual(kind(rc=None, early_stop=True), 'thermal')
-        self.assertEqual(kind(rc=137, watchdog=WATCHDOG, pids=(12345,), buses=(A8,), start='2026-11-05 09:00:00',
-                              end='2026-11-05 10:30:00'), 'thermal')
-        self.assertEqual(kind(rc=137, watchdog=WATCHDOG, pids=(12345,), buses=(A8,), start='2026-11-05 10:01:00'),
-                         'red')  # the kill was before the part
-        self.assertEqual(kind(rc=137, watchdog=WATCHDOG, pids=(12345,), buses=(A8,), end='2026-11-05 09:59:59'),
-                         'red')  # and after it
-        self.assertEqual(kind(rc=137, watchdog=WATCHDOG, pids=(222,), buses=('b8',)), 'red')  # not ours
         self.assertEqual(kind(rc=None, unavailable='no card fits'), 'unavailable')
-        self.assertIn('a8', oc.classify(E(rc=1, watchdog=WATCHDOG, pids=(12345,), buses=(A8,))).reason)
         self.assertEqual(oc.classify(E(rc=None, unavailable='low disk: x')).reason, 'low disk: x')
 
     def test_precedence(self):
@@ -91,9 +66,6 @@ class Classify(unittest.TestCase):
         self.assertEqual(oc.PRECEDENCE, ('stopped', 'reboot', 'thermal', 'oom', 'unavailable', 'lost', 'red', 'pass'))
         self.assertEqual(kind(rc=0, oom_kills=1), 'oom')  # design §4.4: oom ranks above pass
 
-    def test_the_watchdog_ranks_with_thermal_above_oom(self):
-        self.assertEqual(kind(rc=1, oom_kills=1, watchdog=WATCHDOG, pids=(12345,), buses=(A8,)), 'thermal')
-
 
 class Hint(unittest.TestCase):
     def test_hints(self):
@@ -108,8 +80,8 @@ class Hint(unittest.TestCase):
             self.assertEqual(oc.hint(k), want, k)
         self.assertEqual(set(table), set(oc.KINDS))
         self.assertEqual(oc.hint('thermal', cool_card=True), H('retry', where='cool-card'))
-        self.assertEqual(oc.hint('reboot', remote=True), H('fallback'))  # h100: as thermal
-        self.assertEqual(oc.hint('reboot', remote=True, cool_card=True), H('retry', where='cool-card'))
+        # a reboot is retried on the same host, a cool card or not (no h100 rule, decision 13.4)
+        self.assertEqual(oc.hint('reboot', cool_card=True), H('retry', where='same-host'))
 
     def test_a_host_fault_is_not_retried(self):
         """Decision 12.6: a failed P2P self-test is a host fault, so ``next`` is ``none``."""

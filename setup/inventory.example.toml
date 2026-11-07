@@ -10,27 +10,30 @@
 # `default_project` the project of their slot tickets, which name none (decision 12.9);
 # its `local_accounts` (a list) the accounts that share those files, for the plan's root
 # steps, and its `push_key` the org snapshot's push key (`ssh-ed25519 ...`, decision 12.4).
+# A host without `files.host_lock` has no host lock, and keeps its slot files under state/.
 schema = 1
-this = "h100"                                   # the role of the host that reads it
+this = "3090b"                                  # the role of the host that reads it
 
-[hosts.h100]                                    # a standalone host (decision 11.3)
-account = "<shared account>"
-home = "/home/<shared account>"
-data = "/home/<shared account>/<our subtree>"   # the root of design §3.2 on h100
+[hosts.3090b]                                   # a 3090 host, its own CI account (decision 12.2)
+account = "<ci account>"
+home = "/home/<ci account>"
+data = "/<data disk>/<ci account>"              # the root of design §3.2
 slots = 2                                       # CPU slots; each card is its own slot
-memory_max = "512G"                             # ci.slice
+memory_max = "120G"                             # ci.slice
 disk_min_gib = 50
-gpus = [0, 1, 2, 3, 4]
+gpus = [0, 1]
 max_temp_c = 80
-cpus = "0-43,88-131"                            # NUMA node 0
-python = "/<path to a Python 3.11 or later>"    # the system's is 3.10; export it as CI_RUNNERS_PYTHON
-                                                # (and CI_RUNNERS_ETC) to run setup/*.sh by hand
-# orgsync = true                                # only a host with its own token: h100's snapshot is
-                                                # pushed from the workstation (decision 11.9)
-watchdog_log = "/<path to the GPU watchdog's log>"
-watchdog_notice = "/<path to the watchdog's notice file>"   # leave out if the host has none
+cpus = "0-27"
+compile_cpus = "4-15"                           # the compile parts' CPUs (decision 12.7)
+default_project = "brainspike"                  # the project of a ci_slot.sh ticket (decision 12.9)
+python = "/<path to a Python 3.11 or later>"    # export it as CI_RUNNERS_PYTHON (and CI_RUNNERS_ETC)
+                                                # to run setup/*.sh by hand
+# orgsync = true                                # only a host with its own token: the 3090 hosts'
+                                                # snapshot is pushed from the workstation (12.4)
+# local_accounts = ["<local account>"]          # the root steps that share the files (§5.3)
+# push_key = "ssh-ed25519 <key>"                # the snapshot push's key (decision 12.4)
 
-[hosts.h100.tunnel]                             # the egress (decision 11.10)
+[hosts.3090b.tunnel]                            # the egress (decisions 11.10, 12.3)
 http_port = 18182                               # ci-tunnel's forward on 127.0.0.1: the runners' https_proxy
 egress_port = 18443                             # ci-egress.service on the egress host's 127.0.0.1
 # no_proxy of the runners: localhost, and a package mirror that answers directly. Every
@@ -38,13 +41,14 @@ egress_port = 18443                             # ci-egress.service on the egres
 # (setup/egress/allow). Public names only here (these values are not denied in the repository).
 direct = ["localhost", "127.0.0.1", "::1"]
 
-[hosts.h100.pools]                              # h100's own labels (§5.1)
-light = { count = 2, labels = ["h100-light"] }
-part = { count = 2, labels = ["h100-cpu"] }
-h100 = { per_card = true, labels = ["h100"] }   # runners h100-gpu<N>, labelled h100 and h100-gpu<N>
-# A pool names its class where its key is not one (decision 12.5), as a 3090 host's
-# per-card pool does: cards = { per_card = true, class = "gpu", labels = ["<role>-gpu"] }
+[hosts.3090b.pools]                             # this host's own labels (§5.1)
+light = { count = 2, labels = ["3090b-light"] }
+part = { count = 3, labels = ["3090b-cpu"] }
+cards = { per_card = true, class = "gpu", labels = ["3090b-gpu"] }  # runners 3090b-gpu<N>
+multi = { count = 1, labels = ["3090b-multi"] }
+compile = { count = 1, labels = ["3090b-compile"] }
 
-[hosts.h100.files]                              # the CI slots' files, under state/ (§7)
-slot_lock = "/home/<shared account>/<our subtree>/ci-runners/state/slot.lock"
-slot_queue = "/home/<shared account>/<our subtree>/ci-runners/state/slot.queue"
+[hosts.3090b.files]                             # brainspike's lock and slot files (decision 12.9)
+host_lock = "/tmp/brainspike-host.lock"
+slot_lock = "/tmp/brainspike-local-ci.lock"
+slot_queue = "/tmp/brainspike-local-ci.queue"

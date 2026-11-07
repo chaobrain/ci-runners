@@ -15,7 +15,13 @@ from ci_runners import inventory as inv
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXAMPLE = (ROOT / 'setup' / 'inventory.example.toml').read_text()
 H = '/ho' + 'me/'  # a home-directory prefix
-_FILES = re.search(r'slot_lock = "[^"]*"\nslot_queue = "[^"]*"\n', EXAMPLE).group()
+#: the example without the keys of decision 12.9 and 12.7, its slot files under state/: a
+#: host with no host lock, which the tests below give those keys one at a time
+PLAIN = re.sub(r'^(compile_cpus|default_project|host_lock) = .*\n', '', EXAMPLE, flags=re.M).replace(
+    'slot_lock = "/tmp/brainspike-local-ci.lock"', 'slot_lock = "/<data disk>/<ci account>/ci-runners/state/slot.lock"').replace(
+    'slot_queue = "/tmp/brainspike-local-ci.queue"', 'slot_queue = "/<data disk>/<ci account>/ci-runners/state/slot.queue"')
+_FILES = re.search(r'slot_lock = "[^"]*"\nslot_queue = "[^"]*"\n', PLAIN).group()
+_POOLS = r'\[hosts\.3090b\.pools\].*\n(?:.*\n){5}'  # the pools table: its header and five pools
 
 
 def shared(text, host_lock='/tmp/h.lock', slot_lock='/tmp/ci.lock', slot_queue='/tmp/ci_slot.queue'):
@@ -27,92 +33,98 @@ def shared(text, host_lock='/tmp/h.lock', slot_lock='/tmp/ci.lock', slot_queue='
 class Load(unittest.TestCase):
     def test_the_example_loads(self):
         i = inv.load(EXAMPLE)
-        self.assertEqual(i.this, 'h100')
-        self.assertEqual(sorted(i.hosts), ['h100'])
-        self.assertEqual(i.host['pools']['h100'], {'per_card': True, 'labels': ['h100']})
-        self.assertNotIn('host_lock', i.host['files'])
+        self.assertEqual(i.this, '3090b')
+        self.assertEqual(sorted(i.hosts), ['3090b'])
+        self.assertEqual(i.host['pools']['cards'], {'per_card': True, 'class': 'gpu', 'labels': ['3090b-gpu']})
+        self.assertEqual(i.host['files']['host_lock'], '/tmp/brainspike-host.lock')
+        self.assertNotIn('host_lock', inv.load(PLAIN).host['files'])
+        for gone in ('watchdog_log', 'watchdog_notice'):  # decision 13.4: unknown keys now
+            with self.assertRaisesRegex(inv.InventoryError, 'unknown keys', msg=gone):
+                inv.load(EXAMPLE.replace('slots = 2', f'{gone} = "/x"\nslots = 2', 1))
+        with self.assertRaisesRegex(inv.InventoryError, 'class'):  # and the h100 class
+            inv.load(EXAMPLE.replace('multi = { count = 1, labels = ["3090b-multi"] }', 'h100 = { per_card = true }'))
 
     def test_the_retired_keys_are_accepted_and_ignored(self):
         """Decision 11.12: h100's inventory may still hold the first path's keys."""
-        old = EXAMPLE.replace('slots = 2', 'ssh = "<alias>"\ntrusted = true\nremote = false\ncpu_slowdown = 2.7\n'
+        old = PLAIN.replace('slots = 2', 'ssh = "<alias>"\ntrusted = true\nremote = false\ncpu_slowdown = 2.7\n'
                               'slots = 2', 1).replace('slot_lock = ', 'host_lock = "/tmp/h.lock"\nslot_lock = ', 1)
-        old += '[hosts.h100.proxy]\nclient = "/x"\n'
+        old += '[hosts.3090b.proxy]\nclient = "/x"\n'
         i = inv.load(old)
         self.assertEqual(i.host['cpu_slowdown'], 2.7)
         self.assertEqual(inv.RETIRED_KEYS, {'ssh', 'trusted', 'remote', 'cpu_slowdown', 'proxy'})
         with self.assertRaises(inv.InventoryError):  # only those: another key is still unknown
-            inv.load(EXAMPLE.replace('slots = 2', 'slowdown = 2.7\nslots = 2', 1))
+            inv.load(PLAIN.replace('slots = 2', 'slowdown = 2.7\nslots = 2', 1))
         with self.assertRaises(inv.InventoryError):
-            inv.load(EXAMPLE.replace('slot_lock = ', 'other_lock = "/tmp/o.lock"\nslot_lock = ', 1))
+            inv.load(PLAIN.replace('slot_lock = ', 'other_lock = "/tmp/o.lock"\nslot_lock = ', 1))
 
     def test_the_3090_keys_of_decision_12_9(self):
         """A host lock in ``files`` and a ``default_project`` (a project name) load."""
-        text = EXAMPLE.replace('slots = 2', 'default_project = "brainspike"\nslots = 2', 1).replace(
+        text = PLAIN.replace('slots = 2', 'default_project = "brainspike"\nslots = 2', 1).replace(
             'slot_lock = ', 'host_lock = "/tmp/h.lock"\nslot_lock = ', 1)
         i = inv.load(text)
         self.assertEqual(i.host['default_project'], 'brainspike')
         self.assertEqual(i.host['files']['host_lock'], '/tmp/h.lock')
         for bad in ('"Brainspike"', '"a b"', '""', '1'):
             with self.assertRaises(inv.InventoryError, msg=bad):
-                inv.load(EXAMPLE.replace('slots = 2', f'default_project = {bad}\nslots = 2', 1))
+                inv.load(PLAIN.replace('slots = 2', f'default_project = {bad}\nslots = 2', 1))
 
     def test_the_local_accounts_and_the_push_key(self):
         """Decision 12.9, §5.3: the accounts that share the lock files, and the push key's line."""
         key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI' + 'A' * 43
-        i = inv.load(shared(EXAMPLE).replace('local_accounts = ["user-a"]', f'local_accounts = ["user-a", "user_b"]\n'
+        i = inv.load(shared(PLAIN).replace('local_accounts = ["user-a"]', f'local_accounts = ["user-a", "user_b"]\n'
                                              f'push_key = "{key} c"', 1))
         self.assertEqual(i.host['local_accounts'], ['user-a', 'user_b'])
         self.assertEqual(i.host['push_key'], key + ' c')
         for bad in ('[]', '["a", "a"]', '["A"]', '["a b"]', '"a"', '[1]'):
             with self.assertRaises(inv.InventoryError, msg=bad):
-                inv.load(shared(EXAMPLE).replace('local_accounts = ["user-a"]', f'local_accounts = {bad}', 1))
+                inv.load(shared(PLAIN).replace('local_accounts = ["user-a"]', f'local_accounts = {bad}', 1))
         for bad in (key[:-1], 'ssh-rsa ' + key[12:], key + ' a b', key + '\\n' + key, ''):
             with self.assertRaises(inv.InventoryError, msg=bad):
-                inv.load(EXAMPLE.replace('slots = 2', f'push_key = "{bad}"\nslots = 2', 1))
+                inv.load(PLAIN.replace('slots = 2', f'push_key = "{bad}"\nslots = 2', 1))
         self.assertEqual(inv.deny_tokens({'hosts': {'h': {'local_accounts': ['acct7'], 'push_key': key}}}),
                          {'acct7', inv.normalise(key[12:])})  # the type word is the code's: not a token
 
     def test_shared_files_are_plain_names_in_tmp(self):
         """B1: with local_accounts, root's step makes every ``files`` path root-owned with ACL
         entries, so each must be a plain name directly in /tmp."""
-        self.assertEqual(inv.load(shared(EXAMPLE)).host['files']['slot_queue'], '/tmp/ci_slot.queue')
+        self.assertEqual(inv.load(shared(PLAIN)).host['files']['slot_queue'], '/tmp/ci_slot.queue')
         for bad in ('/tmp/../etc/shadow', '/etc/shadow', '/tmp/x/../q', '/tmp//q', '/tmp/./q', '/tmp/a/q',
                     H + 'u/q', '/tmp/', '/tmp/.q', '/tmp/a b'):
             for key in ('host_lock', 'slot_lock', 'slot_queue'):
                 with self.assertRaises(inv.InventoryError, msg=(key, bad)):
-                    inv.load(shared(EXAMPLE, **{key: bad}))
-        self.assertEqual(inv.load(EXAMPLE).host['files']['slot_queue'][:1], '/')  # without them: any absolute path
+                    inv.load(shared(PLAIN, **{key: bad}))
+        self.assertEqual(inv.load(PLAIN).host['files']['slot_queue'][:1], '/')  # without them: any absolute path
         self.assertFalse(inv.shared_path('/tmp/a/../b'))
         self.assertTrue(inv.shared_path('/tmp/a.b-c_d'))
 
     def test_pools_as_tables(self):
         """RUN-5: a pool may give its labels, or have one runner per card."""
-        base = re.sub(r'\[hosts\.h100\.pools\].*\n(?:.*\n){3}', '', EXAMPLE).replace(
+        base = re.sub(_POOLS, '', PLAIN).replace(
             'max_temp_c = 80\n', 'max_temp_c = 80\npools = { @ }\n')
         self.assertIn('@', base)
-        good = ('light = 2', 'light = { count = 2 }', 'light = { count = 1, labels = ["h100-light"] }',
-                'h100 = { per_card = true }', 'h100 = { per_card = true, labels = ["h100", "x-1"] }')
+        good = ('light = 2', 'light = { count = 2 }', 'light = { count = 1, labels = ["hx-light"] }',
+                'cards = { per_card = true, class = "gpu" }', 'cards = { per_card = true, class = "gpu", labels = ["hx-gpu", "x-1"] }')
         for g in good:
             inv.load(base.replace('@', g))
         bad = ('light = 0', 'light = {}', 'light = { labels = ["a"] }', 'light = { count = 0 }',
                'light = { count = 1, per_card = true }', 'light = { count = 1, labels = [] }',
                'light = { count = 1, labels = ["A"] }', 'light = { count = 1, labels = ["a b"] }',
                'light = { count = 1, labels = ["a", "a"] }', 'light = { count = 1, labels = "a" }',
-               'light = { count = 1, extra = 1 }', 'h100 = { per_card = 1 }', 'light = { count = true }',
+               'light = { count = 1, extra = 1 }', 'cards = { per_card = 1, class = "gpu" }', 'light = { count = true }',
                'light = { count = 1, labels = ["light"] }', 'light = { count = 1, labels = ["self-hosted"] }',
-               'h100 = { per_card = true, labels = ["gpu"] }')  # a bare class or GitHub's own label
+               'cards = { per_card = true, class = "gpu", labels = ["gpu"] }')  # a bare class or GitHub's own label
         for b in bad:
             with self.assertRaises(inv.InventoryError, msg=b):
                 inv.load(base.replace('@', b))
         with self.assertRaisesRegex(inv.InventoryError, 'without gpus'):
-            inv.load(base.replace('@', 'h100 = { per_card = true }').replace('gpus = [0, 1, 2, 3, 4]', 'gpus = []', 1))
+            inv.load(base.replace('@', 'cards = { per_card = true, class = "gpu" }').replace('gpus = [0, 1]', 'gpus = []', 1))
         with self.assertRaises(inv.InventoryError):
             inv.load(base.replace('{ @ }', '{}'))
 
     def test_pools_name_their_class(self):
         """Decision 12.5: a pool's class is its key, or its ``class`` where it names one; each
-        class has one pool per host; only h100 and gpu pools run a runner per card."""
-        base = re.sub(r'\[hosts\.h100\.pools\].*\n(?:.*\n){3}', '', EXAMPLE).replace(
+        class has one pool per host; only gpu pools run a runner per card."""
+        base = re.sub(_POOLS, '', PLAIN).replace(
             'max_temp_c = 80\n', 'max_temp_c = 80\ncompile_cpus = "4-15"\npools = { @ }\n')
         i = inv.load(base.replace('@', 'light = 1, cards = { per_card = true, class = "gpu", labels = ["hx-gpu"] }, '
                                        'multi = { count = 1, labels = ["hx-multi"] }, compile = 1, nightly = 1'))
@@ -147,19 +159,19 @@ class Load(unittest.TestCase):
 
     def test_malformed_inventories(self):
         bad = {
-            'this unknown': EXAMPLE.replace('this = "h100"', 'this = "h200"'),
+            'this unknown': EXAMPLE.replace('this = "3090b"', 'this = "3090c"'),
             'unknown top key': 'extra = 1\n' + EXAMPLE,
             'unknown host key': EXAMPLE.replace('max_temp_c = 80\n', 'max_temp_c = 80\nfoo = 1\n'),
-            'missing account': EXAMPLE.replace('account = "<shared account>"\n', ''),
-            'relative home': EXAMPLE.replace('home = "/home/<shared account>"', 'home = "~"'),
+            'missing account': EXAMPLE.replace('account = "<ci account>"\n', ''),
+            'relative home': EXAMPLE.replace('home = "/home/<ci account>"', 'home = "~"'),
             'slots zero': EXAMPLE.replace('slots = 2', 'slots = 0'),
             'slots bool': EXAMPLE.replace('slots = 2', 'slots = true'),
-            'memory': EXAMPLE.replace('memory_max = "512G"', 'memory_max = "512GB"'),
-            'gpus': EXAMPLE.replace('gpus = [0, 1, 2, 3, 4]\n', 'gpus = [0, "1"]\n'),
-            'cpus': EXAMPLE.replace('cpus = "0-43,88-131"', 'cpus = "0-43;rm"'),
+            'memory': EXAMPLE.replace('memory_max = "120G"', 'memory_max = "120GB"'),
+            'gpus': EXAMPLE.replace('gpus = [0, 1]\n', 'gpus = [0, "1"]\n'),
+            'cpus': EXAMPLE.replace('cpus = "0-27"', 'cpus = "0-27;rm"'),
             'pool count': EXAMPLE.replace('light = { count = 2,', 'light = { count = 0,'),
             'files keys': re.sub(r'slot_queue = .*\n', '', EXAMPLE),
-            'role': EXAMPLE.replace('[hosts.h100]', '[hosts.H100]'),
+            'role': EXAMPLE.replace('[hosts.3090b]', '[hosts.X3090b]'),
             'not toml': '[[',
         }
         for what, text in bad.items():
@@ -281,7 +293,7 @@ class Scan(unittest.TestCase):
     def test_the_example_is_all_placeholders(self):
         doc = tomllib.loads(EXAMPLE)
         values = list(inv._strings(doc))
-        self.assertGreater(len(values), 5)
+        self.assertGreaterEqual(len(values), 4)  # account, home, data, python
         for s in values:
             self.assertIn('<', s)  # every private value is a placeholder
 

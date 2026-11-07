@@ -47,7 +47,6 @@ LOCKS = ('none', 's', 'x', 'l')  # the ``lock`` input: hold the host lock for th
 ROWS: dict[str, tuple[int, int | None, tuple[str, ...], int]] = {
     'light': (0, 0, ('none',), 30),
     'part': (0, 0, LOCKS, 240),
-    'h100': (1, 1, LOCKS, 240),
     'gpu': (1, 1, LOCKS, 240),
     'multi': (2, 2, LOCKS, 240),
     'compile': (0, 0, ('x',), 240),
@@ -57,13 +56,10 @@ P2P_CLASSES = ('multi',)  # the classes whose parts run the P2P self-test first 
 P2P_KILL_WAIT = 5.0  # s the supervisor waits for the self-test after killing it at its bound
 KILL_GRACE = 30  # s between TERM and KILL at the inner timeout
 RELAY_DRAIN = 5  # s the relay may still copy once the command has ended
-WATCHDOG_TAIL = 4 << 20  # bytes of the GPU watchdog's log read after a part
 CAP_POLL = 2.0  # s between the supervisor's memory readings, where it enforces the cap
 OOM_POLICY_SYSTEMD = 253  # the first systemd that takes OOMPolicy on a scope
 SCOPE = re.compile(r'ci-part-[^/]*\.scope')  # a part's scope, the only cgroup the cap kills in
 _LEASE_TICKET = re.compile(r'([0-9]{12})\.json\Z')  # a lease ticket in ``state/leases/queue``
-#: the pool that marks an h100-style host: one runner per card, labelled h100-gpu<N> (design §5.1)
-H100_POOL = 'h100'
 #: the step's own files: the command must not write the part's outputs or the job's env
 STEP_FILES = frozenset({'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'GITHUB_ENV', 'GITHUB_PATH', 'GITHUB_STATE'})
 OUTPUTS = ('outcome', 'reason', 'next', 'retry-on', 'host', 'gpus', 'queue-seconds', 'run-seconds',
@@ -231,7 +227,7 @@ class MemoryCap:
 
 def command_argv(command: str, *, cpus: str = '', nice: int = 10) -> list[str]:
     """What the supervisor runs: ``taskset`` to the inventory's ``cpus`` where it gives
-    them (h100: NUMA node 0, design §5.4; ``compile_cpus`` on ``compile``), nice (0 on
+    them (``compile_cpus`` on ``compile``, design §5.5), nice (0 on
     ``compile``) and ionice, then ``bash -c``. Pure."""
     argv = ['taskset', '-c', cpus] if cpus else []
     argv += ['nice', '-n', str(nice), 'ionice', '-c', '2', '-n', '7']
@@ -578,37 +574,14 @@ def smi_apps(run: Callable = subprocess.run) -> list[tuple[int, str]]:
     return gpus_mod.compute_apps(_smi(['--query-compute-apps=pid,gpu_bus_id', '--format=csv,noheader'], run))
 
 
-def h100_style(host: Mapping[str, object]) -> bool:
-    """Whether a host is h100: it has a pool of class ``h100``. A part there takes one card
-    (D7), a reboot counts as thermal, and the GPU watchdog's notice and log count. Pure."""
-    pools = host.get('pools')
-    return isinstance(pools, Mapping) and inventory.pool_of(host, H100_POOL) is not None
-
-
 def per_card(host: Mapping[str, object]) -> bool:
-    """Whether a host has runners per card (a pool of class ``h100`` or ``gpu``, design
-    §5.1): the health gate refuses there instead of waiting, a per-card runner leases its
-    own card, a thermal retry names a cool card's ``<role>-gpu<M>``, and the early stop is
-    on (design §5.4, §5.5). Pure."""
+    """Whether a host has runners per card (a pool of class ``gpu``, design §5.1): the
+    health gate refuses there instead of waiting, a per-card runner leases its own card, a
+    thermal retry names a cool card's ``<role>-gpu<M>``, and the early stop is on (design
+    §5.5). Pure."""
     pools = host.get('pools')
     return isinstance(pools, Mapping) and any(inventory.pool_of(host, c) is not None
                                               for c in sorted(inventory.PER_CARD_CLASSES))
-
-
-def _local(epoch: object) -> str:
-    """Host-local ``YYYY-MM-DD HH:MM:SS``, as the GPU watchdog writes times; empty if unknown."""
-    return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(epoch))) if epoch else ''
-
-
-def read_tail(path: str, limit: int = WATCHDOG_TAIL) -> str:
-    """The last ``limit`` bytes of a log, or empty."""
-    try:
-        with open(path, 'rb') as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - limit))
-            return f.read().decode('utf-8', 'replace')
-    except OSError:
-        return ''
 
 
 # ------------------------------------------------------------------ outputs
@@ -637,15 +610,13 @@ def summary_md(out: Mapping[str, object], part_id: str) -> str:
 
 
 def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | None, *, stopped: bool = False,
-           unavailable: str = '', unit_result: str = '', watchdog: str = '', cool_card: int | None = None,
+           unavailable: str = '', unit_result: str = '', cool_card: int | None = None,
            retry_on: Sequence[str] | None = None) -> dict[str, object]:
-    """The outputs of a part from its record and exit (design §4.4). ``watchdog`` is the
-    GPU watchdog's log: a kill line counts if it falls in the part's run and names one of
-    our cards (``rec['buses']``) and a PID the sampler saw (``rec['pids']``).
-    ``cool_card`` is a card of this h100-style host that passes the health gate, for a
-    thermal retry; ``retry_on`` overrides the labels of a retry or fallback. Pure but for
-    the clock when the exit has no end time. A failed P2P self-test in the exit (``p2p``)
-    ends the part ``unavailable`` (``p2p: <why>``) with ``next`` ``none`` (decision 12.6)."""
+    """The outputs of a part from its record and exit (design §4.4). ``cool_card`` is a
+    card of this per-card host that passes the health gate, for a thermal retry;
+    ``retry_on`` overrides the labels of a retry or fallback. Pure but for the clock when
+    the exit has no end time. A failed P2P self-test in the exit (``p2p``) ends the part
+    ``unavailable`` (``p2p: <why>``) with ``next`` ``none`` (decision 12.6)."""
     end = float((ex or {}).get('end_epoch') or time.time())
     p2p = str((ex or {}).get('p2p') or '')
     unavailable = unavailable or (f'p2p: {p2p}' if p2p else '')
@@ -655,13 +626,11 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
         unavailable=unavailable, boot_start=str(rec.get('boot_start', '')),
         boot_end=str((ex or {}).get('boot_end', '')),
         oom_kills=int((ex or {}).get('oom_kills', 0)) + (1 if unit_result == 'oom-kill' else 0),
-        watchdog=watchdog, start=_local(rec.get('run_epoch')),
-        end=_local(end), pids=tuple(int(p) for p in rec.get('pids', ())), buses=tuple(map(str, rec.get('buses', ()))),
         early_stop=bool(rec.get('early_stop')))
     o = outcome.classify(ev)
     attempt = int(rec.get('attempt', 1))
-    h = outcome.hint(o.kind, attempt=attempt, retries=int(rec.get('retries', 1)), remote=bool(rec.get('h100')),
-                     cool_card=cool_card is not None, host_fault=bool(p2p))
+    h = outcome.hint(o.kind, attempt=attempt, retries=int(rec.get('retries', 1)), cool_card=cool_card is not None,
+                     host_fault=bool(p2p))
     cls, role = str(rec.get('class', '')), str(rec.get('host', ''))
     own = [str(x) for x in rec.get('pool_labels') or ()]  # the pool's labels name its host already (RUN-5)
     if h.next != 'none' and retry_on is not None:
@@ -827,21 +796,14 @@ class Executor:
 
     def gate(self, a: Inputs, cls: str, lock: str) -> str:
         """Why a part cannot start on this host before anything is taken, or empty: its
-        ``gpus`` or ``lock`` outside its class's row (design §4.8), D7, a ``compile`` part
-        on a host without ``compile_cpus``, the watchdog's notice (§5.4 phase 1)."""
+        ``gpus`` or ``lock`` outside its class's row (design §4.8), or a ``compile`` part on
+        a host without ``compile_cpus``."""
         h = self.inv.host
-        if h100_style(h) and a.gpus > 1:
-            return 'multi-GPU part on h100 (D7)'
         why = class_refusal(cls, gpus=a.gpus, lock=lock, cards=len(h['gpus']), host_lock=bool(h['files'].get('host_lock')))
         if why:
             return why
         if cls == 'compile' and not h.get('compile_cpus'):
             return 'this host has no compile_cpus for compile parts'
-        if not a.gpus:
-            return ''
-        notice = h.get('watchdog_notice')
-        if notice and os.path.lexists(str(notice)):
-            return "the GPU watchdog's notice is up"
         return ''
 
     def cool_elsewhere(self, exclude: Sequence[int]) -> int | None:
@@ -924,7 +886,7 @@ class Executor:
             'project': proj.name, 'id': a.id, 'class': cls, 'host': self.inv.this, 'runner': self.env.get('RUNNER_NAME', ''),
             'attempt': attempt, 'retries': proj.retries, 'fallback': fallback, 'inputs': dataclasses.asdict(a),
             'start_epoch': time.time(), 'boot_start': boot_id(), 'executor': os.getpid(),
-            'release': self.release, 'h100': h100_style(h)}
+            'release': self.release}
         if inventory.pool_labels(self.inv, cls):
             rec['pool_labels'] = inventory.pool_labels(self.inv, cls)
         _write_json(os.path.join(record, 'record.json'), rec)
@@ -1075,10 +1037,8 @@ class Executor:
                              capture_output=True, text=True, timeout=30)
                 unit_result = (r.stdout or '').strip()
                 self.run(['systemctl', '--user', 'reset-failed', self.unit], capture_output=True, timeout=30)
-            log = str(h.get('watchdog_log') or '')
             return self._end(record, rec, a, ex=_read_json(os.path.join(record, 'exit.json')),
                              stopped=self.stopped, unit_result=unit_result,
-                             watchdog=read_tail(log) if log and cards else '',
                              cool_card=self.cool_elsewhere(cards) if cards else None)
         finally:
             if hold is not None:
@@ -1088,11 +1048,11 @@ class Executor:
                 os.close(fd)
 
     def _end(self, record: str, rec: dict[str, object], a: Inputs, *, ex: Mapping[str, object] | None = None,
-             stopped: bool = False, unavailable: str = '', unit_result: str = '', watchdog: str = '',
+             stopped: bool = False, unavailable: str = '', unit_result: str = '',
              cool_card: int | None = None, retry_on: Sequence[str] | None = None) -> tuple[int, dict[str, object]]:
         _write_json(os.path.join(record, 'record.json'), rec)
         out = finish(record, rec, ex, stopped=stopped, unavailable=unavailable, unit_result=unit_result,
-                     watchdog=watchdog, cool_card=cool_card, retry_on=retry_on)
+                     cool_card=cool_card, retry_on=retry_on)
         _publish(record, out, a.id, self.env)
         return (1 if out['outcome'] == 'red' else 0), out
 

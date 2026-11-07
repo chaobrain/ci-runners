@@ -44,7 +44,7 @@ RESERVED_LABELS = frozenset({'self-hosted', 'linux', 'x64', 'light', 'part', 'co
 #: not the pool's key (decision 12.5)
 POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class'})
 #: the classes whose runners lease one card each, the runner's own: a per-card pool's
-PER_CARD_CLASSES = frozenset({'h100', 'gpu'})
+PER_CARD_CLASSES = frozenset({'gpu'})
 
 
 class InventoryError(ValueError):
@@ -120,8 +120,6 @@ HOST_KEYS = {
     'tunnel': (lambda v: isinstance(v, dict), False),  # the ssh forward to the egress proxy (h100, decision 11.10)
     'python': (_abs, False),         # the host layer's interpreter, 3.11 or later; else /usr/bin/python3
     'orgsync': (lambda v: type(v) is bool, False),  # runs ci-orgsync.timer: the org snapshot (§6.5)
-    'watchdog_log': (_abs, False),   # the GPU watchdog's log (h100; design §4.4 thermal)
-    'watchdog_notice': (_abs, False),  # the watchdog's notice file (h100 health gate, §5.4)
     # the project of a slot ticket without one: ci_slot.sh's (design §7 rule 4, decision 12.9)
     'default_project': (lambda v: isinstance(v, str) and bool(re.fullmatch(r'[a-z0-9][a-z0-9-]{0,39}', v)), False),
     # the local accounts that share the host lock and slot files with the CI account: the

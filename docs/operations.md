@@ -173,7 +173,7 @@
 | 想知道某个部件是哪个 runner 跑的 | 被调用的工作流里，API 返回的作业 `runnerName` 是空的。看主机上部件记录 `record.json` 里的 `runner`。 |
 | 同一个 head 重新触发没有跑 | claim 跳过了已经绿的 head，推一个新 commit 再跑。 |
 | env build 时出现 403 | 缺少 `no_proxy`，包镜像被送到了 egress 代理。按 §4 从 runner 的 `.env` 导入代理变量。 |
-| 卡一直 `unavailable: health gate` | 卡温 ≥ 80 °C，或 watchdog 告警文件存在。用 `nvidia-smi` 看温度。 |
+| 卡一直 `unavailable: health gate` | 卡温 ≥ 80 °C 或读不到。用 `nvidia-smi` 看温度。 |
 
 ## 9. 验收记录（RUN-5，2026-11-06）
 

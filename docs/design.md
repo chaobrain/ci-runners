@@ -296,8 +296,8 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
     15. **Setup and registration are the lead's** (AGENTS.md). The lead creates the CI
         accounts, places the tunnel keys and the push key, approves each host's
         `setup/plan.sh` output before `apply`, registers the runners and tags `v1.4.0`.
-    16. **The CI account sees no other account's files** (RUN-7g; lead, 2026-11-07: a
-        private `/tmp` on both hosts). Measured before any job ran: the CI account, and so
+    16. **The CI account sees no other account's files** (RUN-7g; lead, 2026-11-07,
+        #46: a private `/tmp` on both hosts, and the data disks and `/home` with it). Measured before any job ran: the CI account, and so
         a job, could read tens of thousands of the local account's files in `/tmp`,
         `/var/tmp` and `/dev/shm` on 3090b (left there with a 002 or 022 umask: copies of
         private code, logs) and other people's on 3090a, and other people's directories on
@@ -315,8 +315,11 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
         because `PrivateTmp=` there needs an unprivileged user namespace, which
         `kernel.apparmor_restrict_unprivileged_userns=1` refuses on both hosts; nor by
         system units with `User=`, which would move every runner unit out of setup's
-        user units for the same result. (The data-disk and `/home` part goes beyond
-        "private `/tmp`" and is the lead's to approve with it.)
+        user units for the same result. The data-disk and `/home` part goes beyond
+        "private `/tmp`"; the lead approved it with the rest (lead, 2026-11-07). A
+        repository whose CI needs a path on a data disk gets it bound in explicitly, by
+        a policy or inventory entry, with its own plan line; none does yet, so `v1.4.0`
+        binds back only the account's own `home` and `data`.
 
 ## Decisions of this spec
 

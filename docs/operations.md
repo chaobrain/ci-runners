@@ -2,25 +2,25 @@
 
 这份手册写给维护主机和发布版本的人。契约是 [design.md](design.md)（英文），本文与之不一致时以 design.md 为准。仓库怎么接入，看 [consumers.md](consumers.md)。
 
-本仓库公开，文档里**不写任何清单信息**：主机名、ssh 别名、IP、账户名、home 路径、令牌都不出现，只用角色名（design §3.3），由 `tests/test_no_inventory.py` 把关。下文的 `<data>` 指 h100 上我们子目录的根（inventory 的 `data`），`<h100>` 指 h100 的 ssh 别名。
+本仓库公开，文档里**不写任何清单信息**：主机名、ssh 别名、IP、账户名、home 路径、令牌都不出现，只用角色名（design §3.3），由 `tests/test_no_inventory.py` 把关。下文的 `<data>` 指主机上 CI 账户数据目录的根（inventory 的 `data`）。
 
 ## 1. 拓扑
 
 | 角色 | 跑什么 | 以谁的身份 |
 |---|---|---|
-| **h100** | 9 个 runner：`h100-light` ×2（claim、verdict）、`h100-cpu` ×2（CPU 部件）、`h100-gpu0..4` 每卡一个（GPU 部件）；`ci-tunnel.service`（到 egress 的 ssh 转发）；`ci-reaper.timer` | 共享账户的 systemd user 单元，文件都在 `<data>` 下；单元文件在 `~/.config/systemd/user/ci-*` |
+| **3090b**、**3090a** | 各自的 runner 池（`<host>-light`、`-cpu`、`-gpu<N>`、`-multi`，3090b 另有 `-compile`，3090a 另有 `-nightly`，design §5.1）；`ci-tunnel.service`（到 egress 的 ssh 转发）；`ci-reaper.timer`、`ci-envrefresh.timer` | 专用 CI 账户的 systemd user 单元，文件都在 `<data>` 下 |
 | **egress 主机** | `ci-egress.service`：HTTP CONNECT 代理，只放行允许清单里的域名的 443 端口 | root 安装，DynamicUser 运行 |
-| **工作站** | `ci-orgsync-push.timer`：每 10 分钟用维护者的 gh 登录拉 org 快照，经 ssh 推到 h100 | 维护者本人的 user 单元 |
+| **工作站** | `ci-orgsync-push.timer`：每 10 分钟用维护者的 gh 登录拉 org 快照，经 ssh 推到每台主机 | 维护者本人的 user 单元 |
 
 数据流：
 
-- GitHub 把任务派给 h100 的 runner。
+- GitHub 把任务派给主机的 runner。（h100 已于 2026-11-07 退出 CI，design 决定 12.17。）
 - runner 自己的流量和任务的外网流量都走 `https_proxy=127.0.0.1:<http_port>`，经 ssh 隧道到 egress 主机的代理，再出去。只有 `tunnel.direct`（localhost 和一个直连可用的包镜像）不走代理。
 - hook 只读本地文件：inventory、policy、`etc/org.json`。
 
 ## 2. 新增一台机器
 
-以新增一台像 h100 这样的独立主机为例。所有步骤都在主机的 CI 账户下执行，不需要 sudo。
+以新增一台像 3090a 这样的独立主机为例。所有步骤都在主机的 CI 账户下执行，不需要 sudo。
 
 1. **准备。** 主机上要有 Python ≥ 3.11（系统自带的版本不够就用 conda 的）、开启 linger、`systemctl --user` 可用。在这台主机上测一下哪些 GitHub 域名能直连。
 2. **装 release。** 从一个能访问 GitHub 的地方取得 release，在主机上运行：
@@ -75,22 +75,22 @@
 
 ## 4. 新增项目和成员
 
-- **成员和私有仓库**：自动同步，什么都不用做。新成员、新私有仓库最多 10 分钟后可用。要暂停某个仓库，在 h100 的 `policy.toml` 里写它的条目，设 `paused = true`（见 `setup/policy.org.example.toml`）。
+- **成员和私有仓库**：自动同步，什么都不用做。新成员、新私有仓库最多 10 分钟后可用。要暂停某个仓库，在每台主机的 `policy.toml` 里写它的条目，设 `paused = true`（见 `setup/policy.org.example.toml`）。
 - **新项目**（仓库要先按 [consumers.md](consumers.md) §3 加 `.github/ci-runners.toml`）：
-  1. 在 h100 上写 `<data>/ci-runners/etc/projects/<project>.toml`，字段见 `ci_runners/registry.py` 的文档字符串：
+  1. 在要用的每台主机上写 `<data>/ci-runners/etc/projects/<project>.toml`，字段见 `ci_runners/registry.py` 的文档字符串：
      - `name` 与文件名同名；
      - `repository = "chaobrain/<repo>"`；
      - `context = "<project>/ci"`；
      - `retries = 1`；
      - `memory`；
      - `refresh = true`（可选）：让 `ci-envrefresh.timer` 每 30 分钟检查这个项目的 upstream，见下面的"环境刷新"；
-     - `[hosts.h100]` 下的 `env`、`memory_max`、`max_slots`、`variables`。
-  2. 建环境。在 h100 的 CI 账户 shell 里：
+     - `[hosts.<role>]` 下的 `env`、`memory_max`、`max_slots`、`variables`。
+  2. 建环境。在主机的 CI 账户 shell 里：
      ```
      export $(grep -E '^(https_proxy|http_proxy|no_proxy|CI_RUNNERS_ETC|CI_RUNNERS_PYTHON)=' <data>/actions-runner/<任一 runner>/.env)
      GH_TOKEN=<只读令牌> <data>/ci-runners/releases/hook/bin/ci-run env build <project> --conda <conda 路径>
      ```
-     - 令牌用 fine-grained 的，对该仓库和其私有 upstream 只给 Contents: read，只为这一条命令设置，**不要**存在 h100 上：共享账户的其他人能读到。
+     - 令牌用 fine-grained 的，对该仓库和其私有 upstream 只给 Contents: read，只为这一条命令设置，**不要**存在主机上。
      - 一定要带上 runner 的 `no_proxy`。否则包镜像也会被送到 egress 代理，代理会返回 403。
      - 构建结果放在 `envs/<project>-<时间戳>/`，全部成功后 `envs/<project>` 才切过去，并保留前两次构建。
      - 命令会打印要写进 registry 的 `env` 和 `variables`。可以先用 `--dry-run` 看步骤。
@@ -106,17 +106,17 @@
 一次发布的六步（design §9）：
 
 1. **功能 PR**：带单元测试、夹具和一台主机上的现场检查，合并进 `main`。
-2. **stamp PR**：把 `actions/RELEASE` 改成 `vX.Y.Z`，把 `.github/workflows/h100-test.yml` 里的 `chaobrain/ci-runners/actions/<a>@v1` 全部改成 `@vX.Y.Z`。`tests/test_actions.py` 会检查两者一致。合并。
+2. **stamp PR**：把 `actions/RELEASE` 改成 `vX.Y.Z`。本仓库的工作流不调用 action，所以没有 ref 要改；`tests/test_actions.py` 会检查工作流里的 ref 与 stamp 一致、文档示例引用 `@v1`。合并。
 3. **打 tag**：在 stamp 的合并 commit 上打 `vX.Y.Z`。
 4. **安装**：在每台主机上运行 `install.sh --tag vX.Y.Z --expect <sha>`，包括 egress 主机（以 root 身份，`CI_RUNNERS_ETC=/opt/ci-runners/etc`）。这一步不会切换任何东西。主机的计划有变化时，先看 `plan.sh`，再 `apply`。
-5. **金丝雀**：金丝雀仓库的一个分支引用 `h100-test.yml@vX.Y.Z`，跑一个绿的 head 和一个红的 head。
-6. **移动 `v1`** 到 `vX.Y.Z`，然后开 restore PR，把 stamp 改回 `hook`、ref 改回 `@v1`。
+5. **金丝雀**：金丝雀仓库的一个分支把各 action 引用为 `@vX.Y.Z`，跑一个绿的 head 和一个红的 head。
+6. **移动 `v1`** 到 `vX.Y.Z`，然后开 restore PR，把 stamp 改回 `hook`。
 
 回滚：把 `v1` 移回旧 tag 即可，旧 release 仍装在主机上。
 
 **两个教训**（design §9，都是 2026-11-06 踩到的）：
 
-- 金丝雀如果只引用 `h100-test.yml@vX.Y.Z`，而工作流里的 action 仍是 `@v1`，跑的其实是**旧版**的主机层。所以第 2 步要改 ref。
+- 金丝雀如果只引用可复用工作流 `@vX.Y.Z`，而工作流里的 action 仍是 `@v1`，跑的其实是**旧版**的主机层。所以新加的可复用工作流要让 ref 跟着 stamp 走。
 - 新版改了主机文件，而旧版读不了（例如 inventory 新增了键），那么从 apply 到移动 `v1` 之间，所有任务都会失败。这种改动要么在同一个窗口里 apply 并移动 `v1`，要么先发一个能读两种格式的版本。
 
 ## 6. 网络
@@ -132,7 +132,7 @@
   3. `systemctl restart ci-egress`。
 - 查看拒绝了什么：在 egress 主机上运行 `journalctl -u ci-egress`，每个连接一行。
 
-**h100 的隧道**：
+**主机的隧道**：
 
 - `ci-tunnel.service` 运行 `ssh -N -L 127.0.0.1:<http_port>:127.0.0.1:<egress_port>`，连到 egress 主机上一个受限账户。
 - 那个账户 `authorized_keys` 里的那一行是 `restrict,port-forwarding,permitopen="127.0.0.1:<egress_port>",permitlisten="127.0.0.1:9",command="/usr/sbin/nologin"`。要吊销，删掉这一行即可。
@@ -151,15 +151,15 @@
 
 **内存**（design 决定 11.11）：
 
-- h100 是 cgroup v1、systemd 249，user scope 没有内存控制器，`MemoryMax` 不生效。
+- 在 cgroup v1、systemd 249 的主机上（当年的 h100），user scope 没有内存控制器，`MemoryMax` 不生效。
 - 所以由部件的监督进程自己限内存：每 2 秒，从 systemd 层级里 scope 的 `cgroup.procs` 读出所有进程，把它们的 `RssAnon` 加起来；超过上限就杀掉 scope 里除监督进程以外的所有进程，并记一次 OOM，结果是 `oom`。
 - `OOMPolicy=continue` 只在 systemd ≥ 253 时下发：249 不认识这个参数，下发了部件会立刻 `lost`。
-- 项目 slice 的 `memory_max` 在 h100 上不生效。总量靠 CI 槽位来限：最多 `slots` 个部件，每个都在自己的上限之内。
+- 项目 slice 的 `memory_max` 在这种主机上不生效。总量靠 CI 槽位来限：最多 `slots` 个部件，每个都在自己的上限之内。
 
 **gh 的权限**：
 
 - 日常只需要 `repo`、`read:org`、`workflow` 等，不要常驻 `admin:org`。
-- 注册或注销 runner、改 runner 组时，用 `gh auth refresh -h github.com -s admin:org` 临时加上（需要在浏览器里批准设备码）。用完运行 `gh auth refresh -h github.com -r admin:org -s read:org` 收回：加 `admin:org` 时 GitHub 会把 `read:org` 并进去，只撤 `admin:org` 就会连读 org 的权限一起丢掉，工作站的快照推送随之失败，60 分钟后 h100 的任务会全部以 `stale` 被拒。
+- 注册或注销 runner、改 runner 组时，用 `gh auth refresh -h github.com -s admin:org` 临时加上（需要在浏览器里批准设备码）。用完运行 `gh auth refresh -h github.com -r admin:org -s read:org` 收回：加 `admin:org` 时 GitHub 会把 `read:org` 并进去，只撤 `admin:org` 就会连读 org 的权限一起丢掉，工作站的快照推送随之失败，60 分钟后所有主机的任务会全部以 `stale` 被拒。
 - `admin:org` 永远不放在 runner 主机上。
 
 ## 8. 排障
@@ -203,3 +203,8 @@
 - 3090b 的 7 个 runner 已停止并在 org 注销，runner 目录已删除，CI 账户里的 `ci-` 单元也已全部删除；org 里只剩 h100 的 9 个 runner；
 - CI 代理、`place`、主机锁、公开仓库 GPU 路径的代码都已删除；
 - v1.3.0 的金丝雀在 `@v1.3.0` 上跑了一绿一红，`v1` 移动之后又在 `@v1` 上跑了一次绿。
+
+**2026-11-07 h100 退出 CI**（design 决定 12.17）：
+
+- h100 的 9 个 runner 已在 org 注销；工作站的快照推送不再推到 h100；
+- `h100-test.yml` 已删除，它唯一的调用方是金丝雀仓库；之后只能自己组合 action（[consumers.md](consumers.md) §3）。

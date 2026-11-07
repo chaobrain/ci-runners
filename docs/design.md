@@ -7,12 +7,14 @@ brainspike, the ssh driver to h100, the CI proxy, placement and the public-repos
 path. The design as it stood before is the one at tag `v1.2.0`. Decision 12 (2026-11-07,
 RUN-7) brings 3090b and 3090a back as local hosts under the RUN-5 model, with the pools,
 the host-lock and slot interop and the classes that brainspike's test CI needs.
+Decision 12.17 (2026-11-07) retires h100 and `h100-test.yml`: the CI runs on the two
+3090 hosts only.
 
 Guides, in Chinese: [consumers.md](consumers.md) for the repositories that use the CI,
 [operations.md](operations.md) for the maintainer of the hosts. This file is the contract;
 where a guide and this file disagree, this file holds.
 
-This repository is public (D1). Hosts appear here under role names: **h100**, **3090b**,
+This repository is public (D1). Hosts appear here under role names: **h100** (retired by 12.17), **3090b**,
 **3090a**, the **egress host** and the maintainer's **workstation**. Real host names and ssh aliases,
 accounts, paths under a home directory, addresses and allowlists are inventory and stay
 on the hosts (§3.3).
@@ -334,6 +336,32 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
         with its PID and memory, but with the name `[Not Found]`, and no `/proc/<pid>`
         for it: a PID without an owner. RUN-8 counts such a process as foreign (one the
         account cannot see is never its own), failing closed.
+    17. **h100 is retired (lead, 2026-11-07).** h100 crashed and is in maintenance for
+        days. Only the canary of RUN-5 ever called `h100-test.yml` (code search, and the
+        workflows of every chaobrain repository that runs CI, searched 2026-11-07), and
+        brainspike used h100 only for one-card GPU parts, which the 3090 hosts' four
+        cards cover. h100 was also the costliest host to keep: a shared account (T6,
+        T13, T14), no private `/tmp`, its own egress and push path, the watchdog, the P2P
+        fault (D7). So:
+        - h100's role in the inventory, its 9 runners and their labels (`h100-light`,
+          `h100-cpu`, `h100`, `h100-gpu<N>`) go: the runners are deregistered, and no
+          consumer may target them (§4.8);
+        - the workstation pushes the snapshot to the 3090 hosts only (12.4);
+        - `h100-test.yml` (§4.7) is deleted, not restored to `@v1` after `v1.4.1`: its
+          only caller is gone. A consumer composes the actions (§4.8). The release stamp
+          is `actions/RELEASE` alone, since no workflow of this repository calls an
+          action (§9);
+        - the h100 canary, RUN-7 acceptance 7 and `v1.4.0` notes item 6 go: `v1` moves
+          to `v1.4.1` after the canary composes the actions at `@v1.4.1` on both 3090
+          hosts, with no h100 check before it.
+
+        What stays: the per-card pool code, the `h100` runner class, the health gate's
+        watchdog inputs and h100's rows in §3, §5 and §6, which the 3090 rows cite ("as on
+        h100"). They are generic, driven by inventory keys and covered by tests; with no
+        host using the watchdog keys or the `h100` class, RUN-8 (`v1.5.0`) reviews whether
+        they go. The example inventory and the installed units keep their comments, so
+        no host's plan changes. h100 comes back, if it returns healthy, by a setup plan
+        approved by the lead, a registration and a canary, as any new host (§10).
 
 ## Decisions of this spec
 
@@ -347,8 +375,8 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
   - The *host layer* is installed on each host from a release by `setup/install.sh`, and
     no job ever fetches it. It holds the hook, the executor, slots, GPU leases and
     outcome classification.
-  - The *workflow layer* holds the actions and the reusable workflow. It is thin and
-    calls the host layer of its own release.
+  - The *workflow layer* holds the actions (the reusable workflow went with 12.17). It
+    is thin and calls the host layer of its own release.
 - **D3. Labels name a class and a host.** Pools are shared by projects. Host slots bound
   the load, and runner counts bound only the waiting (§7).
 - **D4. The pre-job hook is the boundary on every runner.** Every runner unit sets
@@ -360,7 +388,7 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
   its own slot files under `state/` and has no host lock.
 - **D6. A part exits 1 only when the run is red.** Every infrastructure end exits 0, with
   its outcome and a `next` hint for the retry job.
-- **D7. One card per h100 part.** No multi-GPU part runs on h100 in v1 (see the P2P
+- **D7. One card per h100 part** (lapsed with h100, 12.17). No multi-GPU part ran on h100 in v1 (see the P2P
   fault in §5.4). The 3090 hosts' `multi` pool runs two-card parts behind a P2P self-test
   (decision 12.6).
 - **D8.** *The keyed verify draw.* Retired by 11.12.
@@ -370,8 +398,8 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
 In scope: host setup, runner services, the pre-job hook, the executor of a part, shared
 slots and GPU leases, the host lock and the slot interop on the 3090 hosts, the P2P
 self-test, outcome classification and retry hints, the claim step, salvage, the
-verdict, the org snapshot, the hosts' egress, the env builds, and the reusable workflow
-`h100-test.yml`.
+verdict, the org snapshot, the hosts' egress and the env builds. The reusable workflow
+`h100-test.yml` was retired by 12.17.
 
 Out of scope, and kept by each consumer: what to test, its test selection and markers,
 its merge gate and its status semantics beyond `claim` and the verdict.
@@ -396,7 +424,7 @@ Settings read back from the API:
 | An org has one Default runner group. Only Team can create more. | docs: runner groups ("organizations using the GitHub Team plan"); API: one group, `Default` | Every org runner is open to every private org repository. The hook's repository allowlist (the org snapshot) is the per-repository boundary. |
 | By default, only private repositories can use a runner group. | docs; API default `allows_public_repositories: false` | Public repositories reach no org runner while the flag is off, and it stays off (11.1, 11.12). |
 | Rulesets and branch protection exist only for public repositories on Free. | API: a private repository returns 403 "Upgrade to GitHub Pro or make this repository public" | D1 |
-| Self-hosted runners and standard hosted runners for public repositories are free. | docs: Actions billing | This repository's CI runs on hosted runners. A private caller of `h100-test.yml` spends no hosted minutes (§4.7). |
+| Self-hosted runners and standard hosted runners for public repositories are free. | docs: Actions billing | This repository's CI runs on hosted runners. A private caller's self-hosted jobs spend no hosted minutes (§4.8). |
 | The pre-job hook runs in "Set up runner" with the default variables and the event payload (`GITHUB_EVENT_PATH`). A nonzero exit fails the job. It has no timeout, and its output is visible to anyone who can read the repository. | docs: "Running scripts before or after a job" | The hook bounds itself, reads only local files and prints a reason code, never inventory. |
 | A job queued 24 h fails. A runner offline 14 days is removed. A runner registered with `--disableupdate` that misses an update for 30 days gets no jobs. Runners update themselves by default. | docs | §8 bounds. Auto-update stays on. |
 | Forks of a repository can run code on a self-hosted runner through a pull request. GitHub recommends self-hosted runners only for private repositories. | docs warnings | Private repositories only (11.1); the org forbids forks of private repositories; the guard and the hook refuse a fork's pull request anyway (§6). |
@@ -441,8 +469,7 @@ setup/workstation/    orgsync-push.sh and ci-orgsync-push.{service,timer}: the s
                       push from the maintainer's workstation (decision 11.9)
 actions/              claim/, part/, salvage/, verdict/ (composite, action.yml);
                       lib/ci-run.sh, the launcher; RELEASE, the release stamp
-.github/workflows/    h100-test.yml (reusable, the standard test CI); test.yml (this
-                      repository's tests, hosted only)
+.github/workflows/    test.yml (this repository's tests, hosted only)
 tests/                unit tests; fixtures/ (sanitised): event payloads,
                       watchdog lines, nvidia-smi CSV, boot ids, JUnit; mutants.py
 tests/test_no_inventory.py     no tracked file holds a denied token (hashed deny list)
@@ -453,9 +480,9 @@ publish what it protects. `setup/plan.sh` regenerates it from a host's inventory
 
 ### 3.2 Hosts
 
-Every host has the layout below, rooted at its `data` directory (inventory): on h100 our
-subtree of the shared account (decision 11.3), on 3090b and 3090a a directory of the CI
-account (decision 12.2).
+Every host has the layout below, rooted at its `data` directory (inventory): on 3090b and
+3090a a directory of the CI account (decision 12.2); on h100, while it ran (12.17), our
+subtree of the shared account (decision 11.3).
 
 ```
 <our subtree>/ci-runners/releases/<tag>/   installed host layer, read-only
@@ -521,9 +548,8 @@ and one without it has none. The first path's keys (`ssh`, `trusted`, `remote`,
 
 ## 4. The consumer interface
 
-A consumer calls the reusable workflow `chaobrain/ci-runners/.github/workflows/
-h100-test.yml@v1` (§4.7), or calls the actions `chaobrain/ci-runners/actions/<name>@v1`
-in its own workflow (§4.8, decision 12.12). Each action calls the host layer of its own
+A consumer calls the actions `chaobrain/ci-runners/actions/<name>@v1` in its own
+workflow (§4.8, decision 12.12; the reusable workflow `h100-test.yml` was retired by 12.17). Each action calls the host layer of its own
 release (§9). Inputs that the project registry already holds may be left out.
 
 ### 4.1 `claim`: skip a head that already has a verdict
@@ -656,61 +682,22 @@ across runs: when a later run's part of the same id ran on this host, the older 
 part has no record of its own here and ends `lost`. A composite action cannot loop, so
 `salvage` uploads at most 16 parts per host and fails beyond that (read at the stamp,
 2026-11-07). Salvage jobs run
-before the verdict, which then reads every artifact as usual. `h100-test.yml` needs none:
-its parts all run on h100.
+before the verdict, which then reads every artifact as usual.
 
 ### 4.6 *Reusable workflow `gpu.yml`* (retired by 11.12)
 
 Public repositories do not use the self-hosted runners.
 
-### 4.7 Reusable workflow `h100-test.yml`: the standard test CI
+### 4.7 *Reusable workflow `h100-test.yml`* (retired by 12.17)
 
-For any private chaobrain repository. Every job runs on h100 runners, so a private
-caller spends none of its hosted Actions minutes.
-
-| input | default | meaning |
-|---|---|---|
-| `project` | required | registry key (§4.3) |
-| `cpu-command` | empty | the CPU part's command; empty skips the part |
-| `gpu-command` | empty | the GPU part's command; empty skips the part |
-| `gpus` | 1 | cards for the GPU part; only 1 is accepted on h100 (D7) |
-| `timeout-minutes` | 60 | each part's inner bound, 1 to 240; the job's is this plus 15 |
-| `results` | empty | glob of JUnit XML under `CI_RESULTS_DIR` |
-| `context` | `<project>/ci` | the status context claim reads and the verdict posts |
-
-Jobs. Each one has the guard: `pull_request` only with
-`head.repo.full_name == github.repository`, and `push`, `workflow_dispatch`:
-
-1. `claim` on `[self-hosted, h100-light]` (§4.1). Its first step checks the inputs
-   (`timeout-minutes` 1 to 240, at least one command) and gives the later jobs the part
-   ids, the context and the jobs' timeout, since an expression cannot add;
-2. `cpu` on `[self-hosted, h100-cpu]`, `part` with `gpus: 0`;
-3. `gpu` on `[self-hosted, h100]`, `part` with `gpus: 1` (the runner's own card, §5.4
-   health gate);
-4. `cpu-retry` and `gpu-retry`: each part whose `next` is `retry` or `fallback`, once,
-   with `attempt-of` its first record and `resume` as the hint says. The CPU part
-   retries on `[self-hosted, h100-cpu]`, the GPU part on the `h100-gpu<M>` that
-   `retry-on` names (a cool card after a thermal end), else on `[self-hosted, h100]`. A
-   part whose job ended without outputs is not retried here; the verdict salvages it;
-5. `verdict` on `[self-hosted, h100-light]`, the `verdict` action, unless the run was
-   cancelled (a newer head's run posts instead; the cancelled head keeps its pending).
-   It reads the parts' `ci-part-<id>-<attempt>` artifacts, and salvages where they stop
-   short (§4.5), else the part is `lost`. A part's last attempt decides: any `red` sets
-   `context` to failure; all `pass`, success; else error. The parts' summaries are
-   merged into the job summary, and the job fails unless the state is success.
-
-The workflow names the actions it calls with a ref of their own: `@v1` on `main`, the
-release's tag in a release (§9).
-
-Permissions: `contents: read`, plus `statuses: write` for claim and verdict. A caller
-grants the same at the call site.
+Its only caller was the canary of RUN-5. Its jobs, inputs and rules are in the design at
+`v1.4.1`; a consumer composes the actions (§4.8).
 
 ### 4.8 Composing the actions (decision 12.12)
 
 A private repository may call `claim`, `part`, `salvage` and `verdict` from its own
 workflow, with its own jobs between them (a plan job, a matrix of parts over several
-hosts, a coverage job). The rules that `h100-test.yml` keeps for its callers then are the
-consumer's:
+hosts, a coverage job). These rules are the consumer's:
 
 1. **The guard on every job** (decision 2): `pull_request` only with
    `head.repo.full_name == github.repository`, `push`, `workflow_dispatch`, `schedule`.
@@ -720,8 +707,8 @@ consumer's:
    | class | labels | `part` runs | `gpus` | `lock` | slot | `timeout-minutes` |
    |---|---|---|---|---|---|---|
    | `light` | `<host>-light` | short commands (a plan, a summary); `claim`, `salvage`, `verdict` | 0 | `none` | none | ≤ 30 |
-   | `part` | `<host>-cpu` | CPU parts | 0 | any (3090 hosts) | one | ≤ 240 |
-   | `h100`, `gpu` | `<host>`, `<host>-gpu<N>` on h100; `<host>-gpu`, `<host>-gpu<N>` on the 3090 hosts | one-card parts on the runner's card | 1 | any (3090 hosts) | the card's lease | ≤ 240 |
+   | `part` | `<host>-cpu` | CPU parts | 0 | any | one | ≤ 240 |
+   | `gpu` | `<host>-gpu`, `<host>-gpu<N>` | one-card parts on the runner's card | 1 | any | the card's lease | ≤ 240 |
    | `multi` | `<host>-multi` (3090 hosts) | two-card parts, after the P2P self-test | 2 | any | both cards' leases | ≤ 240 |
    | `compile` | `<host>-compile` (3090b), opt-in (12.14) | exclusive timing parts on `compile_cpus` | 0 | `x` | one | ≤ 240 |
    | `nightly` | `<host>-nightly` (3090a), opt-in (12.14) | the consumer's nightly | 0 to all cards | any | every slot and card lease | ≤ 600 |
@@ -736,10 +723,13 @@ consumer's:
    `attempt-of` its first record and `resume` as the hint says, on the labels `retry-on`
    names or on a pool the consumer chooses (another host's, for a `fallback`).
 5. **The verdict** runs last, on the light pool of one host that ran parts, after a
-   `salvage` job on every other host that did (§4.5). It decides from the parts' last
-   attempts, as in §4.7 item 5, and posts the context.
-6. **Permissions** as in §4.7. A job that reads another run's artifacts adds
-   `actions: read`.
+   `salvage` job on every other host that did (§4.5), unless the run was cancelled (a
+   newer head's run posts instead). It reads the parts' `ci-part-<id>-<attempt>`
+   artifacts, and a part's last attempt decides: any `red` sets the context to failure;
+   all `pass`, success; else error. It merges the parts' summaries into the job summary
+   and fails unless the state is success.
+6. **Permissions:** `contents: read`, plus `statuses: write` for claim and verdict. A job
+   that reads another run's artifacts adds `actions: read`.
 
 The consumer's own jobs (`light` commands, a coverage job as a `part`) run in its env
 like any part. Its test selection, its summary format and its merge gate stay its own
@@ -773,13 +763,11 @@ branch that changes its spec still needs a maintainer's `env build`.
 ### 5.1 Runner pools
 
 Every runner also carries GitHub's `self-hosted`, `Linux` and `X64` labels. The runner
-class (`CI_RUNNER_CLASS`) decides what the hook and the executor allow (§6.3).
+class (`CI_RUNNER_CLASS`) decides what the hook and the executor allow (§6.3). h100's
+pools (`h100-light`, `h100-cpu`, the per-card `h100` pool) went with it (12.17).
 
 | host | pool (class) | instances | labels | runs |
 |---|---|---|---|---|
-| h100 | `light` | 2 | `h100-light` | claim and verdict of `h100-test.yml` |
-| h100 | `part` | 2 | `h100-cpu` | CPU parts, pinned to the inventory's `cpus` |
-| h100 | `h100` | 5 | `h100`, `h100-gpu<N>` | GPU parts on card N |
 | 3090b | `light` | 2 | `3090b-light` | claim, salvage, verdict; short consumer commands (a plan) |
 | 3090b | `part` | 3 | `3090b-cpu` | CPU parts, pinned to the inventory's `cpus` |
 | 3090b | `gpu` | 2 | `3090b-gpu`, `3090b-gpu<N>` | one-card parts on card N |
@@ -923,7 +911,9 @@ account:
 | `ci-orgsync-push.{service,timer}` | user units of the maintainer's account, every 10 min: `ci-run org-sync --fetch` from a checkout of a release, with the login from `gh auth token`, piped to `ssh <host> <release>/bin/ci-run org-sync --receive` for each host in turn (h100, and from decision 12.4 3090b and 3090a, with the push key): the snapshot is fetched once, and each host, named by three words (ssh host, data root, interpreter), is bounded on its own (120 s); a host that fails is reported and does not hold up the others, and the run then ends with status 1; `TimeoutStartSec=10min` |
 | unchanged | the maintainer's gh login and ssh access to h100 (both exist); nothing is stored |
 
-### 5.4 The h100 executor
+### 5.4 The h100 executor (h100 retired by 12.17)
+
+Kept as the reference for the per-card pool and the health gate, which stay (12.17).
 
 What the executor of §4.3 adds on h100 (a host with a per-card pool):
 
@@ -1158,20 +1148,22 @@ Rules:
   of the hook must accept every major still installed.
 - **Rollout of `v1.N`:**
   1. A PR with tests (hosted unit tests, fixtures, a live check on one host).
-  2. The stamp PR: `actions/RELEASE` and the reusable workflow's action refs set to
-     `v1.N.0`.
+  2. The stamp PR: `actions/RELEASE` set to `v1.N.0` (and a reusable workflow's action
+     refs, should one return; none since 12.17).
   3. The lead tags `v1.N.0` on the stamp's merge commit.
   4. `install.sh` on every host, the egress host included; nothing switches yet.
-  5. A canary consumer branch pins `h100-test.yml@v1.N.0` and passes.
+  5. A canary consumer branch composes the actions at `@v1.N.0` on both 3090 hosts and
+     passes.
   6. The lead moves `v1`. The hosts already have the release, so the order is safe.
-  7. The restore PR sets the stamp back to `hook` and the refs back to `@v1`.
+  7. The restore PR sets the stamp back to `hook`.
   8. Rollback: move `v1` back. The old release is still installed.
 - **A reusable workflow's canary (measured with `v1.2.0`, 2026-11-06).** A workflow names
   the actions it calls with a ref of their own. A canary that pins `h100-test.yml@v1.N.0`
   still runs the actions at `@v1`, so the old release's host layer, and it tests only the
   workflow file. So the release stamp also rewrites the reusable workflow's own action refs
   (`chaobrain/ci-runners/actions/<a>@v1`) to `@v1.N.0`, and the PR after the tag sets them
-  back to `@v1` with `actions/RELEASE`. A test checks that the refs and the stamp agree.
+  back to `@v1` with `actions/RELEASE`. A test checks that the refs and the stamp agree,
+  and that the docs' examples read `@v1`; since 12.17 no workflow here calls an action.
 - **A host change the old release cannot run.** `v1.2.0` changed h100's inventory (the
   tunnel table) in a way `v1.1.0`'s host layer refuses. Between h100's apply and the move
   of `v1`, every h100 job ran `v1.1.0` and failed at once. Such a release says so in its
@@ -1210,7 +1202,8 @@ Rules:
   left out, so `refresh = true` refreshed nothing. A host's plan with `v1.4.1` writes these
   two units and adds the timer to `enable --now`; on a 3090 host the service reads
   `etc/envrefresh.env`. Nothing else changes; `v1` stays at `v1.3.0` until h100's checks
-  (notes item 6), which then expect these two writes on h100.
+  (notes item 6), which then expect these two writes on h100. Decision 12.17 drops
+  item 6 and h100's checks: `v1` moves to `v1.4.1` after the 3090 canary.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 
@@ -1224,8 +1217,8 @@ h100), **RUN-3** (3090a) and **RUN-4** (the public GPU path) are retired by 11.1
 built. Their acceptance lists are in the design at `v1.2.0`. RUN-7 (decision 12) brings 3090b and 3090a back under
 the RUN-5 model, not RUN-1's or RUN-3's.
 
-**RUN-5: the standard test CI on h100** (decision 11; `v1.1.0` and `v1.2.0`, live since
-2026-11-06). Sub-PRs: the org snapshot and policy schema 2; h100 as a local host in setup
+**RUN-5: the standard test CI on h100** (decision 11; `v1.1.0` and `v1.2.0`, live from
+2026-11-06 until 12.17 retired h100 on 2026-11-07). Sub-PRs: the org snapshot and policy schema 2; h100 as a local host in setup
 (no proxy, the inventory's `python` and labels); the local health gate, sampler and early
 stop; `h100-test.yml` and `ci-run env build`; h100's egress (decision 11.8); the snapshot
 push (decision 11.9); then `v1.1.0`. Then the egress proxy on the egress host (11.10) and
@@ -1314,13 +1307,12 @@ evidence:
    `3090b-cpu` never lands on 3090a.
 5. The P2P self-test passes on both 3090 hosts' card pairs, and a two-card part runs end
    to end on each.
-6. A canary private repository composes the actions (§4.8): a plan job, parts on all
-   three hosts, a salvage job per host and the verdict. A failing CPU, GPU, two-card and
+6. A canary private repository composes the actions (§4.8): a plan job, parts on both
+   3090 hosts (h100 retired, 12.17), a salvage job per host and the verdict. A failing CPU, GPU, two-card and
    compile test each end red in their own part only; a stopped runner on a host other
    than the verdict's is salvaged by that host's salvage job; an OOM-killed part ends
    `oom` and is retried.
-7. h100's plan with `v1.4.0` changes nothing against `v1.3.0`'s apply, and the canary of
-   `h100-test.yml` passes on `@v1.4.0`, then on `@v1` after the move.
+7. *h100's plan and the `h100-test.yml` canary.* Retired by 12.17.
 
 *Measured (2026-11-07, `main` 4551806 on both 3090 hosts; h100 offline and unreachable
 from them, so its items are not tested yet):*
@@ -1363,14 +1355,13 @@ from them, so its items are not tested yet):*
    - On another head, the runner of a part on 3090a was stopped mid-part. Its part
      finished in its own scope, and 3090a's salvage job uploaded it (`salvaged`) for the
      verdict on 3090b.
-   - Parts on h100: not tested.
-7. Not tested yet: h100's plan with `v1.4.0`, and the `h100-test.yml` canary on
-   `@v1.4.0` and `@v1`. They gate h100's install of `v1.4.0` and the move of `v1`, not
-   the tag (§9, notes item 6).
+   - Parts on h100: not tested (retired by 12.17).
+7. Retired with h100 (12.17), never tested: h100's plan with `v1.4.0` and the
+   `h100-test.yml` canary.
 
 ## 11. brainspike on top of this (decision 12)
 
-brainspike composes the actions in its own `ci.yml` (§4.8), on all three hosts. Its
+brainspike composes the actions in its own `ci.yml` (§4.8), on both 3090 hosts. Its
 contract is the CI contract of its spec repository; this section lists only what it
 takes from here:
 
@@ -1385,7 +1376,7 @@ takes from here:
 | the nightly | `3090a-nightly` (12.8) |
 | local performance and CI runs beside the runners | `ci-lock` and `ci-slot` on its files (12.9) |
 | coverage over the parts | a `part` that combines the parts' data artifacts |
-| a verdict over three hosts | a `salvage` job per host, then `verdict` (§4.5) |
+| a verdict over both hosts | a `salvage` job per host, then `verdict` (§4.5) |
 
 ## 12. Decided choices (lead, 2026-11-05)
 

@@ -1411,7 +1411,12 @@ Rules:
      `claim`, `part`, `salvage` and `verdict` of a `v1.4` caller fails on a host whose
      inventory has either: a host's inventory gains them only once no caller pins `v1.4`
      (`v1` moved, the pinned consumers bumped). Until then `v1.5.0` runs with neither,
-     its drain refusing to `next` `none` and its busy rule off;
+     its drain refusing to `next` `none` and its busy rule off. Known limit: a host whose
+     inventory sets `peer_labels` (or `busy`) refuses every action older than `v1.5.0`;
+     consumers pin `@v1` (§4.8), never a release tag. Moving the two keys to a file
+     `v1.4` does not read would add a second host file, its loader and its lint for a
+     gap that closes once no consumer pins a tag, so it stays a note (coordinator,
+     2026-11-08);
   7. `ci-run drain on`, or any `--pool` change, refuses on an unreadable drain state;
      only `drain off` without a pool rewrites it (and undrains the whole host).
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an

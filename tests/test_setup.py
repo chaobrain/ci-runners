@@ -337,6 +337,12 @@ h100 = {{ per_card = true, labels = ["h100"] }}
     def run_(self, argv, **_kw):
         self.ran.append(argv)
 
+    def test_no_root_steps_without_local_accounts(self):
+        plan = setup.build(str(self.etc))  # h100: its own host layer (§5.3), no drop-in, nothing blocked
+        for word in ('root steps', 'ci-runners-private.conf', 'tmpfiles', 'disable --now', 'user@'):
+            self.assertNotIn(word, plan.text())
+        self.assertEqual(plan.blocked, '')
+
     def apply(self, text):
         f = pathlib.Path(self.tmp.name) / 'plan.txt'
         f.write_text(text)
@@ -759,6 +765,10 @@ class Shared(unittest.TestCase):
             f'local_accounts = ["localuser"]\nfiles = {{ host_lock = "{s}-host.lock", slot_lock = "{s}-ci.lock", '
             f'slot_queue = "{s}-ci.queue" }}'))
         self.h = inventory.load(self.inv.read_text()).host
+        disk, mounted = str(self.data.parent), os.path.ismount  # the fixture's data disk is a mount point
+        patcher = mock.patch.object(setup.os.path, 'ismount', lambda p: p == disk or mounted(p))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         for f in glob.glob(self.p + '*'):
@@ -798,14 +808,27 @@ class Shared(unittest.TestCase):
         self.assertEqual(self.apply(text), 1)
         self.assertFalse((self.data / 'ci-runners' / 'state' / 'setup.json').exists())  # nothing made
         drop = setup.DROPIN.format(uid='<uid>')
-        self.assertIn(f'to do  write {drop} mode 644 owner root', text)
+        names = 'ci-runner@hx-light-1.service ci-runner@hx-part-1.service ci-runner@hx-gpu0.service ci-runner@hx-gpu3.service'
+        steps = [f'  to do  write {drop} mode 644 owner root',
+                 f'  to do  as the account, first: systemctl --user disable --now {names}  (the restart starts every '
+                 'enabled runner, and a reboot before the drop-in would start them without it)',
+                 '  to do  run    systemctl daemon-reload; systemctl restart user@<uid>.service',
+                 '  to do  as the account, then: systemctl --user start ci-runner@hx-light-1.service  (only it, for '
+                 'the leak check in a live job, T18; apply enables the others)']
+        at = [next(i for i, line in enumerate(text.splitlines()) if line.startswith(step)) for step in steps]
+        self.assertEqual(at, sorted(at))  # in this order: disabled before the restart, one started after it
         self.assertIn('         | TemporaryFileSystem=/dev/shm:mode=1777 /home ' + str(self.data.parent), text)
-        self.assertIn("as the account, systemctl --user stop 'ci-runner@*.service'", text)  # the restart starts them
         self.assertIn('acct-x: no such account', text)
         with mock.patch.object(setup, 'shared_state', lambda h: []):  # the tmpfiles steps done, not the drop-in
             plan = setup.build(str(self.etc))
             self.assertEqual(plan.blocked, 'the root steps are not done')
             self.assertEqual(self.apply(plan.text()), 1)
+            with mock.patch.object(setup, 'account_uid', lambda a: 4242), \
+                    mock.patch.object(setup, 'private_state',
+                                      lambda h, uid: [(setup.DROPIN.format(uid=4242), 'missing')]):
+                text = setup.build(str(self.etc)).text()  # the account known, the drop-in not written
+                self.assertIn(f'to do  write {setup.DROPIN.format(uid=4242)}', text)
+                self.assertEqual(self.apply(text), 1)
             with mock.patch.object(setup, 'account_uid', lambda a: 4242), \
                     mock.patch.object(setup, 'private_state', lambda h, uid: [('user@4242.service', 'runs without')]):
                 text = setup.build(str(self.etc)).text()  # the drop-in written, the manager not restarted
@@ -818,9 +841,31 @@ class Shared(unittest.TestCase):
                     mock.patch.object(setup, 'private_state', lambda h, uid: []):  # done: the plan goes ahead
                 text = setup.build(str(self.etc)).text()
                 self.assertIn(f'done   write {setup.TMPFILES}', text)
+                self.assertIn('done   as the account, first: systemctl --user disable --now', text)
                 self.assertIn('done   run    systemctl daemon-reload; systemctl restart user@4242.service', text)
+                self.assertIn('done   as the account, then: systemctl --user start', text)
                 self.assertNotIn('apply refuses', text)
                 self.assertEqual(self.apply(text), 0)
+
+    def test_apply_enables_the_runners_the_root_step_disabled(self):
+        wants = self.home / '.config' / 'systemd' / 'user' / 'default.target.wants'
+        names = ['hx-light-1', 'hx-part-1', 'hx-gpu0', 'hx-gpu3']
+        enable = ['systemctl', '--user', 'enable', *(f'ci-runner@{n}.service' for n in names)]
+        with mock.patch.object(setup, 'shared_state', lambda h: []), \
+                mock.patch.object(setup, 'account_uid', lambda a: 4242), \
+                mock.patch.object(setup, 'private_state', lambda h, uid: []):
+            self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+            plan = setup.build(str(self.etc))  # all written, but no runner enabled (the mock ran nothing)
+            self.assertIn(enable, [a.get('argv') for a in plan.actions])
+            wants.mkdir(parents=True)
+            for n in names:
+                (wants / f'ci-runner@{n}.service').symlink_to('../ci-runner@.service')
+            self.assertEqual(setup.build(str(self.etc)).actions, [])  # all enabled: a no-op
+            (wants / 'ci-runner@hx-gpu0.service').unlink()  # disabled by the root step
+            plan = setup.build(str(self.etc))
+            self.assertIn(enable, [a.get('argv') for a in plan.actions])
+            self.assertEqual(self.apply(plan.text()), 0)
+            self.assertIn(enable, self.ran)
 
     def test_the_private_drop_in(self):
         s, home, data = self.p, str(self.home), str(self.data)
@@ -828,7 +873,7 @@ class Shared(unittest.TestCase):
                                               '-ci.2.lock', '-ci.queue'))
         self.assertEqual(setup.private_text(self.h).splitlines(),
                          ["# ci-runners (decision 12.16): the CI account sees no other account's files",
-                          '[Service]', 'PrivateTmp=yes',
+                          '[Service]', 'PrivateTmp=yes', 'ProtectProc=invisible',
                           f'TemporaryFileSystem=/dev/shm:mode=1777 /home {os.path.dirname(data)}',
                           f'BindPaths={home} {data} {shared}'])
         hm = '/ho' + 'me'  # (no home path in a tracked file, design §3.3)
@@ -836,30 +881,103 @@ class Shared(unittest.TestCase):
         self.assertIn(f'TemporaryFileSystem=/dev/shm:mode=1777 /home {hm}/disk2\n', got)
         got = setup.private_text({**self.h, 'home': f'{hm}/acct-x', 'data': f'{hm}/ci-data'})
         self.assertIn('TemporaryFileSystem=/dev/shm:mode=1777 /home\n', got)  # /home once
+        got = setup.private_text({**self.h, 'home': '/d/a', 'data': '/d/ab/x'})  # a root that only shares a prefix
+        self.assertIn('TemporaryFileSystem=/dev/shm:mode=1777 /home /d/ab\n', got)
         for bad in ({'data': '/ci'},  # the data disk root would be /
-                    {'home': '/home'}, {'home': '/'},  # bound back over the emptied /home
+                    {'home': '/home'}, {'home': '/'}, {'home': '//home'},  # bound back over the emptied /home
+                    {'data': '//ci'}, {'data': '//d/ci'},  # // is not / to normpath, but is to the kernel
                     {'home': '/d/a', 'data': '/d/a/data'}, {'home': '/d', 'data': '/d/x/data'},  # its root in home
                     {'home': f'{hm}/x/../y'}, {'data': data + '/'}, {'data': '/d//x'}, {'data': '/d e/x'},
                     {'files': {**self.h['files'], 'slot_queue': '/etc/q'}}):
             with self.assertRaises(ValueError, msg=bad):
                 setup.private_text({**self.h, **bad})
 
+    def test_the_private_paths_on_the_host(self):
+        t = pathlib.Path(self.tmp.name)
+        setup.check_private_paths(self.h)  # real paths, the data disk a mount point (the fixture's)
+        (t / 'link').symlink_to(self.home)
+        (t / 'disklink').symlink_to(self.data.parent)
+        (t / 'other' / 'ci').mkdir(parents=True)
+        for bad, why in (({'home': str(t / 'link')}, 'home .* is not its real path'),
+                         ({'data': str(t / 'disklink' / 'ci')}, 'data .* is not its real path'),
+                         ({'data': str(t / 'other' / 'ci')}, 'must be a mount point'),  # not a disk
+                         ({'data': '/usr/ci'}, 'must be a mount point'), ({'data': '/etc/ci'}, 'must be a mount point')):
+            with self.assertRaisesRegex(ValueError, why, msg=bad):
+                setup.check_private_paths({**self.h, **bad})
+        self.inv.write_text(self.inv.read_text().replace(f'home = "{self.home}"', f'home = "{t / "link"}"'))
+        with self.assertRaisesRegex(ValueError, 'home .* is not its real path'):  # the plan refuses it
+            setup.build(str(self.etc))
+
+    def namespace(self):
+        """A user manager's mount table with the drop-in as planned (the fixture's paths),
+        and the host's own mounts it shadows."""
+        hm, root, home, data = '/ho' + 'me', str(self.data.parent), str(self.home), str(self.data)
+        priv = '/tmp/systemd-private-0a1b-user@4242.service-xyz/tmp'
+        files, queue = setup.shared_files(self.h)
+        return ['22 1 259:2 / / rw - ext4 /dev/x rw',
+                '23 22 0:5 / /proc rw - proc proc rw',
+                '25 22 0:24 / /dev/shm rw - tmpfs tmpfs rw',
+                f'26 22 259:3 / {root} rw - ext4 /dev/y rw',  # the host's data disk, shadowed
+                f'27 22 259:2 /x {hm}/someone rw - ext4 /dev/x rw',  # another account's mount, shadowed
+                '50 23 0:60 / /proc rw - proc proc rw,nosuid,hidepid=invisible',
+                '51 25 0:50 / /dev/shm rw - tmpfs tmpfs rw',
+                '52 22 0:51 / /home rw - tmpfs tmpfs rw',
+                f'53 22 259:2 {priv} /tmp rw - ext4 /dev/x rw',
+                f'54 22 259:2 /var{priv} /var/tmp rw - ext4 /dev/x rw',
+                f'55 53 0:52 / {root} rw - tmpfs tmpfs rw',
+                f'56 53 259:2 {home} {home} rw - ext4 /dev/x rw',
+                f'57 55 259:3 /ci {data} rw - ext4 /dev/y rw',
+                *(f'{58 + k} 53 259:2 {f} {f} rw - ext4 /dev/x rw' for k, f in enumerate([*files, queue]))]
+
+    def test_the_namespace_matches_the_drop_in_exactly(self):
+        hm, root, home, data = '/ho' + 'me', str(self.data.parent), str(self.home), str(self.data)
+        files, queue = setup.shared_files(self.h)
+        ns = self.namespace()
+        SHM = "/dev/shm is the host's (or this plan runs in the namespace)"
+
+        def faults(lines, here=ns[:5]):  # the plan's own table: the host's
+            return setup.namespace_faults(self.h, '\n'.join(lines) + '\n', '\n'.join(here) + '\n')
+
+        def without(mount_id):
+            return [line for line in ns if not line.startswith(f'{mount_id} ')]
+        self.assertEqual(faults(ns), [])
+        self.assertEqual(faults(ns + [f'72 57 0:9 / {data}/sub rw - tmpfs tmpfs rw']), [])  # the account's own
+        self.assertEqual(faults(ns[:5]), ['no tmpfs at /home', f'no tmpfs at {root}', SHM,
+                                          '/tmp not private', '/var/tmp not private', 'other processes visible',
+                                          *(f'no bind at {p}' for p in [home, data, *files, queue]),
+                                          f'another mount at {hm}/someone'])
+        for mount_id, fault in ((50, 'other processes visible'), (51, SHM),
+                                (52, 'no tmpfs at /home'), (52, f'another mount at {hm}/someone'),
+                                (53, '/tmp not private'), (54, '/var/tmp not private'), (55, f'no tmpfs at {root}'),
+                                (55, f'no bind at {data}'), (56, f'no bind at {home}'), (58, f'no bind at {files[0]}'),
+                                (58 + len(files), f'no bind at {queue}')):
+            self.assertIn(fault, faults(without(mount_id)), msg=mount_id)
+        self.assertEqual(faults([line.replace('rw,nosuid,hidepid=invisible', 'rw,hidepid=2') for line in ns]),
+                         ['other processes visible'])
+        gone = [line.replace(f'259:2 {files[1]} ', f'259:2 {files[1]}//deleted ') for line in ns]  # replaced since
+        self.assertEqual(faults(gone), [f'{files[1]} bound from a deleted file'])
+        self.assertEqual(faults(ns + [f'70 52 259:2 /x {hm}/other rw - ext4 /dev/x rw']), [f'another mount at {hm}/other'])
+        self.assertEqual(faults(ns + ['71 53 259:2 /y /tmp/z rw - ext4 /dev/x rw']), ['another mount at /tmp/z'])
+        self.assertEqual(faults(ns + [f'73 55 259:3 /z {root}/z rw - ext4 /dev/y rw']), [f'another mount at {root}/z'])
+        self.assertEqual(faults(ns + ['74 52 259:2 / /home rw - ext4 /dev/x rw']), ['no tmpfs at /home'])  # over it
+        self.assertEqual(faults(ns + ['75 22 259:2 / /home rw - ext4 /dev/x rw']), ['no tmpfs at /home'])  # later, beside
+        tmp_tmpfs = [line.replace('- ext4', '- tmpfs') if line.startswith('53 ') else line for line in without(55)]
+        self.assertIn(f'no tmpfs at {root}', faults(tmp_tmpfs))  # a tmpfs above the root is not one at it
+        self.assertEqual(faults([line.replace(' 0:50 ', ' 0:24 ') for line in ns]), [SHM])  # the host's tmpfs
+        self.assertEqual(faults(ns, here=ns), [SHM])  # a plan run inside the namespace cannot tell
+        self.assertEqual(faults(ns, here=[]), [SHM])  # nor one that cannot read its own table
+        stale = [line for line in without(51) if not line.startswith(f'{58 + len(files)} ')]  # an older drop-in's
+        self.assertEqual(faults(stale), [SHM, f'no bind at {queue}'])
+
     def test_the_private_state_reads_the_drop_in_and_the_managers_mounts(self):
         conf = pathlib.Path(self.tmp.name, 'private.conf')
-        root = os.path.dirname(str(self.data))
         unit, drop = 'user@4242.service', setup.DROPIN.format(uid=4242)
-        host = ('22 1 259:2 / / rw - ext4 /dev/x rw\n'
-                '25 22 0:24 / /dev/shm rw - tmpfs tmpfs rw\n'
-                f'26 22 259:3 / {root} rw - ext4 /dev/y rw\n')
-        priv = '/tmp/systemd-private-0a1b-user@4242.service-xyz/tmp'
-        ns = host + ('40 25 0:50 / /dev/shm rw - tmpfs tmpfs rw\n'
-                     '41 22 0:51 / /home rw - tmpfs tmpfs rw\n'
-                     f'42 26 0:52 / {root} rw - tmpfs tmpfs rw\n'
-                     f'43 22 259:2 {priv} /tmp rw - ext4 /dev/x rw\n'
-                     f'44 22 259:2 /var{priv} /var/tmp rw - ext4 /dev/x rw\n')
+        ns = '\n'.join(self.namespace()) + '\n'
 
         def state(table):
-            return setup.private_state(self.h, 4242, read=str(conf), mounts=lambda uid: table)
+            return setup.private_state(self.h, 4242, read=str(conf), mounts=lambda uid: table, here=str(host))
+        host = pathlib.Path(self.tmp.name, 'host.mountinfo')
+        host.write_text('\n'.join(self.namespace()[:5]) + '\n')
         self.assertEqual(setup.private_state(self.h, None), [('acct-x', 'no such account')])
         self.assertEqual(state(ns), [(drop, 'missing')])
         conf.write_text('changed\n')
@@ -867,15 +985,8 @@ class Shared(unittest.TestCase):
         conf.write_text(setup.private_text(self.h))
         self.assertEqual(state(ns), [])
         self.assertEqual(state(None), [(unit, 'not running, or its mount table cannot be read')])
-        self.assertEqual(state(host), [(unit, f'runs without the drop-in (not private: /home, {root}, /tmp, /var/tmp): '
-                                              'restart it')])
-        for i, short in ((5, root), (6, '/tmp'), (7, '/var/tmp'), (4, '/home')):  # each part on its own
-            lines = ns.splitlines()
-            del lines[i]
-            self.assertEqual(state('\n'.join(lines)), [(unit, f'runs without the drop-in (not private: {short}): '
-                                                              'restart it')], msg=short)
-        later = ns + '45 41 259:2 / /home rw - ext4 /dev/x rw\n'  # a mount over the tmpfs: the top one counts
-        self.assertEqual(state(later), [(unit, 'runs without the drop-in (not private: /home): restart it')])
+        self.assertEqual(state(ns.replace('hidepid=invisible', 'hidepid=0')),
+                         [(unit, 'runs without the drop-in as planned (other processes visible): restart it')])
 
     def test_the_managers_mount_table(self):
         def ran(code, out):

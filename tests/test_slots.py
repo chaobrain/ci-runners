@@ -152,6 +152,10 @@ class Queue(unittest.TestCase):
             finally:
                 os.killpg(hold.pid, 9)
                 hold.wait()
+            for _ in range(500):  # flock(1)'s orphaned sleep holds the lock until the kernel reaps it
+                if not slots._flocked(q.slots[1]):
+                    break
+                time.sleep(0.01)
             fds = q.try_take_every('p', {})
             self.assertEqual((len(fds), q.held()[:2], os.path.exists(q.ticket)), (2, ({'p': 2}, 0), False))
             self.assertIsNone(later.try_take('p', {'p': 2}))

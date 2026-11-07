@@ -84,7 +84,8 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         self.assertEqual(self.apply(text), 0)
         self.assertEqual((self.etc.stat().st_mode & 0o777), 0o700)
         self.assertEqual(sorted(p.name for p in (self.home / '.config' / 'systemd' / 'user').glob('ci-*')),
-                         ['ci-p.slice', 'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service'])
+                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-p.slice', 'ci-reaper.service',
+                          'ci-reaper.timer', 'ci-runner@.service'])
         self.assertIn(['systemctl', '--user', 'enable', 'ci-runner@hb-light-1.service', 'ci-runner@hb-part-1.service',
                        'ci-runner@hb-part-2.service'], self.ran)
         state = json.loads((self.data / 'ci-runners' / 'state' / 'setup.json').read_text())
@@ -262,9 +263,10 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         self.assertIn('ci-orgsync.service', plan.text())
         enable = [a['argv'] for a in plan.actions if a.get('kind') == 'run' and '--now' in a['argv']
                   and 'ci-reaper.timer' in a['argv']]
-        self.assertEqual(enable, [['systemctl', '--user', 'enable', '--now', 'ci-reaper.timer', 'ci-orgsync.timer']])
-        self.assertEqual(setup.timers({}), ['ci-reaper.timer'])
-        self.assertEqual(setup.timers({'orgsync': True}), ['ci-reaper.timer', 'ci-orgsync.timer'])
+        self.assertEqual(enable, [['systemctl', '--user', 'enable', '--now', 'ci-reaper.timer', 'ci-orgsync.timer',
+                                   'ci-envrefresh.timer']])
+        self.assertEqual(setup.timers({}), ['ci-reaper.timer', 'ci-envrefresh.timer'])
+        self.assertEqual(setup.timers({'orgsync': True}), ['ci-reaper.timer', 'ci-orgsync.timer', 'ci-envrefresh.timer'])
 
     def test_runner_names_and_labels(self):
         inv = inventory.load((self.etc / 'inventory.toml').read_text())
@@ -401,14 +403,19 @@ h100 = {{ per_card = true, labels = ["h100"] }}
             self.assertNotIn(no, text)
         for want in ('labels hx-light;', 'labels hx-cpu;', 'labels h100,hx-gpu0;', 'labels h100,hx-gpu3;',
                      '| CI_RUNNER_CARD=3', f'| CI_RUNNERS_PYTHON={sys.executable}', '| MemoryMax=512G',
-                     'fetched directly', 'run    systemctl --user enable --now ci-reaper.timer ci-orgsync.timer\n'):
+                     'fetched directly',
+                     'run    systemctl --user enable --now ci-reaper.timer ci-orgsync.timer ci-envrefresh.timer\n'):
             self.assertIn(want, text)
         self.assertEqual(self.apply(text), 0)
         self.assertEqual(sorted(p.name for p in self.units.iterdir()),
-                         ['ci-orgsync.service', 'ci-orgsync.timer', 'ci-reaper.service', 'ci-reaper.timer',
-                          'ci-runner@.service', 'ci.slice'])
+                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-orgsync.service', 'ci-orgsync.timer',
+                          'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service', 'ci.slice'])
         orgsync = (self.units / 'ci-orgsync.service').read_text()
         self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run org-sync\n', orgsync)
+        refresh = (self.units / 'ci-envrefresh.service').read_text()  # decision 12.11: every host refreshes
+        self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run env refresh --all\n', refresh)
+        self.assertIn(f'EnvironmentFile=-{self.etc}/envrefresh.env\n', refresh)
+        self.assertNotIn('@', refresh)
         self.assertIn(f'Environment=CI_RUNNERS_PYTHON={sys.executable}\n', orgsync)
         hook = (self.data / 'ci-runners' / 'hooks' / 'job-started.sh').read_text()
         self.assertIn(f'\npy={sys.executable}\n', hook)  # written in: no job's environment picks it
@@ -577,7 +584,8 @@ direct = ["localhost", "127.0.0.1", "::1"]
         self.assertNotIn('egress.example', text)  # the lead's files are not shown
         self.assertEqual(self.apply(text), 0)
         self.assertEqual(sorted(p.name for p in self.units.iterdir()),
-                         ['ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service', 'ci-tunnel.service', 'ci.slice'])
+                         ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-reaper.service', 'ci-reaper.timer',
+                          'ci-runner@.service', 'ci-tunnel.service', 'ci.slice'])
         tunnel = (self.units / 'ci-tunnel.service').read_text()
         for want in (f'ExecStart=/usr/bin/ssh -F {self.etc}/tunnel/ssh_config -N -L 127.0.0.1:18182:127.0.0.1:18443 ',
                      f'-o IdentityFile={self.etc}/tunnel/id_ed25519 ', '-o StrictHostKeyChecking=yes ',

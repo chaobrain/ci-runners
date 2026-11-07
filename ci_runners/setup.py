@@ -79,6 +79,8 @@ TUNNEL_ORDER = 'After=ci-tunnel.service\nWants=ci-tunnel.service'
 TUNNEL_FILES = ('id_ed25519', 'ssh_config', 'known_hosts')
 #: the root step's file (decision 12.9, §5.3): the shared lock and slot files, recreated at boot
 TMPFILES = '/etc/tmpfiles.d/ci-runners-shared.conf'
+#: the root step's drop-in (decision 12.16, §5.3): the CI account's user manager in its own mount namespace
+DROPIN = '/etc/systemd/system/user@{uid}.service.d/ci-runners-private.conf'
 #: the comment that marks the push key's line in authorized_keys (decision 12.4)
 PUSH_MARK = 'ci-runners-orgsync-push'
 #: the egress account's line for a tunnel key (decision 11.10; operations §6)
@@ -251,6 +253,86 @@ def tmpfiles_text(h: dict) -> str:
     return '\n'.join(out) + '\n'
 
 
+def private_text(h: dict) -> str:
+    """The root step's drop-in on the CI account's ``user@<uid>.service`` (decision 12.16,
+    §5.3): a private ``/tmp`` and ``/var/tmp``, an empty ``/dev/shm``, ``/home`` and the
+    data-disk root (the parent of ``data``) emptied, and only the account's ``home``, its
+    ``data`` and the shared files of 12.9 bound back in. Pure."""
+    home, data = h['home'], h['data']
+    for key, v in (('home', home), ('data', data)):
+        if not isinstance(v, str) or not PATH.fullmatch(v) or os.path.normpath(v) != v:
+            raise ValueError(f'{key} must be a normal absolute path matching {PATH.pattern}')
+    root = os.path.dirname(data)
+    if root == '/':
+        raise ValueError(f'data must lie below a data-disk root, not directly in /: {data!r}')
+    if home == '/home' or root == home or root.startswith(home + '/'):
+        raise ValueError('home must not be /home, and the data-disk root (the parent of data) must not be in home')
+    files, queue = shared_files(h)
+    for x in [*files, queue]:
+        if not inventory.shared_path(x):
+            raise ValueError(f'shared file {x!r} must be a plain name directly in /tmp')
+    empty = ['/dev/shm:mode=1777', '/home', *([root] if root != '/home' else [])]
+    return '\n'.join(['# ci-runners (decision 12.16): the CI account sees no other account\'s files',
+                      '[Service]', 'PrivateTmp=yes', f'TemporaryFileSystem={" ".join(empty)}',
+                      f'BindPaths={" ".join([home, data, *files, queue])}']) + '\n'
+
+
+def account_uid(account: str) -> int | None:
+    """The account's uid, or None if there is no such account."""
+    try:
+        return pwd.getpwnam(account).pw_uid
+    except KeyError:
+        return None
+
+
+def manager_mounts(uid: int, run=subprocess.run) -> str | None:
+    """The mount table of the account's user manager (``/proc/<pid>/mountinfo``), or None
+    if it is not running or the table cannot be read."""
+    try:
+        r = run(['systemctl', 'show', '-p', 'MainPID', '--value', f'user@{uid}.service'], capture_output=True,
+                text=True, timeout=30, stdin=subprocess.DEVNULL)
+        pid = int(r.stdout.strip()) if r.returncode == 0 else 0
+        if pid <= 0:
+            return None
+        with open(f'/proc/{pid}/mountinfo', encoding='utf-8') as f:
+            return f.read()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def private_state(h: dict, uid: int | None, *, read=None, mounts=manager_mounts) -> list[tuple[str, str]]:
+    """``(what, what is missing)`` for each part of the drop-in's root step not done: the
+    drop-in as planned, and the account's user manager running with it (its mount table:
+    tmpfs at ``/home`` and the data-disk root, ``/tmp`` and ``/var/tmp`` private; not
+    ``/dev/shm``, a tmpfs on the host too). Empty when both are done. Reads the files."""
+    if uid is None:
+        return [(h['account'], 'no such account')]
+    path = DROPIN.format(uid=uid)
+    todo = []
+    try:
+        with open(path if read is None else read, encoding='utf-8') as f:
+            if f.read() != private_text(h):
+                todo.append((path, 'differs from the plan'))
+    except OSError:
+        todo.append((path, 'missing'))
+    table = mounts(uid)
+    unit = f'user@{uid}.service'
+    if table is None:
+        return [*todo, (unit, 'not running, or its mount table cannot be read')]
+    last = {}
+    for line in table.splitlines():
+        left, _, right = line.partition(' - ')
+        f, r = left.split(), right.split()
+        if len(f) >= 5 and r:
+            last[f[4]] = (f[3], r[0])  # the mount point's top mount: (its root, its type)
+    root = os.path.dirname(h['data'])
+    short = [m for m in ('/home', root) if last.get(m, ('', ''))[1] != 'tmpfs']
+    short += [m for m in ('/tmp', '/var/tmp') if '/systemd-private-' not in last.get(m, ('', ''))[0]]
+    if short:
+        todo.append((unit, f'runs without the drop-in (not private: {", ".join(short)}): restart it'))
+    return todo
+
+
 ACL_USER, ACL_MASK = 0x02, 0x10
 
 
@@ -330,10 +412,11 @@ def tunnel_public_key(etc: str, run=subprocess.run) -> str:
                 text=True, timeout=10, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         r = None
-    pub = (r.stdout.strip() if r is not None and r.returncode == 0 else '')
+    # the comment, which may hold spaces, is dropped: it often names an account and host
+    pub = ' '.join((r.stdout if r is not None and r.returncode == 0 else '').split()[:2])
     if not inventory.PUSH_KEY.fullmatch(pub):
         return '<the public key of etc/tunnel/id_ed25519>'
-    return ' '.join(pub.split()[:2])  # the comment often names an account and host: not shown
+    return pub
 
 
 class Plan:
@@ -507,7 +590,21 @@ def build(etc: str, adopt: bool = False) -> Plan:
                  '(while no local job holds them: under host_lock.sh -x, with ci_slot.sh\'s queue empty)')
         for path, why in todo:
             plan.add(f'         {path}: {why}')
-        if todo:
+        uid = account_uid(h['account'])
+        text, path = private_text(h), DROPIN.format(uid='<uid>' if uid is None else uid)
+        unit = f'user@{"<uid>" if uid is None else uid}.service'
+        private = private_state(h, uid)
+        plan.add(f'  {"done " if uid is not None and all(p != path for p, _ in private) else "to do"}  write {path} '
+                 f'mode 644 owner root, sha256 {_sha(text.encode())[:16]} (decision 12.16):')
+        for line in text.splitlines():
+            plan.add(f'         | {line}')
+        plan.add(f'  {"done " if not private else "to do"}  run    systemctl daemon-reload; systemctl restart {unit}  '
+                 '(with every runner stopped: the restart starts the enabled runners; so at once after it, as '
+                 "the account, systemctl --user stop 'ci-runner@*.service', and start them again only for the "
+                 'leak check in a live job, T18)')
+        for p, why in private:
+            plan.add(f'         {p}: {why}')
+        if todo or private:
             plan.blocked = 'the root steps are not done'
             plan.add('  apply refuses until they are done: run them, then plan again')
     gone = sorted(p for p in ours if os.path.dirname(p) == unit_dir and p not in planned)

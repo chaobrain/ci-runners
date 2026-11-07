@@ -302,7 +302,7 @@ class Standalone(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         t = pathlib.Path(self.tmp.name)
-        self.home, self.data = t / 'home', t / 'home' / 'sub'
+        self.home, self.data = t / 'home', t.joinpath(*getattr(self, 'DATA', ('home', 'sub')))  # h100: data in the account's home
         self.etc = self.data / 'ci-runners' / 'etc'
         for d in (self.etc / 'projects', self.data / 'ci-runners' / 'releases'):
             d.mkdir(parents=True)
@@ -745,6 +745,7 @@ class Shared(unittest.TestCase):
     account's line for the tunnel key."""
 
     setUp_ = Standalone.setUp
+    DATA = ('disk', 'ci')  # data on a data disk, out of the home (decision 12.16)
     run_ = Standalone.run_
     apply_ = Standalone.apply
 
@@ -796,11 +797,97 @@ class Shared(unittest.TestCase):
         self.assertEqual(plan.blocked, 'the root steps are not done')
         self.assertEqual(self.apply(text), 1)
         self.assertFalse((self.data / 'ci-runners' / 'state' / 'setup.json').exists())  # nothing made
-        with mock.patch.object(setup, 'shared_state', lambda h: []):  # done: the plan goes ahead
-            text = setup.build(str(self.etc)).text()
-            self.assertIn(f'done   write {setup.TMPFILES}', text)
-            self.assertNotIn('apply refuses', text)
-            self.assertEqual(self.apply(text), 0)
+        drop = setup.DROPIN.format(uid='<uid>')
+        self.assertIn(f'to do  write {drop} mode 644 owner root', text)
+        self.assertIn('         | TemporaryFileSystem=/dev/shm:mode=1777 /home ' + str(self.data.parent), text)
+        self.assertIn("as the account, systemctl --user stop 'ci-runner@*.service'", text)  # the restart starts them
+        self.assertIn('acct-x: no such account', text)
+        with mock.patch.object(setup, 'shared_state', lambda h: []):  # the tmpfiles steps done, not the drop-in
+            plan = setup.build(str(self.etc))
+            self.assertEqual(plan.blocked, 'the root steps are not done')
+            self.assertEqual(self.apply(plan.text()), 1)
+            with mock.patch.object(setup, 'account_uid', lambda a: 4242), \
+                    mock.patch.object(setup, 'private_state', lambda h, uid: [('user@4242.service', 'runs without')]):
+                text = setup.build(str(self.etc)).text()  # the drop-in written, the manager not restarted
+                self.assertIn(f'done   write {setup.DROPIN.format(uid=4242)}', text)
+                self.assertIn('to do  run    systemctl daemon-reload; systemctl restart user@4242.service', text)
+                self.assertIn('apply refuses', text)
+                self.assertEqual(self.apply(text), 1)
+            self.assertFalse((self.data / 'ci-runners' / 'state' / 'setup.json').exists())
+            with mock.patch.object(setup, 'account_uid', lambda a: 4242), \
+                    mock.patch.object(setup, 'private_state', lambda h, uid: []):  # done: the plan goes ahead
+                text = setup.build(str(self.etc)).text()
+                self.assertIn(f'done   write {setup.TMPFILES}', text)
+                self.assertIn('done   run    systemctl daemon-reload; systemctl restart user@4242.service', text)
+                self.assertNotIn('apply refuses', text)
+                self.assertEqual(self.apply(text), 0)
+
+    def test_the_private_drop_in(self):
+        s, home, data = self.p, str(self.home), str(self.data)
+        shared = ' '.join(f'{s}{x}' for x in ('-host.lock', '-host.turnstile.lock', '-host.shared.lock', '-ci.lock',
+                                              '-ci.2.lock', '-ci.queue'))
+        self.assertEqual(setup.private_text(self.h).splitlines(),
+                         ["# ci-runners (decision 12.16): the CI account sees no other account's files",
+                          '[Service]', 'PrivateTmp=yes',
+                          f'TemporaryFileSystem=/dev/shm:mode=1777 /home {os.path.dirname(data)}',
+                          f'BindPaths={home} {data} {shared}'])
+        hm = '/ho' + 'me'  # (no home path in a tracked file, design §3.3)
+        got = setup.private_text({**self.h, 'home': f'{hm}/acct-x', 'data': f'{hm}/disk2/acct-x'})
+        self.assertIn(f'TemporaryFileSystem=/dev/shm:mode=1777 /home {hm}/disk2\n', got)
+        got = setup.private_text({**self.h, 'home': f'{hm}/acct-x', 'data': f'{hm}/ci-data'})
+        self.assertIn('TemporaryFileSystem=/dev/shm:mode=1777 /home\n', got)  # /home once
+        for bad in ({'data': '/ci'},  # the data disk root would be /
+                    {'home': '/home'}, {'home': '/'},  # bound back over the emptied /home
+                    {'home': '/d/a', 'data': '/d/a/data'}, {'home': '/d', 'data': '/d/x/data'},  # its root in home
+                    {'home': f'{hm}/x/../y'}, {'data': data + '/'}, {'data': '/d//x'}, {'data': '/d e/x'},
+                    {'files': {**self.h['files'], 'slot_queue': '/etc/q'}}):
+            with self.assertRaises(ValueError, msg=bad):
+                setup.private_text({**self.h, **bad})
+
+    def test_the_private_state_reads_the_drop_in_and_the_managers_mounts(self):
+        conf = pathlib.Path(self.tmp.name, 'private.conf')
+        root = os.path.dirname(str(self.data))
+        unit, drop = 'user@4242.service', setup.DROPIN.format(uid=4242)
+        host = ('22 1 259:2 / / rw - ext4 /dev/x rw\n'
+                '25 22 0:24 / /dev/shm rw - tmpfs tmpfs rw\n'
+                f'26 22 259:3 / {root} rw - ext4 /dev/y rw\n')
+        priv = '/tmp/systemd-private-0a1b-user@4242.service-xyz/tmp'
+        ns = host + ('40 25 0:50 / /dev/shm rw - tmpfs tmpfs rw\n'
+                     '41 22 0:51 / /home rw - tmpfs tmpfs rw\n'
+                     f'42 26 0:52 / {root} rw - tmpfs tmpfs rw\n'
+                     f'43 22 259:2 {priv} /tmp rw - ext4 /dev/x rw\n'
+                     f'44 22 259:2 /var{priv} /var/tmp rw - ext4 /dev/x rw\n')
+
+        def state(table):
+            return setup.private_state(self.h, 4242, read=str(conf), mounts=lambda uid: table)
+        self.assertEqual(setup.private_state(self.h, None), [('acct-x', 'no such account')])
+        self.assertEqual(state(ns), [(drop, 'missing')])
+        conf.write_text('changed\n')
+        self.assertEqual(state(ns), [(drop, 'differs from the plan')])
+        conf.write_text(setup.private_text(self.h))
+        self.assertEqual(state(ns), [])
+        self.assertEqual(state(None), [(unit, 'not running, or its mount table cannot be read')])
+        self.assertEqual(state(host), [(unit, f'runs without the drop-in (not private: /home, {root}, /tmp, /var/tmp): '
+                                              'restart it')])
+        for i, short in ((5, root), (6, '/tmp'), (7, '/var/tmp'), (4, '/home')):  # each part on its own
+            lines = ns.splitlines()
+            del lines[i]
+            self.assertEqual(state('\n'.join(lines)), [(unit, f'runs without the drop-in (not private: {short}): '
+                                                              'restart it')], msg=short)
+        later = ns + '45 41 259:2 / /home rw - ext4 /dev/x rw\n'  # a mount over the tmpfs: the top one counts
+        self.assertEqual(state(later), [(unit, 'runs without the drop-in (not private: /home): restart it')])
+
+    def test_the_managers_mount_table(self):
+        def ran(code, out):
+            return lambda argv, **k: subprocess.CompletedProcess(argv, code, out, '')
+        with open('/proc/self/mountinfo', encoding='utf-8') as f:
+            mine = f.read()
+        self.assertEqual(setup.manager_mounts(4242, run=ran(0, f'{os.getpid()}\n')), mine)
+        for code, out in ((0, '0\n'), (1, f'{os.getpid()}\n'), (0, 'x\n'), (0, '999999999\n')):
+            self.assertIsNone(setup.manager_mounts(4242, run=ran(code, out)), msg=(code, out))
+        seen = []
+        setup.manager_mounts(4242, run=lambda argv, **k: seen.append(argv) or subprocess.CompletedProcess(argv, 1, '', ''))
+        self.assertEqual(seen, [['systemctl', 'show', '-p', 'MainPID', '--value', 'user@4242.service']])
 
     def test_the_shared_files_state_reads_their_acls(self):
         if not shutil.which('setfacl'):
@@ -899,6 +986,8 @@ class Shared(unittest.TestCase):
                          f'command="/usr/sbin/nologin" {KEY}')
         ok = subprocess.CompletedProcess([], 0, KEY + ' comment\n', '')
         self.assertEqual(setup.tunnel_public_key('/e', run=lambda *a, **k: ok), KEY)  # the comment is not shown
+        spaced = subprocess.CompletedProcess([], 0, KEY + ' a comment with spaces\n', '')  # as ssh-keygen -C wrote it
+        self.assertEqual(setup.tunnel_public_key('/e', run=lambda *a, **k: spaced), KEY)
         for r in (subprocess.CompletedProcess([], 1, '', 'bad'), subprocess.CompletedProcess([], 0, 'ssh-rsa AAAA\n', '')):
             self.assertEqual(setup.tunnel_public_key('/e', run=lambda *a, _r=r, **k: _r),
                              '<the public key of etc/tunnel/id_ed25519>')

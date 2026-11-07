@@ -22,8 +22,23 @@
 # ignored. A waiter whose ticket is gone (it was stopped and resumed, or the queue
 # directory was deleted) takes a new one, at the back. A request deletes its own ticket
 # once it holds a slot, and on exit or on INT, TERM or HUP while it waits; a SIGKILLed
-# waiter leaves a dead ticket, which the next reader deletes. A request stopped in the
-# moment it takes a ticket holds $QUEUE/seq.lock, so new requests wait until it resumes.
+# waiter leaves a dead ticket, which the next reader deletes.
+#
+# The queue directory may be writable by another account (the CI runners' account on the
+# 3090 hosts), which can create, rename or delete any entry at any moment, so nothing in
+# it is trusted: no write follows a link and no open can block. The queue is read and
+# written by one python3 helper (QUEUE_PY below), which opens every entry once, by name
+# relative to the queue directory (itself opened without following a link), with
+# O_NOFOLLOW | O_NONBLOCK (a FIFO planted between a check and the open cannot block it),
+# takes fstat of the open file, and reads or locks it only if it is a regular file.
+# Writes go to a temporary file created exclusively (O_EXCL | O_NOFOLLOW, mode 0660, a
+# name no one can guess) and are renamed onto seq or the ticket name, which replaces a
+# link and never writes through it. $QUEUE must be a real directory and seq.lock a regular
+# file (a link or another kind is refused, status 2). The lock is the helper's flock on
+# seq.lock, taken while it reads the counter and the queue and writes both. A counter or
+# a ticket that is not a regular file counts as malformed (a ticket is deleted: rm removes
+# a link, not its target). A hostile entry can disturb the queueing, never a local file
+# and never the script's progress.
 #
 # Once a slot is held the wrapper prints `brainspike-ci-slot: holding <lock>` to stderr,
 # runs CMD and exits with its status. CMD and the processes it starts inherit the slot's
@@ -114,32 +129,70 @@ on_term() {
 }
 
 # The traps come first, so that no signal leaves a ticket behind.
-TICKET= sleeper=
-trap '[ -z "$TICKET" ] || rm -f "$TICKET"; [ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null; finish_run' EXIT
+TICKET= TAKEN= sleeper=
+# drop_ticket: delete our ticket. TAKEN is the helper's whole answer, assigned by the same
+# command that runs it, so a signal that ends us as the ticket appears still finds its number.
+drop_ticket() {
+  [ -z "$TICKET" ] || rm -f "$TICKET"
+  case $TAKEN in 'ok '[0-9]*) rm -f "$(printf '%s/%012d.ticket' "$QUEUE" "${TAKEN#ok }")" ;; esac
+}
+trap 'drop_ticket; [ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null; finish_run' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap on_term TERM
 register_run
 
-# put_files: write the files named in the arguments (DIR NAME TEXT [NAME TEXT]...), in
-# order, each as TEXT and a newline: to a temporary file in DIR created exclusively and
-# without following a link, mode 0660, then renamed onto NAME, all relative to DIR opened
-# as a directory without following a link. Exit 1 on any error; the temporary file is
-# removed then.
-PUT_PY='
-import os, sys
-d, rest = sys.argv[1], sys.argv[2:]
-dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-for name, text in zip(rest[0::2], rest[1::2]):
+# QUEUE_PY: the queue's only reader and writer (see the header), run as
+#   python3 -I -c "$QUEUE_PY" take DIR SEQ PID START CWD CMD   under flock on DIR/seq.lock:
+#       prints `ok <n>` after writing seq and the ticket <n>, n past SEQ, the counter and
+#       every ticket queued; `refuse <why>` (status 3) for a link or a non-regular file
+#       where one must not be; any other failure is status 1;
+#   python3 -I -c "$QUEUE_PY" scan DIR   prints `<name> ok <first line>` for each
+#       <12 digits>.ticket that is a regular file (at most 4096 bytes read), `<name> bad`
+#       for any other kind of entry, nothing if DIR cannot be opened.
+QUEUE_PY='
+import errno, fcntl, os, re, stat, sys
+RD = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+TICKET = re.compile(r"([0-9]{12})\.ticket")
+
+
+class Refuse(Exception):
+    pass
+
+
+def opendir(d):
+    try:
+        return os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise Refuse("%s is a link, not a directory" % d)
+        raise
+
+
+def read(dfd, name, limit):
+    """The first `limit` bytes of the regular file `name`, None for anything else."""
+    try:
+        fd = os.open(name, RD, dir_fd=dfd)
+    except OSError:
+        return None
+    try:
+        return os.read(fd, limit) if stat.S_ISREG(os.fstat(fd).st_mode) else None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def put(dfd, name, text):
     for _ in range(100):
         tmp = ".tmp.%d.%s" % (os.getpid(), os.urandom(8).hex())
         try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o660, dir_fd=dfd)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o660, dir_fd=dfd)
             break
         except FileExistsError:
             pass
     else:
-        sys.exit(1)
+        raise OSError("no temporary name")
     try:
         os.fchmod(fd, 0o660)
         os.write(fd, os.fsencode(text) + b"\n")
@@ -148,6 +201,75 @@ for name, text in zip(rest[0::2], rest[1::2]):
     except BaseException:
         os.unlink(tmp, dir_fd=dfd)
         raise
+
+
+def lock(dfd, d):
+    why = Refuse("%s/seq.lock is not a regular file" % d)
+    for _ in range(3):
+        try:
+            fd = os.open("seq.lock", RD, dir_fd=dfd)
+        except FileNotFoundError:
+            try:
+                fd = os.open("seq.lock", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                             0o660, dir_fd=dfd)
+                os.fchmod(fd, 0o660)
+            except FileExistsError:
+                continue  # made meanwhile: open that one
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.ENXIO, errno.EISDIR):
+                raise why
+            raise
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise why
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+    raise why
+
+
+def take(d, seq, pid, start, cwd, cmd):
+    dfd = opendir(d)
+    lock(dfd, d)  # held until this process ends
+    n = 0
+    data = read(dfd, "seq", 32)
+    if data is not None:
+        word = data.split(b"\n")[0].strip()
+        if re.fullmatch(rb"[0-9]{1,15}", word):
+            n = int(word)
+    n = max(n, int(seq))
+    for name in os.listdir(dfd):
+        m = TICKET.fullmatch(name)
+        if m:
+            n = max(n, int(m.group(1)))
+    n += 1
+    put(dfd, "seq", str(n))
+    put(dfd, "%012d.ticket" % n, "%d %s %s %s %s" % (n, pid, start, cwd, cmd))
+    print("ok %d" % n)
+
+
+def scan(d):
+    try:
+        dfd = opendir(d)
+    except OSError:
+        return
+    for name in sorted(os.listdir(dfd)):
+        if TICKET.fullmatch(name):
+            data = read(dfd, name, 4096)
+            if data is None:
+                print(name, "bad")
+            else:
+                print(name, "ok", data.split(b"\n")[0].decode("utf-8", "replace"))
+
+
+try:
+    if sys.argv[1] == "take":
+        take(*sys.argv[2:])
+    else:
+        scan(sys.argv[2])
+except Refuse as e:
+    print("refuse", e)
+    sys.exit(3)
+except Exception:
+    sys.exit(1)
 '
 PY=$(command -v python3 || command -v python)
 
@@ -160,35 +282,18 @@ SEQ=0 START=$(date +%s) CMD=$*
 CMD=${CMD//$'\n'/ }
 REFUSE=
 take_ticket() {
-  local qfd n t ok lk=$QUEUE/seq.lock
+  local rc
   REFUSE=
   [ ! -L "$QUEUE" ] || { REFUSE="$QUEUE is a link, not a directory"; return 1; }
   mkdir -p "$QUEUE" 2>/dev/null || return 1
   [ -n "$PY" ] || { REFUSE="no python3 to write the queue safely"; return 1; }
-  if [ ! -e "$lk" ] && [ ! -L "$lk" ]; then (umask 007; set -o noclobber; : > "$lk") 2>/dev/null; fi
-  if [ -L "$lk" ] || [ ! -f "$lk" ]; then REFUSE="$lk is not a regular file"; return 1; fi
-  exec {qfd}< "$lk" || return 1  # read-only: it creates and writes nothing, through a link or not
-  if [ -L "$lk" ] || [ ! "$lk" -ef "/proc/self/fd/$qfd" ] || [ ! -f "/proc/self/fd/$qfd" ]; then
-    exec {qfd}>&-
-    REFUSE="$lk is not a regular file"
-    return 1
-  fi
-  flock -x "$qfd"
-  n=0
-  if [ -f "$QUEUE/seq" ] && [ ! -L "$QUEUE/seq" ]; then read -r -n 32 n < "$QUEUE/seq" 2>/dev/null; fi
-  [[ $n =~ ^[0-9]{1,15}$ ]] && n=$((10#$n)) || n=0
-  ((SEQ > n)) && n=$SEQ
-  for t in "$QUEUE"/*.ticket; do
-    [[ ${t##*/} =~ ^([0-9]{12})\.ticket$ ]] || continue
-    ((10#${BASH_REMATCH[1]} > n)) && n=$((10#${BASH_REMATCH[1]}))
-  done
-  SEQ=$((n + 1))
-  TICKET=$(printf '%s/%012d.ticket' "$QUEUE" "$SEQ")
-  "$PY" -I -c "$PUT_PY" "$QUEUE" seq "$SEQ" "${TICKET##*/}" "$SEQ $$ $START $PWD $CMD"
-  ok=$?
-  flock -u "$qfd"
-  exec {qfd}>&-
-  return $ok
+  TAKEN=$("$PY" -I -c "$QUEUE_PY" take "$QUEUE" "$SEQ" "$$" "$START" "$PWD" "$CMD")
+  rc=$?
+  case $rc in
+    0) SEQ=${TAKEN#ok } TICKET=$(printf '%s/%012d.ticket' "$QUEUE" "$SEQ") ;;
+    3) REFUSE=${TAKEN#refuse } ;;
+  esac
+  return $((rc != 0))
 }
 refused() { echo "brainspike-ci-slot: refusing to use $QUEUE: $REFUSE" >&2; exit 2; }
 take_ticket 2>/dev/null || { [ -z "$REFUSE" ] || refused; echo "brainspike-ci-slot: cannot write a ticket in $QUEUE" >&2; exit 2; }
@@ -205,14 +310,14 @@ while true; do
       msg="the ticket is gone and $QUEUE is not writable, retrying"
     fi
   fi
-  [ -n "$msg" ] || for t in "$QUEUE"/*.ticket; do
-    [[ ${t##*/} =~ ^([0-9]{12})\.ticket$ ]] || continue  # a stray file, or no ticket at all
-    named=${BASH_REMATCH[1]} seq= pid= start= rest=
-    if [ -L "$t" ] || [ ! -f "$t" ]; then  # a link or a device, never ours: delete the entry (a link, not its target)
+  [ -n "$msg" ] || while read -r name state line; do
+    [[ $name =~ ^([0-9]{12})\.ticket$ ]] || continue  # the helper lists no other name
+    named=${BASH_REMATCH[1]} seq= pid= start= rest= t=$QUEUE/$name
+    if [ "$state" != ok ]; then  # a link, a FIFO, a device, a directory: not a ticket, never ours
       rm -f "$t" 2>/dev/null
       continue
     fi
-    read -r -n 4096 seq pid start rest 2>/dev/null < "$t"
+    read -r seq pid start rest <<< "$line"
     if [ "$t" != "$TICKET" ]; then
       if [[ ! "$seq $pid $start" =~ ^[0-9]{1,15}\ [1-9][0-9]{0,9}\ [0-9]{1,12}$ ]] ||
         ((10#$seq != 10#$named)) || ! alive "$((10#$pid))" "$((10#$start))"; then
@@ -223,7 +328,7 @@ while true; do
     pos=$((pos + 1))
     [ -n "$head" ] || head="seq $seq, pid $pid, $rest"
     [ "$t" = "$TICKET" ] && ahead=$((pos - 1))
-  done
+  done < <("$PY" -I -c "$QUEUE_PY" scan "$QUEUE" 2>/dev/null)
   if [ -n "$msg" ]; then
     :
   elif [ "$ahead" -eq 0 ]; then

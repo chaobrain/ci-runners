@@ -35,6 +35,7 @@ CLA = 'ci_runners/claim.py'
 OUT = 'ci_runners/outcome.py'
 GPU = 'ci_runners/gpus.py'
 SLO = 'ci_runners/slots.py'
+LCK = 'ci_runners/locks.py'
 GHB = 'ci_runners/github.py'
 PRT = 'ci_runners/part.py'
 RGY = 'ci_runners/registry.py'
@@ -74,6 +75,7 @@ TW = 'tests.test_workflow'
 TM = 'tests.test_thermal'
 TZ = 'tests.test_orgsync'
 TBR = 'tests.test_bridge'
+TX = 'tests.test_interop'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
@@ -167,10 +169,54 @@ MUTANTS = [
     (SLO, "key = (held.get(p, 0), t.seq)", "key = (0, t.seq)", [f'{TS}.Grants.test_the_project_holding_fewest_goes_first']),
     (SLO, "        held[p] = held.get(p, 0) + 1\n", "", [f'{TS}.Grants.test_a_project_at_its_cap_is_skipped']),
     (SLO, "return waiting >= max_waiting", "return waiting > max_waiting", [f'{TS}.Grants.test_queue_full']),
+    (SLO, "p = t.project or default_project\n            if", "p = t.project\n            if",
+     [f'{TS}.Grants.test_tickets_without_a_project_are_the_default_projects']),
+    # ci_slot.sh's tickets and holders are the default project's (design §7 rule 4, decision 12.9)
+    (SLO, "            per[self.default] = per.get(self.default, 0) + per.pop('', 0)\n", "",
+     [f'{TS}.Queue.test_ci_slot_sh_holders_and_tickets_are_the_default_projects']),
+    (SLO, "caps = dict(caps, **{self.default: len(self.slots)})", "caps = dict(caps)",
+     [f'{TS}.Queue.test_the_default_projects_cap_is_the_slot_count']),
+    (SLO, "_TICKET = re.compile(r'([0-9]{12})\\.(ticket|wait)\\Z')", "_TICKET = re.compile(r'([0-9]{12})\\.(wait)\\Z')",
+     [f'{TS}.Queue.test_an_older_ci_slot_sh_ticket_goes_first']),
+    # the host lock and the slots, against brainspike's originals (RUN-7 acceptance 2)
+    (LCK, "                    fcntl.flock(ts, fcntl.LOCK_UN)\n                    os.close(ts)\n                    self._fds.remove(ts)\n", "",
+     [f'{TX}.LockInterop.test_every_mode_pair_both_ways']),
+    (LCK, "self._flock(fd, fcntl.LOCK_SH if want == 's' else fcntl.LOCK_EX, t0)", "self._flock(fd, fcntl.LOCK_SH, t0)",
+     [f'{TX}.LockInterop.test_every_mode_pair_both_ways']),
+    (LCK, "                    if mode == 's':  # a normal shared holder", "                    if False:",
+     [f'{TX}.LockInterop.test_light_enters_beside_a_normal_shared_holder_only']),
+    (LCK, "            if mode == 'l' and self._normal_shared_in():", "            if False:",
+     [f'{TX}.LockInterop.test_light_enters_beside_a_normal_shared_holder_only']),
+    (LCK, "                self._flock(ts, fcntl.LOCK_EX, t0)\n", "",
+     [f'{TX}.LockInterop.test_a_waiting_exclusive_request_keeps_new_shared_ones_out']),
+    (LCK, "            elif self.held == 'x' or want == 's':", "            elif want == 's':",
+     [f'{TX}.LockInterop.test_nesting_covers_cross_implementations']),
+    (LCK, "            if not self.cover_live():", "            if False:", [f'{TX}.LockInterop.test_a_stale_cover_takes_the_lock']),
+    (LCK, "if left <= 0 or not _wait_in_queue(fd, op, left):", "if not _wait_in_queue(fd, op, 1e6):",
+     [f'{TX}.LockInterop.test_a_timeout']),
+    (SLO, "                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n", "                pass\n",
+     [f'{TX}.SlotInterop.test_together_never_more_than_the_slot_count']),
+    # two accounts: no O_CREAT on an existing shared file, none created in a sticky directory,
+    # the queue's files keep the default ACL's rw (decision 12.9)
+    (LCK, "        return os.open(path, os.O_WRONLY | os.O_APPEND)\n    except FileNotFoundError",
+     "        return os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)\n    except FileNotFoundError",
+     [f'{TX}.TwoAccounts.test_existing_files_are_opened_without_o_creat']),
+    (SLO, "            fd = open_lock(path)\n", "            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)\n",
+     [f'{TX}.TwoAccounts.test_existing_files_are_opened_without_o_creat']),
+    (LCK, "        if os.stat(os.path.dirname(os.path.abspath(path))).st_mode & stat.S_ISVTX:", "        if False:",
+     [f'{TX}.TwoAccounts.test_a_missing_shared_file_in_a_sticky_directory_is_not_created']),
+    (SLO, "        if os.path.isdir(parent) and os.stat(parent).st_mode & stat.S_ISVTX:", "        if False:",
+     [f'{TX}.TwoAccounts.test_a_missing_shared_file_in_a_sticky_directory_is_not_created']),
+    (SLO, "os.path.join(self.queue, 'seq.lock'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o660)",
+     "os.path.join(self.queue, 'seq.lock'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)",
+     [f'{TX}.TwoAccounts.test_queue_files_give_the_other_account_rw']),
+    (SLO, "            with open(self.ticket + f'.{os.getpid()}', 'w') as f:",
+     "            with open(self.ticket + f'.{os.getpid()}', 'w', opener=lambda p, fl: os.open(p, fl, 0o600)) as f:",
+     [f'{TX}.TwoAccounts.test_queue_files_give_the_other_account_rw']),
     # the slots
     (SLO, "            fcntl.flock(lk, fcntl.LOCK_EX)\n", "            pass\n",
      [f'{TS}.Queue.test_a_round_waits_for_another_round']),
-    (SLO, "        if self.seq not in grants(self.waiting(), per, caps, nfree):", "        if False:",
+    (SLO, "        if self.seq not in grants(self.waiting(), per, caps, nfree, self.default):", "        if False:",
      [f'{TS}.Concurrent.test_never_more_than_the_slots_or_a_cap']),
     (SLO, "                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n", "                pass\n",
      [f'{TS}.Concurrent.test_never_more_than_the_slots_or_a_cap']),
@@ -428,7 +474,7 @@ MUTANTS = [
     (INV, "            if isinstance(v, dict) and v.get('per_card') and not h['gpus']:", "            if False:",
      [f'{TI}.Load.test_pools_as_tables']),
     (INV, "    'python': (_abs, False),", "    'python': (_str, False),", [f'{TI}.Load.test_python_and_orgsync']),
-    (INV, "'extra_events', 'labels'})", "'extra_events', 'labels', 'python'})",
+    (INV, "'extra_events', 'labels', 'default_project'})", "'extra_events', 'labels', 'default_project', 'python'})",
      [f'{TI}.Deny.test_labels_are_public_and_the_python_is_not']),
     (SET, "        if os.path.lexists(path) and path not in ours:", "        if False:",
      [f'{TU}.Standalone.test_another_users_unit_stops_the_plan']),
@@ -812,6 +858,9 @@ MUTANTS = [
     (INV, "RETIRED_KEYS = frozenset({'ssh', 'trusted', 'remote', 'cpu_slowdown', 'proxy'})",
      "RETIRED_KEYS = frozenset({'ssh', 'trusted', 'remote', 'cpu_slowdown', 'proxy', 'slowdown'})",
      [f'{TI}.Load.test_the_retired_keys_are_accepted_and_ignored']),
+    (INV, "bool(re.fullmatch(r'[a-z0-9][a-z0-9-]{0,39}', v))", "True", [f'{TI}.Load.test_the_3090_keys_of_decision_12_9']),
+    (INV, "'extra_events', 'labels', 'default_project'})", "'extra_events', 'labels'})",
+     [f'{TI}.Deny.test_the_default_project_is_public']),
     (INV, "{'slot_lock', 'slot_queue'} <= set(v) <= FILES", "set(v) == FILES", [f'{TI}.Load.test_the_example_loads']),
     (INV, "{'slot_lock', 'slot_queue'} <= set(v) <= FILES", "{'slot_lock', 'slot_queue'} <= set(v)",
      [f'{TI}.Load.test_the_retired_keys_are_accepted_and_ignored']),

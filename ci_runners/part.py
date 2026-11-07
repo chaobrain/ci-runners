@@ -756,7 +756,8 @@ class Executor:
             if why:
                 return self._end(record, rec, a, unavailable=why)
             if cls in SLOT_CLASSES:
-                q = slots.SlotQueue(h['files']['slot_lock'], h['slots'], h['files']['slot_queue'], poll=self.poll)
+                q = slots.SlotQueue(h['files']['slot_lock'], h['slots'], h['files']['slot_queue'], poll=self.poll,
+                                    default_project=h.get('default_project', ''))
                 mine = sum(1 for t in q.waiting() if t.project == proj.name)
                 if slots.queue_full(mine, proj.max_waiting):
                     return self._end(record, rec, a, unavailable='project queue full')

@@ -38,6 +38,17 @@ class Load(unittest.TestCase):
         with self.assertRaises(inv.InventoryError):
             inv.load(EXAMPLE.replace('slot_lock = ', 'other_lock = "/tmp/o.lock"\nslot_lock = ', 1))
 
+    def test_the_3090_keys_of_decision_12_9(self):
+        """A host lock in ``files`` and a ``default_project`` (a project name) load."""
+        text = EXAMPLE.replace('slots = 2', 'default_project = "brainspike"\nslots = 2', 1).replace(
+            'slot_lock = ', 'host_lock = "/tmp/h.lock"\nslot_lock = ', 1)
+        i = inv.load(text)
+        self.assertEqual(i.host['default_project'], 'brainspike')
+        self.assertEqual(i.host['files']['host_lock'], '/tmp/h.lock')
+        for bad in ('"Brainspike"', '"a b"', '""', '1'):
+            with self.assertRaises(inv.InventoryError, msg=bad):
+                inv.load(EXAMPLE.replace('slots = 2', f'default_project = {bad}\nslots = 2', 1))
+
     def test_pools_as_tables(self):
         """RUN-5: a pool may give its labels, or have one runner per card."""
         base = re.sub(r'\[hosts\.h100\.pools\].*\n(?:.*\n){3}', '', EXAMPLE).replace(
@@ -112,6 +123,11 @@ class Deny(unittest.TestCase):
         # public keys, table keys, numbers, short and common words are not tokens
         for t in ('role-a', '120g', '/tmp/public.lock', 'chaobrain/x', 'github-actions[bot]', 'nd', 'localhost'):
             self.assertNotIn(inv.normalise(t), got)
+
+    def test_the_default_project_is_public(self):
+        """A project name is the repository's, which the design names: not a token."""
+        self.assertEqual(inv.deny_tokens({'hosts': {'h': {'default_project': 'brainspike', 'account': 'acct9'}}}),
+                         {'acct9'})
 
     def test_labels_are_public_and_the_python_is_not(self):
         doc = {'hosts': {'h': {'python': '/opt/private-env/bin/python3',

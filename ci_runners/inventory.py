@@ -358,9 +358,10 @@ _PATTERNS = {
     'home-path': re.compile(r'/(?:home|Users)/(?!runner(?![\w.-]))(?=\w)[\w.-]+'),
     'github-token': re.compile(r'\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})'),
     'private-key': re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----'),
-    # a host's account uid (user@<uid>.service, user-<uid>.slice, uid=<uid>): the inventory
-    # names accounts, never uids, so a real one can only come from a host (RUN-8 review)
-    'uid': re.compile(r'(?:\buser[@-]|\buid\s*[=:]\s*)(\d{4,5})(?!\d)', re.I),
+    # a host's account uid (user@<uid>.service, user-<uid>.slice, /run/user/<uid>, uid=<uid>,
+    # uid <uid>): the inventory names accounts, never uids, so a real one can only come
+    # from a host (RUN-8 review)
+    'uid': re.compile(r'(?:\buser[@-]|/run/user/|\buid\s*[=:]?\s*)(\d{4,5})(?!\d)', re.I),
     # a block device's numbers, as mountinfo (decimal) and /proc/locks (hex) print them
     'device': re.compile(r'(?<![\w:.])\d+ \d+ (\d+):\d+ /'
                          r'|\b(?:FLOCK|POSIX|OFDLCK)\s+\S+\s+(?:READ|WRITE)\s+\d+\s+([0-9a-f]+):[0-9a-f]+:\d+'),

@@ -283,10 +283,12 @@ class Scan(unittest.TestCase):
         built here, so that this file holds none."""
         uid, major = 1000 + 9, 250 + 9
         for text in (f'0::/user.slice/user-{uid}.slice/user@{uid}.service/app.slice/x.service',
-                     f'/tmp/systemd-private-0a-user@{uid}.service-Xy/tmp', f'uid={uid}', f'uid: {uid}', f'Uid = {uid}'):
+                     f'/tmp/systemd-private-0a-user@{uid}.service-Xy/tmp', f'uid={uid}', f'uid: {uid}', f'Uid = {uid}',
+                     f'XDG_RUNTIME_DIR=/run/user/{uid}', f'uid {uid}', f'the uid {uid} owns it'):
             self.assertEqual(self.kinds(text), ['uid'], text)
         for text in ('user@4242.service', 'user@999.service', 'user@0.service', 'uid=65534', 'user@65535.service',
-                     'useruser@1500', 'pid 1500', 'the uid', 'port: 8080', 'user-123456.slice'):
+                     'useruser@1500', 'pid 1500', 'the uid', 'port: 8080', 'user-123456.slice', '/run/user/4242',
+                     '/run/user/$(id -u)', 'uid 999', 'fluid 1500'):
             self.assertEqual(self.kinds(text), [], text)
         for text in (f'600 22 {major}:2 /tmp/systemd-private-x/tmp /tmp rw - ext4 /dev/x rw',
                      f"HOST = '22 1 {major}:2 / / rw,relatime shared:1 - ext4 /dev/x rw'",

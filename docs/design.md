@@ -1205,6 +1205,12 @@ Rules:
   6. `v1.4.0` is tagged before h100's checks (acceptance 7): h100 is offline at the tag.
      They run before h100 installs `v1.4.0` and before `v1` moves; until then h100 and
      every `@v1` caller keep `v1.3.0` (lead, 2026-11-07).
+- **`v1.4.1`** (patch, 2026-11-07; lead-approved): setup installs and enables
+  `ci-envrefresh.{service,timer}` on every host (12.11; issue #49), which `v1.4.0`'s setup
+  left out, so `refresh = true` refreshed nothing. A host's plan with `v1.4.1` writes these
+  two units and adds the timer to `enable --now`; on a 3090 host the service reads
+  `etc/envrefresh.env`. Nothing else changes; `v1` stays at `v1.3.0` until h100's checks
+  (notes item 6), which then expect these two writes on h100.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

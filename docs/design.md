@@ -1584,8 +1584,9 @@ tests and evidence:
      of the same head and part on the host is not refused; the defaults of 13.2; the
      sampler writes one line and the reaper deletes old days and markers;
    - **clean-up**: an inventory with `watchdog_log` or `watchdog_notice` is refused; the
-     policy and the executor refuse the `h100` class; the tests of the 3090 path from
-     `v1.4.1` pass unchanged, and only h100-only tests and mutants are deleted;
+     policy and the executor refuse the `h100` class; only h100-only tests and mutants
+     are deleted, and the tests of the 3090 path keep their assertions (those that used
+     h100's example inventory as a fixture use a 3090 host's instead);
    - **hooks**: the copy refuses a linked directory and another account's, writes mode
      500 copies by rename, and the reaper rewrites a missing or changed one; a copy runs
      the release its `base` line names; setup plans `ci-hooks.service`, the runner

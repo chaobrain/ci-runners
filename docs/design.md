@@ -1186,7 +1186,7 @@ Rules:
   `salvage` action, the env spec's `conda` table and the inventory's optional keys. No
   input a consumer passes is removed or renamed, and h100's inventory and `h100-test.yml`
   callers need no change, so it is a minor release.
-- **`v1.4.0` notes** (to be stamped at the tag). Read when the contract was stamped
+- **`v1.4.0` notes** (stamped 2026-11-07). Read when the contract was stamped
   (2026-11-07), each recorded where it applies:
   1. a `nightly` part holds every card lease; its `gpu-mem-mib` is checked only on the
      cards its command gets (12.8, §4.8, §5.5);
@@ -1306,6 +1306,51 @@ evidence:
    `oom` and is retried.
 7. h100's plan with `v1.4.0` changes nothing against `v1.3.0`'s apply, and the canary of
    `h100-test.yml` passes on `@v1.4.0`, then on `@v1` after the move.
+
+*Measured (2026-11-07, `main` 4551806 on both 3090 hosts; h100 offline and unreachable
+from them, so its items are not tested yet):*
+
+1. The suite and the mutant table pass (679 of 679 mutants killed at the RUN-7g head).
+2. Interop:
+   - `ci-lock -s` in a job waited for the local `host_lock.sh -x` (19 s on each host);
+   - the local `host_lock.sh -s` waited for the job's `ci-lock -x` (184 s on 3090b,
+     33 s on 3090a);
+   - a job's `ci-slot` waited 51 s while the local account held both slot files, then
+     ran.
+3. Both hosts' plans are applied, and the runners are online at org level (9 on 3090b,
+   8 on 3090a).
+   - They came back 171 s after `systemctl --user restart` and 69 s after a tunnel
+     restart.
+   - After a reboot: not tested, as none happened. The lock files' ACLs after a reboot:
+     not tested.
+4. In a live job on each host:
+   - `sudo -n true` fails (`NoNewPrivs` 1);
+   - `/tmp`, `/var/tmp` and `/dev/shm` hold no entry of another account;
+   - `/home` and the data-disk root show only the account's own, and none of another
+     account's entries is readable;
+   - `ps` shows one account, and pid 1 is hidden (12.16).
+
+   Refusals and placement:
+   - An unlisted repository's `compile` job on 3090b, and its `nightly` job on 3090a,
+     were refused (`runner-class`) 0.16 s after the job's first runner line.
+   - A non-member's job: not tested, as no non-member account is at hand.
+   - Four `3090b-cpu` jobs all ran on 3090b.
+   - "Print no inventory" holds for the hook's line. The runner itself writes the
+     machine name and the hook's path (under `data`) into every job log, on every host,
+     h100 included; the lead decides (see the stamp PR).
+5. The P2P self-test passed on both hosts, outside a job and in each two-card part.
+   A two-card part ran end to end on each host.
+6. The canary repository composes the four actions at `main` across both 3090 hosts.
+   - A green head passed.
+   - On a red head, the CPU, GPU, two-card (both hosts) and compile parts each ended red
+     in their own part, and the verdict failed.
+   - An OOM-killed part ended `oom` and passed on its retry (`resume`).
+   - On another head, the runner of a part on 3090a was stopped mid-part. Its part
+     finished in its own scope, and 3090a's salvage job uploaded it (`salvaged`) for the
+     verdict on 3090b.
+   - Parts on h100: not tested.
+7. Not tested yet: h100's plan with `v1.4.0`, and the `h100-test.yml` canary on
+   `@v1.4.0` and `@v1`.
 
 ## 11. brainspike on top of this (decision 12)
 

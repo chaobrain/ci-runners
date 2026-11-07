@@ -613,9 +613,10 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
            unavailable: str = '', unit_result: str = '', cool_card: int | None = None,
            retry_on: Sequence[str] | None = None) -> dict[str, object]:
     """The outputs of a part from its record and exit (design §4.4). ``cool_card`` is a
-    card of this per-card host that passes the health gate, for a thermal retry; ``retry_on`` overrides the labels of a retry or fallback. Pure but for
-    the clock when the exit has no end time. A failed P2P self-test in the exit (``p2p``)
-    ends the part ``unavailable`` (``p2p: <why>``) with ``next`` ``none`` (decision 12.6)."""
+    card of this per-card host that passes the health gate, for a thermal retry;
+    ``retry_on`` overrides the labels of a retry or fallback. Pure but for the clock when
+    the exit has no end time. A failed P2P self-test in the exit (``p2p``) ends the part
+    ``unavailable`` (``p2p: <why>``) with ``next`` ``none`` (decision 12.6)."""
     end = float((ex or {}).get('end_epoch') or time.time())
     p2p = str((ex or {}).get('p2p') or '')
     unavailable = unavailable or (f'p2p: {p2p}' if p2p else '')

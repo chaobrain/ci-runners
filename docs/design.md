@@ -1420,6 +1420,12 @@ Rules:
      2026-11-08);
   7. `ci-run drain on`, or any `--pool` change, refuses on an unreadable drain state;
      only `drain off` without a pool rewrites it (and undrains the whole host).
+- **`v1.5.1`** (patch, stamped 2026-11-08; lead-approved as a patch of `v1.5`): `salvage`
+  reads only this run's records of a part (§4.5; issue #61). `v1.5.0` took the part id's
+  newest record across the repository's runs, so a later run's part of the same id on the
+  host left a lost part `lost`. No input, output, setup code or hook changes: the install
+  moves `releases/hook`, a host's plan adds nothing, and no runner restarts. `v1` moves to
+  `v1.5.1` after the 3090 canary.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

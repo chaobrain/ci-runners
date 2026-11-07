@@ -927,7 +927,7 @@ class Executor:
             why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # decision 13.1
             if why:
                 return self._away(record, rec, a, why, cls)
-            why = self.busy(a, cls)  # decision 13.2
+            why = self.busy(a, cls, proj.retries)  # decision 13.2
             if why:
                 return self._away(record, rec, a, why, cls)
             if cls in SLOT_CLASSES or nightly:
@@ -1072,11 +1072,12 @@ class Executor:
             for fd in {slot_fd, env_fd, *every} - {None}:
                 os.close(fd)
 
-    def busy(self, a: Inputs, cls: str) -> str:
+    def busy(self, a: Inputs, cls: str, retries: int) -> str:
         """Busy-host avoidance (decision 13.2): why this part's first attempt goes to the
-        other host, or empty. Only for a class with a peer pool other than ``light``, never on
-        a retry, and once per head and part on this host (a marker, then it waits here)."""
-        if a.attempt_of or cls == 'light' or not inventory.peer_labels(self.inv, cls):
+        other host, or empty. Only where it can go there: a class with a peer pool other than
+        ``light``, and a project that allows a retry; never on a retry, and once per head and
+        part on this host (a marker, then it waits here)."""
+        if a.attempt_of or retries < 1 or cls == 'light' or not inventory.peer_labels(self.inv, cls):
             return ''
         data = str(self.inv.host['data'])
         mark = hostload.marker(data, self.env.get('GITHUB_REPOSITORY', ''), self.env.get('GITHUB_SHA', ''), a.id)

@@ -10,7 +10,8 @@ never read it.
 CLI (as the CI account)::
 
     ci-run drain on [--pool P]     drain the host, or one pool (its inventory key or class)
-    ci-run drain off [--pool P]    undrain the host and every pool, or that pool only
+    ci-run drain off [--pool P]    undrain the host and every pool, or that pool only (an
+                                   unreadable state: only "off" without a pool rewrites it)
     ci-run drain status            the state, and the part scopes still running
 """
 from __future__ import annotations
@@ -97,14 +98,19 @@ def pool_key(host: Mapping[str, object], name: str) -> str:
 
 def change(data: str, on: bool, pool: str = '', now: Callable[[], float] = time.time) -> dict:
     """Set or clear the drain under the lock, and return the new state. ``off`` without a
-    pool clears the host and every pool. An unreadable state is replaced: the operator's
-    command is the fix for it."""
+    pool clears the host and every pool, and is the one change that replaces an unreadable
+    state; any other raises ValueError there, since starting from an empty state would
+    undrain the host the unreadable file holds drained."""
     d = os.path.dirname(state_path(data))
     os.makedirs(d, mode=0o700, exist_ok=True)
     lock = os.open(os.path.join(d, 'drain.lock'), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        st = read(data) or {'host': None, 'pools': {}}
+        st = read(data)
+        if st is None and (on or pool):
+            raise ValueError(f'{state_path(data)} is unreadable, so the host counts as drained: fix or remove '
+                             'that file, or run "ci-run drain off" (no pool) to undrain the whole host')
+        st = st or {'host': None, 'pools': {}}
         if on and pool:
             st['pools'].setdefault(pool, now())
         elif on:
@@ -171,6 +177,10 @@ def main(argv: list[str], inv: inventory.Inventory, run: Callable = subprocess.r
     except ValueError as e:
         print(f'ci-run drain: {e}', file=sys.stderr)
         return 2
-    st = change(data, argv[0] == 'on', pool)
+    try:
+        st = change(data, argv[0] == 'on', pool)
+    except ValueError as e:
+        print(f'ci-run drain: {e}', file=sys.stderr)
+        return 1
     sys.stdout.write(status_text(st, running_scopes(run)))
     return 0

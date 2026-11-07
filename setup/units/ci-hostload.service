@@ -8,4 +8,5 @@ Environment=CI_RUNNERS_ETC=@CI_ETC@
 Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
 NoNewPrivileges=yes
 Nice=10
-TimeoutStartSec=30s
+# two nvidia-smi calls of at most 20 s each, and the rest
+TimeoutStartSec=90s

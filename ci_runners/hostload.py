@@ -159,19 +159,23 @@ def raw(host_lock: str = '', *, read: Callable[[str], str] = _read, run: Callabl
     gib = 1 << 20  # kB per GiB
     return {'t': now(), 'cpu_s': busy, 'ci_cpu_s': None if ci_usec is None else ci_usec / 1e6,
             'mem_total': None if total is None else total / gib,
-            'mem': None if total is None or avail is None else max(0.0, (total - avail) / gib - (ci_anon or 0) / (1 << 30)),
+            # without the CI account's own memory the value is no one's: no sample (fail open)
+            'mem': None if None in (total, avail, ci_anon) else max(0.0, (total - avail) / gib - ci_anon / (1 << 30)),
             'gpu': gpu, 'lock': lock}
 
 
-def derive(line: dict, prev: dict | None) -> dict:
+def derive(line: dict, prev: dict | None, cpus: int) -> dict:
     """The line with ``cpu``: other accounts' cores since ``prev``, or None without a
-    usable previous line. Pure."""
+    usable previous line, or when either counter went back or past ``cpus`` cores (a
+    restart of the user manager resets the CI account's). Pure."""
     out = dict(line)
     out['cpu'] = None
     if (prev and None not in (line.get('cpu_s'), line.get('ci_cpu_s'), prev.get('cpu_s'), prev.get('ci_cpu_s'))
             and 0 < line['t'] - prev['t'] <= PREV_MAX_S):
         dt = line['t'] - prev['t']
-        out['cpu'] = round(max(0.0, (line['cpu_s'] - prev['cpu_s']) - (line['ci_cpu_s'] - prev['ci_cpu_s'])) / dt, 2)
+        host, ci = (line['cpu_s'] - prev['cpu_s']) / dt, (line['ci_cpu_s'] - prev['ci_cpu_s']) / dt
+        if 0 <= ci <= cpus and 0 <= host <= cpus:
+            out['cpu'] = round(max(0.0, host - ci), 2)
     return out
 
 
@@ -209,11 +213,11 @@ def lines(data: str, since: float, now: float) -> list[dict]:
     return dedup
 
 
-def sample(data: str, host_lock: str = '', **kw) -> dict:
+def sample(data: str, host_lock: str = '', cpus: int | None = None, **kw) -> dict:
     """Append one line to the record and return it."""
     line = raw(host_lock, **kw)
     prev = lines(data, line['t'] - PREV_MAX_S, line['t'])
-    line = derive(line, prev[-1] if prev else None)
+    line = derive(line, prev[-1] if prev else None, cpus or os.cpu_count() or 1)
     os.makedirs(record_dir(data), mode=0o700, exist_ok=True)
     fd = os.open(day_file(data, line['t']), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:

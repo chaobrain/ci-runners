@@ -48,6 +48,7 @@ class Parsers(unittest.TestCase):
         self.assertEqual(hostload.manager_cgroup(CGROUP), MANAGER)
         self.assertEqual(hostload.manager_cgroup('0::/system.slice/x.service\n'), '')  # not under a user manager
         self.assertEqual(hostload.manager_cgroup('12:cpu:/a\n0::/user.slice/user@1.service\n'), '')  # cgroup v1
+        self.assertEqual(hostload.manager_cgroup('0::/user.slice/user@1.service\n1:name=systemd:/user.slice\n'), '')  # hybrid
         self.assertEqual(hostload.manager_cgroup(''), '')
 
     def test_exclusive_flocks_on_one_file(self):
@@ -77,7 +78,7 @@ class Sample(unittest.TestCase):
             '/proc/self/cgroup': CGROUP, '/proc/stat': STAT, '/proc/meminfo': MEMINFO,
             f'/sys/fs/cgroup{MANAGER}/cpu.stat': 'usage_usec 300000\n',
             f'/sys/fs/cgroup{MANAGER}/memory.stat': f'file 1\nanon {2 << 30}\n',
-            '/proc/locks': f'1: FLOCK  ADVISORY  WRITE 900 {dev} 0 EOF\n2: FLOCK  ADVISORY  WRITE 10 {dev} 0 EOF\n'}
+            '/proc/locks': f'1: FLOCK  ADVISORY  WRITE 10 {dev} 0 EOF\n2: FLOCK  ADVISORY  WRITE 900 {dev} 0 EOF\n'}
         self.smi = {'--query-gpu=index,pci.bus_id': '0, 00000000:01:00.0\n1, 00000000:4D:00.0\n',
                     '--query-compute-apps=pid,gpu_bus_id,used_memory':
                         '900, 00000000:4D:00.0, 3000\n901, 00000000:4D:00.0, 100\n10, 00000000:01:00.0, 5000\n'}
@@ -184,6 +185,9 @@ class Rule(unittest.TestCase):
         self.assertEqual(hostload.busy(rec, NOW, TH), 'busy: cpu 20 >= 14 cores for 10 min')
         self.assertEqual(hostload.busy(rec, NOW - 60, TH), '')  # its window holds an idle minute
         self.assertEqual(hostload.busy(rec, NOW + 600, TH), '')  # every sample is older than the window
+        rec = minutes(11, cpu=20.0)
+        rec[-1]['cpu'] = 1.0
+        self.assertEqual(hostload.busy(rec, NOW - 60, TH), 'busy: cpu 20 >= 14 cores for 10 min')  # not a later one
 
     def test_memory(self):
         self.assertEqual(hostload.busy(minutes(10, cpu=1, mem=100.04), NOW, TH),
@@ -279,7 +283,7 @@ class Gate(Host):
         self.assertEqual(out['outcome'], 'pass')
 
     def test_check_reads_the_hosts_thresholds_cards_and_lock(self):
-        self.record(minutes(20, now=self.now - 1, cpu=0.5, mem=600.0, mem_total=900.0, gpu={'1': 3000}, lock=7))
+        self.record(minutes(30, now=self.now - 1, cpu=0.5, mem=600.0, mem_total=900.0, gpu={'1': 3000}, lock=7))
         self.assertEqual(hostload.check(self.inv, now=self.now), 'busy: memory 600.0 >= 500 GiB for 10 min')
         inv = inventory.load(self.inv_text.replace('memory_gib = 500', 'memory_gib = 700'))
         self.assertEqual(hostload.check(inv, now=self.now), '')
@@ -288,10 +292,10 @@ class Gate(Host):
         self.assertEqual(hostload.check(no_mem, now=self.now), 'busy: memory 600.0 >= 450 GiB for 10 min')  # half of 900
         self.assertEqual(hostload.check(no_mem, now=self.now, cpus=1), 'busy: memory 600.0 >= 450 GiB for 10 min')
         self.assertEqual(hostload.check(inv, now=self.now), '')  # no host lock in the inventory
-        locked = inventory.load(self.inv_text.replace('memory_gib = 500', 'memory_gib = 700').replace(
+        locked = inventory.load(self.inv_text.replace('memory_gib = 500', 'memory_gib = 700, lock_minutes = 30').replace(
             'files = {', f'files = {{ host_lock = "{self.data}/h.lock", '))
         self.assertEqual(hostload.check(locked, now=self.now),
-                         'busy: host lock held exclusively by another account for >= 20 min')
+                         'busy: host lock held exclusively by another account for >= 30 min')  # read 30 min back
 
     def test_the_cli(self):
         line = {'t': self.now, 'cpu_s': 1.0, 'ci_cpu_s': 0.0, 'mem_total': 900.0, 'mem': 1.0, 'gpu': {}, 'lock': None}

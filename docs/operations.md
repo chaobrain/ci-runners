@@ -98,6 +98,7 @@
 
 - **conda 表。** 规格里的 `[conda]` 表（见 [consumers.md](consumers.md) §3）和 `python` 在同一次 `conda create` 里求解，在任何 pip 步骤之前。表格式不对就什么都不建，错误写在 stderr。`--dry-run` 会打印 `conda create` 那一行，先看一眼。
 - **环境刷新**（design §4.9）。`ci-run env refresh <project>` 不要令牌：它读环境里保存的 `ci-env.json`（规格、requirements 文件、每个 upstream 的 commit），用 `git ls-remote` 看分支动没动，动了才重建，建好后一次 rename 换上。有 upstream 读不了（私有，或者没有路由）就拒绝，什么都不建；任何一步失败都保留旧环境。在 v1.4 之前建的环境没有保存规格，要先用 `env build` 重建一次。`ci-run env refresh --all` 处理这台主机上 registry 里写了 `refresh = true` 的每个项目，一个失败不影响其他项目，只要有失败，退出码就是 2。同一个项目同一时刻只有一个 build 或 refresh 在跑（`envs/.<project>.lock`），撞上的刷新等下一轮。
+- **部件用哪个构建。** `envs/<project>` 是会被 refresh 移动的链接。部件开始时把它解析一次，`PATH` 和 `CONDA_PREFIX` 都指向那个构建目录，部件记录（`record.json`）的 `env_build` 写下构建名；部件在 `<构建>/.inuse` 上持有共享 `flock` 直到结束（supervisor 继承该描述符，runner 停了也不放）。清理旧构建时只删能拿到独占非阻塞锁的构建，被部件占用的构建多留一轮，拿不准就保留。
 - **刷新单元。** `setup/units/ci-envrefresh.{service,timer}`：timer 每 30 分钟触发，service 运行 `ci-run env refresh --all`。service 读 `etc/envrefresh.env`（可选，由维护者写，模式 600）：放 runner `.env` 里的 `https_proxy`、`http_proxy`、`no_proxy`，以及 `CI_RUNNERS_CONDA=<conda 路径>`。git 的 `ls-remote` 和 clone 都走这个代理。这两个文件随仓库发布，由 setup 计划在对应主机上安装，计划要经维护者批准。
 
 ## 5. 发布流程

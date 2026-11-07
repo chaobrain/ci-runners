@@ -18,7 +18,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
-from ci_runners import envbuild, inventory, registry
+from ci_runners import envbuild, envuse, inventory, registry
 from ci_runners.envbuild import SpecError
 
 GOOD = '''schema = 1
@@ -614,6 +614,54 @@ class Refresh(Base):
         self.assertTrue(registry.load_file(str(self.etc), 'p', 'hb').refresh)
         self.entry('p', 'Org/Repo')
         self.assertFalse(registry.load_file(str(self.etc), 'p', 'hb').refresh)
+
+
+class Held(Base):
+    """A build a live part holds is never pruned (design decision 12.11)."""
+
+    def builds(self):
+        return sorted(n for n in os.listdir(self.envs) if n[0] != '.' and n != 'p')
+
+    def test_a_held_build_survives_the_prune_that_would_remove_it(self):
+        self.assertEqual(self.main()[0], 0, self.err)
+        oldest = self.builds()[0]
+        fd = envuse.hold(str(self.envs / oldest))[1]  # a part that started on it
+        self.assertIsNotNone(fd)
+        for _ in range(3):  # three refreshes during the part: KEEP builds are newer than it
+            self.assertEqual(self.main()[0], 0, self.err)
+        self.assertIn(oldest, self.builds())  # kept, though over the limit
+        self.assertEqual(len(self.builds()), envbuild.KEEP + 1)
+        os.close(fd)  # the part ends
+        self.assertEqual(self.main()[0], 0, self.err)
+        self.assertNotIn(oldest, self.builds())  # the next build removes it
+        self.assertEqual(len(self.builds()), envbuild.KEEP)
+
+    def test_a_build_nobody_holds_is_removed_and_the_hold_keeps_the_link_target(self):
+        self.envs.mkdir(parents=True)
+        for n in ('a', 'b'):
+            (self.envs / n).mkdir()
+        fd = envuse.hold(str(self.envs / 'a'))[1]
+        self.assertFalse(envuse.remove_unused(str(self.envs / 'a')))
+        self.assertTrue((self.envs / 'a').is_dir())
+        self.assertTrue(envuse.remove_unused(str(self.envs / 'b')))
+        self.assertFalse((self.envs / 'b').exists())
+        os.close(fd)
+
+    def test_an_unlockable_build_is_kept(self):
+        (self.envs / 'a').mkdir(parents=True)
+        with mock.patch.object(envuse.os, 'open', side_effect=PermissionError):
+            self.assertFalse(envuse.remove_unused(str(self.envs / 'a')))
+        self.assertTrue((self.envs / 'a').is_dir())
+
+    def test_the_hold_names_the_build_the_link_has_now(self):
+        self.envs.mkdir(parents=True)
+        for n in ('a', 'b'):
+            (self.envs / n).mkdir()
+        (self.envs / 'l').symlink_to('a')
+        build, fd = envuse.hold(str(self.envs / 'l'))
+        self.assertEqual(build, str(self.envs / 'a'))
+        os.close(fd)
+        self.assertEqual(envuse.hold(str(self.envs / 'nope')), (str(self.envs / 'nope'), None))
 
 
 class Units(unittest.TestCase):

@@ -41,7 +41,8 @@ built from (``ci-env.json``) and the commit of each upstream. When an upstream's
 has moved (``git ls-remote``, through the host's egress), the env is rebuilt from the
 kept spec and linked in one rename, as a build is. An upstream git cannot read without
 credentials (a private one) refuses the refresh; a failure of any step leaves the old env
-as it was. One build or refresh of a project runs at a time.
+as it was. One build or refresh of a project runs at a time. A build that a live part
+holds (``envuse``) is never pruned.
 """
 from __future__ import annotations
 
@@ -62,7 +63,7 @@ import tomllib
 import urllib.parse
 from collections.abc import Callable, Mapping
 
-from ci_runners import github, inventory, registry
+from ci_runners import envuse, github, inventory, registry
 
 SPEC = '.github/ci-runners.toml'
 MAX_FILE, MAX_FILES = 1 << 20, 16
@@ -403,7 +404,7 @@ def _build(proj: registry.Project, spec: Spec, files: dict[str, str], sha: str, 
             os.symlink(os.path.basename(d), tmp)
             os.replace(tmp, link)  # the one switch
             for old in prune(os.listdir(envs), proj.name):
-                shutil.rmtree(os.path.join(envs, old), ignore_errors=True)
+                envuse.remove_unused(os.path.join(envs, old))  # not one a live part holds
         finally:
             lock.close()
     print(f'ci-run env build: {link} -> {os.path.basename(d)}; the registry entry needs:', file=sys.stderr)

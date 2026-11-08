@@ -9,7 +9,8 @@ supervisor would be. ``drive``:
 2. for each target in the part's order, tries its eligible accounts, least spent this
    month relative to their weight first, round-robin on ties (14.8), each priced
    against the site's and the account's caps from the accounts' ledgers (14.7);
-3. stages the workspace and ``RUNNER_TEMP`` through the account's gate, and submits;
+3. stages the workspace and ``RUNNER_TEMP`` through the account's gate, without the
+   checkout's credentials (``git_config``, ``TEMP_EXCLUDES``), and submits;
 4. while the job pends past the target's bound, cancels it and tries the next account,
    then the next target, within the part's ``queue-timeout-minutes``;
 5. watches the job, relays its log, cancels it on TERM (``stopped``);
@@ -18,8 +19,10 @@ supervisor would be. ``drive``:
    ``slurm`` block, with the job's cost.
 
 A login host unreachable for ``LOST_AFTER`` s mid-part leaves no ``exit.json``: the part
-is ``lost``, its record keeps the job, and the reaper (``reap``) cancels the job once its
-driver is gone. Every call to the cluster is one ssh call to the account's gate
+is ``lost``. Every job the driver did not see end (that one, a cancel the login host did
+not take, a submit cut short) stays in the block's ``open``, and the reaper (``reap``)
+cancels it once the driver is gone. A pending job's worst case counts in the budget from
+its submission: the account's cached ledger is then read again. Every call to the cluster is one ssh call to the account's gate
 (``ci_runners.slurmgate``), over one master connection; the account's key is
 ``etc/slurm/keys/<alias>``.
 """
@@ -27,10 +30,12 @@ from __future__ import annotations
 
 import datetime
 import fcntl
+import glob
 import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -52,7 +57,10 @@ JOB_VARS = ('GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_REF', 'GITHUB_REF_NAME', 
             'GITHUB_ACTOR', 'GITHUB_SERVER_URL', 'GITHUB_WORKFLOW', 'GITHUB_ACTIONS', 'CI', 'RUNNER_OS',
             'RUNNER_ARCH', 'RUNNER_NAME')
 #: what is not staged from, nor fetched into, RUNNER_TEMP: the runner's own files and our artifact
-TEMP_EXCLUDES = ('/_runner_file_commands/', '/ci-runners/', '/_github_workflow/', '/_github_home/')
+TEMP_EXCLUDES = ('/_runner_file_commands/', '/ci-runners/', '/_github_workflow/', '/_github_home/',
+                 '/git-credentials-*')
+#: the checkout's git config: staged without its credentials (``git_config``)
+GIT_CONFIG = '/.git/config'
 LIVE = frozenset({'PENDING', 'CONFIGURING', 'RUNNING', 'COMPLETING', 'SUSPENDED', 'REQUEUED', 'RESIZING',
                   'SIGNALING', 'STAGE_OUT', 'STOPPED', 'REQUEUE_HOLD', 'REQUEUE_FED', 'RESV_DEL_HOLD', 'UNKNOWN'})
 NODE_FAIL = frozenset({'NODE_FAIL', 'BOOT_FAIL'})
@@ -141,12 +149,14 @@ def _tres(alloc: str, key: str) -> int:
 
 def row_cost(site: slurmsite.Site, job: Mapping[str, str]) -> tuple[float, bool]:
     """A ``sacct`` row's cost by the site's prices (14.7), and whether it still runs or
-    pends: a job that may still run is priced at its whole time limit. A card of a
-    partition no GPU target names is priced at the dearest card. Pure."""
+    pends: a job that may still run is priced at its whole time limit, a pending one by
+    what it asks for (``ReqTRES``). A card of a partition no GPU target names is priced
+    at the dearest card. Pure."""
     state = job.get('State', '').split(' ')[0]
     live = state in LIVE
-    cards = _tres(job.get('AllocTRES', ''), 'gres/gpu')
-    cpus = _tres(job.get('AllocTRES', ''), 'cpu')
+    tres = job.get('AllocTRES') or job.get('ReqTRES', '')  # a pending job has no AllocTRES yet
+    cards = _tres(tres, 'gres/gpu')
+    cpus = _tres(tres, 'cpu')
     limit = int(job['TimelimitRaw']) * 60 if job.get('TimelimitRaw', '').isdigit() else 0
     secs = max(limit, int(job.get('ElapsedRaw') or 0) if str(job.get('ElapsedRaw', '')).isdigit() else 0) if live \
         else (int(job['ElapsedRaw']) if str(job.get('ElapsedRaw', '')).isdigit() else 0)
@@ -249,10 +259,11 @@ class Gate:
             raise Refused(f'{verb}: not an object')
         return v
 
-    def sync(self, verb: str, src: str, dst: str, excludes: Sequence[str] = (), timeout: float = 1800) -> None:
+    def sync(self, verb: str, src: str, dst: str, excludes: Sequence[str] = (), timeout: float = 1800,
+             delete: bool = True) -> None:
         """``rsync -a --delete`` through the gate's ``stage`` (to the cluster) or ``fetch``
         (back, without a link that points out of what it fetches)."""
-        argv = [self.rsync, '-a', '--delete', *(['--safe-links'] if verb == 'fetch' else []), '-e',
+        argv = [self.rsync, '-a', *(['--delete'] if delete else []), *(['--safe-links'] if verb == 'fetch' else []), '-e',
                 shlex.join(self.ssh_argv()), f'--rsync-path=ci-slurm-gate {verb}', *(f'--exclude={x}' for x in excludes),
                 src, dst]
         try:
@@ -265,25 +276,70 @@ class Gate:
             raise Refused(f'{verb}: rsync exit {r.returncode}: {(r.stderr or b"").decode(errors="replace").strip()[-200:]}')
 
 
-def ledgers(gates: Mapping[str, Gate], cache: str, now: float, month: str) -> dict[str, list[dict]]:
-    """Each account's ledger rows of ``month``, cached ``LEDGER_TTL`` s in ``cache``; an
-    account whose gate does not answer is left out."""
+def ledgers(gates: Mapping[str, Gate], cache: str, now: float, month: str) -> tuple[dict[str, list[dict]], set[str]]:
+    """Each account's ledger rows of ``month``, cached ``LEDGER_TTL`` s in ``cache``, and
+    the accounts whose gate did not answer. Such an account's rows are its last cached
+    ones of the month, however old, so that its spend still counts against the site's
+    caps; one with none is left out of the rows (its spend is unknown)."""
     os.makedirs(cache, mode=0o700, exist_ok=True)
-    out = {}
+    out, silent = {}, set()
     for alias, g in gates.items():
         path = os.path.join(cache, f'ledger-{alias}.json')
         c = _read_json(path)
-        if c and c.get('month') == month and now - float(c.get('at', 0)) < LEDGER_TTL and isinstance(c.get('jobs'), list):
-            out[alias] = c['jobs']
+        cached = c['jobs'] if c and c.get('month') == month and isinstance(c.get('jobs'), list) else None
+        if cached is not None and now - float(c.get('at', 0)) < LEDGER_TTL:  # type: ignore[union-attr]
+            out[alias] = cached
             continue
         try:
             led = g.json('ledger', month)
         except (Unreachable, Refused):
+            silent.add(alias)
+            if cached is not None:
+                out[alias] = cached
             continue
         jobs = [j for j in led.get('jobs', []) if isinstance(j, dict)]
         _write_json(path, {'month': month, 'at': now, 'jobs': jobs})
         out[alias] = jobs
-    return out
+    return out, silent
+
+
+def stale_ledger(cache: str, alias: str) -> None:
+    """Mark an account's cached ledger stale (a job was just submitted): the next part
+    reads ``sacct`` again, and keeps the rows should the gate not answer then."""
+    path = os.path.join(cache, f'ledger-{alias}.json')
+    c = _read_json(path)
+    if c is not None:
+        c['at'] = 0
+        _write_json(path, c)
+
+
+def git_config(text: str) -> str:
+    """A checkout's ``.git/config`` without credentials: no ``extraheader`` (where
+    ``actions/checkout`` keeps the job's token) and no ``includeIf`` section (where newer
+    versions point at a credentials file). Pure."""
+    out, skip = [], False
+    for line in text.splitlines(keepends=True):
+        s = line.strip()
+        if s.startswith('['):
+            skip = s.lower().startswith('[includeif')
+        if skip or s.split('=', 1)[0].strip().lower() == 'extraheader':
+            continue
+        out.append(line)
+    return ''.join(out)
+
+
+def cancel_job(g: Gate, key: str) -> dict | None:
+    """The part's job on ``g``'s account, cancelled: its last status once it has ended
+    (``{'state': 'GONE'}`` when the account holds no job of the key), else None after
+    one ``scancel``. Raises Unreachable."""
+    try:
+        st = g.json('status', key, timeout=60)
+    except Refused:
+        return {'state': 'GONE'}
+    if str(st.get('state')) not in LIVE:
+        return st
+    g.json('cancel', key, timeout=60)
+    return None
 
 
 # ------------------------------------------------------------------ the end (14.4)
@@ -420,13 +476,17 @@ class Driver:
         month, today = datetime.date.fromtimestamp(now).strftime('%Y-%m'), datetime.date.fromtimestamp(now).isoformat()
         gates = {a: self.gate(a) for a, x in self.site.accounts.items() if not x.retired}
         cache = state_dir(p['data'], self.site.name)
-        rows = ledgers(gates, cache, now, month)
+        rows, silent = ledgers(gates, cache, now, month)
+        unknown = sorted(set(gates) - set(rows))
+        if unknown:  # the site's caps count every account: fail closed
+            return self.finish({'rc': None, 'unavailable': f'budget: the spend of {", ".join(unknown)} is unknown (its '
+                                                           'login host does not answer, and no ledger is cached)'})
         spent = {a: spend(self.site, jobs, today) for a, jobs in rows.items()}
         why: list[str] = []
         turns = _read_json(os.path.join(cache, 'turns.json')) or {}
         for target in p['targets']:
             for alias in order(self.site, target, {a: m for a, (m, _) in spent.items()}, int(turns.get(target, 0))):
-                if alias not in rows:
+                if alias in silent:
                     why.append(f'{target}@{alias}: the login host did not answer')
                     continue
                 refusal = budget_refusal(self.site, alias, target, p['cards'], p['minutes'], spent)
@@ -435,7 +495,7 @@ class Driver:
                     continue
                 turns[target] = int(turns.get(target, 0)) + 1
                 _write_json(os.path.join(cache, 'turns.json'), turns)
-                end = self.attempt(gates[alias], target, deadline)
+                end = self.attempt(gates[alias], target, deadline, cache)
                 if end is not None:
                     return end
                 if self.stopping:
@@ -448,7 +508,40 @@ class Driver:
             return self.finish({'rc': None, 'unavailable': budget[0]})
         return self.finish({'rc': None, 'unavailable': ('; '.join(why) or 'no eligible account')[:400]})
 
-    def attempt(self, g: Gate, target: str, deadline: float) -> int | None:
+    def opened(self, alias: str, job: int | None) -> None:
+        """A job of the part on ``alias`` that may run: kept in ``open`` until its end is
+        seen, so that the reaper cancels it once this driver is gone (T21)."""
+        self.block.setdefault('open', {})[alias] = job  # type: ignore[union-attr]
+        self.save()
+
+    def closed(self, alias: str) -> None:
+        self.block.get('open', {}).pop(alias, None)  # type: ignore[union-attr]
+        self.save()
+
+    def stage(self, g: Gate) -> None:
+        """The workspace, its git config without credentials (``git_config``), and
+        ``RUNNER_TEMP`` but the runner's own files and the checkout's credentials."""
+        p = self.plan
+        ws = p['workspace'].rstrip('/')
+        g.sync('stage', ws + '/', f'{g.host}:{self.key}/ws/', (GIT_CONFIG,))
+        try:
+            with open(ws + GIT_CONFIG, encoding='utf-8', errors='replace') as f:
+                text = git_config(f.read())
+        except OSError:
+            text = None
+        if text is not None:
+            d = os.path.join(self.record, 'stage-git')
+            os.makedirs(os.path.join(d, '.git'), mode=0o700, exist_ok=True)
+            with open(os.path.join(d, '.git', 'config'), 'w', encoding='utf-8') as f:
+                f.write(text)
+            try:
+                g.sync('stage', d + '/', f'{g.host}:{self.key}/ws/', delete=False)
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
+        if p.get('temp'):
+            g.sync('stage', p['temp'].rstrip('/') + '/', f'{g.host}:{self.key}/tmp/', TEMP_EXCLUDES)
+
+    def attempt(self, g: Gate, target: str, deadline: float, cache: str) -> int | None:
         """One account and target: stage, submit, wait out the pending bound, watch. The
         drive's end, or None to try the next."""
         p = self.plan
@@ -457,24 +550,34 @@ class Driver:
         self.block.update(account=g.alias, target=target, partition=self.site.targets[target].t['partition'],
                           cards=p['cards'], cpus=self.site.targets[target].cpus(p['cards']))
         try:
-            g.sync('stage', p['workspace'].rstrip('/') + '/', f'{g.host}:{self.key}/ws/')
-            if p.get('temp'):
-                g.sync('stage', p['temp'].rstrip('/') + '/', f'{g.host}:{self.key}/tmp/', TEMP_EXCLUDES)
-            req = dict(p['request'], target=target)
-            job = g.json('submit', self.key, data=json.dumps(req).encode())['job']
+            self.stage(g)
         except (Unreachable, Refused) as e:
             tried['why'] = f'{target}@{g.alias}: {e}'
             self.say(str(tried['why']))
             return None
+        held = g.alias in self.block.get('open', {})  # type: ignore[operator]  # an earlier job not seen to end
+        if not held:
+            self.opened(g.alias, None)  # a submit that fails may still have reached sbatch
+        try:
+            job = g.json('submit', self.key, data=json.dumps(dict(p['request'], target=target)).encode())['job']
+        except (Unreachable, Refused) as e:
+            tried['why'] = f'{target}@{g.alias}: {e}'
+            self.say(str(tried['why']))
+            if self.stopping:
+                return self.cancel(g)
+            if isinstance(e, Refused) and not held:  # the gate refused it: no job
+                self.closed(g.alias)
+            return None
+        stale_ledger(cache, g.alias)
         tried['job'] = job
         self.block.update(job=job, state='PENDING')
-        self.save()
+        self.opened(g.alias, job)
         self.say(f'{self.site.name}:{target} job {job} ({g.alias})')
         submitted, bound = self.clock(), self.site.pending_minutes(target) * 60
         offset, lost_since, st = 0, None, {}
         while True:
             if self.stopping:
-                return self.cancel(g, job)
+                return self.cancel(g)
             try:
                 st = g.json('status', self.key, timeout=60)
                 lost_since = None
@@ -500,7 +603,7 @@ class Driver:
                     reason = st.get('reason') or 'pending'
                     tried['why'] = f'pending: {target}@{g.alias} {reason}'
                     self.say(f'job {job} pends past its bound ({reason}): cancelled')
-                    self.cancel(g, job, end=False)
+                    self.cancel(g, end=False)
                     self.block.pop('run_epoch', None)
                     return None
             else:
@@ -527,19 +630,20 @@ class Driver:
             if len(chunk) < LOG_CHUNK:
                 return offset
 
-    def cancel(self, g: Gate, job: int, end: bool = True) -> int | None:
-        """``scancel`` the job and wait for it to go (``CANCEL_WAIT`` s); ``end``: end the
-        drive ``stopped``."""
+    def cancel(self, g: Gate, end: bool = True) -> int | None:
+        """``scancel`` the part's job and wait for its end (``cancel_wait`` s); one not seen
+        to end stays ``open`` for the reaper. ``end``: end the drive ``stopped``."""
         t0 = self.clock()
-        while self.clock() - t0 < CANCEL_WAIT:
+        while self.clock() - t0 < float(self.plan.get('cancel_wait', CANCEL_WAIT)):
             try:
-                g.json('cancel', self.key, timeout=60)
-                st = g.json('status', self.key, timeout=60)
-                if st.get('state') not in LIVE:
-                    self.block['state'] = st.get('state')
-                    break
+                st = cancel_job(g, self.key)
             except (Unreachable, Refused):
-                pass
+                st = None
+            if st is not None:
+                if st.get('state') != 'GONE':
+                    self.block['state'] = st.get('state')
+                self.closed(g.alias)
+                break
             self.sleep(min(self.plan['poll'], 2))
         if end:
             return self.finish({'rc': None, 'signalled': True})
@@ -559,6 +663,7 @@ class Driver:
         cost = self.site.hourly(target, p['cards'], self.site.targets[target].cpus(p['cards'])) * elapsed / 3600
         self.block.update(state=st.get('state'), node=st.get('node', ''), elapsed=elapsed, cost=round(cost, 4),
                           exit_code=st.get('exit_code', ''))
+        self.block.get('open', {}).pop(g.alias, None)  # type: ignore[union-attr]
         ex = end_evidence(st, stopping=self.stopping)
         if ex.get('p2p'):
             hold_one_card(p['data'], self.site.name, target, str(ex['p2p']))
@@ -583,33 +688,37 @@ def drive(record: str) -> int:
 
 def reap(data: str, etc: str, *, run: Callable = subprocess.run, ssh: str = '/usr/bin/ssh',
          rsync: str = '/usr/bin/rsync') -> list[str]:
-    """Cancel the job of a ``slurm`` part whose driver is gone without an end (a lost
-    part, a stopped host; 14.4, T21): its record holds the job and no ``exit.json``.
-    Then run each account's gate ``reap``. Returns what it did, a line each."""
+    """Cancel the jobs of a ``slurm`` part whose driver is gone and did not see them end
+    (a lost part, a cancel the login host did not take, a stopped host; 14.4, T21): its
+    record's ``open``. A job counts as cancelled once its end is seen. Then run each
+    account's gate ``reap``. Returns what it did, a line each."""
     out = []
     root = os.path.join(data, 'ci-runners', 'state', 'parts')
     sites: dict[str, slurmsite.Site] = {}
-    for top, dirs, files in os.walk(root):
-        if 'slurm.json' not in files or 'exit.json' in files:
-            continue
-        dirs[:] = []
-        block = _read_json(os.path.join(top, 'slurm.json')) or {}
-        drv = block.get('driver')
-        if block.get('reaped') or type(block.get('job')) is not int or not isinstance(block.get('account'), str):
+    for path in sorted(glob.glob(os.path.join(glob.escape(root), *'****', 'slurm.json'))):  # a record's own
+        top = os.path.dirname(path)
+        block = _read_json(path) or {}
+        drv, todo = block.get('driver'), block.get('open')
+        if not isinstance(todo, dict) or not todo:
             continue
         if isinstance(drv, list) and len(drv) == 2 and slots.alive(int(drv[0]), float(drv[1])):
             continue
         plan = _read_json(os.path.join(top, 'slurm-plan.json')) or {}
-        try:
-            site = sites.get(plan.get('site_file', '')) or slurmsite.load_file(plan['site_file'])
-            sites[plan['site_file']] = site
-            Gate(etc, data, site, block['account'], ssh=ssh, rsync=rsync, run=run).json('cancel', plan['key'])
-        except (KeyError, slurmsite.SiteError, Unreachable, Refused) as e:
-            out.append(f'slurm reap: {os.path.relpath(top, root)}: job {block["job"]} not cancelled: {e}')
-            continue
-        block['reaped'] = time.time()
-        _write_json(os.path.join(top, 'slurm.json'), block)
-        out.append(f'slurm reap: {os.path.relpath(top, root)}: job {block["job"]} cancelled, its driver gone')
+        for alias, job in sorted(todo.items()):
+            name = f'slurm reap: {os.path.relpath(top, root)}: job {job if job is not None else "?"} ({alias})'
+            try:
+                site = sites.get(plan.get('site_file', '')) or slurmsite.load_file(plan['site_file'])
+                sites[plan['site_file']] = site
+                st = cancel_job(Gate(etc, data, site, alias, ssh=ssh, rsync=rsync, run=run), plan['key'])
+            except (KeyError, slurmsite.SiteError, Unreachable, Refused) as e:
+                out.append(f'{name} not cancelled: {e}')
+                continue
+            if st is None:
+                out.append(f'{name} cancelled, its driver gone; its end not seen yet')
+                continue
+            del todo[alias]
+            out.append(f'{name} ended ({st.get("state")}), its driver gone')
+        _write_json(path, block)
     for name, path in slurmsite.site_files(etc).items():
         try:
             site = slurmsite.load_file(path)

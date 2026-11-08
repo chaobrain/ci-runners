@@ -431,6 +431,9 @@ class Ledger(Cluster):
         led = self.gate_json('ci-slurm-gate ledger 2026-11')
         self.assertEqual(led['month'], '2026-11')
         self.assertEqual(sorted(j['JobName'] for j in led['jobs']), ['ci-r-p1-1', 'mine'])
+        pending = next(j for j in led['jobs'] if j['JobName'] == 'ci-r-p1-1')
+        self.assertEqual((pending['State'], pending['AllocTRES']), ('PENDING', ''))
+        self.assertIn('cpu=', pending['ReqTRES'])  # what the driver prices a pending job by
         self.assertEqual(self.gate('ci-slurm-gate ledger 2026-13')[0], 2)
         self.assertEqual(self.gate('ci-slurm-gate ledger 11-2026')[0], 2)
         calls = []

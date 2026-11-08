@@ -103,7 +103,7 @@ REQUEST = {
 LIVE_STATES = frozenset({'PENDING', 'CONFIGURING', 'RUNNING', 'COMPLETING', 'SUSPENDED', 'REQUEUED', 'RESIZING',
                          'SIGNALING', 'STAGE_OUT', 'STOPPED', 'REQUEUE_HOLD', 'REQUEUE_FED', 'RESV_DEL_HOLD'})
 SACCT_FIELDS = ('JobID', 'JobName', 'Partition', 'State', 'ExitCode', 'ElapsedRaw', 'NodeList', 'AllocTRES', 'Start',
-                'End', 'TimelimitRaw')
+                'End', 'TimelimitRaw', 'ReqTRES')
 
 
 class GateError(Exception):

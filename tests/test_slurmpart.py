@@ -64,6 +64,83 @@ class Pure(unittest.TestCase):
         self.assertEqual(sp.row_cost(s, ledger_row(State='CANCELLED by 5', ElapsedRaw='0'))[0], 0.0)
         month, day = sp.spend(s, [ledger_row(), ledger_row(Start='2026-11-01T00:00:00')], '2026-11-08')
         self.assertEqual((month, day), (64.0, 32.0))
+        pending = ledger_row(State='PENDING', ElapsedRaw='0', AllocTRES='', ReqTRES='cpu=16,gres/gpu=2', TimelimitRaw='30')
+        self.assertEqual(sp.row_cost(s, pending), (16.0, True))  # what it asks for, at its whole limit
+        self.assertEqual(sp.row_cost(s, dict(pending, State='CANCELLED by 5'))[0], 0.0)  # never ran
+
+    def test_ledgers_are_cached_and_a_silent_accounts_last_rows_still_count(self):
+        class G:
+            def __init__(self, rows):
+                self.rows, self.calls = rows, 0
+
+            def json(self, verb, month):
+                self.calls += 1
+                if self.rows is None:
+                    raise sp.Unreachable('down')
+                return {'jobs': self.rows}
+        import tempfile
+        with tempfile.TemporaryDirectory() as cache:
+            a, b = G([{'JobID': '1'}]), G([{'JobID': '2'}])
+            self.assertEqual(sp.ledgers({'a': a, 'b': b}, cache, 1000.0, '2026-11'),
+                             ({'a': [{'JobID': '1'}], 'b': [{'JobID': '2'}]}, set()))
+            sp.ledgers({'a': a}, cache, 1000.0 + sp.LEDGER_TTL - 1, '2026-11')
+            self.assertEqual(a.calls, 1)  # cached
+            a.rows = [{'JobID': '3'}]
+            self.assertEqual(sp.ledgers({'a': a}, cache, 1000.0 + sp.LEDGER_TTL, '2026-11')[0], {'a': [{'JobID': '3'}]})
+            sp.stale_ledger(cache, 'a')
+            sp.ledgers({'a': a}, cache, 1000.0 + sp.LEDGER_TTL, '2026-11')
+            self.assertEqual(a.calls, 3)  # a submit makes it stale
+            b.rows = a.rows = None  # silent: the last rows of the month, however old; none of another month
+            self.assertEqual(sp.ledgers({'a': a, 'b': b}, cache, 1e9, '2026-11'),
+                             ({'a': [{'JobID': '3'}], 'b': [{'JobID': '2'}]}, {'a', 'b'}))
+            self.assertEqual(sp.ledgers({'a': a}, cache, 1e9, '2026-12'), ({}, {'a'}))
+
+    def test_the_staged_git_config_holds_no_credentials(self):
+        text = ('[core]\n\tbare = false\n[remote "origin"]\n\turl = https://github.com/o/r\n'
+                '[http "https://github.com/"]\n\textraheader = AUTHORIZATION: basic c2VjcmV0\n'
+                '[includeIf "gitdir:/w/.git"]\n\tpath = /rt/git-credentials-1.config\n[branch "main"]\n\tremote = origin\n')
+        self.assertEqual(sp.git_config(text), '[core]\n\tbare = false\n[remote "origin"]\n\turl = https://github.com/o/r\n'
+                                              '[http "https://github.com/"]\n[branch "main"]\n\tremote = origin\n')
+        self.assertEqual(sp.git_config('[http]\n\tExtraHeader=x\n'), '[http]\n')
+        import tempfile
+        calls = []
+
+        class G:
+            host, alias = 'h', 'a'
+
+            def sync(self, verb, src, dst, excludes=(), delete=True):
+                cfg = pathlib.Path(src) / '.git' / 'config'
+                calls.append((verb, dst, tuple(excludes), delete, cfg.read_text() if cfg.exists() else None))
+        with tempfile.TemporaryDirectory() as t:
+            ws = pathlib.Path(t) / 'ws'
+            (ws / '.git').mkdir(parents=True)
+            (ws / '.git' / 'config').write_text(text)
+            d = object.__new__(sp.Driver)
+            d.plan, d.key, d.record = {'workspace': str(ws), 'temp': ''}, 'k', t
+            d.stage(G())
+        self.assertEqual(calls[0][:4], ('stage', 'h:k/ws/', ('/.git/config',), True))  # never the checkout's own
+        self.assertEqual(calls[1][1:], ('h:k/ws/', (), False, sp.git_config(text)))
+        self.assertEqual(len(calls), 2)
+
+    def test_cancel_job(self):
+        class G:
+            def __init__(self, states):
+                self.states, self.calls = list(states), []
+
+            def json(self, verb, key, timeout=0):
+                self.calls.append(verb)
+                if verb == 'cancel':
+                    return {'cancelled': True}
+                st = self.states.pop(0)
+                if st is None:
+                    raise sp.Refused('k has no job')
+                return {'state': st}
+        g = G([None])
+        self.assertEqual((sp.cancel_job(g, 'k'), g.calls), ({'state': 'GONE'}, ['status']))  # nothing to cancel
+        g = G(['RUNNING'])
+        self.assertEqual((sp.cancel_job(g, 'k'), g.calls), (None, ['status', 'cancel']))  # its end not seen yet
+        g = G(['CANCELLED'])
+        self.assertEqual((sp.cancel_job(g, 'k'), g.calls), ({'state': 'CANCELLED'}, ['status']))
 
     def test_the_budget(self):
         s = self.site
@@ -141,6 +218,10 @@ class Driver(Cluster):
         for x in (self.etc / 'projects', self.etc / 'slurm' / 'keys', self.ws, self.temp / '_runner_file_commands'):
             x.mkdir(parents=True)
         (self.ws / 'src.txt').write_text('src\n')
+        (self.ws / '.git').mkdir()
+        (self.ws / '.git' / 'config').write_text('[core]\n\tbare = false\n[http "https://github.com/"]\n'
+                                                 '\textraheader = AUTHORIZATION: basic c2VjcmV0\n')
+        (self.temp / 'git-credentials-1.config').write_text('[http]\n\textraheader = AUTHORIZATION: basic c2VjcmV0\n')
         (self.temp / 'input.txt').write_text('in\n')
         (self.temp / '_runner_file_commands' / 'set_output').write_text('never staged\n')
         site = self.etc / 'slurm' / 'cluster1.toml'
@@ -247,6 +328,14 @@ class Ends(Driver):
         self.assertEqual(r['class'], 'slurm')
         self.assertEqual(r['run_epoch'], b['run_epoch'])  # the run starts with the job, not the drive
         self.assertGreaterEqual(r['run_epoch'], r['start_epoch'])
+        self.assertEqual(b['open'], {})
+        ws = self.base / 'work' / 'org' / 'repo' / '77-1' / 'unit-1' / 'ws'
+        self.assertEqual((ws / '.git' / 'config').read_text(), '[core]\n\tbare = false\n[http "https://github.com/"]\n')
+        self.assertEqual((ws / 'src.txt').read_text(), 'src\n')
+        self.assertFalse((ws.parent / 'tmp' / 'git-credentials-1.config').exists())
+        self.assertTrue((ws.parent / 'tmp' / 'input.txt').exists())
+        cache = json.loads((self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'ledger-acct1.json').read_text())
+        self.assertEqual(cache['at'], 0)  # read again by the next part: the job counts from its submission
 
     def test_a_red_part(self):
         code, out = self.execute(command='exit 3')
@@ -335,6 +424,21 @@ class Pending(Driver):
         self.assertIn('Priority', out['reason'])
         self.assertTrue(all(j['state'] == 'CANCELLED' for j in self.jobs()))
 
+    def test_past_the_queue_timeout_no_next_account_is_tried(self):
+        self.plan({'pend': -1, 'reason': 'Priority'}, {'pend': -1, 'reason': 'Priority'})
+        code, out = self.execute(target='cpu', queue_timeout_minutes=0.005)  # below the target's pending bound
+        self.assertEqual(out['outcome'], 'unavailable')
+        self.assertEqual(len(self.jobs()), 1)
+
+    def test_tied_accounts_take_turns(self):
+        site = self.etc / 'slurm' / 'cluster1.toml'
+        site.write_text(site.read_text().replace('cpu_core_hour = 0.06', 'cpu_core_hour = 0.0'))  # spend ties at 0
+        accounts = []
+        for k in range(3):
+            code, out = self.execute(id=f't{k}', target='cpu')
+            accounts.append(self.block(out)['account'])
+        self.assertEqual(accounts, ['acct1', 'acct2', 'acct1'])
+
     def test_a_budget_refusal_is_unavailable_budget(self):
         # each account's sacct shows the row: 2 x 14.90 of the daily 30; an a40 card for 6 min is 0.45 more
         (self.d / 'slurm' / 'ledger.json').write_text(json.dumps([ledger_row(
@@ -365,6 +469,8 @@ class Pending(Driver):
         self.assertEqual(self.jobs(), [])
 
     def test_an_unreachable_account_is_skipped(self):
+        code, out = self.execute(id='first', target='cpu')  # both answer: their ledgers are cached
+        self.assertEqual(self.block(out)['account'], 'acct1')
         self.hosts({'acct1': True})
         code, out = self.execute(target='cpu')
         self.assertEqual(out['outcome'], 'pass')
@@ -373,6 +479,14 @@ class Pending(Driver):
         code, out = self.execute(id='nowhere', target='cpu')
         self.assertEqual((out['outcome'], out['next']), ('unavailable', 'fallback'))
         self.assertIn('did not answer', out['reason'])
+
+
+    def test_an_account_of_unknown_spend_stops_every_part(self):
+        self.hosts({'acct1': True})  # silent, and no ledger of it cached: the site's caps cannot be checked
+        code, out = self.execute(target='cpu')
+        self.assertEqual((out['outcome'], out['next']), ('unavailable', 'fallback'))
+        self.assertTrue(out['reason'].startswith('budget: the spend of acct1 is unknown'), out['reason'])
+        self.assertEqual(self.jobs(), [])
 
 
 class Stop(Driver):
@@ -397,6 +511,34 @@ class Stop(Driver):
         self.assertEqual((code, out['outcome'], out['next']), (0, 'stopped', 'none'))
         self.assertEqual(self.jobs()[0]['state'], 'CANCELLED')
         self.assertEqual(self.jobs()[0]['cancelled_by'], os.getuid())
+        b = self.block(out)
+        self.assertEqual((b['state'], b['open']), ('CANCELLED', {}))  # its end seen, not only the scancel sent
+
+    def test_a_cancel_the_login_host_does_not_take_is_left_to_the_reaper(self):
+        ex = self.executor()
+
+        def act():
+            self.hosts({'acct1': True})
+            os.kill(ex.proc.pid, signal.SIGTERM)
+        t = self.when_running(act)
+        with mock.patch.object(sp, 'CANCEL_WAIT', 1):
+            code, out = self.execute(ex, command='sleep 60')
+        t.join(10)
+        self.assertEqual(out['outcome'], 'stopped')
+        rec = self.record(out)
+        self.assertTrue((rec / 'exit.json').exists())
+        self.assertEqual(json.loads((rec / 'slurm.json').read_text())['open'], {'acct1': 1001})
+        self.assertEqual(self.jobs()[0]['state'], 'RUNNING')
+        self.hosts({})
+        ssh = os.path.join(self.bin, 'ssh')
+        end = time.monotonic() + 20
+        while json.loads((rec / 'slurm.json').read_text())['open']:
+            self.assertLess(time.monotonic(), end)
+            lines = sp.reap(str(self.data), str(self.etc), ssh=ssh)
+            time.sleep(0.2)
+        self.assertTrue(any('job 1001 (acct1) ended (CANCELLED), its driver gone' in x for x in lines), lines)
+        self.assertEqual(self.jobs()[0]['state'], 'CANCELLED')
+        self.assertFalse(any('job 1001' in x for x in sp.reap(str(self.data), str(self.etc), ssh=ssh)))
 
     def test_a_lost_driver_leaves_the_job_to_the_reaper(self):
         t = self.when_running(lambda: self.hosts({'acct1': True}))  # the login host goes away mid-part
@@ -411,18 +553,30 @@ class Stop(Driver):
         self.assertIn('did not answer', b['lost'])
         self.assertEqual(self.jobs()[0]['state'], 'RUNNING')
         (rec / 'outcome.json').unlink()  # as if the runner had stopped first: the verdict's salvage reads it
+        r = json.loads((rec / 'record.json').read_text())
+        r.pop('slurm')  # and the executor before its end: salvage reads the block from slurm.json
+        (rec / 'record.json').write_text(json.dumps(r))
         _, done = part.salvage(self.inv, out['record'], self.env)
         self.assertEqual(done['outcome'], 'lost')
         self.assertIn('cluster1:cpu (acct1), job 1001', done['slurm'])
         self.hosts({})
-        lines = sp.reap(str(self.data), str(self.etc), ssh=os.path.join(self.bin, 'ssh'))
-        self.assertTrue(any('job 1001 cancelled, its driver gone' in x for x in lines), lines)
+        nested = rec / 'work' / 'x'  # a block below a record (results the job wrote): not the reaper's
+        nested.mkdir(parents=True)
+        for f in ('slurm.json', 'slurm-plan.json'):
+            (nested / f).write_text((rec / f).read_text())
+        ssh = os.path.join(self.bin, 'ssh')
+        lines = sp.reap(str(self.data), str(self.etc), ssh=ssh)
+        self.assertIn('slurm reap: org/repo/77-1/unit-1: job 1001 (acct1) cancelled, its driver gone; its end not seen yet',
+                      lines)
+        self.assertEqual(sum('job 1001' in x for x in lines), 1, lines)
         end = time.monotonic() + 15
         while self.jobs()[0]['state'] != 'CANCELLED':
             self.assertLess(time.monotonic(), end)
             time.sleep(0.05)
-        self.assertTrue(json.loads((rec / 'slurm.json').read_text())['reaped'])
-        lines = sp.reap(str(self.data), str(self.etc), ssh=os.path.join(self.bin, 'ssh'))
+        lines = sp.reap(str(self.data), str(self.etc), ssh=ssh)
+        self.assertIn('slurm reap: org/repo/77-1/unit-1: job 1001 (acct1) ended (CANCELLED), its driver gone', lines)
+        self.assertEqual(json.loads((rec / 'slurm.json').read_text())['open'], {})
+        lines = sp.reap(str(self.data), str(self.etc), ssh=ssh)
         self.assertFalse(any('job 1001' in x for x in lines), lines)  # once
 
     def test_the_reaper_leaves_a_live_drivers_job(self):

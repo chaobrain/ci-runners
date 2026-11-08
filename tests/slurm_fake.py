@@ -219,7 +219,7 @@ def _row(j: dict) -> dict[str, str]:
     return {'JobID': str(j['id']), 'JobName': j['sb'].get('--job-name', ''), 'Partition': j['sb'].get('--partition', ''),
             'State': state, 'ExitCode': f'{j.get("rc", 0)}:0', 'ElapsedRaw': str(elapsed),
             'NodeList': j['sb'].get('--nodelist', 'fake01') if j.get('start') else 'None assigned',
-            'AllocTRES': tres if j.get('start') else '', 'Start': _iso(j.get('start')), 'End': _iso(end),
+            'AllocTRES': tres if j.get('start') else '', 'ReqTRES': tres, 'Start': _iso(j.get('start')), 'End': _iso(end),
             'TimelimitRaw': j['sb'].get('--time', '0')}
 
 

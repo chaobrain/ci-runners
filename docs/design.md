@@ -900,7 +900,9 @@ hosts, a coverage job). These rules are the consumer's:
    `salvage` job on every other host that did (§4.5), unless the run was cancelled (a
    newer head's run posts instead). It reads the parts' `ci-part-<id>-<attempt>`
    artifacts, and a part's last attempt decides: any `red` sets the context to failure;
-   all `pass`, success; else error. It merges the parts' summaries into the job summary
+   all `pass`, success; else error. A run's artifacts outlive its GitHub re-runs, so an
+   attempt made in an earlier run attempt than the part's first attempt (its outcome's
+   `record` names the run attempt) is not read (`v1.5.2`, issue #64). It merges the parts' summaries into the job summary
    and fails unless the state is success.
 6. **Permissions:** `contents: read`, plus `statuses: write` for claim and verdict. A job
    that reads another run's artifacts adds `actions: read`.

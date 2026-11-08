@@ -70,6 +70,27 @@ class Artifacts(unittest.TestCase):
         self.assertEqual(sorted(got['cpu']), [1, 2])
         self.assertEqual(got['cpu'][2], ({'outcome': 'pass', 'next': 'none'}, '### cpu 2\n'))
 
+    def test_a_retry_an_earlier_run_attempt_left_is_dropped(self):
+        # issue #64: run attempt 1's cpu and its retry ended unavailable; run attempt 3
+        # re-ran cpu alone, which passed, and the old ci-part-cpu-2 is still in the run
+        rec = 'hb:org/repo/77-{}/{}-{}'.format
+        art(self.root, 'ci-part-cpu-1', {'outcome': 'pass', 'next': 'none', 'record': rec(3, 'cpu', 1)})
+        art(self.root, 'ci-part-cpu-2', {'outcome': 'unavailable', 'next': 'none', 'record': rec(1, 'cpu', 2)})
+        # the same run attempt: the retry counts, as before
+        art(self.root, 'ci-part-gpu-1', {'outcome': 'oom', 'next': 'retry', 'record': rec(2, 'gpu', 1)})
+        art(self.root, 'ci-part-gpu-2', {'outcome': 'pass', 'next': 'none', 'record': rec(2, 'gpu', 2)})
+        # a retry made in a later run attempt than its first attempt counts too
+        art(self.root, 'ci-part-lnt-1', {'outcome': 'oom', 'next': 'retry', 'record': rec(1, 'lnt', 1)})
+        art(self.root, 'ci-part-lnt-2', {'outcome': 'red', 'next': 'none', 'record': rec(2, 'lnt', 2)})
+        got = verdict.collect(str(self.root))
+        self.assertEqual({i: sorted(a) for i, a in got.items()}, {'cpu': [1], 'gpu': [1, 2], 'lnt': [1, 2]})
+        items = verdict.ends(['cpu', 'gpu', 'lnt'], got, lambda pid, n: None)
+        self.assertEqual([(e.id, e.outcome, e.attempt) for e in items],
+                         [('cpu', 'pass', 1), ('gpu', 'pass', 2), ('lnt', 'red', 2)])
+        self.assertEqual(verdict.decide(items).state, 'failure')
+        self.assertEqual(verdict.run_attempt({'record': 'hb:org/repo/77-12/cpu-1'}), 12)
+        self.assertEqual(verdict.run_attempt({}), 0)
+
     def test_what_is_not_an_artifact_is_skipped(self):
         art(self.root, 'other-cpu-1', {'outcome': 'pass'})
         art(self.root, 'ci-part-cpu-x', {'outcome': 'pass'})

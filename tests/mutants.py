@@ -443,6 +443,12 @@ MUTANTS = [
      [f'{TV}.Artifacts.test_ends_read_the_records_where_the_artifacts_stop',
       f'{TV}.Main.test_a_part_without_artifact_or_record_is_lost']),
     (VRD, "    if len(set(ids)) != len(ids):", "    if False:", [f'{TV}.Artifacts.test_part_ids']),
+    # a retry an earlier run attempt left behind (issue #64)
+    (VRD, "    return {pid: current(attempts) for pid, attempts in out.items()}", "    return out", [f'{TV}.Artifacts.test_a_retry_an_earlier_run_attempt_left_is_dropped']),
+    (VRD, "if n == 1 or run_attempt(a[0]) >= first}", "if n == 1 or run_attempt(a[0]) > first}", [f'{TV}.Artifacts.test_a_retry_an_earlier_run_attempt_left_is_dropped']),
+    (VRD, "if n == 1 or run_attempt(a[0]) >= first}", "if n == 1 or run_attempt(a[0]) >= 0}", [f'{TV}.Artifacts.test_a_retry_an_earlier_run_attempt_left_is_dropped']),
+    (VRD, "    return int(m.group(1)) if m else 0", "    return 0", [f'{TV}.Artifacts.test_a_retry_an_earlier_run_attempt_left_is_dropped']),
+    (VRD, "RECORD_RUN = re.compile(r'/[0-9]+-([0-9]+)/[^/]+-[0-9]{1,2}\\Z')", "RECORD_RUN = re.compile(r'/([0-9]+)-[0-9]+/[^/]+-[0-9]{1,2}\\Z')", [f'{TV}.Artifacts.test_a_retry_an_earlier_run_attempt_left_is_dropped']),
     (VRD, "        if not token:", "        if False:", [f'{TV}.Main.test_malformed_inputs_post_nothing']),
     # salvage, per host (design §4.5, decision 12.13)
     # the old lookup: the part's newest record across the repository's runs

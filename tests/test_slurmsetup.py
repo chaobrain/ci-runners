@@ -309,6 +309,8 @@ class Status(Site):
             'JobID': '9', 'JobName': 'ci-old', 'Partition': 'gpu-partition-b', 'State': 'COMPLETED', 'ExitCode': '0:0',
             'ElapsedRaw': '3600', 'AllocTRES': 'cpu=16,gres/gpu=1', 'Start': '2026-01-01T00:00:00', 'TimelimitRaw': '60'}]))
         slurmpart.hold_one_card(str(self.data), 'cluster1', 'a40', 'p2p: copies read zeros')
+        path = self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'targets.json'
+        path.write_text(json.dumps({**json.loads(path.read_text()), 'cpu': {'canary': {'ok': True}}}))
         ctx, out = self.ctx()
         self.assertEqual(ss.status(ctx, 'cluster1'), 0)
         text = out.getvalue()
@@ -318,6 +320,7 @@ class Status(Site):
         self.assertNotIn('mine', text)
         self.assertIn('site cluster1: month 16.', text)
         self.assertIn('target a40: held at 1 card(s): p2p: copies read zeros', text)
+        self.assertNotIn('target cpu', text)  # its canary passed: not held
         self.site_file.write_text(ss.retire_text(self.site_file.read_text(), 'acct1'))
         ctx, out = self.ctx()
         ss.status(ctx, 'cluster1')  # its gate is no longer asked; its cached rows still count

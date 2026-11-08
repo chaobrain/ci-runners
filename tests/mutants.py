@@ -134,6 +134,7 @@ MUTANTS = [
     (SE, "    built = dict((kept or {}).get('variants', {}))", '    built = {}', [f'{TSE}.Env.test_a_subset_run_keeps_the_other_variants_builds_in_the_kept_file']),
     # RUN-9h: what a part shows on GitHub is redacted; a root others may write is refused; the canary at its --time
     # RUN-9h review: redact, then cut; the cluster's node lists; the directories above the root; the nits
+    (SS, "        if isinstance(h, dict) and h.get('max_cards') is not None:", '        if isinstance(h, dict):', [f'{TSU}.Status.test_spend_live_jobs_and_held_targets']),
     # one env build at a time per base; a conda create that leaves no python fails
     (SL, '        fcntl.flock(block, fcntl.LOCK_EX)', '        pass', [f'{TSE}.Env.test_builds_of_two_projects_run_one_at_a_time']),
     (SL, "                    if 'create' in argv and '--prefix' in argv:", '                    if False:', [f'{TSE}.Env.test_a_conda_create_that_leaves_no_python_fails_the_build']),

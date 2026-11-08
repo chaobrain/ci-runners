@@ -47,6 +47,7 @@ verdict        [self-hosted, <host>-light]
 | `unavailable` | 开跑前就不满足条件：卡太热、没有空卡、排队超时、磁盘不足、`gpus` 不合该类 runner 等 | 重试一次 |
 | `unavailable`（`drained: …`） | 这台主机或这个池子被维护者排空了（design 决定 13.1） | 在另一台主机的同类池子上重试一次（`retry-on`）；另一台主机没有这一类（`compile`、`nightly`）就不重试，状态为 `error` |
 | `unavailable`（`busy: …`） | 第一次尝试时这台主机被其他账户占满了：原因写出规则、测到的值和阈值（design 决定 13.2） | 同上，在另一台主机的同类池子上重试一次；同一个 head 的同一个部件只让出一次 |
+| `unavailable`（`busy: nightly holds every slot and card`） | 第一次尝试时这台主机的 `nightly` 部件占着（或正排队等着）全部槽位和卡（design 决定 13.6），不再白等排队超时 | 立刻在另一台主机的同类池子上重试一次；每次都让出 |
 | `unavailable`（`p2p: …`） | 双卡部件（`multi`）开跑前的 P2P 自检失败：主机故障 | 不重试，状态为 `error` |
 | `lost` | 作业没留下输出就结束了，例如 runner 被停 | verdict 从主机上的记录 salvage |
 | `stopped` | 被取消，例如同一个 PR 推了新 head | — |
@@ -148,7 +149,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE = "false"
 - **新建的私有仓库或新成员**：最多等 10 分钟，下一次同步后就能用。
 - **想对同一个 head 重跑**：已经绿的 head 会被 claim 跳过，要重跑就推一个新 commit。红的 head 或 error 的 head 重新触发会再跑一次。
 - **`unavailable: health gate`**：分到的卡太热，会自动换一张凉卡重试。
-- **作业排队很久**：CPU 部件共用主机的 CI 槽位，GPU 部件一张卡一次只跑一个。每个项目在每个池子里最多有 1 个等待中的部件，再多就直接 `unavailable`（"project queue full"）。
+- **作业排队很久**：CPU 部件共用主机的 CI 槽位，GPU 部件一张卡一次只跑一个。每个项目在每个池子里最多有 1 个等待中的部件，再多的第一次尝试就直接 `unavailable`（"project queue full"），去另一台主机重试；重试本身不受这个上限限制，会排队等到排队超时（design 决定 13.6）。
 
 ## 6. 主机锁
 

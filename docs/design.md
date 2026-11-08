@@ -248,7 +248,8 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
     8. **The `nightly` class returns, on 3090a only.** One runner; a part may run 600 min
        (its job 615). A `nightly` part holds every CI slot and every card lease of its
        host for its life, so no other part runs beside it; parts queued behind it wait up
-       to their queue timeout and then end `unavailable`. Its `gpu-mem-mib` is checked on
+       to their queue timeout and then end `unavailable` (from `v1.6.0` a first attempt
+       with somewhere else to go goes there at once instead, 13.6). Its `gpu-mem-mib` is checked on
        the cards its command gets only: the lowest-numbered cool cards with that much
        free, `gpus` of them (lead, 2026-11-07); a local user's job on another card does
        not hold it back. This replaces the first path's
@@ -523,6 +524,40 @@ from the load record they add.
          through `Requires=`).
        - Known limit, unchanged: the runner still writes the machine name into every job
          log.
+    6. **No wait behind the nightly, and a retry queues on a full queue** (lead,
+       2026-11-08, from the CI-time review of brainspike's runs that morning). While a
+       `nightly` part held every slot and card of 3090a, PR parts' first attempts there
+       waited out their 20-minute queue timeout before going to 3090b; others ended at once
+       with "project queue full", and their retries, piled onto 3090b, could meet the cap
+       there too and end `unavailable` with `next` `none`, which the verdict reports as an
+       infrastructure error with nothing wrong in the change. So, from `v1.6.0`:
+       - **The nightly's hold record.** A `nightly` part writes `state/every.json` before
+         it takes its slot ticket and deletes it when it ends: the processes that keep its
+         hold, by PID and start time (the executor; from the command's start the
+         supervisor too, which keeps the slots and leases after a stopped executor, §4.3),
+         and its record. The record holds while one of those processes runs; a record whose
+         processes are all gone holds nothing (fail open: the part waits as in `v1.5`).
+       - **A first attempt does not wait behind it.** The busy check (13.2) gains a rule
+         that comes before the load rules: while the hold record holds, a part's first
+         attempt ends `unavailable` (`busy: nightly holds every slot and card`) at once,
+         with `next` `fallback` and `retry-on` the other host's pool of its class (13.3).
+         It applies where busy does (a class with a peer pool, other than `light` and
+         `nightly`; a project with a retry budget; never on a retry), every time and with
+         no marker: while it waits its ticket holds back every later one, and once in it
+         holds every slot and card (12.8, §7), so a part sent away saves its whole queue
+         timeout. Generalising to "a hold whose expected end is past
+         the queue timeout" is not done: only the nightly holds a whole host, and its
+         timeout (600 min) is no estimate of its end.
+       - **A retry queues on a full queue.** The project cap of §7 rule 2 (`max_waiting`
+         per pool) refuses a first attempt only; a retry (`attempt-of` set) takes its
+         ticket past the cap and waits up to its queue timeout, as a retry already does
+         on a busy or drained host's peer. The cap still counts a waiting retry, so the
+         first attempts that come after it go elsewhere. The backlog stays bounded: a
+         retry exists only after its first attempt ended, a part is retried at most once
+         (§4.4), and each waiting retry holds a runner of its pool, so a pool never has
+         more waiting retries than runners, and each waits at most its queue timeout.
+       - A retry that still finds no slot ends `queue timeout: no CI slot` (or `no card
+         fits`), `next` `none`, as before: both hosts were full for its whole wait.
 
 ## Decisions of this spec
 
@@ -655,7 +690,8 @@ subtree of the shared account (decision 11.3).
 <our subtree>/ci-runners/state/            part records parts/<repo>/<run>-<attempt>/<id>-<n>/
                                            {record.json, status.json, samples.csv, log};
                                            leases; the slot queue; setup.json; drain.json
-                                           (13.1); hostload/ (the load record, 13.2)
+                                           (13.1); hostload/ (the load record, 13.2);
+                                           every.json (the nightly part's hold, 13.6)
 <our subtree>/ci-runners/logs/             hook and reaper logs, kept 14 days
 <our subtree>/ci-runners/envs/<project>/   the projects' conda envs (decision 11.4)
 <our subtree>/actions-runner/<name>/       one runner each: the app, .env, credentials
@@ -771,8 +807,8 @@ A CPU part (`gpus: 0`) takes one of the host's CI slots; a GPU part takes its ca
 lease, which is its slot (§7).
 
 Before it takes anything, the part passes its gate, in this order: low disk; its `gpus`
-and `lock` against its class's row (§4.8); the drain (decision 13.1); busy (13.2, a
-first attempt only). The health gate (§5.5) comes before the leases. Once it holds its
+and `lock` against its class's row (§4.8); the drain (decision 13.1); busy (13.2 and
+13.6, a first attempt only). The health gate (§5.5) comes before the leases. Once it holds its
 slot and leases, it reads the drain again before the command. A refusal at any of these
 ends it `unavailable` and releases what it took.
 
@@ -829,7 +865,7 @@ nonzero exit with an OOM kill is `oom`, not `red`.
 | thermal | our own early stop (§5.5) | retry once on a cool card |
 | reboot | boot id differs from the one recorded at start | retry once on the same host |
 | unavailable | before the command: the health gate, no card fits, the queue timeout, the project's queue full, low disk, `gpus` or `lock` the class does not accept (§4.8), an unknown inventory schema, a malformed registry entry | fallback: once, on a cool card or the same pool |
-| unavailable (`drained`, `busy`) | the drain (decision 13.1), or a busy host on a first attempt (13.2) | fallback: once, on the other host's pool of the class (13.3); `none` for a drained part of a class with no such pool |
+| unavailable (`drained`, `busy`) | the drain (decision 13.1), or a busy host on a first attempt (13.2), or a `nightly` part's hold of the host on a first attempt (13.6) | fallback: once, on the other host's pool of the class (13.3); `none` for a drained part of a class with no such pool |
 | unavailable (`p2p`) | the P2P self-test of a `multi` part failed, errored or ran over its bound (decision 12.6) | none: a host fault, which the verdict reports as error |
 | lost | the job ended without outputs: the runner stopped (`systemctl show` timestamps after the part's start), or the tunnel dropped the job's connection | the verdict salvages the record (§4.5) |
 | stopped | cancelled (concurrency group, TERM) | none |
@@ -1109,7 +1145,8 @@ On 3090b and 3090a the executor of §4.3 adds:
      leases are held.
    - **Busy** (decision 13.2): on a first attempt of a class with a peer pool, other than
      `light`, a host busy for the whole window ends the part `unavailable`, with
-     `retry-on` the other host's pool; once per head and part.
+     `retry-on` the other host's pool; once per head and part. While a `nightly` part
+     holds or waits for every slot and card (13.6), every time.
    - **Health**, before the leases: a GPU part needs as many of its cards below
      `max_temp_c` (80 °C) and read as it asks for. If not, it ends `unavailable`, and
      `retry-on` names a card of the host that passes (`<host>-gpu<M>`) where one does.
@@ -1260,8 +1297,9 @@ Rules:
    its cap is skipped. When several projects wait, the next slot goes to the project
    that holds the fewest slots, and ties go to the older ticket.
 2. **Per-project caps** come from the registry: `max_slots` per host (default 1),
-   `memory_max`, and `max_waiting` per pool (default 1). A part beyond `max_waiting`
-   ends `unavailable` ("project queue full"). So one project cannot fill a pool with
+   `memory_max`, and `max_waiting` per pool (default 1). A first attempt beyond
+   `max_waiting` ends `unavailable` ("project queue full") and goes elsewhere; a retry
+   queues past it, counted by it (decision 13.6). So one project cannot fill a pool with
    waiters, and GitHub's queue, which is not fair across repositories, stays short.
 3. **Light jobs never wait behind heavy ones**: claim and verdict run on their own
    `light` pool and take no slot.
@@ -1273,7 +1311,9 @@ Rules:
 6. **Busy hosts and drains** (decision 13). A part does not queue on a host that another
    account has kept busy for the whole window, nor on a drained one: it goes once to the
    other host's pool of its class. A retry, or a re-run of a head already sent away, waits
-   for its slot where it lands, so load moves at most once per head and part.
+   for its slot where it lands, so load moves at most once per head and part. Nor does a
+   first attempt queue behind a `nightly` part that holds or waits for every slot and
+   card (decision 13.6).
 
 ## 8. Failure modes and bounds
 

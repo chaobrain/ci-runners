@@ -658,6 +658,7 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
             'gpus': ','.join(str(c) for c in rec.get('cards', [])), 'queue-seconds': int(rec.get('queue_seconds', 0)),
             'run-seconds': run_seconds,
             'record': f'{role}:{record_ref(record)}', 'summary': f'{record_ref(record)}/summary.md', 'attempt': attempt,
+            'run-attempt': record_run_attempt(record),
             'resume': h.resume, 'peak': ', '.join(f'card {c} {t:g} C' for c, t in sorted(peak.items()))
             if isinstance(peak, dict) else ''}
 
@@ -1117,6 +1118,14 @@ def record_ref(record: str) -> str:
     what the ``record`` output names, so no home path reaches the job's outputs. Pure."""
     parts = record.split(os.sep)
     return '/'.join(parts[-4:])
+
+
+def record_run_attempt(record: str) -> int:
+    """The run attempt (``GITHUB_RUN_ATTEMPT``, which ``record_dir`` names) a record was
+    made in: ``<run id>-<run attempt>``, its parent's name; 0 if that names none. What
+    the verdict orders a part's artifacts by (issue #64). Pure."""
+    m = re.fullmatch(r'[0-9]+-([0-9]+)', os.path.basename(os.path.dirname(record.rstrip(os.sep))))
+    return int(m.group(1)) if m else 0
 
 
 def _record_path(inv: inventory.Inventory, ref: str) -> str:

@@ -91,6 +91,19 @@ class Artifacts(unittest.TestCase):
         self.assertEqual(verdict.run_attempt({'record': 'hb:org/repo/77-12/cpu-1'}), 12)
         self.assertEqual(verdict.run_attempt({}), 0)
 
+    def test_a_first_attempt_without_a_record_still_drops_a_stale_retry(self):
+        # the re-run's first attempt found no release installed (no record), so only its
+        # run-attempt field names run attempt 3; run attempt 1's retry must not decide
+        art(self.root, 'ci-part-cpu-1', {'outcome': 'unavailable', 'next': 'none', 'run-attempt': 3})
+        art(self.root, 'ci-part-cpu-2', {'outcome': 'pass', 'next': 'none', 'record': 'hb:org/repo/77-1/cpu-2'})
+        got = verdict.collect(str(self.root))
+        self.assertEqual(sorted(got['cpu']), [1])
+        self.assertEqual(verdict.ends(['cpu'], got, lambda pid, n: None)[0].outcome, 'unavailable')
+        # the field wins over the record; a malformed one falls back to the record
+        self.assertEqual(verdict.run_attempt({'run-attempt': 4, 'record': 'hb:org/repo/77-2/cpu-1'}), 4)
+        self.assertEqual(verdict.run_attempt({'run-attempt': True, 'record': 'hb:org/repo/77-2/cpu-1'}), 2)
+        self.assertEqual(verdict.run_attempt({'run-attempt': '5', 'record': 'hb:org/repo/77-2/cpu-1'}), 2)
+
     def test_what_is_not_an_artifact_is_skipped(self):
         art(self.root, 'other-cpu-1', {'outcome': 'pass'})
         art(self.root, 'ci-part-cpu-x', {'outcome': 'pass'})

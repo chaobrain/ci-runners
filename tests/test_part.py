@@ -95,6 +95,9 @@ class Execute(Host):
         self.assertNotIn('verify', o)
         self.assertNotIn('CI_HOST_LOCK', env)  # the host lock is retired (decision 11.12)
         self.assertEqual(json.loads(pathlib.Path(rec, 'outcome.json').read_text())['outcome'], 'pass')
+        self.assertEqual(json.loads(pathlib.Path(rec, 'outcome.json').read_text())['run-attempt'], 1)  # 77-1 (issue #64)
+        self.assertEqual(part.record_run_attempt('/d/org/repo/77-12/unit-2'), 12)
+        self.assertEqual(part.record_run_attempt('/d/org/repo/x/unit-2'), 0)
         self.assertIn('### part `unit`', pathlib.Path(rec, 'summary.md').read_text())
         self.assertEqual(o['summary'], 'org/repo/77-1/unit-1/summary.md')
         self.assertNotIn('GITHUB_OUTPUT', env)  # the command cannot write the step's outputs

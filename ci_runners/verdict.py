@@ -114,9 +114,13 @@ def collect(root: str) -> dict[str, dict[int, tuple[dict, str]]]:
 
 
 def run_attempt(outcome: Mapping) -> int:
-    """The run attempt (``GITHUB_RUN_ATTEMPT``) an outcome was made in, from its
-    ``record`` (``<host>:<repo>/<run id>-<run attempt>/<id>-<n>``); 0 when it names none.
-    Pure."""
+    """The run attempt (``GITHUB_RUN_ATTEMPT``) an outcome was made in: its
+    ``run-attempt`` (every outcome from ``v1.5.2``, also one without a record), else its
+    ``record`` (``<host>:<repo>/<run id>-<run attempt>/<id>-<n>``); 0 when neither names
+    one. Pure."""
+    v = outcome.get('run-attempt')
+    if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+        return v
     m = RECORD_RUN.search(str(outcome.get('record', '')))
     return int(m.group(1)) if m else 0
 

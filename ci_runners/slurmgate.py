@@ -148,7 +148,8 @@ def load_account(base: str) -> dict:
 
 def part_dir(base: str, key: str, *, create: bool = False) -> str:
     """``<base>/work/KEY``, which must be a key and lie under ``work/`` with no link on
-    the way; ``create`` makes it and its parents, mode 700."""
+    the way; ``create`` makes it and its parents, mode 700 (a parent another part of
+    the run makes at the same time is taken, if it is a directory)."""
     if not KEY.fullmatch(key):
         raise GateError(f'{key!r} is no part key')
     work = os.path.join(base, 'work')
@@ -162,8 +163,11 @@ def part_dir(base: str, key: str, *, create: bool = False) -> str:
         except FileNotFoundError:
             if not create:
                 raise GateError(f'no part {key}') from None
-            os.mkdir(path, 0o700)
-            continue
+            try:
+                os.mkdir(path, 0o700)
+            except FileExistsError:  # another part of the run made it meanwhile
+                pass
+            st = os.lstat(path)  # whatever is there now: a directory, or refused
         if not stat.S_ISDIR(st.st_mode):
             raise GateError(f'{key}: not a directory on the way')
     return path

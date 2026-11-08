@@ -135,6 +135,9 @@ MUTANTS = [
     # RUN-9h: what a part shows on GitHub is redacted; a root others may write is refused; the canary at its --time
     # RUN-9h review: redact, then cut; the cluster's node lists; the directories above the root; the nits
     (SS, "        if isinstance(h, dict) and h.get('max_cards') is not None:", '        if isinstance(h, dict):', [f'{TSU}.Status.test_spend_live_jobs_and_held_targets']),
+    # two parts of a run make its work directory at once
+    (SGT, "            except FileExistsError:  # another part of the run made it meanwhile\n                pass", "            except OSError:\n                raise", [f'{TSG}.Stage.test_two_parts_of_a_run_make_its_directory_at_once']),
+    (SGT, "            st = os.lstat(path)  # whatever is there now", "            continue  # whatever is there now", [f'{TSG}.Stage.test_two_parts_of_a_run_make_its_directory_at_once']),
     # a slurm part's driver scope reaches the user manager
     (PRT, "               **{k: e[k] for k in USER_BUS if k in e}, **self.slurm_env}", "               **self.slurm_env}", [f'{TSP}.Ends.test_the_driver_scope_gets_the_user_managers_bus']),
     (PRT, "USER_BUS = ('XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS')", "USER_BUS = ('XDG_RUNTIME_DIR',)", [f'{TSP}.Ends.test_the_driver_scope_gets_the_user_managers_bus']),

@@ -314,6 +314,26 @@ class Stage(Cluster):
         self.assertEqual(list(self.outside.iterdir()), [])
 
 
+    def test_two_parts_of_a_run_make_its_directory_at_once(self):
+        mkdir = os.mkdir
+
+        def raced(path, mode=0o777, made=lambda p: mkdir(p, 0o700)):
+            made(path)  # the run's other part, between our lstat and mkdir
+            return mkdir(path, mode)
+        with mock.patch.object(sg.os, 'mkdir', raced):
+            d = sg.part_dir(str(self.base), KEY, create=True)
+        self.assertTrue(os.path.isdir(d))
+        self.assertTrue(d.endswith(KEY))
+        other = KEY.rsplit('/', 1)[0] + '/p2-1'
+
+        def linked(path, mode=0o777):  # what is there by then is a link: refused
+            os.symlink(self.outside, path)
+            return mkdir(path, mode)
+        with mock.patch.object(sg.os, 'mkdir', linked), self.assertRaisesRegex(sg.GateError, 'not a directory'):
+            sg.part_dir(str(self.base), other, create=True)
+        self.assertEqual(list(self.outside.iterdir()), [])
+
+
 class Jobs(Cluster):
     """The batch job end to end on the fake Slurm: the command in its explicit
     environment, the log, the results fetched back, cancel, the memory cap, the P2P

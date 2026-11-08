@@ -239,7 +239,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 集群是 3090 主机 runner 的远程目标：`slurm` 池在 3090 主机上，部件以 `sbatch` 作业跑在集群上，集群上不常驻任何东西（没有单元、定时器、隧道或监听端口，决定 14.11）。所有命令都在一台驱动主机（3090）上以 CI 账户运行。
 
-**站点配置**：`etc/slurm/<site>.toml`（模式 600），格式见 `setup/slurm/site.example.toml`（RUN-9b 起；只有占位符）。站点名用角色名，不用机构的主机名。写的是：GPU 申请语法（例如 `--gpus={n}`）、额外的 `sbatch` 参数、登录节点的 Python、egress 方式、预算（每日、每月）、每个目标的排队上限；价格表（每核时、每种卡的卡时、GPU 作业是否另付 CPU）；目标（分区、节点、卡型号、每节点卡数、`max_cards`、环境变体、每卡 CPU、每节点内存、`max_minutes`、`enabled`）；账户（ssh 别名、共享文件系统上的根目录、Slurm 账户、可用目标、权重、每月上限）。把站点的名字加进 deny 清单（同 §2 第 4 步），保证它们不会进入仓库。
+**站点配置**：`etc/slurm/<site>.toml`（模式 600），格式见 `setup/slurm/site.example.toml`（RUN-9b 起；只有占位符）。站点名用角色名，不用机构的主机名。写的是：GPU 申请语法（例如 `--gpus={n}`）、额外的 `sbatch` 参数、登录节点的 Python、egress 方式、预算（每日、每月）、每个目标的排队上限；价格表（每核时、每种卡的卡时、GPU 作业是否另付 CPU）；目标（分区、节点、卡型号、每节点卡数、`max_cards`、环境变体、每卡 CPU、每节点内存、`max_minutes`、`enabled`）；账户（ssh 别名、共享文件系统上的根目录、Slurm 账户、可用目标、权重、每月上限）。`python -m ci_runners.slurmsite check etc/slurm/<site>.toml` 校验它（文件名要等于 `site.name`，权限要是 600）。把站点的名字加进 deny 清单（同 §2 第 4 步）：`python -m ci_runners.slurmsite deny etc/slurm/<site>.toml` 打印分区、节点、账户、ssh 别名、路径等值的哈希；目标名和账户别名是我们自己起的角色名，不算；配置里没有、但同样不能进仓库的名字（登录节点、机构名、其他节点）用 `python -m ci_runners.inventory hash` 从 stdin 生成。保证它们不会进入仓库。
 
 **装一个账户**（决定 14.9）：
 

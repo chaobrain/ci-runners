@@ -184,7 +184,7 @@ class HostLock:
                                       'would wait for itself')
         t0 = time.monotonic()
         try:
-            if mode == 'l' and self._normal_shared_in():
+            if mode == 'l' and self._normal_shared_in(t0):
                 fd = open_lock(self.path)  # enter beside the shared holders, past the turnstile
                 self._fds.append(fd)
                 self._flock(fd, fcntl.LOCK_SH, t0)
@@ -229,16 +229,17 @@ class HostLock:
         self._close()
         self.mode, self.covered = None, False
 
-    def _normal_shared_in(self) -> bool:
+    def _normal_shared_in(self, t0: float) -> bool:
         """Whether a normal shared holder holds the marker: a non-blocking exclusive try,
-        made in turn with the other probes (see the module doc)."""
+        made in turn with the other probes (see the module doc). The wait for the turn
+        counts against the request's timeout."""
         try:
             turn = open_lock(self.probe)
         except OSError:  # missing from a sticky directory, or not ours to open: no turns
             turn = None
         try:
             if turn is not None:
-                fcntl.flock(turn, fcntl.LOCK_EX)
+                self._flock(turn, fcntl.LOCK_EX, t0)
             fd = open_lock(self.marker)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -190,8 +190,16 @@ MUTANTS = [
     (LCK, "                    if mode == 's':  # a normal shared holder", "                    if False:",
      [f'{TX}.LockInterop.test_light_enters_beside_a_normal_shared_holder_only']),
     # issue #69: the light requests' probes take turns under the probe file, a shared file
-    (LCK, "                fcntl.flock(turn, fcntl.LOCK_EX)", "                pass",
+    (LCK, "                self._flock(turn, fcntl.LOCK_EX, t0)", "                pass",
      [f'{TX}.LockInterop.test_light_probes_made_together_take_turns_behind_a_waiting_exclusive_one']),
+    (LCK, "                self._flock(turn, fcntl.LOCK_EX, t0)", "                self._flock(turn, fcntl.LOCK_SH, t0)",
+     [f'{TX}.LockInterop.test_a_probe_holds_its_turn_exclusively_through_its_try']),
+    (LCK, "                self._flock(turn, fcntl.LOCK_EX, t0)", "                fcntl.flock(turn, fcntl.LOCK_EX)",
+     [f'{TX}.LockInterop.test_the_wait_for_a_turn_counts_against_the_timeout']),
+    (LCK, "            fd = open_lock(self.marker)\n            try:\n                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+     "            if turn is not None:\n                fcntl.flock(turn, fcntl.LOCK_UN)\n            fd = open_lock(self.marker)\n"
+     "            try:\n                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+     [f'{TX}.LockInterop.test_a_probe_holds_its_turn_exclusively_through_its_try']),
     (LCK, "    return (lock[:-len('.lock')] if lock.endswith('.lock') else lock) + '.probe.lock'",
      "    return (lock[:-len('.lock')] if lock.endswith('.lock') else lock) + '.turns.lock'",
      [f'{TX}.LockInterop.test_light_probes_made_together_take_turns_behind_a_waiting_exclusive_one']),

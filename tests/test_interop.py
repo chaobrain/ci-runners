@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -197,6 +198,51 @@ class LockInterop(unittest.TestCase):
         self.assertTrue(self.inside('lpy') and self.inside('lsh'))
         self.go('lpy')
         self.go('lsh')
+
+    def test_a_probe_holds_its_turn_exclusively_through_its_try(self):
+        """While a light request tries the marker, no other probe can take a turn, shared or
+        exclusive: the turns exclude each other for the whole try."""
+        _, _, marker = locks.paths(self.lock)
+        probe = locks.probe_path(self.lock)
+        pathlib.Path(marker).touch()
+        mark = os.stat(marker).st_ino
+        seen = []
+        real = fcntl.flock
+
+        def spy(fd, op):
+            if os.fstat(fd).st_ino == mark and op == fcntl.LOCK_EX | fcntl.LOCK_NB:  # the try on the marker
+                other = os.open(probe, os.O_WRONLY)
+                try:
+                    for want in (fcntl.LOCK_SH, fcntl.LOCK_EX):
+                        try:
+                            real(other, want | fcntl.LOCK_NB)
+                            seen.append(want)
+                        except BlockingIOError:
+                            pass
+                finally:
+                    os.close(other)
+            return real(fd, op)
+        h = locks.HostLock(self.lock, held='')
+        with mock.patch('fcntl.flock', spy):
+            h.acquire('l')
+        h.release()
+        self.assertTrue(os.path.exists(probe))
+        self.assertEqual(seen, [], 'another probe took a turn during the try')
+
+    def test_the_wait_for_a_turn_counts_against_the_timeout(self):
+        turn = locks.open_lock(locks.probe_path(self.lock))
+        fcntl.flock(turn, fcntl.LOCK_EX)  # a probe that keeps its turn for 4 s (a stopped job)
+        late = threading.Timer(4, fcntl.flock, (turn, fcntl.LOCK_UN))
+        late.start()
+        try:
+            t0 = time.monotonic()
+            with self.assertRaises(locks.LockTimeout):
+                locks.HostLock(self.lock, held='', timeout=0.5).acquire('l')
+            self.assertLess(time.monotonic() - t0, 3)
+        finally:
+            late.cancel()
+            late.join()
+            os.close(turn)
 
     def test_nesting_covers_cross_implementations(self):
         out = self.dir / 'nested'

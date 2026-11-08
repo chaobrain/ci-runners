@@ -743,7 +743,9 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
          after the build), `push` (a wheelhouse and conda packages downloaded on the
          driver, installed offline), `direct` or `proxy`. The build's steps run with an
          empty `HOME` of their own and no pip config file, so the account's own conda
-         and pip settings (a mirror the egress does not allow) do not reach it. It builds one env for the
+         and pip settings (a mirror the egress does not allow) do not reach it; a part's
+         job reads neither the account's `~/.local` packages (`PYTHONNOUSERSITE=1`) nor
+         its pip config, and has no conda on its `PATH`. It builds one env for the
          variants the account's targets run that the spec does not name, and one of its own
          for each `[variant.<name>]` the spec holds (its `install` replaces the base's,
          §4.9), and points each `<project>-<variant>` at its build only once every build

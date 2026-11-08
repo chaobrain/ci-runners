@@ -776,11 +776,13 @@ class BehindNightly(ClassHost):
                 if (rec / 'scope.json').exists() and len(json.loads(self.hold.read_text())['procs']) == 2:
                     break
                 time.sleep(0.05)
+            seq = (self.slot.parent / 's.queue' / 'seq').read_text()
             t0 = time.monotonic()
             _, out = self.go('part', id='a', queue_timeout_minutes=0.05)
             self.assertEqual((out['outcome'], out['reason'], out['next'], out['retry-on']),
                              ('unavailable', part.NIGHTLY_BUSY, 'fallback', ['self-hosted', 'hz-cpu']))
             self.assertLess(time.monotonic() - t0, 2.5)  # at once, not after its queue timeout
+            self.assertEqual((self.slot.parent / 's.queue' / 'seq').read_text(), seq)  # the gate: no ticket taken
             self.assertFalse(self.ran(out))
             _, out = self.go('gpu', card='1', gpus=1, id='g', queue_timeout_minutes=0.05)
             self.assertEqual((out['reason'], out['retry-on']), (part.NIGHTLY_BUSY, ['self-hosted', 'hz-gpu']))

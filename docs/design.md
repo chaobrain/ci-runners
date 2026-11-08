@@ -1744,6 +1744,30 @@ Rules:
      without turns, as in `v1.5`.
   3. also in the tag, unused by any host path: decision 14's text and the Slurm site
      config's loader (RUN-9a, RUN-9b); no action, setup step or hook reads them yet.
+- **`v1.7.0`** (minor, stamped 2026-11-09; decision 14, RUN-9b to RUN-9h; `v1` moves to it after the slurm canary at `@v1.7.0`):
+  1. **The `slurm` class.** A Slurm cluster becomes a remote target of the 3090 hosts'
+     runners (decision 14); a repository opts in through `policy.toml`'s `classes`
+     (14.2). A part on a `<host>-slurm` / `3090-slurm` runner runs as one `sbatch` job
+     through the account's gate. `part` gains the input `target`: a target of the site
+     config, or a list in the order to try. Its outcomes are §4.4's, plus the `slurm`
+     block in the record and the cost in the summary. No existing input or output
+     changes; a consumer that does not name the class is untouched.
+  2. **`ci-run slurm check|plan|apply|env|canary|status|uninstall`** (14.9), on a driver
+     host.
+  3. **The env spec's optional `[variant.<name>]` table** (§4.9), read by `ci-run slurm
+     env` only; a 3090 host's `env build` reads the base, as before. A host running an
+     older release refuses the key, so a consumer names a variant only after its hosts
+     run `v1.7.0`.
+  4. **What a cluster part shows on GitHub is redacted** (14.4; RUN-9h): the job log, the
+     gate's and ssh's errors, the reasons, the summary line (target, job, cost only) and
+     the artifacts name none of the site's root, account, user, hosts, partitions or
+     nodes, nor our site and account aliases. The gate gains the verb `nodes` (`sinfo`'s
+     node lists); without them a part ends `unavailable` before any job. `check` and
+     `apply` refuse a root that another user could swap. The files a part fetches back
+     are the consumer's, and are not redacted (consumers §7).
+  5. **Setup:** no new unit. The site config, the cluster key and the gate's ssh alias
+     are host files the maintainer writes; a host's plan adds the `slurm` pool's runners
+     where its inventory gives the pool.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

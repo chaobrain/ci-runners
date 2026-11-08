@@ -21,12 +21,15 @@ file are read at that commit through the contents API, never from a pull request
     [variables]                              # for the registry entry (printed, not applied)
     XLA_PYTHON_CLIENT_PREALLOCATE = "false"
     [variant.cuda12]                         # a cluster target's env variant (14.9): its
-    install = ["jax[cuda12]"]                # install replaces the base's; nothing else changes
+    install = ["jax[cuda12]"]                # install replaces the base's
+    conda = { packages = ["cuda-nvcc=12.2"] }  # optional: joins the base's conda table
 
 The project itself is not installed: a part runs from the job's checkout. The ``conda``
 packages are solved together with ``python`` in the one ``conda create``, before any pip
 step; an unknown key or a malformed entry in the table builds nothing. A ``variant`` table
-is read only by ``ci-run slurm env`` (``Spec.variant``); a build here uses the base.
+is read only by ``ci-run slurm env`` (``Spec.variant``); a build here uses the base. A
+variant's ``conda`` channels follow the base's and its packages join them, in the same
+solve; it names no channel or package the base names.
 
 The env is built into a new directory ``<data>/ci-runners/envs/<project>-<stamp>``. Only
 when every step has passed does the link ``<data>/ci-runners/envs/<project>`` move to it
@@ -85,7 +88,7 @@ BRANCH = re.compile(r'origin/([A-Za-z0-9._-][A-Za-z0-9._/-]{0,99})')
 STAMP = re.compile(r'[0-9]{8}T[0-9]{6}Z')
 #: an env variant's name, as a site config's target names it (``slurmsite.VARIANT``)
 VARIANT = re.compile(r'[a-z0-9][a-z0-9_.-]{0,30}')
-VARIANT_KEYS = {'install'}
+VARIANT_KEYS = {'install', 'conda'}
 #: a requirement file's lines that name another file: ``-r f``, ``--requirement f``, ``-c f``
 NESTED = re.compile(r'\s*(?:-r|--requirement|-c|--constraint)[\s=]+(\S+)')
 
@@ -112,6 +115,14 @@ class Conda:
 
 
 @dataclasses.dataclass(frozen=True)
+class Variant:
+    """A ``[variant.<name>]`` table: its ``install``, which replaces the base's, and its
+    ``conda`` channels and packages, which join the base's."""
+    install: tuple[str, ...] = ()
+    conda: Conda = Conda((), ())
+
+
+@dataclasses.dataclass(frozen=True)
 class Spec:
     python: str
     requirements: tuple[str, ...] = ()
@@ -119,16 +130,19 @@ class Spec:
     upstream: tuple[Upstream, ...] = ()
     variables: Mapping[str, str] = dataclasses.field(default_factory=dict)
     conda: Conda = Conda()
-    #: ``[variant.<name>]``: each variant's ``install``, which replaces the base's
-    variants: Mapping[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
+    #: ``[variant.<name>]``: each variant's ``install`` and ``conda`` additions
+    variants: Mapping[str, Variant] = dataclasses.field(default_factory=dict)
     text: str = dataclasses.field(default='', compare=False)  # the spec as read, kept in the env
 
     def variant(self, name: str) -> 'Spec':
         """The spec a target of env variant ``name`` builds: the base with the variant's
-        ``install``, or the base itself where the spec does not name it."""
+        ``install`` and with its ``conda`` channels and packages after the base's, or the
+        base itself where the spec does not name it."""
         if name not in self.variants:
             return self
-        return dataclasses.replace(self, install=self.variants[name])
+        v = self.variants[name]
+        conda = Conda(self.conda.channels + v.conda.channels, self.conda.packages + v.conda.packages)
+        return dataclasses.replace(self, install=v.install, conda=conda)
 
 
 def _path(where: str, p: object) -> str:
@@ -138,30 +152,35 @@ def _path(where: str, p: object) -> str:
     return p
 
 
-def _conda(doc: object) -> Conda:
-    """The ``conda`` table. Raises SpecError."""
+def _conda(doc: object, where: str = 'conda', base: Conda | None = None) -> Conda:
+    """The ``conda`` table, or with ``base`` a variant's, whose channels and packages join
+    the base's: its channels default to none, and it names no channel or package the base
+    names. Raises SpecError."""
     if not isinstance(doc, dict):
-        raise SpecError(f'{SPEC}: conda must be a table')
+        raise SpecError(f'{SPEC}: {where} must be a table')
     unknown = set(doc) - CONDA_KEYS
     if unknown:
-        raise SpecError(f'{SPEC}: conda: unknown keys {sorted(unknown)}')
-    channels = doc.get('channels', ['conda-forge'])
-    if (not isinstance(channels, list) or not channels
-            or not all(isinstance(c, str) and CHANNEL.fullmatch(c) for c in channels) or len(set(channels)) != len(channels)):
-        raise SpecError(f'{SPEC}: conda.channels must list distinct channel names (no URLs or paths)')
+        raise SpecError(f'{SPEC}: {where}: unknown keys {sorted(unknown)}')
+    have = list(base.channels) if base is not None else []
+    channels = doc.get('channels', ['conda-forge'] if base is None else [])
+    if (not isinstance(channels, list) or (base is None and not channels)
+            or not all(isinstance(c, str) and CHANNEL.fullmatch(c) for c in channels)
+            or len(set(have + channels)) != len(have) + len(channels)):
+        raise SpecError(f'{SPEC}: {where}.channels must list distinct channel names (no URLs or paths)'
+                        + ('' if base is None else ", none of the base's"))
     packages = doc.get('packages', [])
     if not isinstance(packages, list):
-        raise SpecError(f'{SPEC}: conda.packages must be a list')
-    names = []
+        raise SpecError(f'{SPEC}: {where}.packages must be a list')
+    names = [CONDA_SPEC.fullmatch(p).group(1).lower() for p in base.packages] if base is not None else []
     for pkg in packages:
         m = CONDA_SPEC.fullmatch(pkg) if isinstance(pkg, str) else None
         if not m:
-            raise SpecError(f'{SPEC}: conda.packages: {pkg!r} is not a match spec (no options, URLs or paths)')
+            raise SpecError(f'{SPEC}: {where}.packages: {pkg!r} is not a match spec (no options, URLs or paths)')
         names.append(m.group(1).lower())
     if 'python' in names:
-        raise SpecError(f'{SPEC}: conda.packages cannot name python: the python key sets it')
+        raise SpecError(f'{SPEC}: {where}.packages cannot name python: the python key sets it')
     if len(set(names)) != len(names):
-        raise SpecError(f'{SPEC}: conda.packages names a package twice')
+        raise SpecError(f'{SPEC}: {where}.packages names a package twice' + ('' if base is None else ' (with the base)'))
     return Conda(tuple(channels), tuple(packages))
 
 
@@ -209,7 +228,8 @@ def parse_spec(text: str) -> Spec:
         if not isinstance(v, str) or '\0' in v or '\n' in v:
             raise SpecError(f'{SPEC}: variables.{k} must be a one-line string')
     conda = _conda(doc['conda']) if 'conda' in doc else Conda()
-    return Spec(py, tuple(reqs), install, tuple(upstream), dict(variables), conda, _variants(doc.get('variant', {})), text)
+    return Spec(py, tuple(reqs), install, tuple(upstream), dict(variables), conda,
+                _variants(doc.get('variant', {}), conda), text)
 
 
 def _install(where: str, v: object) -> tuple[str, ...]:
@@ -218,8 +238,9 @@ def _install(where: str, v: object) -> tuple[str, ...]:
     return tuple(v)
 
 
-def _variants(doc: object) -> dict[str, tuple[str, ...]]:
-    """The ``variant`` table: ``[variant.<name>]`` with exactly ``install``. Raises SpecError."""
+def _variants(doc: object, base: Conda) -> dict[str, Variant]:
+    """The ``variant`` table: ``[variant.<name>]`` with ``install`` and an optional ``conda``
+    table that joins ``base``. Raises SpecError."""
     if not isinstance(doc, dict):
         raise SpecError(f'{SPEC}: variant must be a table of tables')
     out = {}
@@ -229,10 +250,11 @@ def _variants(doc: object) -> dict[str, tuple[str, ...]]:
         if not isinstance(v, dict):
             raise SpecError(f'{SPEC}: variant.{name} must be a table')
         if set(v) - VARIANT_KEYS:
-            raise SpecError(f'{SPEC}: variant.{name}: unknown keys {sorted(set(v) - VARIANT_KEYS)} (only install)')
+            raise SpecError(f'{SPEC}: variant.{name}: unknown keys {sorted(set(v) - VARIANT_KEYS)} (only install and conda)')
         if 'install' not in v:
             raise SpecError(f'{SPEC}: variant.{name} needs install')
-        out[name] = _install(f'variant.{name}.install', v['install'])
+        conda = _conda(v['conda'], f'variant.{name}.conda', base) if 'conda' in v else Conda((), ())
+        out[name] = Variant(_install(f'variant.{name}.install', v['install']), conda)
     return out
 
 

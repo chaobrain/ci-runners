@@ -87,7 +87,7 @@ def plan_builds(spec: envbuild.Spec, variants: list[str], *, project: str, envs:
                 conda: str) -> list[dict]:
     """The builds an env run makes: one for the variants the spec does not name (the base),
     and one of its own for each it names (``[variant.<name>]``, whose ``install`` replaces
-    the base's). Pure."""
+    the base's and whose ``conda`` packages join the base's). Pure."""
     out = []
     base = [v for v in variants if v not in spec.variants]
     if base:

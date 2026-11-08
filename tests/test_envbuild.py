@@ -115,7 +115,8 @@ class Spec(unittest.TestCase):
 
     def test_a_variant_table_gives_a_variants_install(self):
         s = envbuild.parse_spec(GOOD + VARIANTS)
-        self.assertEqual(s.variants, {'cuda12': ('jax[cuda12]==0.4.30',), 'cpu': ()})
+        self.assertEqual(s.variants, {'cuda12': envbuild.Variant(('jax[cuda12]==0.4.30',)), 'cpu': envbuild.Variant()})
+        self.assertEqual(s.variant('cuda12').conda, s.conda)  # no conda table: the base's
         self.assertEqual(s.variant('cuda12').install, ('jax[cuda12]==0.4.30',))
         self.assertEqual(s.variant('cuda12').requirements, s.requirements)  # only install changes
         self.assertEqual(s.variant('cpu').install, ())
@@ -131,6 +132,36 @@ class Spec(unittest.TestCase):
             text = bad + GOOD if bad.startswith('variant') else GOOD + bad
             with self.assertRaisesRegex(SpecError, why, msg=bad):
                 envbuild.parse_spec(text)
+
+    def test_a_variants_conda_table_joins_the_base_s(self):
+        cuda = '[variant.cuda12]\ninstall = ["jax[cuda12]"]\nconda = { packages = ["cuda-nvcc=12.2", "cuda-cudart-dev=12.2"] }\n'
+        s = envbuild.parse_spec(RICH + cuda + '[variant.cpu]\ninstall = []\n')
+        self.assertEqual(s.variants['cuda12'].conda, envbuild.Conda((), ('cuda-nvcc=12.2', 'cuda-cudart-dev=12.2')))
+        v = s.variant('cuda12')
+        self.assertEqual(v.conda, envbuild.Conda(('conda-forge',), ('nest-simulator=3.10', 'cuda-nvcc=12.2',
+                                                                    'cuda-cudart-dev=12.2')))
+        self.assertEqual(s.conda, envbuild.Conda(('conda-forge',), ('nest-simulator=3.10',)))  # the base unchanged
+        self.assertEqual(s.variant('cpu').conda, s.conda)
+        s = envbuild.parse_spec(GOOD + '[variant.x]\ninstall = []\n[variant.x.conda]\nchannels = ["nvidia"]\npackages = ["cuda-nvcc"]\n')
+        self.assertEqual(s.variant('x').conda, envbuild.Conda(('conda-forge', 'nvidia'), ('cuda-nvcc',)))  # after the base's
+        s = envbuild.parse_spec(GOOD + '[variant.x]\ninstall = []\nconda = {}\n')
+        self.assertEqual(s.variant('x').conda, s.conda)  # an empty table adds nothing
+
+    def test_a_malformed_variant_conda_table_is_refused(self):
+        for conda, why in (('{ packages = ["nest-simulator=3.11"] }', r'variant\.x\.conda\.packages names a package twice \(with the base\)'),
+                           ('{ packages = ["NEST-simulator"] }', 'names a package twice'),
+                           ('{ packages = ["a", "a"] }', 'names a package twice'),
+                           ('{ packages = ["python=3.12"] }', 'cannot name python'),
+                           ('{ packages = ["--override-channels"] }', r'variant\.x\.conda\.packages: .* is not a match spec'),
+                           ('{ packages = "cuda-nvcc" }', r'variant\.x\.conda\.packages must be a list'),
+                           ('{ channels = ["conda-forge"] }', "none of the base's"),
+                           ('{ channels = ["a", "a"] }', 'distinct channel names'),
+                           ('{ channels = ["https://evil.example/c"] }', 'distinct channel names'),
+                           ('{ channels = "nvidia" }', 'distinct channel names'),
+                           ('{ pip = ["x"] }', r"variant\.x\.conda: unknown keys \['pip'\]"),
+                           ('3', r'variant\.x\.conda must be a table')):
+            with self.assertRaisesRegex(SpecError, why, msg=conda):
+                envbuild.parse_spec(RICH + f'[variant.x]\ninstall = []\nconda = {conda}\n')
 
     def test_the_conda_table_can_ask_for_live_nest_on_python_313(self):
         s = envbuild.parse_spec(RICH)
@@ -195,6 +226,14 @@ class Steps(unittest.TestCase):
         pips = [i for i, c in enumerate(cmds) if 'pip' in c and c[0] != 'conda']
         self.assertTrue(pips and min(pips) > 0)
         self.assertEqual(sum('nest-simulator=3.10' in c for c in cmds), 1)  # no pip step carries it
+
+    def test_a_variants_conda_packages_are_in_its_one_solve_and_not_the_base_s(self):
+        spec = envbuild.parse_spec(RICH + '[variant.cuda12]\ninstall = ["jax[cuda12]"]\nconda = { packages = ["cuda-nvcc=12.2"] }\n')
+        kw = dict(project='p', envs='/e', stamp='20261106T010203Z', reqdir='/r', conda='conda')
+        v = envbuild.steps(spec.variant('cuda12'), variant='cuda12', **kw)
+        self.assertEqual(v[0][-4:], ['python=3.13', 'pip', 'nest-simulator=3.10', 'cuda-nvcc=12.2'])
+        self.assertEqual(sum('cuda-nvcc=12.2' in c for c in v), 1)  # one solve, no pip step carries it
+        self.assertNotIn('cuda-nvcc=12.2', envbuild.steps(spec, **kw)[0])  # a 3090 build reads the base only
 
     def test_a_spec_without_conda_keeps_its_one_channel(self):
         cmds = envbuild.steps(envbuild.parse_spec(GOOD), project='p', envs='/e', stamp='20261106T010203Z', reqdir='/r',

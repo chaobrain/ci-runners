@@ -1221,7 +1221,7 @@ class Executor:
             'site_file': found[0][0], 'targets': targets, 'key': record_ref(record), 'etc': self.etc, 'data': str(h['data']),
             'ssh': self.slurm_tools['ssh'], 'rsync': self.slurm_tools['rsync'], 'poll': self.poll if not self.scope
             else slurmpart.POLL, 'deadline': time.time() + a.queue_timeout_minutes * 60, 'cards': a.gpus,
-            'minutes': a.timeout_minutes, 'workspace': ws, 'temp': temp if temp and os.path.isdir(temp) else '',
+            'minutes': a.timeout_minutes, 'lost_after': slurmpart.LOST_AFTER, 'workspace': ws, 'temp': temp if temp and os.path.isdir(temp) else '',
             'part_dir': work,
             'request': {'project': proj.name, 'cards': a.gpus, 'minutes': a.timeout_minutes,
                         'queue_minutes': min(a.queue_timeout_minutes, 24 * 60), 'memory': memory, 'command': a.command,
@@ -1331,6 +1331,7 @@ def salvage(inv: inventory.Inventory, ref: str, env: Mapping[str, str], *, wait_
     rec = _read_json(os.path.join(record, 'record.json'))
     if rec is None:
         raise Refused('no part record there')
+    rec = slurm_record(record, rec)  # a slurm part's job, also when its executor stopped first (14.4)
     if not record_ref(record).lower().startswith(env.get('GITHUB_REPOSITORY', '').lower() + '/'):
         raise Refused('the record is another repository\'s')
     done = _read_json(os.path.join(record, 'outcome.json'))

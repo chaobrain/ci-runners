@@ -31,7 +31,7 @@ P = policy.load(POLICY)
 P_BOT = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nbot_dispatch = true\n'))
 P_TARGET = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nextra_events = ["pull_request_target"]\n'))
 #: brainkit may use the exclusive classes (decision 12.14): compile and nightly, or compile alone
-P_BOTH = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nclasses = ["compile", "nightly"]\n'))
+P_BOTH = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nclasses = ["compile", "nightly", "slurm"]\n'))
 P_COMPILE = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nclasses = ["compile"]\n'))
 
 REPOS = {'chaobrain/brainkit': '1001', 'chaobrain/brainevent': '2002'}
@@ -72,6 +72,12 @@ class Accepted(unittest.TestCase):
             self.assertEqual(reason(P, env(cls=cls), event('pr_same_repo')), 'ok', cls)
         for cls in sorted(policy.CLASSES):
             self.assertEqual(reason(P_BOTH, env(cls=cls), event('pr_same_repo')), 'ok', cls)
+
+    def test_the_slurm_class_is_opt_in(self):
+        """Decision 14.2: a repository uses the slurm runners only where its entry lists them."""
+        self.assertNotEqual(reason(P, env(cls='slurm'), event('pr_same_repo')), 'ok')
+        self.assertNotEqual(reason(P_COMPILE, env(cls='slurm'), event('pr_same_repo')), 'ok')
+        self.assertEqual(reason(P_BOTH, env(cls='slurm'), event('pr_same_repo')), 'ok')
 
     def test_the_3090_classes_are_open(self):
         """Decision 12.5: gpu and multi are open to every private repository, as part is."""
@@ -184,7 +190,7 @@ class Refused(unittest.TestCase):
             self.assertEqual(reason(P, env(cls=cls, event='push'), event('push')), 'runner-class', cls)
         self.assertEqual(reason(P_COMPILE, env(cls='compile'), event('pr_same_repo')), 'ok')
         self.assertEqual(reason(P_COMPILE, env(cls='nightly'), event('pr_same_repo')), 'runner-class')
-        self.assertEqual(P_BOTH.repos['chaobrain/brainkit'].classes, {'compile', 'nightly'})
+        self.assertEqual(P_BOTH.repos['chaobrain/brainkit'].classes, {'compile', 'nightly', 'slurm'})
         self.assertEqual(P.repos['chaobrain/brainkit'].classes, frozenset())
 
     def test_an_unknown_runner_class(self):

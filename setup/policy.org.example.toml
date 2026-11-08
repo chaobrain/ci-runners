@@ -18,4 +18,4 @@ max_age_minutes = 60
 # id = 1
 # visibility = "private"
 # paused = true
-# classes = ["compile", "nightly"]               # the hosts' compile and nightly runners
+# classes = ["compile", "nightly", "slurm"]      # the hosts' compile and nightly runners, the cluster (14.2)

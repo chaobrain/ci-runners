@@ -160,7 +160,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE = "false"
 按计费时长收费的 Slurm 集群作为 3090 主机 runner 的**远程目标**：`slurm` 类的部件在 3090 主机上运行，不占这台主机的 CI 槽位和卡，把 checkout 同步到集群的共享文件系统，以一个 `sbatch` 作业运行命令，日志实时转回作业日志，结束后把结果同步回来（design 决定 14.3）。集群的主机名、分区、节点、账户和路径都只写在维护者主机上的私有站点配置里，不进仓库。
 
 - **按仓库开通**：和 `compile`、`nightly` 一样，`slurm` 类只接 `policy.toml` 里列了它的仓库（决定 14.2）。
-- **标签和输入**：作业用 `[self-hosted, <host>-slurm]` 或共享标签；`part` 多一个可选输入 `target`，写站点配置里的目标名，或者按尝试顺序写一个列表（例如按卡价从低到高）。`gpus` 最多为该目标的 `max_cards`，`lock` 只能是 `none`，`timeout-minutes` 不超过该目标的 `max_minutes`。
+- **标签和输入**：作业用 `[self-hosted, <host>-slurm]` 或共享标签；`part` 多一个可选输入 `target`，写站点配置里的目标名，或者按尝试顺序写几个，用逗号或空格隔开（例如按卡价从低到高：`a40,h100`）；主机上有多个站点配置时写成 `<site>:<target>`。`slurm` 类必须给 `target`。`gpus` 最多为该目标的 `max_cards`，`lock` 只能是 `none`，`timeout-minutes` 不超过该目标的 `max_minutes`。
 - **计费**：只有作业运行期间计费，排队不计费。排队超过每个目标的上限就取消、换下一个账户或目标；超过 `queue-timeout-minutes` 就 `unavailable`（`pending`）。会超出每日或每月预算的部件直接 `unavailable`（`budget`）（决定 14.7）。summary 里写出每个部件的目标和花费。
 - **命令约定**同 §4，另有几点：节点不限制内存，部件的内存上限由集群上的 supervisor 按 `RssAnon` 执行，超出就是 `oom`；计算节点**不能访问外网**，命令不能下载任何东西；`RUNNER_TEMP` 和 `CI_PART_DIR` 指向集群上的目录，结束后同步回 runner，所以之后的 upload 步骤不用改；双卡部件开跑前先做 P2P 自检。
 - **结果**（design §4.4，没有新结果）：节点故障是 `unavailable`（`node fail`），在同一目标上重试一次；被站点其他用户取消、排队超时、预算不够、目标尚未启用是 `unavailable`，换池子；P2P 自检失败是 `unavailable`（`p2p`），不重试；登录节点 5 分钟连不上是 `lost`，verdict 从 3090 主机上的记录 salvage。

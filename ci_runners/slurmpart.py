@@ -251,9 +251,10 @@ class Gate:
 
     def sync(self, verb: str, src: str, dst: str, excludes: Sequence[str] = (), timeout: float = 1800) -> None:
         """``rsync -a --delete`` through the gate's ``stage`` (to the cluster) or ``fetch``
-        (back)."""
-        argv = [self.rsync, '-a', '--delete', '-e', shlex.join(self.ssh_argv()), f'--rsync-path=ci-slurm-gate {verb}',
-                *(f'--exclude={x}' for x in excludes), src, dst]
+        (back, without a link that points out of what it fetches)."""
+        argv = [self.rsync, '-a', '--delete', *(['--safe-links'] if verb == 'fetch' else []), '-e',
+                shlex.join(self.ssh_argv()), f'--rsync-path=ci-slurm-gate {verb}', *(f'--exclude={x}' for x in excludes),
+                src, dst]
         try:
             r = self.run(argv, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -367,6 +368,9 @@ class Driver:
     def finish(self, ex: dict[str, object]) -> int:
         ex = {'timed_out': False, 'oom_kills': 0, 'signalled': False, **ex, 'end_epoch': self.clock(),
               'boot_end': boot_id()}
+        for k in ('unavailable', 'red', 'p2p'):  # one line each: they become the part's reason output
+            if isinstance(ex.get(k), str):
+                ex[k] = ' '.join(re.sub(r'[^\x20-\x7e]', '?', ex[k]).split())[:400]
         self.save()
         _write_json(os.path.join(self.record, 'exit.json'), ex)
         return 0
@@ -438,7 +442,7 @@ class Driver:
                     return self.finish({'rc': None, 'signalled': True})
                 why.append(str(self.block['tried'][-1]['why']) if self.block['tried'] else f'{target}@{alias}')
                 if self.clock() >= deadline:
-                    return self.finish({'rc': None, 'unavailable': f'pending: {"; ".join(why[-3:])}'})
+                    return self.finish({'rc': None, 'unavailable': '; '.join(why[-3:])[:400]})
         budget = [w for w in why if w.startswith('budget:')]
         if budget and len(budget) == len(why):
             return self.finish({'rc': None, 'unavailable': budget[0]})
@@ -476,8 +480,8 @@ class Driver:
                 lost_since = None
             except Unreachable as e:
                 lost_since = lost_since or self.clock()
-                if self.clock() - lost_since >= LOST_AFTER:
-                    self.block['lost'] = f'the login host did not answer for {LOST_AFTER} s: {e}'
+                if self.clock() - lost_since >= float(p.get('lost_after', LOST_AFTER)):
+                    self.block['lost'] = f'the login host did not answer for {p.get("lost_after", LOST_AFTER):g} s: {e}'
                     self.save()
                     return 0  # no exit.json: lost; the reaper cancels the job once this driver is gone
                 self.sleep(p['poll'])
@@ -494,7 +498,7 @@ class Driver:
                 now = self.clock()
                 if now - submitted >= bound or now >= deadline:
                     reason = st.get('reason') or 'pending'
-                    tried['why'] = f'{target}@{g.alias} {reason}'
+                    tried['why'] = f'pending: {target}@{g.alias} {reason}'
                     self.say(f'job {job} pends past its bound ({reason}): cancelled')
                     self.cancel(g, job, end=False)
                     self.block.pop('run_epoch', None)

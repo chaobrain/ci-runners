@@ -39,6 +39,7 @@ from ci_runners import hostload
 from ci_runners import envuse, inventory, locks, outcome, registry, slots
 from ci_runners import p2p as p2p_mod
 from ci_runners import sampler as sampler_mod
+from ci_runners import slurmpart, slurmsite
 
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 #: a part record of any host, ``<role>:<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>``
@@ -57,6 +58,8 @@ ROWS: dict[str, tuple[int, int | None, tuple[str, ...], int]] = {
     'multi': (2, 2, LOCKS, 240),
     'compile': (0, 0, ('x',), 240),
     'nightly': (0, None, LOCKS, 600),
+    # a target's max_cards and max_minutes bound it further (slurmpart.row, decision 14.2)
+    'slurm': (0, None, ('none',), 24 * 60),
 }
 P2P_CLASSES = ('multi',)  # the classes whose parts run the P2P self-test first (decision 12.6)
 P2P_KILL_WAIT = 5.0  # s the supervisor waits for the self-test after killing it at its bound
@@ -652,12 +655,41 @@ def write_outputs(out: Mapping[str, object], github_output: str) -> None:
             f.write(f'{k}={v}\n')
 
 
+def slurm_record(record: str, rec: dict[str, object]) -> dict[str, object]:
+    """``rec`` with a slurm part's ``slurm`` block (``slurm.json``, decision 14.4): the
+    site, account, target, job, node, state, elapsed, cards, CPUs and cost; its run
+    starts when its job does."""
+    blk = _read_json(os.path.join(record, 'slurm.json'))
+    if blk is not None:
+        rec['slurm'] = blk
+        if isinstance(blk.get('run_epoch'), (int, float)):
+            rec['run_epoch'] = blk['run_epoch']
+            rec['queue_seconds'] = round(max(0.0, float(blk['run_epoch']) - float(rec.get('start_epoch', 0))))
+    return rec
+
+
+def slurm_line(rec: Mapping[str, object]) -> str:
+    """A slurm part's summary line: ``<driver> → <site>:<target>``, its job, node and
+    cost (decision 14.4); empty for any other part. Pure."""
+    b = rec.get('slurm')
+    if not isinstance(b, dict) or not b.get('target'):
+        return ''
+    line = f'{rec.get("host", "")} → {b.get("site")}:{b.get("target")} ({b.get("account")})'
+    if b.get('job'):
+        line += f', job {b["job"]}' + (f' on {b["node"]}' if b.get('node') else '')
+    if isinstance(b.get('cost'), (int, float)):
+        line += f', {b.get("elapsed", 0)} s, cost {b["cost"]:.3f}'
+    return line
+
+
 def summary_md(out: Mapping[str, object], part_id: str) -> str:
     rows = [('outcome', f'{out["outcome"]} ({out["reason"]})'), ('next', out['next']), ('host', out['host']),
             ('cards', out['gpus'] or 'none'), ('queue', f'{out["queue-seconds"]} s'), ('run', f'{out["run-seconds"]} s'),
             ('attempt', out['attempt'])]
     if out.get('peak'):
         rows.append(('peak temperature', out['peak']))
+    if out.get('slurm'):
+        rows.append(('cluster', out['slurm']))
     return f'### part `{part_id}`\n\n| | |\n|---|---|\n' + ''.join(f'| {k} | {v} |\n' for k, v in rows)
 
 
@@ -673,7 +705,7 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
     (decision 12.6)."""
     end = float((ex or {}).get('end_epoch') or time.time())
     p2p = str((ex or {}).get('p2p') or '')
-    unavailable = unavailable or (f'p2p: {p2p}' if p2p else '')
+    unavailable = unavailable or str((ex or {}).get('unavailable') or '') or (f'p2p: {p2p}' if p2p else '')
     ev = outcome.Evidence(
         rc=None if ex is None else ex.get('rc'), timed_out=bool(ex and ex.get('timed_out')),
         stopped=stopped or bool(ex and ex.get('signalled') and not ex.get('timed_out')),
@@ -682,9 +714,11 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
         oom_kills=int((ex or {}).get('oom_kills', 0)) + (1 if unit_result == 'oom-kill' else 0),
         early_stop=bool(rec.get('early_stop')))
     o = outcome.classify(ev)
+    if o.kind == 'lost' and ex and ex.get('red'):  # a slurm job's time limit (decision 14.4)
+        o = outcome.Outcome('red', str(ex['red']))
     attempt = int(rec.get('attempt', 1))
     h = outcome.hint(o.kind, attempt=attempt, retries=int(rec.get('retries', 1)), cool_card=cool_card is not None,
-                     host_fault=bool(p2p) or nowhere)
+                     host_fault=bool(p2p) or nowhere, retry_here=bool(ex and ex.get('retry_here')))
     cls, role = str(rec.get('class', '')), str(rec.get('host', ''))
     own = [str(x) for x in rec.get('pool_labels') or ()]  # the pool's labels name its host already (RUN-5)
     if h.next != 'none' and retry_on is not None:
@@ -706,7 +740,7 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
             'record': f'{role}:{record_ref(record)}', 'summary': f'{record_ref(record)}/summary.md', 'attempt': attempt,
             'run-attempt': record_run_attempt(record),
             'resume': h.resume, 'peak': ', '.join(f'card {c} {t:g} C' for c, t in sorted(peak.items()))
-            if isinstance(peak, dict) else ''}
+            if isinstance(peak, dict) else '', 'slurm': slurm_line(rec)}
 
 
 def _publish(record: str, out: dict[str, object], part_id: str, env: Mapping[str, str]) -> None:
@@ -741,6 +775,7 @@ class Inputs:
     resume: bool = False
     attempt_of: str = ''
     lock: str = ''  # empty: the class's default, ``x`` on ``compile``, else ``none`` (design §4.3)
+    target: str = ''  # a slurm part's targets, in the order to try (decision 14.2)
 
 
 def parse_args(argv: Sequence[str]) -> Inputs:
@@ -757,9 +792,10 @@ def parse_args(argv: Sequence[str]) -> Inputs:
     p.add_argument('--resume', choices=('true', 'false', ''), default='false')
     p.add_argument('--attempt-of', default='')
     p.add_argument('--lock', choices=('', *LOCKS), default='')
+    p.add_argument('--target', default='')
     a = p.parse_args(list(argv))
     return Inputs(a.project, a.command, a.id, a.timeout_minutes, a.gpus, a.gpu_mem_mib, a.memory,
-                  a.queue_timeout_minutes, a.results, a.resume == 'true', a.attempt_of, a.lock)
+                  a.queue_timeout_minutes, a.results, a.resume == 'true', a.attempt_of, a.lock, a.target)
 
 
 class Executor:
@@ -773,8 +809,12 @@ class Executor:
                  poll: float = 3.0, procs: Callable[[], set[int]] | None = None,
                  stop_part: Callable[[], None] | None = None, clock: Callable[[], float] = time.time,
                  sample_s: float = sampler_mod.SAMPLE_S, own_cap: bool | None = None,
-                 p2p: Sequence[str] | None = None) -> None:
+                 p2p: Sequence[str] | None = None, slurm_tools: Mapping[str, str] | None = None,
+                 slurm_env: Mapping[str, str] | None = None) -> None:
         self.inv, self.etc, self.env, self.release = inv, etc, dict(env), release
+        # a slurm part's ssh and rsync, and what its driver's environment adds (the tests' fakes)
+        self.slurm_tools = dict(slurm_tools or {'ssh': '/usr/bin/ssh', 'rsync': '/usr/bin/rsync'})
+        self.slurm_env = dict(slurm_env or {})
         # the P2P self-test of a multi part (decision 12.6); a fixture in the tests
         self.p2p = list(p2p) if p2p is not None else p2p_argv(release)
         self.own_cap = own_cap  # None: the supervisor caps memory where systemd does not (11.11)
@@ -830,7 +870,7 @@ class Executor:
             raise Refused(str(e)) from None
         if a.gpu_mem_mib < 0 or a.queue_timeout_minutes < 0:
             raise Refused('gpu-mem-mib and queue-timeout-minutes must not be negative')
-        if not 0 <= a.gpus <= len(self.inv.host['gpus']):
+        if cls != slurmpart.CLASS and not 0 <= a.gpus <= len(self.inv.host['gpus']):
             raise Refused(f'gpus must be in [0, {len(self.inv.host["gpus"])}] here')
         if not 0 < a.timeout_minutes <= ROWS[cls][3]:
             raise Refused(f'timeout-minutes must be above 0 and at most {ROWS[cls][3]} on the {cls} runners')
@@ -968,6 +1008,8 @@ class Executor:
             free = shutil.disk_usage(h['data']).free / (1 << 30)
             if free < h['disk_min_gib']:
                 return self._end(record, rec, a, unavailable=f'low disk: {free:.0f} GiB free under the data directory')
+            if cls == slurmpart.CLASS:  # one batch job on a Slurm cluster (decision 14.3)
+                return self._slurm(a, proj, memory, record, rec, work, lock)
             why = self.gate(a, cls, lock)
             if why:
                 return self._end(record, rec, a, unavailable=why)
@@ -1143,6 +1185,69 @@ class Executor:
         return not (a.attempt_of or retries < 1 or cls in ('light', EVERY_SLOT)
                     or not inventory.peer_labels(self.inv, cls))
 
+    def _slurm(self, a: Inputs, proj: registry.Project, memory: str, record: str, rec: dict[str, object], work: str,
+               lock: str) -> tuple[int, dict[str, object]]:
+        """A ``slurm`` part (decision 14.3): the drain, the class row per target, then
+        ``slurmpart.drive`` in the part's scope, as a supervisor; its ``exit.json`` and
+        ``slurm.json`` end the part (14.4)."""
+        h = self.inv.host
+        why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, slurmpart.CLASS)  # decision 13.1
+        if why:
+            return self._away(record, rec, a, why, slurmpart.CLASS)
+        names = [x for x in re.split(r'[\s,]+', a.target) if x]
+        if not names:
+            raise Refused('a slurm part names its target (design §4.8)')
+        found = [slurmpart.site_path(self.etc, n) for n in names]
+        bad = [w for p, w in found if not p]
+        if bad:
+            return self._end(record, rec, a, unavailable=f'target: {bad[0]}')
+        if len({p for p, _ in found}) > 1:
+            raise Refused('a slurm part\'s targets are of one site')
+        try:
+            site = slurmsite.load_file(found[0][0])
+        except slurmsite.SiteError as e:
+            return self._end(record, rec, a, unavailable=f'site config: {e}')
+        targets, why = slurmpart.row(str(h['data']), site, [t for _, t in found], project=proj.name, gpus=a.gpus,
+                                     minutes=a.timeout_minutes, lock=lock)
+        if not targets:
+            return self._end(record, rec, a, unavailable=why)
+        e = self.env
+        ws = e.get('GITHUB_WORKSPACE', '')
+        if not ws or not os.path.isdir(ws):
+            ws = os.path.join(record, 'empty')
+            os.makedirs(ws, mode=0o700, exist_ok=True)
+        temp = e.get('RUNNER_TEMP', '')
+        plan = {
+            'site_file': found[0][0], 'targets': targets, 'key': record_ref(record), 'etc': self.etc, 'data': str(h['data']),
+            'ssh': self.slurm_tools['ssh'], 'rsync': self.slurm_tools['rsync'], 'poll': self.poll if not self.scope
+            else slurmpart.POLL, 'deadline': time.time() + a.queue_timeout_minutes * 60, 'cards': a.gpus,
+            'minutes': a.timeout_minutes, 'lost_after': slurmpart.LOST_AFTER, 'cancel_wait': slurmpart.CANCEL_WAIT,
+            'workspace': ws, 'temp': temp if temp and os.path.isdir(temp) else '', 'part_dir': work,
+            'request': {'project': proj.name, 'cards': a.gpus, 'minutes': a.timeout_minutes,
+                        'queue_minutes': min(a.queue_timeout_minutes, 24 * 60), 'memory': memory, 'command': a.command,
+                        'variables': {**{k: e[k] for k in slurmpart.JOB_VARS if k in e}, **proj.variables},
+                        'run_url': f'https://github.com/{e.get("GITHUB_REPOSITORY", "")}/actions/runs/'
+                                   f'{e.get("GITHUB_RUN_ID", "0")}/attempts/{e.get("GITHUB_RUN_ATTEMPT", "1")}',
+                        'host': self.inv.this, 'resume': a.resume}}
+        _write_json(os.path.join(record, 'slurm-plan.json'), plan)
+        drv = [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
+               'from ci_runners.slurmpart import drive; sys.exit(drive(sys.argv[1]))', self.release, record]
+        run_id = f'{os.path.basename(os.path.dirname(record))}-{rec["attempt"]}'
+        self.unit = unit_name(e.get('RUNNER_NAME', ''), a.id, run_id) if self.scope else ''
+        rec.update(unit=self.unit, cards=[], targets=targets)
+        _write_json(os.path.join(record, 'record.json'), rec)
+        argv = scope_argv(self.unit, proj.name, slurmpart.DRIVER_MEMORY, drv, self.oom_policy()) if self.scope else drv
+        if self.stopped:
+            return self._end(record, rec, a, stopped=True)
+        env = {'HOME': e.get('HOME') or os.path.expanduser('~'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',
+               **self.slurm_env}
+        self.proc = self.spawn(argv, cwd=ws, env=env)
+        self.proc.wait()
+        if self.scope:
+            self.run(['systemctl', '--user', 'reset-failed', self.unit], capture_output=True, timeout=30)
+        return self._end(record, slurm_record(record, rec), a, ex=_read_json(os.path.join(record, 'exit.json')),
+                         stopped=self.stopped)
+
     def busy(self, a: Inputs, cls: str, retries: int) -> str:
         """Busy-host avoidance (decisions 13.2, 13.6): why this part's first attempt goes
         to the other host, or empty (see ``yields``). A ``nightly`` part that holds or waits
@@ -1226,6 +1331,7 @@ def salvage(inv: inventory.Inventory, ref: str, env: Mapping[str, str], *, wait_
     rec = _read_json(os.path.join(record, 'record.json'))
     if rec is None:
         raise Refused('no part record there')
+    rec = slurm_record(record, rec)  # a slurm part's job, also when its executor stopped first (14.4)
     if not record_ref(record).lower().startswith(env.get('GITHUB_REPOSITORY', '').lower() + '/'):
         raise Refused('the record is another repository\'s')
     done = _read_json(os.path.join(record, 'outcome.json'))

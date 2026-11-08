@@ -39,7 +39,8 @@ _CPUS = re.compile(r'[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*\Z')
 LABEL = re.compile(r'[a-z0-9][a-z0-9-]{0,39}\Z')
 #: labels a pool may not give itself: GitHub's own and the bare class names, which any
 #: runner's job could ask for (design §5.1: h100's labels are its own)
-RESERVED_LABELS = frozenset({'self-hosted', 'linux', 'x64', 'light', 'part', 'compile', 'nightly', 'gpu', 'multi'})
+RESERVED_LABELS = frozenset({'self-hosted', 'linux', 'x64', 'light', 'part', 'compile', 'nightly', 'gpu', 'multi',
+                             'slurm'})
 #: what a pool's runners run with, besides the count (RUN-5), and their class where it is
 #: not the pool's key (decision 12.5)
 POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class'})

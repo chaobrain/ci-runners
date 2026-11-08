@@ -49,6 +49,9 @@ def main(argv: list[str]) -> int:
         from ci_runners import hookcopy, reaper
         h = load_inventory().host
         print(reaper.reap(h['data']))
+        from ci_runners import slurmpart
+        for line in slurmpart.reap(h['data'], etc_dir()):  # a lost slurm part's job (decision 14.4)
+            print(line)
         line = hookcopy.refresh(h)  # a copy /tmp's cleaning took, or one that changed (decision 13.5)
         if line:
             print(line)

@@ -820,6 +820,7 @@ ci_runners/           stdlib-only Python: pure functions, thin I/O
   inventory.py        schema, loader, lint
   slurmsite.py        the Slurm site config: schema, loader, prices, deny tokens (14.6)
   slurmgate.py        the cluster's gate (14.5), the batch template and the job's supervisor (14.3)
+  slurmpart.py        the executor's `slurm` path: choice, budget, stage, submit, watch, end (14.3, 14.4)
   cli.py              `ci-run`
 bin/                  ci-run, ci-lock, ci-slot: CLIs over the package; ci-slurm-gate, a cluster
                       key's forced command (14.5)
@@ -972,6 +973,7 @@ h100 is the only host, and its labels choose the pool (§5.1); there is nothing 
 | `results` | none | glob of JUnit XML that the command writes under `CI_RESULTS_DIR` |
 | `resume` | false | sets `CI_RESUME=1`, for a command that can resume |
 | `attempt-of` | none | the record of the attempt this one retries; a record of another host is taken by its name (decision 13.3) |
+| `target` | none | `slurm` only, required there (decision 14.2): a target of the site config, or several in the order to try, separated by commas or spaces; `<site>:<target>` where the host has more than one site config |
 
 A CPU part (`gpus: 0`) takes one of the host's CI slots; a GPU part takes its card's
 lease, which is its slot (§7).

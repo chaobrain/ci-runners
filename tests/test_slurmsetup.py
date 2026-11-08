@@ -28,7 +28,7 @@ ANOTHER = f'restrict,command="/elsewhere/ci-runners/releases/hook/bin/ci-slurm-g
 def good_facts() -> dict:
     t = {'partition_up': True, 'test_only': True, 'test_only_text': ''}
     return {'python': [3, 12, 1], 'commands': {c: True for c in ss.COMMANDS}, 'slurm': [24, 5, 3], 'free_gib': 400.0,
-            'writable': True, 'targets': {'cpu': dict(t), 'a40': dict(t), 'h100': dict(t)}, 'envs': []}
+            'writable': True, 'shared': [], 'targets': {'cpu': dict(t), 'a40': dict(t), 'h100': dict(t)}, 'envs': []}
 
 
 class Pure(unittest.TestCase):
@@ -39,7 +39,8 @@ class Pure(unittest.TestCase):
         self.assertEqual(ss.findings(self.site, 'acct1', good_facts()), [])
         cases = [(('python', [3, 10, 12]), 'login Python'), (('slurm', [20, 2, 1]), 'Slurm [20, 2, 1]'),
                  (('slurm', None), 'Slurm None'), (('writable', False), 'not writable'),
-                 (('free_gib', 49.0), '49 GiB free, 50 needed')]
+                 (('free_gib', 49.0), '49 GiB free, 50 needed'), (('shared', ['/r']), 'others may write /r: chmod go-w'),
+                 (('shared', None), 'does not say who may write the root')]  # an older gate's facts: fail closed
         for (k, v), why in cases:
             f = good_facts()
             f[k] = v
@@ -76,7 +77,7 @@ class Pure(unittest.TestCase):
 
     def test_the_canary_and_its_cost(self):
         self.assertEqual([(t, c, n, round(x, 4)) for t, c, n, x in ss.canary_jobs(self.site, 'acct1')],
-                         [('cpu', 0, 8, 0.024), ('a40', 2, 16, 0.45), ('h100', 2, 32, 1.6)])
+                         [('cpu', 0, 8, 0.064), ('a40', 2, 16, 1.2), ('h100', 2, 32, 4.2667)])  # 8 min: its --time
 
 
 class Site(unittest.TestCase):
@@ -157,7 +158,8 @@ class Plan(Site):
                      f'2. release {tag}, copied from this host to {b}/releases/{tag}',
                      f'{b}/releases/hook -> {tag}', f'   {b}/etc/python, mode 600: {sys.executable}',
                      f'   restrict,command="{b}/releases/hook/bin/ci-slurm-gate" {PUB} ci-runners-slurm-hb',
-                     'variants: cpu, cuda13', '   a40: 2 cards, 16 CPUs, up to 0.45', '   in all up to 2.07'):
+                     'variants: cpu, cuda13', '   a40: 2 cards, 16 CPUs, up to 1.20', '   in all up to 5.53',
+                     'at most 3 min, priced at its --time of 8 min:'):
             self.assertIn(line, text)
         entry = json.dumps(slurmsite.account_entry(self.site(), 'acct1'), indent=1, sort_keys=True)
         self.assertIn('\n'.join(f'   {x}' for x in entry.splitlines()), text)
@@ -258,6 +260,19 @@ class Install(Site):
             ss.apply(ctx, 'cluster1', 'acct1', self.plan_file(), 'owner')
         with self.assertRaisesRegex(ss.SetupError, 'not an ssh alias'):
             ss.login_call(self.site(), '-oProxyCommand=x', 'prepare', {}, ssh='ssh', run=None)
+
+    def test_a_root_others_may_write_is_refused(self):
+        self.root.chmod(0o770)
+        self.addCleanup(self.root.chmod, 0o700)
+        ctx, out = self.ctx()
+        self.assertEqual(ss.check(ctx, 'cluster1', 'acct1', 'owner'), 1)
+        self.assertIn(f'finding: its group or others may write {self.root}: chmod go-w', out.getvalue())
+        with self.assertRaisesRegex(ss.SetupError, 'may be written by its group or others: chmod go-w it first'):
+            ss.apply(ctx, 'cluster1', 'acct1', self.plan_file(), 'owner')
+        self.assertEqual(os.listdir(self.root), [])
+        self.root.chmod(0o702)
+        with self.assertRaisesRegex(ss.SetupError, 'may be written by its group or others'):
+            ss.apply(ctx, 'cluster1', 'acct1', self.plan_file(), 'owner')
 
     def test_a_refusal_on_the_login_host_is_reported(self):
         (self.root).chmod(0o500)

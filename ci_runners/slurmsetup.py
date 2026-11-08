@@ -135,13 +135,14 @@ def key_line(base: str, key: str, driver: str) -> str:
 def canary_jobs(site: slurmsite.Site, alias: str) -> list[tuple[str, int, int, float]]:
     """The canary's job per target of the account: ``(target, cards, cpus, cost)``; a GPU
     target's at its ``max_cards`` (the P2P self-test where 2 or more), for
-    ``CANARY_MINUTES`` at most."""
+    ``CANARY_MINUTES`` at most, priced at its job's ``--time`` (``TIME_MARGIN`` more), as
+    the budget prices a part."""
     out = []
     for t in site.accounts[alias].a['targets']:
         tg = site.targets[t]
         cards = tg.max_cards if tg.gpu else 0
         cpus = tg.cpus(cards)
-        out.append((t, cards, cpus, site.hourly(t, cards, cpus) * CANARY_MINUTES / 60))
+        out.append((t, cards, cpus, site.worst_cost(t, cards, CANARY_MINUTES)))  # at its job's --time
     return out
 
 
@@ -173,7 +174,8 @@ def plan_text(site: slurmsite.Site, alias: str, *, release: str, key: str, drive
         f'   {key_line(base, key, driver)}',
         f'5. env builds (ci-run slurm env {site.name} {alias} <project>; egress {site.site["egress"]}), '
         f'variants: {", ".join(variants)}',
-        f'6. canary (ci-run slurm canary {site.name} {alias}): one job per target, at most {CANARY_MINUTES} min:',
+        f'6. canary (ci-run slurm canary {site.name} {alias}): one job per target, at most {CANARY_MINUTES} min, '
+        f'priced at its --time of {CANARY_MINUTES + slurmsite.TIME_MARGIN} min:',
         *(f'   {t}: {c} cards, {n} CPUs, up to {cost:.2f}' for t, c, n, cost in jobs),
         f'   in all up to {sum(j[3] for j in jobs):.2f}',
     ]
@@ -195,6 +197,11 @@ def findings(site: slurmsite.Site, alias: str, facts: dict) -> list[str]:
     v = facts.get('slurm')
     if not isinstance(v, list) or tuple(v[:2]) < MIN_SLURM:
         out.append(f'Slurm {v}: {".".join(map(str, MIN_SLURM))} or later needed')
+    shared = facts.get('shared')
+    if not isinstance(shared, list):
+        out.append('the gate does not say who may write the root (an older release: apply the plan)')
+    elif shared:
+        out.append(f'its group or others may write {", ".join(map(str, shared))}: chmod go-w')
     if not facts.get('writable'):
         out.append('the root is not writable')
     elif float(facts.get('free_gib') or 0) < MIN_FREE_GIB:

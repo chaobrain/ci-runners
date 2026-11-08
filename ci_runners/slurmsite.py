@@ -357,6 +357,117 @@ def deny_tokens(*docs: Mapping[str, object]) -> set[str]:
     return inventory.deny_tokens(*(_private(d) for d in docs))  # type: ignore[arg-type]
 
 
+# ------------------------------------------------------------------ redaction
+
+#: a value shorter than this, or a common word, is not replaced: as the deny list
+#: (``inventory.MIN_TOKEN``, ``inventory._COMMON``), so it would not be denied either
+REDACT_MIN = inventory.MIN_TOKEN
+#: a node name is replaced from this length (``c07``): one is a whole word only
+NODE_MIN = 2
+#: the node names of one host list a redactor takes at most
+HOSTLIST_MAX = 4096
+_HOSTLIST = re.compile(r'[A-Za-z0-9_.-]+(?:\[[0-9,-]{1,64}\][A-Za-z0-9_.-]*)?(?:,[A-Za-z0-9_.-]+'
+                       r'(?:\[[0-9,-]{1,64}\][A-Za-z0-9_.-]*)?)*\Z')
+
+
+def hostlist(text: str) -> list[str]:
+    """The node names of a Slurm host list (``zq[01-03,7],cpu1``: a range keeps its
+    start's width), at most ``HOSTLIST_MAX``; ``[]`` for anything else. Pure."""
+    if not _HOSTLIST.fullmatch(text):
+        return []
+    out: list[str] = []
+    for m in re.finditer(r'([A-Za-z0-9_.-]+)(?:\[([0-9,-]+)\]([A-Za-z0-9_.-]*))?', text):
+        pre, ranges, post = m.groups()
+        if ranges is None:
+            out.append(pre)
+            continue
+        for r in ranges.split(','):
+            a, dash, b = r.partition('-')
+            if not a.isdigit() or dash and not b.isdigit():
+                return []
+            for i in range(int(a), min(int(b or a), int(a) + HOSTLIST_MAX) + 1):
+                out.append(f'{pre}{i:0{len(a)}d}{post}')
+        if len(out) >= HOSTLIST_MAX:
+            return out[:HOSTLIST_MAX]
+    return out
+
+
+class Redactor:
+    """Replaces a site's inventory in text with placeholders, for what a part shows on
+    GitHub (its job log, reason and summary): each account's root (``<root>``) and its
+    parent (``<home>``), Slurm account (``<account>``) and ssh alias (``<host>``), the
+    login host and user its ssh config names (``add_ssh``: ``<host>``, ``<user>``), each
+    target's partition (``<partition>``) and nodes (``<node>``, host lists expanded, and
+    the nodes a job ran on as they are seen: ``add_nodes``), the login Python, proxy and
+    submit arguments. A whole word only (no letter or digit next to it), the longest
+    first, in any case. A value that is one of our role names (site, target, account,
+    variant, GPU model) says nothing and is kept, as is one the deny list would not hold
+    (``REDACT_MIN``), but a node name (``NODE_MIN``)."""
+
+    def __init__(self, site: Site | None = None) -> None:
+        self.public: set[str] = set()
+        self.pairs: dict[str, str] = {}
+        self._rx: re.Pattern | None = None
+        if site is None:
+            return
+        self.public = {site.name.lower(), *(t.lower() for t in site.targets), *(a.lower() for a in site.accounts)}
+        for t in site.targets.values():
+            self.public.update(str(t.t[k]).lower() for k in ('variant', 'gpu_model') if k in t.t)
+        for a in site.accounts.values():
+            root = str(a.a['root']).rstrip('/')
+            self.add(root, '<root>')
+            if root.count('/') >= 2:
+                self.add(os.path.dirname(root), '<home>')
+            self.add(str(a.a['slurm_account']), '<account>')
+            self.add(str(a.a['ssh']), '<host>')
+        for t in site.targets.values():
+            self.add(str(t.t['partition']), '<partition>')
+            for n in [*t.t.get('nodes', []), *t.t.get('exclude', [])]:
+                self.add_nodes(str(n))
+        py = str(site.site['login_python'])
+        if not py.startswith('/usr/'):
+            self.add(py, '<python>')
+        if site.site.get('proxy'):
+            self.add(str(site.site['proxy']), '<proxy>')
+        for x in site.site.get('submit_args', []):
+            self.add(str(x), '<submit-arg>')
+            if '=' in str(x):
+                self.add(str(x).split('=', 1)[1], '<submit-arg>')
+
+    def add(self, value: str, placeholder: str, least: int = REDACT_MIN) -> None:
+        v = value.strip()
+        if len(v) < least or v.lower() in inventory._COMMON or v.lower() in self.public:
+            return
+        if v.lower() not in self.pairs:
+            self.pairs[v.lower()] = placeholder
+            self._rx = None
+
+    def add_nodes(self, text: str) -> None:
+        """A node name or host list, as sacct or the site config writes it."""
+        text = text.strip()
+        names = hostlist(text)
+        for n in names:
+            self.add(n, '<node>', NODE_MIN)
+        if names:
+            self.add(text, '<node>')
+
+    def add_ssh(self, facts: Mapping[str, str]) -> None:
+        """``ssh -G``'s ``hostname`` and ``user`` of an account's alias."""
+        if facts.get('hostname'):
+            self.add(facts['hostname'], '<host>')
+        if facts.get('user'):
+            self.add(facts['user'], '<user>')
+
+    def __call__(self, text: str) -> str:
+        if not self.pairs:
+            return text
+        if self._rx is None:
+            keys = sorted(self.pairs, key=len, reverse=True)
+            self._rx = re.compile(r'(?<![A-Za-z0-9])(?:' + '|'.join(re.escape(k) for k in keys) + r')(?![A-Za-z0-9])',
+                                  re.IGNORECASE)
+        return self._rx.sub(lambda m: self.pairs[m.group().lower()], text)
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(__doc__.split('CLI (stdlib only)::', 1)[1], file=sys.stderr)

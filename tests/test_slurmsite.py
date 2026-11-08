@@ -214,5 +214,61 @@ class Deny(unittest.TestCase):
                 self.assertEqual(ss.main(['entry', p, 'nobody']), 2)
 
 
+class Redact(unittest.TestCase):
+    """What a part shows on GitHub: the site's inventory as placeholders (RUN-9h)."""
+
+    def site(self) -> ss.Site:
+        text = edit('submit_args = []', 'submit_args = ["--qos=labqos"]')
+        text = edit('login_python = "/usr/bin/python3"', 'login_python = "/opt/labpy/bin/python3"\n'
+                    'proxy = "http://proxy.lab.example:3128"', text).replace('egress = "tunnel"', 'egress = "proxy"')
+        text = edit('partition = "gpu-partition-b"', 'partition = "h100sxm"\nexclude = ["zq[08-10,3]"]', text)
+        return ss.load(edit('partition = "cpu-partition"', 'partition = "cpu"', text))
+
+    def test_each_kind_of_inventory_has_its_placeholder(self):
+        r = ss.Redactor(self.site())
+        r.add_ssh({'hostname': 'login7.lab.example', 'user': 'labuser'})
+        cases = [
+            ('/shared/fs/acct1/ci-runners/envs/p-cpu', '<root>/ci-runners/envs/p-cpu'),
+            ('/shared/fs/other', '<home>/other'),
+            ('cd /shared/fs/acct10', 'cd <home>/acct10'),  # a whole name only
+            ('-A lab-acct1 -p gpu-partition-a -w node01', '-A <account> -p <partition> -w <node>'),
+            ('labuser@login7.lab.example via cluster1-acct1', '<user>@<host> via <host>'),
+            ('LabUser on NODE01', '<user> on <node>'),  # in any case
+            ('node011 xnode01 node01x', 'node011 xnode01 node01x'),
+            ('zq08 zq09 zq10 zq3 zq[08-10,3] zq11', '<node> <node> <node> <node> <node> zq11'),
+            ('/opt/labpy/bin/python3 http://proxy.lab.example:3128 --qos=labqos', '<python> <proxy> <submit-arg>'),
+            ('qos labqos', 'qos <submit-arg>'),
+            # our own names say nothing: the site, its targets, accounts, variants and GPU models
+            ('cluster1:a40 acct1 cuda13 h100sxm cpu', 'cluster1:a40 acct1 cuda13 h100sxm cpu'),
+        ]
+        for text, want in cases:
+            self.assertEqual(r(text), want, text)
+
+    def test_the_nodes_a_job_ran_on_are_added_as_seen(self):
+        r = ss.Redactor(self.site())
+        self.assertEqual(r('on c07 and c08'), 'on c07 and c08')
+        r.add_nodes('c[07-08]')
+        self.assertEqual(r('on c07 and c08, c[07-08]'), 'on <node> and <node>, <node>')
+        for x in ('None assigned', '', 'a b'):
+            r.add_nodes(x)
+        self.assertEqual(r('None assigned'), 'None assigned')
+
+    def test_a_short_or_common_value_is_kept_as_the_deny_list_keeps_it(self):
+        r = ss.Redactor()
+        r.add('gpu', '<partition>')
+        r.add('home', '<home>')
+        r.add('/data', '<root>')
+        self.assertEqual(r('gpu home /data'), 'gpu home <root>')
+        self.assertEqual(ss.Redactor()('anything'), 'anything')
+
+    def test_a_host_list(self):
+        self.assertEqual(ss.hostlist('zq[01-03,7],cpu1'), ['zq01', 'zq02', 'zq03', 'zq7', 'cpu1'])
+        self.assertEqual(ss.hostlist('a[1-2]-ib'), ['a1-ib', 'a2-ib'])
+        for bad in ('None assigned', '', 'a[x-2]', 'a[1-]', '(null)'):
+            self.assertEqual(ss.hostlist(bad), [], bad)
+        self.assertEqual(len(ss.hostlist('n[1-99999]')), ss.HOSTLIST_MAX)
+        self.assertEqual(len(ss.hostlist('n[1-3000],m[1-3000]')), ss.HOSTLIST_MAX)
+
+
 if __name__ == '__main__':
     unittest.main()

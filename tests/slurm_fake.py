@@ -25,7 +25,8 @@ States move when a command looks at them, as a scheduler's would between polls.
 with ``SSH_ORIGINAL_COMMAND``, as a forced command would; a host with ``"login": true``
 and a ``home`` is an owner's login, which prints its ``motd`` and runs the command with
 ``sh -c`` in ``home``; ``sbatch --test-only`` records each script's directives in
-``test_only.json``; ``-O`` control calls pass; an
+``test_only.json``; ``-O`` control calls pass; ``-G`` prints the host's ``user`` and
+``hostname`` (``ciuser`` and the alias by default; ``"no_config": true`` fails it); an
 unknown or down host fails with 255. ``$FAKE_SSH/calls.log`` records each call.
 """
 from __future__ import annotations
@@ -305,11 +306,13 @@ _SSH_VALUE = set('BbcDEeFIiJLlmOoPpQRSWw')
 
 def ssh(args: list[str]) -> int:
     d = os.environ['FAKE_SSH']
-    i, control, forwards = 0, False, []
+    i, control, forwards, show = 0, False, [], False
     while i < len(args) and args[i].startswith('-'):
         flag = args[i][1:2]
         if flag == 'O':
             control = True
+        if flag == 'G':
+            show = True
         if flag == 'R':
             forwards.append(args[i + 1])
         i += 2 if flag in _SSH_VALUE and len(args[i]) == 2 else 1
@@ -320,6 +323,11 @@ def ssh(args: list[str]) -> int:
             if k in os.environ:
                 f.write(json.dumps(['env', f'{k}={os.environ[k]}']) + '\n')
     h = _load(os.path.join(d, 'hosts.json'), {}).get(host)
+    if show:  # -G: the config it would use, without connecting
+        if (h or {}).get('no_config'):
+            return 255
+        print(f'user {(h or {}).get("user", "ciuser")}\nhostname {(h or {}).get("hostname", host)}\nport 22')
+        return 0
     if h is None or h.get('down'):
         print(f'ssh: connect to host {host} port 22: Connection refused', file=sys.stderr)
         return 255

@@ -194,6 +194,33 @@ class Pure(unittest.TestCase):
         self.assertEqual(out['next'], 'none')
         self.assertEqual(outcome.hint('unavailable', retry_here=True), outcome.Hint('retry', where='same-host'))
 
+    def test_ssh_facts_need_both_the_host_and_the_user(self):
+        import subprocess as sp_
+        out = {'rc': 0, 'text': b'user labuser\nhostname login7\nport 22\n'}
+        g = sp.Gate('/e', '/d', self.site, 'acct1', run=lambda argv, **kw: sp_.CompletedProcess(argv, out['rc'], out['text'], b''))
+        self.assertEqual(g.ssh_facts(), {'user': 'labuser', 'hostname': 'login7'})
+        out['text'] = b'hostname login7\nport 22\n'
+        self.assertIsNone(g.ssh_facts())  # no user to redact: fail closed
+        out.update(rc=255, text=b'user labuser\nhostname login7\n')
+        self.assertIsNone(g.ssh_facts())
+
+    def test_the_job_log_is_redacted_by_whole_lines(self):
+        import io
+        d = object.__new__(sp.Driver)
+        d.out, d.log_tail = io.StringIO(), ''
+        d.redact = slurmsite.Redactor(self.site)
+        d.write_log('a cpu-part')
+        self.assertEqual(d.out.getvalue(), '')  # held: the line may go on
+        d.write_log('ition b\nc lab-')
+        self.assertEqual(d.out.getvalue(), 'a <partition> b\n')
+        long = 'x ' * (sp.LOG_LINE_MAX // 2) + 'lab-'
+        d.write_log(long)
+        self.assertEqual(d.log_tail[-8:], 'x x lab-')  # a line too long goes out at a blank, its end held
+        self.assertLessEqual(len(d.log_tail), sp.LOG_KEEP)
+        d.write_log('acct1 end', end=True)
+        self.assertTrue(d.out.getvalue().endswith('x <account> end'), d.out.getvalue()[-40:])
+        self.assertEqual(d.log_tail, '')
+
     def test_the_class_row(self):
         s, data = self.site, '/nonexistent'
         ok, why = sp.row(data, s, ['a40', 'cpu', 'h100', 'l40'], project='p', gpus=1, minutes=90, lock='none')
@@ -323,9 +350,9 @@ class Ends(Driver):
                          ('cluster1', 'acct1', 'cpu', 'cpu-partition', 1001, 'COMPLETED'))
         self.assertEqual((b['cards'], b['cpus'], b['node']), (0, 8, 'fake01'))
         self.assertAlmostEqual(b['cost'], 8 * 0.06 * b['elapsed'] / 3600)
-        self.assertIn('hb → cluster1:cpu (acct1), job 1001 on fake01', out['slurm'])
+        self.assertIn('hb → cluster1:cpu (acct1), job 1001, ', out['slurm'])  # not its node: inventory
         summary = (rec / 'summary.md').read_text()
-        self.assertIn('| cluster | hb → cluster1:cpu (acct1), job 1001 on fake01', summary)
+        self.assertIn('| cluster | hb → cluster1:cpu (acct1), job 1001, ', summary)
         self.assertIn('cost', summary)
         r = json.loads((rec / 'record.json').read_text())
         self.assertEqual(r['class'], 'slurm')
@@ -339,6 +366,40 @@ class Ends(Driver):
         self.assertTrue((ws.parent / 'tmp' / 'input.txt').exists())
         cache = json.loads((self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'ledger-acct1.json').read_text())
         self.assertEqual(cache['at'], 0)  # read again by the next part: the job counts from its submission
+
+    def private_site(self, **ssh):
+        """The site config names the accounts' real roots, as a real one does, and acct1's
+        ssh config ``ssh`` (a login host and user)."""
+        site = self.etc / 'slurm' / 'cluster1.toml'
+        site.write_text(site.read_text().replace('/shared/fs/acct1', str(self.d / 'root'))
+                        .replace('/shared/fs/acct2', str(self.d / 'root2')))
+        h = json.loads((self.d / 'ssh' / 'hosts.json').read_text())
+        h['cluster1-acct1'].update(ssh)
+        (self.d / 'ssh' / 'hosts.json').write_text(json.dumps(h))
+
+    def test_what_a_part_shows_on_github_names_no_inventory(self):
+        self.private_site(hostname='login7.example.org', user='labuser')
+        cmd = ('echo "dir $CI_PART_DIR"; echo "fake01 labuser@LOGIN7.example.org lab-acct1 cluster1-acct1 cluster1:cpu"; '
+               'printf "x cpu-part"; sleep 1; printf "ition y\\nlast lab-acct1"; exit 3')
+        code, out = self.execute(command=cmd)
+        log = self.log.read_text()
+        self.assertIn('dir <root>/ci-runners/', log)
+        self.assertIn('<node> <user>@<host> <account> <host> cluster1:cpu\n', log)  # our role names stay
+        self.assertIn('x <partition> y\n', log)  # one name, split across two reads of the job's log
+        self.assertIn('last <account>', log)  # and the log's last line, without its newline
+        summary = (self.record(out) / 'summary.md').read_text()
+        for x in (str(self.d / 'root'), 'fake01', 'labuser', 'login7', 'lab-acct1', 'cluster1-acct1', 'cpu-partition'):
+            self.assertNotIn(x.lower(), log.lower())
+            self.assertNotIn(x, json.dumps(out) + summary)
+        self.assertIn('fake01 labuser@', (self.record(out) / 'job.log').read_text())  # this host's own copy: as it was
+        self.assertEqual(self.block(out)['node'], 'fake01')
+
+    def test_without_its_ssh_config_a_part_runs_nowhere(self):
+        self.private_site(no_config=True)
+        code, out = self.execute()
+        self.assertEqual(out['outcome'], 'unavailable')
+        self.assertIn('ssh -G acct1: no host and user to redact', out['reason'])
+        self.assertEqual(self.jobs(), [])
 
     def test_a_red_part(self):
         code, out = self.execute(command='exit 3')
@@ -365,7 +426,7 @@ class Ends(Driver):
         code, out = self.execute()
         self.assertEqual((code, out['outcome'], out['next']), (0, 'unavailable', 'retry'))
         self.assertEqual(out['retry-on'], ['self-hosted', 'hb-slurm'])
-        self.assertIn('node fail', out['reason'])
+        self.assertEqual(out['reason'], 'node fail: NODE_FAIL on <node>')  # the node the job ran on, redacted
 
     def test_a_cancel_by_another_user_falls_back(self):
         self.plan({'other_cancel': 0.5})

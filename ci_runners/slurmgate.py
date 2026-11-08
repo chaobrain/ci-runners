@@ -457,7 +457,8 @@ def _newest(path: str) -> float:
 
 def check(base: str, release: str, run: Callable = subprocess.run) -> dict:
     """What this account sees of the site (RUN-9e's ``check`` reads it): the Python,
-    the Slurm commands and version, the root's room, and per target its partition's
+    the Slurm commands and version, the root and tree its group or others may write
+    (``shared``), the root's room, and per target its partition's
     state and whether ``sbatch --test-only`` takes the largest request a part may make
     (its ``max_cards`` and ``max_minutes``: the partition access and the association's
     limits on cards, CPUs and time)."""
@@ -473,6 +474,9 @@ def check(base: str, release: str, run: Callable = subprocess.run) -> dict:
     rc, text = out_of(['sbatch', '--version'])
     m = re.search(r'(\d+)\.(\d+)\.(\d+)', text)
     facts['slurm'] = [int(x) for x in m.groups()] if rc == 0 and m else None
+    # whoever else may write the root or the tree may swap the gate, the env or a job's files
+    facts['shared'] = [p for p in (os.path.dirname(base), base)
+                       if not os.path.lexists(p) or os.lstat(p).st_mode & (stat.S_IWGRP | stat.S_IWOTH)]
     try:
         st = os.statvfs(base)
         facts['free_gib'] = st.f_bavail * st.f_frsize / (1 << 30)

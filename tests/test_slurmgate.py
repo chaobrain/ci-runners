@@ -497,6 +497,14 @@ class Check(Cluster):
         self.assertEqual(sorted(facts['targets']), ['a40', 'cpu', 'h100'])
         self.assertTrue(all(t['test_only'] and t['partition_up'] for t in facts['targets'].values()))
         self.assertEqual(facts['envs'], ['p-cpu', 'p-cuda13'])
+        self.assertEqual(facts['shared'], [])
+        self.base.chmod(0o720)
+        self.addCleanup(self.base.chmod, 0o700)
+        self.assertEqual(self.gate_json('ci-slurm-gate check')['shared'], [str(self.base)])  # the tree, as the root
+        self.base.chmod(0o700)
+        self.base.parent.chmod(0o703)
+        self.addCleanup(self.base.parent.chmod, 0o700)
+        self.assertEqual(self.gate_json('ci-slurm-gate check')['shared'], [str(self.base.parent)])
         self.assertEqual(list((self.base / 'work').iterdir()) if (self.base / 'work').exists() else [], [])
 
     def test_a_wrong_gpu_syntax_and_a_down_partition_show(self):

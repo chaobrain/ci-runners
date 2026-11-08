@@ -28,6 +28,7 @@ its submission: the account's cached ledger is then read again. Every call to th
 """
 from __future__ import annotations
 
+import codecs
 import datetime
 import fcntl
 import glob
@@ -51,6 +52,10 @@ CANCEL_WAIT = 90  # s a cancelled job has to end
 LEDGER_TTL = 600  # s a ledger is cached (14.7)
 DRIVER_MEMORY = '1G'  # the driver's scope
 LOG_CHUNK = 1 << 20  # slurmgate.LOG_CHUNK
+#: a job log line longer than this goes out redacted at its last blank before
+#: ``LOG_KEEP`` from its end; ``LOG_KEEP`` is longer than any value the redactor replaces
+LOG_LINE_MAX = 1 << 16
+LOG_KEEP = 512
 #: the job's environment from the runner's: what a command may read of its job
 JOB_VARS = ('GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_REF', 'GITHUB_REF_NAME', 'GITHUB_HEAD_REF', 'GITHUB_BASE_REF',
             'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_RUN_NUMBER', 'GITHUB_JOB', 'GITHUB_EVENT_NAME',
@@ -236,6 +241,22 @@ class Gate:
     @property
     def host(self) -> str:
         return str(self.site.accounts[self.alias].a['ssh'])
+
+    def ssh_facts(self) -> dict[str, str] | None:
+        """``ssh -G``'s ``hostname`` and ``user`` of the account's alias (no connection),
+        for the redactor; None if ssh cannot say."""
+        try:
+            r = self.run([self.ssh, '-G', self.host], capture_output=True, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if r.returncode != 0:
+            return None
+        out = {}
+        for line in (r.stdout or b'').decode(errors='replace').splitlines():
+            k, _, v = line.partition(' ')
+            if k in ('hostname', 'user'):
+                out[k] = v.strip()
+        return out if len(out) == 2 else None
 
     def call(self, verb: str, *args: str, data: bytes = b'', timeout: float = 120) -> bytes:
         try:
@@ -426,20 +447,42 @@ class Driver:
         self.block: dict[str, object] = {'site': self.site.name, 'tried': [],
                                          'driver': [os.getpid(), round(slots._start_of(os.getpid()))]}
         self.key = self.plan['key']
+        # what the part shows on GitHub (its log, reason and summary) names no inventory
+        self.redact = slurmsite.Redactor(self.site)
+        self.log_tail = ''
+        self.log_decoder = codecs.getincrementaldecoder('utf-8')('replace')
 
     def say(self, text: str) -> None:
-        self.out.write(f'ci-runners: {text}\n')
+        self.out.write(self.redact(f'ci-runners: {text}') + '\n')
         self.out.flush()
+
+    def write_log(self, text: str, end: bool = False) -> None:
+        """The job's log to the job log, redacted by whole lines, so that no name is
+        split across two chunks; a line longer than ``LOG_LINE_MAX`` goes at its last
+        blank. ``end``: the rest."""
+        text = self.log_tail + text
+        cut = len(text) if end else text.rfind('\n') + 1
+        if not end and cut == 0 and len(text) > LOG_LINE_MAX:
+            cut = max(text.rfind(' ', 0, len(text) - LOG_KEEP), text.rfind('\t', 0, len(text) - LOG_KEEP)) + 1 \
+                or len(text) - LOG_KEEP
+        self.log_tail = text[cut:]
+        if cut:
+            self.out.write(self.redact(text[:cut]))
+            self.out.flush()
+
+    def node_seen(self, st: Mapping[str, object]) -> None:
+        self.redact.add_nodes(str(st.get('node') or ''))
 
     def save(self) -> None:
         _write_json(os.path.join(self.record, 'slurm.json'), self.block)
 
     def finish(self, ex: dict[str, object]) -> int:
+        self.write_log(self.log_decoder.decode(b'', final=True), end=True)
         ex = {'timed_out': False, 'oom_kills': 0, 'signalled': False, **ex, 'end_epoch': self.clock(),
               'boot_end': boot_id()}
         for k in ('unavailable', 'red', 'p2p'):  # one line each: they become the part's reason output
             if isinstance(ex.get(k), str):
-                ex[k] = ' '.join(re.sub(r'[^\x20-\x7e]', '?', ex[k]).split())[:400]
+                ex[k] = ' '.join(re.sub(r'[^\x20-\x7e]', '?', self.redact(ex[k])).split())[:400]
         self.save()
         _write_json(os.path.join(self.record, 'exit.json'), ex)
         return 0
@@ -488,6 +531,11 @@ class Driver:
         now = self.clock()
         month, today = datetime.date.fromtimestamp(now).strftime('%Y-%m'), datetime.date.fromtimestamp(now).isoformat()
         gates = {a: self.gate(a) for a, x in self.site.accounts.items() if not x.retired}
+        for a, g in gates.items():
+            facts = g.ssh_facts()
+            if facts is None:  # its login host and user would show unredacted: fail closed
+                return self.finish({'rc': None, 'unavailable': f'ssh -G {a}: no host and user to redact'})
+            self.redact.add_ssh(facts)
         cache = state_dir(p['data'], self.site.name)
         rows, silent = ledgers(gates, cache, now, month)
         unknown = sorted(set(gates) - set(rows))
@@ -606,6 +654,7 @@ class Driver:
             except Refused as e:
                 st = {'state': 'UNKNOWN', 'why': str(e)}
             state = str(st.get('state', 'UNKNOWN'))
+            self.node_seen(st)
             if state != self.block.get('state'):
                 self.block.update(state=state, node=st.get('node', ''))
                 if state == 'RUNNING' and 'run_epoch' not in self.block:
@@ -636,8 +685,7 @@ class Driver:
                 return offset
             if not chunk:
                 return offset
-            self.out.write(chunk.decode('utf-8', 'replace'))
-            self.out.flush()
+            self.write_log(self.log_decoder.decode(chunk))
             with open(os.path.join(self.record, 'job.log'), 'ab') as f:
                 f.write(chunk)
             offset += len(chunk)
@@ -665,6 +713,7 @@ class Driver:
 
     def ended(self, g: Gate, st: Mapping[str, object], target: str) -> int:
         p = self.plan
+        self.node_seen(st)
         ran = isinstance(st.get('exit'), dict) or int(st.get('elapsed') or 0) > 0
         if ran:
             for sub, dst, excl in (('tmp', p.get('temp'), TEMP_EXCLUDES), ('part', p['part_dir'], ())):

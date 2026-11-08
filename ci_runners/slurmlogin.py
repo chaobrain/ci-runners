@@ -62,6 +62,11 @@ def _own_dir(path: str) -> bool:
     return True
 
 
+def _shared(path: str) -> bool:
+    """``path`` may be written by its group or others: whoever can may swap what is in it."""
+    return bool(os.lstat(path).st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+
+
 def _write(path: str, text: str) -> None:
     tmp = f'{path}.{os.getpid()}.new'
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -85,9 +90,13 @@ def facts(root: str, entry: dict) -> dict:
 
 
 def prepare(base: str) -> dict:
-    """``<root>/ci-runners`` and its directories, mode 700; ``root`` must exist."""
-    if not _own_dir(os.path.dirname(base)):
-        raise LoginError(f'{os.path.dirname(base)} does not exist')
+    """``<root>/ci-runners`` and its directories, mode 700; ``root`` must exist, and only
+    its owner may write it."""
+    root = os.path.dirname(base)
+    if not _own_dir(root):
+        raise LoginError(f'{root} does not exist')
+    if _shared(root):
+        raise LoginError(f'{root} may be written by its group or others: chmod go-w it first')
     made = []
     for d in (base, *(os.path.join(base, x) for x in DIRS)):
         if not _own_dir(d):

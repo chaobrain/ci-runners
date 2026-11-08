@@ -809,7 +809,8 @@ class Shared(unittest.TestCase):
         rw, rwx = 'u:acct-x:rw,u:localuser:rw,m::rw', 'u:acct-x:rwx,u:localuser:rwx,m::rwx'
         want = ['# ci-runners (decision 12.9): the host lock and slot files that the CI account shares',
                 '# with the local accounts, root-owned in /tmp, recreated at boot, never age-cleaned.']
-        files = [f'{s}-host.lock', f'{s}-host.turnstile.lock', f'{s}-host.shared.lock', f'{s}-ci.lock', f'{s}-ci.2.lock']
+        files = [f'{s}-host.lock', f'{s}-host.turnstile.lock', f'{s}-host.shared.lock', f'{s}-host.probe.lock',
+                 f'{s}-ci.lock', f'{s}-ci.2.lock']
         for f in files:
             want += [f'f {f} 0660 root root -', f'a+ {f} - - - - {rw}']
         want += [f'd {s}-ci.queue 0770 root root -',
@@ -935,8 +936,8 @@ class Shared(unittest.TestCase):
 
     def test_the_private_drop_in(self):
         s, home, data = self.p, str(self.home), str(self.data)
-        shared = ' '.join(f'{s}{x}' for x in ('-host.lock', '-host.turnstile.lock', '-host.shared.lock', '-ci.lock',
-                                              '-ci.2.lock', '-ci.queue'))
+        shared = ' '.join(f'{s}{x}' for x in ('-host.lock', '-host.turnstile.lock', '-host.shared.lock',
+                                              '-host.probe.lock', '-ci.lock', '-ci.2.lock', '-ci.queue'))
         self.assertEqual(setup.private_text(self.h).splitlines(),
                          ["# ci-runners (decision 12.16): the CI account sees no other account's files",
                           '[Service]', 'PrivateTmp=yes', 'ProtectProc=invisible',

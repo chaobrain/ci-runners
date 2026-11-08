@@ -20,6 +20,7 @@ checkout instead. Linux with bash and flock(1) only.
 """
 from __future__ import annotations
 
+import fcntl
 import itertools
 import os
 import pathlib
@@ -27,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -162,6 +164,86 @@ class LockInterop(unittest.TestCase):
         self.assertTrue(self.inside('l2'))
         self.go('l2')
 
+    def test_light_probes_made_together_take_turns_behind_a_waiting_exclusive_one(self):
+        """Issue #69: a light request probes the shared marker with a non-blocking
+        exclusive try, so two probes at once refused each other, each took the other for a
+        normal shared holder and entered past a waiting exclusive request. With a light
+        holder in and a writer waiting, the test makes one probe (it holds the probe file
+        and the marker, as a probe does in its try) while two light requests, ours and
+        brainspike's, probe too: they wait their turn, find no normal holder, and queue
+        behind the writer, so neither enters first."""
+        _, _, marker = locks.paths(self.lock)
+        self.start('sh', 'l', 'l1')
+        self.assertTrue(self.inside('l1'))
+        self.start('py', 'x', 'xw')
+        time.sleep(0.3)  # the exclusive request holds the turnstile now
+        turn = locks.open_lock(locks.probe_path(self.lock))
+        fcntl.flock(turn, fcntl.LOCK_EX)
+        try:
+            fd = locks.open_lock(marker)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # our probe's try, in progress
+            try:
+                self.start('py', 'l', 'lpy')
+                self.start('sh', 'l', 'lsh')
+                self.assertFalse(self.inside('lpy', 0.4) or self.inside('lsh', 0.1), 'a probe did not wait its turn')
+            finally:
+                os.close(fd)
+        finally:
+            os.close(turn)
+        self.assertFalse(self.inside('lpy', 0.4) or self.inside('lsh', 0.1), 'a light request passed the writer')
+        self.go('l1')
+        self.assertTrue(self.inside('xw'))
+        self.assertFalse(self.inside('lpy', 0.3) or self.inside('lsh', 0.1))
+        self.go('xw')
+        self.assertTrue(self.inside('lpy') and self.inside('lsh'))
+        self.go('lpy')
+        self.go('lsh')
+
+    def test_a_probe_holds_its_turn_exclusively_through_its_try(self):
+        """While a light request tries the marker, no other probe can take a turn, shared or
+        exclusive: the turns exclude each other for the whole try."""
+        _, _, marker = locks.paths(self.lock)
+        probe = locks.probe_path(self.lock)
+        pathlib.Path(marker).touch()
+        mark = os.stat(marker).st_ino
+        seen = []
+        real = fcntl.flock
+
+        def spy(fd, op):
+            if os.fstat(fd).st_ino == mark and op == fcntl.LOCK_EX | fcntl.LOCK_NB:  # the try on the marker
+                other = os.open(probe, os.O_WRONLY)
+                try:
+                    for want in (fcntl.LOCK_SH, fcntl.LOCK_EX):
+                        try:
+                            real(other, want | fcntl.LOCK_NB)
+                            seen.append(want)
+                        except BlockingIOError:
+                            pass
+                finally:
+                    os.close(other)
+            return real(fd, op)
+        h = locks.HostLock(self.lock, held='')
+        with mock.patch('fcntl.flock', spy):
+            h.acquire('l')
+        h.release()
+        self.assertTrue(os.path.exists(probe))
+        self.assertEqual(seen, [], 'another probe took a turn during the try')
+
+    def test_the_wait_for_a_turn_counts_against_the_timeout(self):
+        turn = locks.open_lock(locks.probe_path(self.lock))
+        fcntl.flock(turn, fcntl.LOCK_EX)  # a probe that keeps its turn for 4 s (a stopped job)
+        late = threading.Timer(4, fcntl.flock, (turn, fcntl.LOCK_UN))
+        late.start()
+        try:
+            t0 = time.monotonic()
+            with self.assertRaises(locks.LockTimeout):
+                locks.HostLock(self.lock, held='', timeout=0.5).acquire('l')
+            self.assertLess(time.monotonic() - t0, 3)
+        finally:
+            late.cancel()
+            late.join()
+            os.close(turn)
+
     def test_nesting_covers_cross_implementations(self):
         out = self.dir / 'nested'
         cases = [
@@ -288,7 +370,7 @@ class TwoAccounts(unittest.TestCase):
         /tmp, so neither the host lock's three files nor a slot file is opened with it."""
         with tempfile.TemporaryDirectory(prefix='ci-lock-') as d:
             lock = os.path.join(d, 'host.lock')
-            shared = list(locks.paths(lock))
+            shared = [*locks.paths(lock), locks.probe_path(lock)]
             q = slots.SlotQueue(os.path.join(d, 'slot.lock'), 2)
             shared += q.slots
             for p in shared:
@@ -341,6 +423,13 @@ class TwoAccounts(unittest.TestCase):
                                capture_output=True, text=True, timeout=20)
             self.assertEqual(r.returncode, 2, r.stderr)
             self.assertFalse(os.path.exists(os.path.join(d, 'slot.lock')))
+            for name in ('host.lock', 'host.turnstile.lock', 'host.shared.lock'):
+                pathlib.Path(d, name).touch()  # the probe file is not there (a host before its apply)
+            r = subprocess.run([str(CI_LOCK), '-l', 'true'], env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(r.returncode, 0, r.stderr)  # the light request probes without turns
+            self.assertFalse(os.path.exists(os.path.join(d, 'host.probe.lock')))
+            for name in ('host.lock', 'host.turnstile.lock', 'host.shared.lock'):
+                os.unlink(os.path.join(d, name))
             os.chmod(d, 0o700)  # outside a sticky directory both create what they need
             self.assertEqual(subprocess.run([str(CI_LOCK), '-s', 'true'], env=env, timeout=20).returncode, 0)
             self.assertTrue(os.path.exists(os.path.join(d, 'host.lock')))

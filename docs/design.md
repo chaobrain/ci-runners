@@ -250,7 +250,8 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
     8. **The `nightly` class returns, on 3090a only.** One runner; a part may run 600 min
        (its job 615). A `nightly` part holds every CI slot and every card lease of its
        host for its life, so no other part runs beside it; parts queued behind it wait up
-       to their queue timeout and then end `unavailable`. Its `gpu-mem-mib` is checked on
+       to their queue timeout and then end `unavailable` (from `v1.6.0` a first attempt
+       with somewhere else to go goes there at once instead, 13.6). Its `gpu-mem-mib` is checked on
        the cards its command gets only: the lowest-numbered cool cards with that much
        free, `gpus` of them (lead, 2026-11-07); a local user's job on another card does
        not hold it back. This replaces the first path's
@@ -274,6 +275,19 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
        (read at the stamp, 2026-11-07). The local accounts that share the files are
        inventory (`local_accounts`); the plan prints the root steps (§5.3) and `apply`
        refuses until they are done.
+       - **Fix: the light probes take turns** (issue #69; `v1.6.0`). A light request
+         (`-l`) finds a normal shared holder by a non-blocking exclusive try on the shared
+         marker, which a concurrent try refuses as if a holder were in: two light requests
+         made together could each take the other's try for a holder and enter past a
+         waiting exclusive request. brainspike's `host_lock.sh` makes its tries take turns
+         under a fourth file, `<stem>.probe.lock` (its #409); `ci-lock` does the same, so
+         the turns hold across the two implementations, and the probe file joins the shared
+         files: the `tmpfiles.d` entries (root-owned, `rw` ACL entries for both accounts)
+         and the private namespace's `BindPaths=` (12.16). Exclusive holds were never at
+         stake, only the order behind a waiting exclusive request. A probe file that cannot
+         be opened (a host before its apply, where the namespace's `/tmp` lacks it) leaves
+         the try without turns, as before. The host's plan changes both root files, so the
+         apply restarts the user manager (12.16, §5.3).
     10. **The env spec gains an optional `conda` table** (§4.9). It is additive, so it
         ships in `v1.4.0`, not `v2` (§9). brainspike's spec asks for `nest-simulator=3.10`
         from `conda-forge`.
@@ -312,7 +326,7 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
         a private `/tmp` and `/var/tmp` (`PrivateTmp=yes`) and an empty `/dev/shm`; an
         empty `/home` and an empty data-disk root, with only the account's own `home` and
         `data` bound back; and, bound in from the host's `/tmp`, only brainspike's
-        five shared lock files and its slot queue (12.9), so `ci-lock` and `ci-slot` still
+        six shared lock files and its slot queue (12.9; the probe file since `v1.6.0`), so `ci-lock` and `ci-slot` still
         meet `host_lock.sh` and `ci_slot.sh`. A root drop-in on that one unit does it
         (§5.3); the user units, the executor and the part scopes do not change, since a
         `systemd-run --user --scope` part keeps its caller's namespace and stays in the
@@ -525,6 +539,46 @@ from the load record they add.
          through `Requires=`).
        - Known limit, unchanged: the runner still writes the machine name into every job
          log.
+    6. **No wait behind the nightly, and a retry queues on a full queue** (lead,
+       2026-11-08, from the CI-time review of brainspike's runs that morning). While a
+       `nightly` part held every slot and card of 3090a, PR parts' first attempts there
+       waited out their 20-minute queue timeout before going to 3090b; others ended at once
+       with "project queue full", and their retries, piled onto 3090b, could meet the cap
+       there too and end `unavailable` with `next` `none`, which the verdict reports as an
+       infrastructure error with nothing wrong in the change. So, from `v1.6.0`:
+       - **The nightly's hold record.** A `nightly` part writes `state/every.json` before
+         it takes its slot ticket and deletes it when it ends: the processes that keep its
+         hold, by PID and start time (the executor; from the command's start the
+         supervisor too, which keeps the slots and leases after a stopped executor, §4.3),
+         and its record. The record holds while one of those processes runs; a record whose
+         processes are all gone holds nothing (fail open: the part waits as in `v1.5`).
+       - **A first attempt does not wait behind it.** The busy check (13.2) gains a rule
+         that comes before the load rules: while the hold record holds, a part's first
+         attempt ends `unavailable` (`busy: nightly holds every slot and card`) at once,
+         with `next` `fallback` and `retry-on` the other host's pool of its class (13.3).
+         It applies where busy does (a class with a peer pool, other than `light` and
+         `nightly`; a project with a retry budget; never on a retry), every time and with
+         no marker: once in, the nightly holds every slot and card (12.8, §7), and while it
+         waits its slot ticket holds back every later slot ticket, so a part sent away
+         saves its whole queue timeout. A `gpu` or `multi` part is sent away too while the
+         nightly still waits for the slots, though a card may be free then: the nightly
+         takes the cards next, and a lease taken in between would hold it back.
+         A first attempt that passed the gate before the record appeared checks again
+         while it waits: a slot part goes elsewhere unless its slot ticket is older than
+         the nightly's, a card part once the nightly runs or holds an older lease ticket
+         than its own. A write of the record that fails is ignored (fail open). Generalising to "a hold whose expected end is past
+         the queue timeout" is not done: only the nightly holds a whole host, and its
+         timeout (600 min) is no estimate of its end.
+       - **A retry queues on a full queue.** The project cap of §7 rule 2 (`max_waiting`
+         per pool) refuses a first attempt only; a retry (`attempt-of` set) takes its
+         ticket past the cap and waits up to its queue timeout, as a retry already does
+         on a busy or drained host's peer. The cap still counts a waiting retry, so the
+         first attempts that come after it go elsewhere. The backlog stays bounded: a
+         retry exists only after its first attempt ended, a part is retried at most once
+         (§4.4), and each waiting retry holds a runner of its pool, so a pool never has
+         more waiting retries than runners, and each waits at most its queue timeout.
+       - A retry that still finds no slot ends `queue timeout: no CI slot` (or `no card
+         fits`), `next` `none`, as before: both hosts were full for its whole wait.
 
 ## Lead decisions (2026-11-08): a Slurm cluster as a remote target (RUN-9)
 
@@ -806,7 +860,8 @@ subtree of the shared account (decision 11.3).
 <our subtree>/ci-runners/state/            part records parts/<repo>/<run>-<attempt>/<id>-<n>/
                                            {record.json, status.json, samples.csv, log};
                                            leases; the slot queue; setup.json; drain.json
-                                           (13.1); hostload/ (the load record, 13.2)
+                                           (13.1); hostload/ (the load record, 13.2);
+                                           every.json (the nightly part's hold, 13.6)
 <our subtree>/ci-runners/logs/             hook and reaper logs, kept 14 days
 <our subtree>/ci-runners/envs/<project>/   the projects' conda envs (decision 11.4)
 <our subtree>/actions-runner/<name>/       one runner each: the app, .env, credentials
@@ -922,8 +977,8 @@ A CPU part (`gpus: 0`) takes one of the host's CI slots; a GPU part takes its ca
 lease, which is its slot (§7).
 
 Before it takes anything, the part passes its gate, in this order: low disk; its `gpus`
-and `lock` against its class's row (§4.8); the drain (decision 13.1); busy (13.2, a
-first attempt only). The health gate (§5.5) comes before the leases. Once it holds its
+and `lock` against its class's row (§4.8); the drain (decision 13.1); busy (13.2 and
+13.6, a first attempt only). The health gate (§5.5) comes before the leases. Once it holds its
 slot and leases, it reads the drain again before the command. A refusal at any of these
 ends it `unavailable` and releases what it took.
 
@@ -980,7 +1035,7 @@ nonzero exit with an OOM kill is `oom`, not `red`.
 | thermal | our own early stop (§5.5) | retry once on a cool card |
 | reboot | boot id differs from the one recorded at start | retry once on the same host |
 | unavailable | before the command: the health gate, no card fits, the queue timeout, the project's queue full, low disk, `gpus` or `lock` the class does not accept (§4.8), an unknown inventory schema, a malformed registry entry | fallback: once, on a cool card or the same pool |
-| unavailable (`drained`, `busy`) | the drain (decision 13.1), or a busy host on a first attempt (13.2) | fallback: once, on the other host's pool of the class (13.3); `none` for a drained part of a class with no such pool |
+| unavailable (`drained`, `busy`) | the drain (decision 13.1), or a busy host on a first attempt (13.2), or a `nightly` part's hold of the host on a first attempt (13.6) | fallback: once, on the other host's pool of the class (13.3); `none` for a drained part of a class with no such pool |
 | unavailable (`p2p`) | the P2P self-test of a `multi` part failed, errored or ran over its bound (decision 12.6) | none: a host fault, which the verdict reports as error |
 | lost | the job ended without outputs: the runner stopped (`systemctl show` timestamps after the part's start), or the tunnel dropped the job's connection | the verdict salvages the record (§4.5) |
 | stopped | cancelled (concurrency group, TERM) | none |
@@ -1206,7 +1261,7 @@ refreshed from a546b92f (T17):
 | change | detail |
 |---|---|
 | the CI account (root) | a new account with no password and no sudo, linger on, its `data` directory on the data disk (decision 12.2) |
-| shared lock and slot files (root) | brainspike's host lock (with its `.shared` and `.turnstile` files), its slot files and its ticket queue directory become root-owned, with ACL entries (and default ACL entries on the queue) giving the CI account and each of the inventory's `local_accounts` `rw`; a `tmpfiles.d` file (`/etc/tmpfiles.d/ci-runners-shared.conf`) recreates them at boot and excludes them from age cleaning. Their paths do not change (decision 12.9). Root-owned, because brainspike's scripts open them with `O_CREAT` (`exec N>>file`): `fs.protected_regular` lets any account do that on a file in sticky `/tmp` that `/tmp`'s owner, root, owns, and refuses it on a file another account owns. `plan.sh` prints the file's text and checks each step (the file as printed, each account present, each file root-owned, not a link, with its `rw` entries after the mask); the lead writes it as root and runs `systemd-tmpfiles --create` on it while no local job holds the files (under `host_lock.sh -x`, with `ci_slot.sh`'s queue empty). `apply` refuses until every step is done. Setup never runs as root, and nothing root runs reads the inventory. |
+| shared lock and slot files (root) | brainspike's host lock (with its `.shared`, `.turnstile` and, from `v1.6.0`, `.probe` files), its slot files and its ticket queue directory become root-owned, with ACL entries (and default ACL entries on the queue) giving the CI account and each of the inventory's `local_accounts` `rw`; a `tmpfiles.d` file (`/etc/tmpfiles.d/ci-runners-shared.conf`) recreates them at boot and excludes them from age cleaning. Their paths do not change (decision 12.9). Root-owned, because brainspike's scripts open them with `O_CREAT` (`exec N>>file`): `fs.protected_regular` lets any account do that on a file in sticky `/tmp` that `/tmp`'s owner, root, owns, and refuses it on a file another account owns. `plan.sh` prints the file's text and checks each step (the file as printed, each account present, each file root-owned, not a link, with its `rw` entries after the mask); the lead writes it as root and runs `systemd-tmpfiles --create` on it while no local job holds the files (under `host_lock.sh -x`, with `ci_slot.sh`'s queue empty). `apply` refuses until every step is done. Setup never runs as root, and nothing root runs reads the inventory. |
 | the CI account's own mount namespace (root; decision 12.16) | a drop-in `/etc/systemd/system/user@<uid>.service.d/ci-runners-private.conf`, mode 644, that `plan.sh` prints from the inventory and checks as it does the `tmpfiles.d` file: `[Service]` with `PrivateTmp=yes`, `ProtectProc=invisible` (lead, 2026-11-07), `TemporaryFileSystem=/dev/shm:mode=1777 /home <the data disk root>` (the parent of `data`, never `/`) and `BindPaths=` the account's `home`, its `data` and each shared file of 12.9. `home`, `data` and the data-disk root must each be their own real path (no link), and the root a mount point, or the plan refuses. The steps, in order: the lead installs it; as the account, `systemctl --user disable --now` every runner (a restart of the user manager starts the enabled ones, and a reboot before the drop-in would start them without it); as root, `systemctl daemon-reload` and `systemctl restart user@<uid>.service`; as the account, `systemctl --user start` the first runner only, for the leak check in a live job (T18). `apply` refuses until the drop-in is in place as printed and the manager runs in the namespace it makes, read from its `/proc/<pid>/mountinfo` by the mounts the paths reach: tmpfs at `/home` and the data-disk root and over `/dev/shm`, a private `/tmp` and `/var/tmp`, `/proc` with `hidepid=invisible`, a bind at each bound path and none of a deleted file (a lock file replaced since the restart would split the lock), and no other mount in `/home`, the data-disk root or `/tmp`; `apply` then enables the runners again. A shared file missing at the manager's start fails it (fail closed: no runner comes up); the files exist from boot (`tmpfiles.d`, sysinit). **Reversal**: stop the runners, remove the drop-in, `daemon-reload`, restart the user manager. Measured on 3090b on 2026-11-07 as the CI account, in a scratch system unit with these settings and then (without the `/home` and data-disk part) in this drop-in, removed again after the test: `/tmp`, `/var/tmp` and `/dev/shm` hold no file of any other account; in the scratch unit `/home` and the data-disk root showed only the account's own, its env ran, and no directory of another account was readable to a depth of two below `/`, `/data`, `/home`, `/mnt`, `/opt` and `/srv`; `ci-lock -s` waits out (status 4 at 3 s) under the local account's `host_lock.sh -x` and passes after it, and the local `host_lock.sh -s` waited 6.1 s under our `-x`; `ci-slot` and `ci_slot.sh` both took slots; a `systemd-run --user --scope` child is in `user@<uid>.service`'s cgroup tree, in the same mount namespace, and with `MemoryMax=64M` an allocation of 300 MB was killed (status 137); both cards were visible; `ci-tunnel` runs in the namespace. |
 | the push key (the account) | inventory `push_key`; the plan writes one line in the CI account's `~/.ssh/authorized_keys` (mode 600, in `~/.ssh` of mode 700): `restrict`, forced to `<data>/ci-runners/releases/hook/bin/ci-run org-sync --receive` with `CI_RUNNERS_ETC` and `CI_RUNNERS_PYTHON` set, marked `ci-runners-orgsync-push` so that a new key replaces it; every other line is kept (decision 12.4) |
 | `etc/tunnel/` | as on h100, with this host's own key pair; the plan prints the egress account's line for its public key (below) |
@@ -1261,7 +1316,8 @@ On 3090b and 3090a the executor of §4.3 adds:
      leases are held.
    - **Busy** (decision 13.2): on a first attempt of a class with a peer pool, other than
      `light`, a host busy for the whole window ends the part `unavailable`, with
-     `retry-on` the other host's pool; once per head and part.
+     `retry-on` the other host's pool; once per head and part. While a `nightly` part
+     holds or waits for every slot and card (13.6), every time.
    - **Health**, before the leases: a GPU part needs as many of its cards below
      `max_temp_c` (80 °C) and read as it asks for. If not, it ends `unavailable`, and
      `retry-on` names a card of the host that passes (`<host>-gpu<M>`) where one does.
@@ -1345,7 +1401,7 @@ bound).
 | T15 | A co-user of h100's shared account takes the tunnel key, or any local user of a host uses the tunnel's port on 127.0.0.1 (on the 3090 hosts, every local account can reach it). | the egress account has no shell and no listening forward, and its key opens only the egress proxy's port (decision 11.10). The proxy passes only its allowlist on port 443: HTTPS to GitHub, the Actions service's storage and the package indexes, which job code reaches through the tunnel anyway. The suffix `.blob.core.windows.net` lets them reach any Azure storage account over HTTPS, and `storage.googleapis.com` any Google Cloud Storage bucket: accepted gaps, since the Actions storage accounts have no stable names and package downloads use those buckets. They appear as the egress host's address. The allowlist is root-owned on the egress host. The lead revokes the key by deleting one line there. |
 | T16 | (3090 hosts) A job, or a local user, holds the shared host lock or a slot, and stalls the other side's work; or a local account empties the ticket queue. | the files are `flock` locks, so a hold ends with its process: a part's hold ends with its scope (inner timeout, the job-completed hook, the reaper); a waiting part ends `unavailable` at its queue timeout; the files hold no data, and a lost ticket only loses a place in the queue |
 | T17 | (3090 hosts) A job plants a link in the shared ticket queue (a `seq`, a ticket, a holder record, a temp name or a lock file there) so that a script of the other account writes, creates or truncates a file the link names, or blocks on a FIFO it reads. | the queue directory is not sticky and both accounts write in it (decision 12.9; lead, 2026-11-07), so no script of either account writes or creates through a link there. `slots.py` creates each file exclusively under a random name (`O_EXCL`, `O_NOFOLLOW`) and renames it over its name (a rename replaces a link, never its target). A FIFO is covered on each side: `slots.py` opens `seq.lock` and `take.lock` `O_NOFOLLOW` and `O_NONBLOCK` and uses them only if `fstat` shows a regular file, and reads `seq`, tickets and holder records the same way, so a FIFO there is refused at once; brainspike's `ci_slot.sh` (since ceb68a77) writes through exclusive temporaries renamed into place, exits 2 on a linked queue directory or a `seq.lock` that is not a regular file, and deletes a ticket that is a link or not a regular file as malformed, and (since a546b92f) opens every entry of the queue `O_NOFOLLOW` and `O_NONBLOCK` and checks it with `fstat` before it reads, locks or writes, creating `seq.lock` with `O_EXCL`. The plan checks that the queue is a root-owned directory, not a link. Residual: a job can delete or forge tickets and holder records, which disturbs the queueing only (T16), never a file of a local account; and a FIFO or a directory a job leaves at `seq` or `seq.lock` makes the other side refuse or fail until it is removed, never hang. |
-| T18 | (3090 hosts) A job reads other accounts' files that are readable by everyone, or their processes' command lines in `/proc`: temp files in `/tmp`, `/var/tmp` and `/dev/shm` left with a 002 or 022 umask (copies of private code, logs, notes), and other people's directories on the data disks. Measured before any job ran (2026-11-07): tens of thousands of the local account's temp files on 3090b, other people's on 3090a, and other people's data-disk directories on both. | the CI account's user manager runs in its own mount namespace (decision 12.16, §5.3): private `/tmp` and `/var/tmp`, an empty `/dev/shm`, and `/home` and the data-disk root emptied but for the account's own `home` and `data`; only brainspike's five shared lock files and the slot queue are bound in; `/proc` shows only the account's own processes (`ProtectProc=invisible`; lead, 2026-11-07). No local account's file modes change. The runners stay stopped until the drop-in is applied on the host, and a leak check inside a live job on each host (no other account's temp or data file readable) comes before any other job. Residual: files that other accounts leave readable elsewhere on the root disk (outside `/home`, the temp directories and the data disk) stay readable, as for any local user; system directories hold no user data. |
+| T18 | (3090 hosts) A job reads other accounts' files that are readable by everyone, or their processes' command lines in `/proc`: temp files in `/tmp`, `/var/tmp` and `/dev/shm` left with a 002 or 022 umask (copies of private code, logs, notes), and other people's directories on the data disks. Measured before any job ran (2026-11-07): tens of thousands of the local account's temp files on 3090b, other people's on 3090a, and other people's data-disk directories on both. | the CI account's user manager runs in its own mount namespace (decision 12.16, §5.3): private `/tmp` and `/var/tmp`, an empty `/dev/shm`, and `/home` and the data-disk root emptied but for the account's own `home` and `data`; only brainspike's six shared lock files and the slot queue are bound in; `/proc` shows only the account's own processes (`ProtectProc=invisible`; lead, 2026-11-07). No local account's file modes change. The runners stay stopped until the drop-in is applied on the host, and a leak check inside a live job on each host (no other account's temp or data file readable) comes before any other job. Residual: files that other accounts leave readable elsewhere on the root disk (outside `/home`, the temp directories and the data disk) stay readable, as for any local user; system directories hold no user data. |
 | T19 | (the `slurm` class, 14) A job reads a cluster key from the CI account's `etc` (job code runs as that account, T13) and uses the cluster account. | the key's forced command runs only the gate: no shell, no forward, `rsync` only into `work/`; private repositories of org members only; the class is opt-in per repository; the budget ledger | `submit` runs any code as the cluster account by design, so a job can read everything that account holds on the cluster, send it out through its log or artifacts, and submit billed jobs from inside a job. Exit path: a dedicated cluster account (14.12). |
 | T20 | (14) Other users of the cluster reach our files or a forward. | the account's root and every part directory mode 700; a part's temporary files on a node only inside a 700 directory of its own; the build's forward is a Unix socket in a 700 directory behind a relay that accepts only the build's random credential | a node's `/tmp` and process table are shared with other users' jobs, as for any user of the site |
 | T21 | (14) Runaway cost: a lost driver, a stuck job, a retry loop. | every job has `--time`; the reaper cancels a job whose GitHub job is gone; pending is bounded; one retry (§4.4); the daily and monthly caps (14.7) | job code (T19) can spend up to the site's association limits |
@@ -1416,8 +1472,9 @@ Rules:
    its cap is skipped. When several projects wait, the next slot goes to the project
    that holds the fewest slots, and ties go to the older ticket.
 2. **Per-project caps** come from the registry: `max_slots` per host (default 1),
-   `memory_max`, and `max_waiting` per pool (default 1). A part beyond `max_waiting`
-   ends `unavailable` ("project queue full"). So one project cannot fill a pool with
+   `memory_max`, and `max_waiting` per pool (default 1). A first attempt beyond
+   `max_waiting` ends `unavailable` ("project queue full") and goes elsewhere; a retry
+   queues past it, counted by it (decision 13.6). So one project cannot fill a pool with
    waiters, and GitHub's queue, which is not fair across repositories, stays short.
 3. **Light jobs never wait behind heavy ones**: claim and verdict run on their own
    `light` pool and take no slot.
@@ -1429,7 +1486,9 @@ Rules:
 6. **Busy hosts and drains** (decision 13). A part does not queue on a host that another
    account has kept busy for the whole window, nor on a drained one: it goes once to the
    other host's pool of its class. A retry, or a re-run of a head already sent away, waits
-   for its slot where it lands, so load moves at most once per head and part.
+   for its slot where it lands, so load moves at most once per head and part. Nor does a
+   first attempt queue behind a `nightly` part that holds or waits for every slot and
+   card (decision 13.6).
 
 ## 8. Failure modes and bounds
 

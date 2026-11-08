@@ -15,7 +15,7 @@ import tempfile
 import threading
 import unittest
 
-from ci_runners import envuse, inventory, part, registry
+from ci_runners import envuse, inventory, part, registry, slots
 from tests.p2p_fake import zeros_release
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -221,6 +221,21 @@ class Execute(Host):
         code, out = self.execute(command='true')
         self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no CI slot'))
 
+    def test_a_retry_queues_past_a_full_project_queue(self):
+        """Decision 13.6: the cap (``max_waiting``, §7 rule 2) refuses a first attempt, which
+        goes elsewhere; a retry has nowhere else to go, so it queues, and the cap counts it."""
+        self.two_slots()
+        (self.etc / 'projects' / 'p.toml').write_text(
+            (self.etc / 'projects' / 'p.toml').read_text().replace('[hosts.hb]\n', '[hosts.hb]\nmax_slots = 2\n'))
+        q = self.slot.parent / 's.queue'
+        q.mkdir()
+        (q / '000000000001.wait').write_text(f'1 {os.getpid()} {int(time.time())} /x ci-slot project=p cmd\n')
+        _, out = self.execute(id='a')
+        self.assertEqual((out['outcome'], out['reason'], out['next']), ('unavailable', 'project queue full', 'fallback'))
+        _, out = self.execute(id='a', attempt_of='hz:org/repo/77-1/a-1', command='touch "$CI_PART_DIR/ran"')
+        self.assertEqual((out['outcome'], out['attempt']), ('pass', 2), out['reason'])
+        self.assertTrue(pathlib.Path(self.path(out), 'work', 'ran').exists())
+
     def test_cards_are_leased(self):
         smi = '0, 24576, 576\n1, 24576, 24000\n'
 
@@ -292,9 +307,9 @@ P2P_OK = [sys.executable, '-I', '-c', 'import os; open(os.environ["CI_PART_DIR"]
           'os.environ["CUDA_VISIBLE_DEVICES"]); print("p2p: ok")']
 
 
-class Classes(Host):
-    """The 3090 classes (decisions 12.5 to 12.8, design §4.8, §5.5) on a 3090-style host:
-    two cards, two slots, a per-card ``gpu`` pool, ``multi``, ``compile`` and ``nightly``."""
+class ClassHost(Host):
+    """A 3090-style host: two cards, two slots, a per-card ``gpu`` pool, ``multi``,
+    ``compile`` and ``nightly``."""
 
     def setUp(self):
         super().setUp()
@@ -335,6 +350,10 @@ class Classes(Host):
 
     def work(self, out, name):
         return pathlib.Path(self.path(out), 'work', name).read_text().strip()
+
+
+class Classes(ClassHost):
+    """The 3090 classes (decisions 12.5 to 12.8, design §4.8, §5.5)."""
 
     def test_each_class_refuses_gpus_and_lock_outside_its_row(self):
         bad = [('light', {'gpus': 1}, 'take no card'), ('part', {'gpus': 1}, 'take no card'),
@@ -593,6 +612,197 @@ class Classes(Host):
         finally:
             other.release()
         self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'queue timeout: no card fits'))
+
+
+class BehindNightly(ClassHost):
+    """Decision 13.6: while a ``nightly`` part holds or waits for every slot and card, a
+    first attempt with a peer pool goes there at once (``busy: nightly ...``) instead of
+    waiting out its queue timeout; a retry queues. The hold lives as long as the executor or
+    the supervisor that keeps the slots."""
+
+    PEER = 'peer_labels = { part = ["hz-cpu"], gpu = ["hz-gpu"], multi = ["hz-multi"] }\n'
+
+    def setUp(self):
+        super().setUp()
+        self.inv_text = self.inv_text.replace('max_temp_c = 80\n', 'max_temp_c = 80\n' + self.PEER)
+        self.inv = inventory.load(self.inv_text)
+        self.hold = pathlib.Path(part.every_path(str(self.data)))
+
+    def test_a_nightly_part_keeps_the_hold_record_for_its_life(self):
+        _, out = self.go('nightly', command=f'cp "{self.hold}" "$CI_PART_DIR/hold"', timeout_minutes=600)
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
+        hold = json.loads(self.work(out, 'hold'))
+        self.assertEqual(len(hold['procs']), 2)  # the executor and the supervisor
+        self.assertEqual(hold['procs'][0][0], os.getpid())
+        self.assertEqual(hold['record'], out['record'].split(':', 1)[1])
+        self.assertFalse(self.hold.exists())  # gone with the part
+        _, out = self.go('part', id='after')
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
+        other = subprocess.Popen(['sleep', '30'])  # another writer's record, written while ours ran
+        self.addCleanup(lambda: (other.kill(), other.wait()))
+        mark = f'{{"procs": [[{other.pid}, {round(slots._start_of(other.pid))}]], "record": "x"}}'
+        _, out = self.go('nightly', id='n2', command=f"printf '%s' '{mark}' > \"{self.hold}\"", timeout_minutes=600)
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
+        self.assertEqual(json.loads(self.hold.read_text())['procs'][0][0], other.pid)  # not ours to delete
+
+    def nightly(self, gate):
+        """A nightly part in its own process (its runner), its command waiting for ``gate``."""
+        inv = pathlib.Path(self.tmp.name, 'inv.toml')
+        inv.write_text(self.inv_text)
+        code = '\n'.join([
+            'import json, subprocess, sys',
+            f'sys.path.insert(0, {str(ROOT)!r})',
+            'from ci_runners import inventory, part',
+            f'inv = inventory.load(open({str(inv)!r}).read())',
+            'def run(argv, **kw):',
+            '    if argv[0] == "nvidia-smi":',
+            f'        text = {SMI_MEMORY!r} if argv[1].startswith("--query-gpu=index,memory") else '
+            f'{SMI_STATUS!r} if argv[1].startswith("--query-gpu=index,pci.bus_id") else ""',
+            '        return subprocess.CompletedProcess(argv, 0, text, "")',
+            '    return subprocess.run(argv, **kw)',
+            f'ex = part.Executor(inv, {str(self.etc)!r}, json.loads(sys.argv[1]), release={str(ROOT)!r}, scope=False, '
+            'poll=0.05, run=run)',
+            'ex.execute(part.Inputs(project="p", id="night", timeout_minutes=1, queue_timeout_minutes=1, '
+            f'command="while [ ! -e {gate} ]; do sleep 0.05; done"))'])
+        env = {**self.env, 'CI_RUNNER_CLASS': 'nightly', 'RUNNER_NAME': 'hb-nightly-1'}
+        return subprocess.Popen([sys.executable, '-I', '-c', code, json.dumps(env)], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def stop(self, child, gate):
+        gate.touch()
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+
+    def test_a_waiting_nightly_part_sends_first_attempts_away(self):
+        """Its ticket holds back every later one, so the hold begins with its wait."""
+        gate = pathlib.Path(self.tmp.name, 'gate')
+        proj = self.etc / 'projects' / 'p.toml'
+        proj.write_text(proj.read_text().replace('memory = "1G"\n', 'memory = "1G"\nmax_waiting = 2\n'))  # room to wait
+        fd = os.open(self.slot.parent / 's.2.lock', os.O_WRONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # someone holds slot 2: the nightly part waits
+        child = self.nightly(gate)
+        try:
+            q = self.slot.parent / 's.queue'
+            for _ in range(200):
+                if q.is_dir() and any(n.endswith('.wait') for n in os.listdir(q)):
+                    break
+                time.sleep(0.05)
+            _, out = self.go('part', id='a', queue_timeout_minutes=0.05)
+            self.assertEqual((out['outcome'], out['reason']), ('unavailable', part.NIGHTLY_BUSY))
+        finally:
+            os.close(fd)
+            self.stop(child, gate)
+
+    def later(self, write, delay=0.3):
+        t = threading.Timer(delay, write)
+        t.start()
+        self.addCleanup(t.cancel)
+
+    def test_a_waiting_part_yields_only_behind_a_nightly_ticket(self):
+        """The race the gate cannot see: a nightly part that comes in while a first attempt
+        waits. Behind its ticket the part goes elsewhere; ahead of it, it keeps its turn."""
+        fds = [os.open(p, os.O_WRONLY) for p in (self.slot, self.slot.parent / 's.2.lock')]
+        for fd in fds:
+            fcntl.flock(fd, fcntl.LOCK_EX)  # both slots held: the part waits
+        self.addCleanup(lambda: [os.close(fd) for fd in fds])
+        q = self.slot.parent / 's.queue'
+        q.mkdir()
+
+        def every(seq):
+            (q / f'{seq:012d}.wait').write_text(f'{seq} {os.getpid()} {int(time.time())} /x ci-slot project=q every n\n')
+
+        every(1)  # the nightly's ticket, older than ours; its hold record comes once ours waits
+        self.later(lambda: part.every_hold(str(self.data), [os.getpid()], 'n'))
+        t0 = time.monotonic()
+        _, out = self.go('part', id='behind', queue_timeout_minutes=0.05)
+        self.assertEqual((out['reason'], out['retry-on']), (part.NIGHTLY_BUSY, ['self-hosted', 'hz-cpu']))
+        self.assertLess(time.monotonic() - t0, 2.5)
+        (q / '000000000001.wait').unlink()
+        os.unlink(part.every_path(str(self.data)))
+
+        def younger():  # the nightly comes in after our ticket: we are ahead of it
+            mine = max(int(n[:12]) for n in os.listdir(q) if n.endswith('.wait'))
+            every(mine + 1)
+            part.every_hold(str(self.data), [os.getpid()], 'n')
+        self.later(younger)
+        _, out = self.go('part', id='ahead', queue_timeout_minutes=0.05)
+        self.assertEqual(out['reason'], 'queue timeout: no CI slot')
+
+    def test_a_part_waiting_for_its_card_yields_once_the_nightly_is_ahead(self):
+        """A GPU part waiting for its lease goes elsewhere once a nightly part runs (it holds
+        every card) or waits for the cards with an older lease ticket; else it waits."""
+        leases = self.data / 'ci-runners/state/leases'
+        other = part.Leases(str(leases))
+        self.assertEqual(other.try_take(1, [1], {0: 24000, 1: 24000}, 0), [1])  # card 1 held: the part waits
+        self.addCleanup(other.release)
+        me = [os.getpid(), round(slots._start_of(os.getpid()))]
+
+        def hold(procs):
+            part._write_json(part.every_path(str(self.data)), {'procs': procs, 'record': 'n'})
+        cases = (('running', [me, me], False, part.NIGHTLY_BUSY),
+                 ('waiting, older ticket', [me], True, part.NIGHTLY_BUSY),
+                 ('waiting for slots', [me], False, 'queue timeout: no card fits'))
+        for n, (what, procs, ticket, reason) in enumerate(cases):
+            with self.subTest(what):
+                if ticket:
+                    part._write_json(str(leases / 'queue' / '000000000001.json'),
+                                     {'pid': me[0], 'start': me[1], 'n': 2, 'cards': [0, 1], 'need_mib': 0, 'every': True})
+                self.later(lambda procs=procs: hold(procs))
+                _, out = self.go('gpu', card='1', gpus=1, id=f'g{n}', queue_timeout_minutes=0.05)
+                self.assertEqual(out['reason'], reason)
+                if reason == part.NIGHTLY_BUSY:
+                    self.assertEqual(out['retry-on'], ['self-hosted', 'hz-gpu'])
+                for f in (leases / 'queue' / '000000000001.json', pathlib.Path(part.every_path(str(self.data)))):
+                    if f.exists():
+                        f.unlink()
+
+    def test_a_hold_record_that_cannot_be_written_holds_nothing_back(self):
+        """The record only places other parts: a nightly part whose record cannot be written
+        runs (fail open)."""
+        state = self.data / 'ci-runners/state'
+        state.mkdir(parents=True)
+        os.mkdir(part.every_path(str(self.data)))  # a directory where the record goes: every write fails
+        _, out = self.go('nightly', timeout_minutes=600)
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
+        self.assertTrue(self.ran(out))
+
+    def test_first_attempts_go_to_the_peer_at_once_and_a_retry_queues(self):
+        gate = pathlib.Path(self.tmp.name, 'gate')
+        child = self.nightly(gate)
+        rec = self.data / 'ci-runners/state/parts/org/repo/77-1/night-1'
+        try:
+            for _ in range(200):
+                if (rec / 'scope.json').exists() and len(json.loads(self.hold.read_text())['procs']) == 2:
+                    break
+                time.sleep(0.05)
+            seq = (self.slot.parent / 's.queue' / 'seq').read_text()
+            t0 = time.monotonic()
+            _, out = self.go('part', id='a', queue_timeout_minutes=0.05)
+            self.assertEqual((out['outcome'], out['reason'], out['next'], out['retry-on']),
+                             ('unavailable', part.NIGHTLY_BUSY, 'fallback', ['self-hosted', 'hz-cpu']))
+            self.assertLess(time.monotonic() - t0, 2.5)  # at once, not after its queue timeout
+            self.assertEqual((self.slot.parent / 's.queue' / 'seq').read_text(), seq)  # the gate: no ticket taken
+            self.assertFalse(self.ran(out))
+            _, out = self.go('gpu', card='1', gpus=1, id='g', queue_timeout_minutes=0.05)
+            self.assertEqual((out['reason'], out['retry-on']), (part.NIGHTLY_BUSY, ['self-hosted', 'hz-gpu']))
+            _, out = self.go('part', id='a', attempt_of='hz:org/repo/77-1/a-1')  # a retry waits for its slot
+            self.assertEqual((out['outcome'], out['reason'], out['attempt']), ('unavailable', 'queue timeout: no CI slot', 2))
+            _, out = self.go('light', id='l')
+            self.assertEqual(out['outcome'], 'pass')
+            os.killpg(child.pid, signal.SIGTERM)  # its runner stops: the supervisor keeps the slots, and the hold
+            self.assertEqual(child.wait(timeout=20), 128 + signal.SIGTERM)
+            _, out = self.go('part', id='b', queue_timeout_minutes=0.05)
+            self.assertEqual(out['reason'], part.NIGHTLY_BUSY)
+            sup = json.loads(self.hold.read_text())['procs'][1]
+        finally:
+            self.stop(child, gate)
+        for _ in range(200):
+            if not slots.alive(sup[0], sup[1]):
+                break
+            time.sleep(0.05)
+        _, out = self.go('part', id='c')  # its processes are gone: the record holds nothing
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
 
 
 class NoHostLock(Host):

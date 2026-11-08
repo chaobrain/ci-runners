@@ -580,6 +580,52 @@ def smi_apps(run: Callable = subprocess.run) -> list[tuple[int, str]]:
     return gpus_mod.compute_apps(_smi(['--query-compute-apps=pid,gpu_bus_id', '--format=csv,noheader'], run))
 
 
+#: why a first attempt goes to the other host while a nightly part has this host (decision 13.6)
+NIGHTLY_BUSY = 'busy: nightly holds every slot and card'
+
+
+def every_path(data: str) -> str:
+    """The hold record of the ``nightly`` part that holds, or waits for, every slot and
+    card of this host (decision 13.6): ``state/every.json``."""
+    return os.path.join(data, 'ci-runners', 'state', 'every.json')
+
+
+def every_hold(data: str, pids: Sequence[int], record: str) -> None:
+    """Write the hold record: the processes that keep the hold (the executor, then the
+    supervisor too, which outlives a stopped executor), by PID and start, and the part's
+    record. It only places other parts, so a failed write is ignored (fail open)."""
+    try:
+        _write_json(every_path(data), {'procs': [[p, round(slots._start_of(p))] for p in pids],
+                                       'record': record_ref(record), 'since': round(time.time())})
+    except OSError:
+        pass
+
+
+def every_holder(data: str) -> dict | None:
+    """The hold record while one of its processes runs, else None: a record whose
+    processes are all gone holds nothing (it fails open, and the part waits as before)."""
+    rec = _read_json(every_path(data))
+    for p in (rec or {}).get('procs') or ():
+        try:
+            pid, start = int(p[0]), float(p[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if pid > 0 and slots.alive(pid, start):
+            return rec
+    return None
+
+
+def every_drop(data: str) -> None:
+    """Delete the hold record if this process wrote it."""
+    rec = _read_json(every_path(data)) or {}
+    procs = rec.get('procs') or [[0]]
+    if isinstance(procs, list) and procs and isinstance(procs[0], list) and procs[0][:1] == [os.getpid()]:
+        try:
+            os.unlink(every_path(data))
+        except OSError:
+            pass
+
+
 def per_card(host: Mapping[str, object]) -> bool:
     """Whether a host has runners per card (a pool of class ``gpu``, design §5.1): the
     health gate refuses there instead of waiting, a per-card runner leases its own card, a
@@ -928,14 +974,17 @@ class Executor:
             why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # decision 13.1
             if why:
                 return self._away(record, rec, a, why, cls)
-            why = self.busy(a, cls, proj.retries)  # decision 13.2
+            why = self.busy(a, cls, proj.retries)  # decisions 13.2, 13.6
             if why:
                 return self._away(record, rec, a, why, cls)
+            if nightly:  # from its first ticket to its end, first attempts go elsewhere (13.6)
+                every_hold(str(h['data']), [os.getpid()], record)
             if cls in SLOT_CLASSES or nightly:
                 q = slots.SlotQueue(h['files']['slot_lock'], h['slots'], h['files']['slot_queue'], poll=self.poll,
                                     default_project=h.get('default_project', ''))
                 mine = sum(1 for t in q.waiting() if t.project == proj.name)
-                if slots.queue_full(mine, proj.max_waiting):
+                # a retry queues past the cap, which still counts it (13.6): it has nowhere else to go
+                if not a.attempt_of and slots.queue_full(mine, proj.max_waiting):
                     return self._end(record, rec, a, unavailable='project queue full')
                 q.take_ticket(proj.name, f'part {a.id}', every=nightly)
                 every = q.every  # the slots it holds so far, closed at the end
@@ -950,6 +999,10 @@ class Executor:
                         if slot_fd is None:
                             if self.stopped:
                                 return self._end(record, rec, a, stopped=True)
+                            # a nightly part came in after the gate, and our ticket is behind its (13.6)
+                            if (self.yields(a, cls, proj.retries) and every_holder(str(h['data']))
+                                    and not any(t.every and t.seq > q.seq for t in q.waiting())):
+                                return self._away(record, rec, a, NIGHTLY_BUSY, cls)
                             if time.monotonic() >= deadline:
                                 return self._end(record, rec, a, unavailable='queue timeout: no CI slot')
                             time.sleep(self.poll)
@@ -992,6 +1045,12 @@ class Executor:
                         break
                     if self.stopped:
                         return self._end(record, rec, a, stopped=True)
+                    if not nightly and self.yields(a, cls, proj.retries):
+                        # a nightly part came in after the gate: it runs, or our lease ticket is behind its (13.6)
+                        held = every_holder(str(h['data']))
+                        if held and (len(held.get('procs') or ()) > 1
+                                     or any(t.every and t.seq < leases.seq for t in leases.tickets())):
+                            return self._away(record, rec, a, NIGHTLY_BUSY, cls)
                     if time.monotonic() >= deadline:
                         return self._end(record, rec, a, unavailable='queue timeout: no card fits')
                     time.sleep(self.poll)
@@ -1043,6 +1102,8 @@ class Executor:
             held = tuple(fd for fd in {slot_fd, env_fd, *every, *leases.fds, *(hold.fds if hold else ())}
                          if fd is not None)
             self.proc = self.spawn(argv, cwd=self.env.get('GITHUB_WORKSPACE') or os.getcwd(), env=env, pass_fds=held)
+            if nightly:  # the supervisor keeps the slots and leases, so it keeps the hold too
+                every_hold(str(h['data']), [os.getpid(), self.proc.pid], record)
             smp, done, thread = None, threading.Event(), None
             if cards:
                 smp = sampler_mod.Sampler(cards, csv_path=os.path.join(record, 'samples.csv'),
@@ -1067,20 +1128,31 @@ class Executor:
                              stopped=self.stopped, unit_result=unit_result,
                              cool_card=self.cool_elsewhere(cards) if cards else None)
         finally:
+            if nightly and (self.proc is None or self.proc.poll() is not None):
+                every_drop(str(h['data']))  # a supervisor that outlives us keeps the record live
             if hold is not None:
                 hold.close()  # not release: a supervisor that outlives us keeps the hold
             leases.release()
             for fd in {slot_fd, env_fd, *every} - {None}:
                 os.close(fd)
 
+    def yields(self, a: Inputs, cls: str, retries: int) -> bool:
+        """Whether a busy host sends this part elsewhere (decisions 13.2, 13.6): only where
+        it can go there, a class with a peer pool other than ``light`` (and ``nightly``), and
+        a project that allows a retry; never a retry."""
+        return not (a.attempt_of or retries < 1 or cls in ('light', EVERY_SLOT)
+                    or not inventory.peer_labels(self.inv, cls))
+
     def busy(self, a: Inputs, cls: str, retries: int) -> str:
-        """Busy-host avoidance (decision 13.2): why this part's first attempt goes to the
-        other host, or empty. Only where it can go there: a class with a peer pool other than
-        ``light``, and a project that allows a retry; never on a retry, and once per head and
+        """Busy-host avoidance (decisions 13.2, 13.6): why this part's first attempt goes
+        to the other host, or empty (see ``yields``). A ``nightly`` part that holds or waits
+        for every slot and card sends it away every time; the load rule once per head and
         part on this host (a marker, then it waits here)."""
-        if a.attempt_of or retries < 1 or cls == 'light' or not inventory.peer_labels(self.inv, cls):
+        if not self.yields(a, cls, retries):
             return ''
         data = str(self.inv.host['data'])
+        if every_holder(data):
+            return NIGHTLY_BUSY
         mark = hostload.marker(data, self.env.get('GITHUB_REPOSITORY', ''), self.env.get('GITHUB_SHA', ''), a.id)
         if os.path.lexists(mark):
             return ''

@@ -81,6 +81,9 @@ HL = 'ci_runners/hostload.py'
 SST = 'ci_runners/slurmsite.py'
 SGT = 'ci_runners/slurmgate.py'
 SPT = 'ci_runners/slurmpart.py'
+SS = 'ci_runners/slurmsetup.py'
+SL = 'ci_runners/slurmlogin.py'
+TSS = 'tests.test_slurmsetup'
 TSP = 'tests.test_slurmpart'
 TSG = 'tests.test_slurmgate'
 TSS = 'tests.test_slurmsite'
@@ -90,6 +93,39 @@ THC = 'tests.test_hookcopy'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
+    # RUN-9e: ci-run slurm check|plan|apply|status|uninstall (decision 14.9)
+    (SS, '    if not isinstance(py, list) or tuple(py[:2]) < slurmsite.MIN_PYTHON:', '    if not isinstance(py, list):', [f'{TSS}.Pure.test_findings']),
+    (SS, '    missing = [c for c in COMMANDS if not cmds.get(c)]', '    missing = []', [f'{TSS}.Pure.test_findings']),
+    (SS, '    if not isinstance(v, list) or tuple(v[:2]) < MIN_SLURM:', '    if not isinstance(v, list):', [f'{TSS}.Pure.test_findings']),
+    (SS, "    if not facts.get('writable'):", '    if False:', [f'{TSS}.Pure.test_findings']),
+    (SS, "    elif float(facts.get('free_gib') or 0) < MIN_FREE_GIB:", '    elif False:', [f'{TSS}.Pure.test_findings']),
+    (SS, "        if not f.get('partition_up'):", '        if False:', [f'{TSS}.Pure.test_findings', f'{TSS}.Install.test_check_before_an_install_goes_through_the_owners_login']),
+    (SS, "        if not f.get('test_only'):", '        if False:', [f'{TSS}.Pure.test_findings']),
+    (SS, "    if isinstance(facts.get('root'), str):\n        return [facts['root']]", "    if False:\n        return [facts['root']]", [f'{TSS}.Pure.test_findings']),
+    (SS, '    return f\'restrict,command="{base}/{GATE}" {key} ci-runners-slurm-{driver}\'', '    return f\'command="{base}/{GATE}" {key} ci-runners-slurm-{driver}\'', [f'{TSS}.Plan.test_the_plan_lists_every_change_and_reads_no_remote_state']),
+    (SS, '    if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) & 0o077:', '    if not stat.S_ISREG(st.st_mode):', [f'{TSS}.Plan.test_the_ci_key_must_be_the_owners_only_and_ed25519']),
+    (SS, '    if not inventory.PUSH_KEY.fullmatch(pub):', '    if False:', [f'{TSS}.Plan.test_the_ci_key_must_be_the_owners_only_and_ed25519']),
+    (SS, '        cards = tg.max_cards if tg.gpu else 0', '        cards = 1 if tg.gpu else 0', [f'{TSS}.Pure.test_the_canary_and_its_cost']),
+    (SS, '    if approved != text:', '    if False:', [f'{TSS}.Install.test_apply_refuses_a_stale_plan_and_a_retired_account']),
+    (SS, "    if site.accounts[alias].retired:\n        raise SetupError(f'account {alias} is retired')", "    if False:\n        raise SetupError(f'account {alias} is retired')", [f'{TSS}.Install.test_apply_refuses_a_stale_plan_and_a_retired_account']),
+    (SS, "'--delete', '--delete-excluded', '--chmod=go=', ", "'--delete-excluded', '--chmod=go=', ", [f'{TSS}.Install.test_apply_makes_exactly_the_plan_and_the_gate_then_answers']),
+    (SS, "'--delete', '--delete-excluded', '--chmod=go=', ", "'--delete', '--delete-excluded', ", [f'{TSS}.Install.test_apply_makes_exactly_the_plan_and_the_gate_then_answers']),
+    (SS, "            lines[i] = 'retired = true\\n'", '            pass', [f'{TSS}.Pure.test_retire']),
+    (SS, "        lines.insert(head + 1, 'retired = true\\n')", '        pass', [f'{TSS}.Pure.test_retire']),
+    (SS, '    if not slurmsite.SSH_ALIAS.fullmatch(via):', '    if False:', [f'{TSS}.Install.test_apply_refuses_a_stale_plan_and_a_retired_account']),
+    (SS, "    if r.returncode != 0:\n        raise SetupError(f'{call} on {via}", "    if False:\n        raise SetupError(f'{call} on {via}", [f'{TSS}.Install.test_a_refusal_on_the_login_host_is_reported']),
+    (SS, "        live = [j for j in rows[alias] if j.get('JobName', '').startswith('ci-')", '        live = [j for j in rows[alias] if True', [f'{TSS}.Status.test_spend_live_jobs_and_held_targets']),
+    (SS, '                and slurmpart.row_cost(site, j)[1]]', '                ]', [f'{TSS}.Status.test_spend_live_jobs_and_held_targets']),
+    (SS, '        text = retire_text(f.read(), alias)', '        text = f.read()', [f'{TSS}.Uninstall.test_refused_while_a_ci_job_is_there_then_cancel_removes_everything_of_ours']),
+    (SS, "    slurmpart._write_json(ctx.record(site, alias), {'plan_sha256'", "    (lambda *a: None)(ctx.record(site, alias), {'plan_sha256'", [f'{TSS}.Install.test_apply_makes_exactly_the_plan_and_the_gate_then_answers']),
+    (SL, '    if jobs and not cancel:', '    if False:', [f'{TSS}.Uninstall.test_refused_while_a_ci_job_is_there_then_cancel_removes_everything_of_ours']),
+    (SL, "            line.split('|')[1].startswith('ci-')]", '            True]', [f'{TSS}.Uninstall.test_refused_while_a_ci_job_is_there_then_cancel_removes_everything_of_ours']),
+    (SL, "['squeue', '-h', '-A', slurm_account, '-u'", "['squeue', '-h', '-u'", [f'{TSS}.Uninstall.test_refused_while_a_ci_job_is_there_then_cancel_removes_everything_of_ours']),
+    (SL, '    keep = [x for x in lines if f\'command="{gate}"\' not in x]', '    keep = lines', [f'{TSS}.Uninstall.test_refused_while_a_ci_job_is_there_then_cancel_removes_everything_of_ours']),
+    (SL, '        os.chmod(keys, mode)', '        pass', [f'{TSS}.Uninstall.test_refused_while_a_ci_job_is_there_then_cancel_removes_everything_of_ours']),
+    (SL, '        os.chmod(d, 0o700)', '        pass', [f'{TSS}.Install.test_apply_makes_exactly_the_plan_and_the_gate_then_answers']),
+    (SL, '        shutil.rmtree(tmp, ignore_errors=True)', '        pass', [f'{TSS}.Install.test_check_before_an_install_goes_through_the_owners_login']),
+    (SL, "        _write(os.path.join(base, 'etc', name), text)", '        pass', [f'{TSS}.Install.test_apply_makes_exactly_the_plan_and_the_gate_then_answers']),
     # RUN-9d: the executor's slurm path (decision 14.3, 14.4)
     (SPT, "          and spent.get(a, 0.0) < float(x.a['monthly_cap'])]", "]",
      [f'{TSP}.Pure.test_the_least_spent_account_relative_to_its_weight_first_and_round_robin_on_ties']),

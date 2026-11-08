@@ -821,6 +821,8 @@ ci_runners/           stdlib-only Python: pure functions, thin I/O
   slurmsite.py        the Slurm site config: schema, loader, prices, deny tokens (14.6)
   slurmgate.py        the cluster's gate (14.5), the batch template and the job's supervisor (14.3)
   slurmpart.py        the executor's `slurm` path: choice, budget, stage, submit, watch, end (14.3, 14.4)
+  slurmsetup.py       `ci-run slurm check|plan|apply|status|uninstall`: an account's install (14.9)
+  slurmlogin.py       the install's steps on the login host, through the owner's own login (14.9)
   cli.py              `ci-run`
 bin/                  ci-run, ci-lock, ci-slot: CLIs over the package; ci-slurm-gate, a cluster
                       key's forced command (14.5)

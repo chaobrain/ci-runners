@@ -115,6 +115,11 @@ def unit_name(runner: str, part_id: str, run: str) -> str:
     return f'ci-part-{safe}-{part_id}-{run}.scope'
 
 
+#: what ``systemd-run --user`` needs to reach the user manager (a slurm part's minimal
+#: environment keeps them; without them its scope fails before the driver starts)
+USER_BUS = ('XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS')
+
+
 def scope_argv(unit: str, project: str, memory: str, inner: Sequence[str], oom_policy: bool = True) -> list[str]:
     """``systemd-run`` for the part's scope (design §4.3); ``oom_policy`` false on a
     systemd that refuses ``OOMPolicy`` on a scope. Pure."""
@@ -1244,7 +1249,7 @@ class Executor:
         if self.stopped:
             return self._end(record, rec, a, stopped=True)
         env = {'HOME': e.get('HOME') or os.path.expanduser('~'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',
-               **self.slurm_env}
+               **{k: e[k] for k in USER_BUS if k in e}, **self.slurm_env}  # systemd-run --user needs the bus
         self.proc = self.spawn(argv, cwd=ws, env=env)
         self.proc.wait()
         if self.scope:

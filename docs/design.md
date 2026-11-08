@@ -702,8 +702,13 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
          127.0.0.1 that accepts only the build's random `Proxy-Authorization`, passed in
          the environment; the egress host's allowlist applies, 11.10; nothing listens
          after the build), `push` (a wheelhouse and conda packages downloaded on the
-         driver, installed offline), `direct` or `proxy`. The driver's refresh timer
-         compares the upstreams' refs and rebuilds on the cluster when one moved;
+         driver, installed offline), `direct` or `proxy`. It builds one env for the
+         variants the account's targets run that the spec does not name, and one of its own
+         for each `[variant.<name>]` the spec holds (its `install` replaces the base's,
+         §4.9), and points each `<project>-<variant>` at its build only once every build
+         has passed; a job resolves that link when it starts. `env --refresh`, a
+         maintainer's command (14.11), compares the upstreams' refs with the kept build's
+         and rebuilds when one moved;
        - `canary`, per target, one job of at most 3 min: the env imports and sees the
          cards, the driver against the variant's floor, the P2P self-test where
          `max_cards` ≥ 2 (a failure sets it to 1), a file round trip, the start latency
@@ -727,8 +732,11 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
     11. **Nothing resident on the cluster.** No unit, timer, tunnel or listener of ours on
         the login host or a node; an env build runs on the login host only while a
         maintainer runs it, at nice 10.
-    12. **Threats** T19–T22 (§6.4). The exit path for T19 is a dedicated cluster account
-        per site, from the site's admins, with a hard spending cap.
+    12. **Threats** T19–T22 (§6.4). CI runs on a dedicated cluster account, or on the
+        account owner's own account once the credentials it holds for other tools are
+        moved off it (lead, 2026-11-08: a dedicated one cannot always be had); a part can
+        read whatever the account holds (T19). The exit path for T19 is a dedicated cluster
+        account per site, from the site's admins, with a hard spending cap.
 
 ## Decisions of this spec
 
@@ -1133,7 +1141,7 @@ The consumer's own jobs (`light` commands, a coverage job as a `part`) run in it
 like any part. Its test selection, its summary format and its merge gate stay its own
 (§1).
 
-### 4.9 The env spec: `conda` and refresh (decisions 12.10, 12.11)
+### 4.9 The env spec: `conda`, `variant` and refresh (decisions 12.10, 12.11, 14.9)
 
 `.github/ci-runners.toml` (schema 1, consumers §1) takes an optional `conda` table:
 
@@ -1142,6 +1150,19 @@ like any part. Its test selection, its summary format and its merge gate stay it
 channels = ["conda-forge"]                   # in order; the build passes --override-channels
 packages = ["nest-simulator=3.10"]           # match specs: no options, URLs or paths
 ```
+
+and an optional `variant` table, read only by `ci-run slurm env` (14.9):
+
+```toml
+[variant.cuda12]                             # a cluster target's env variant
+install = ["jax[cuda12]"]                    # replaces the base's install; the only key
+```
+
+A target of a variant the spec names gets an env of its own, built as the base with the
+variant's `install`; a variant the spec does not name uses the base env. An unknown key in
+a variant is a spec error. A 3090 host's `ci-run env build` reads the base only: a spec
+with a variant table builds there exactly as without it, so a package that changes per
+variant (jax's CUDA plugin) goes in `install`, not in a requirement file.
 
 `ci-run env build` creates the env with `python` and the `conda` packages in one solve,
 then runs the pip steps (`requirements`, `install`, the upstreams) as before. A spec

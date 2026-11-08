@@ -38,6 +38,7 @@ KEEP = 3  # builds of a project kept: the linked ones and the newest
 UNLINKED = '.ci-unlinked'  # in a build no link holds: its mtime is when that was first seen
 CONDA_DONE = '.ci-installed'  # in <base>/conda once its installer finished
 STAMP = r'[0-9]{8}T[0-9]{6}Z'
+VARIANT = r'[a-z0-9][a-z0-9_.-]{0,30}'  # an env variant (``slurmsite.VARIANT``)
 
 
 class LoginError(Exception):
@@ -328,21 +329,29 @@ def _links(envs: str) -> set[str]:
     return {os.readlink(os.path.join(envs, n)) for n in os.listdir(envs) if os.path.islink(os.path.join(envs, n))}
 
 
-def build(base: str, project: str, stamp: str, steps: list, files: dict, record: dict, variants: list, egress: str,
+def build(base: str, project: str, stamp: str, builds: list, files: dict, record: dict, egress: str,
           proxy: str = '', secret: str = '', socket_path: str = '', installer: str = '', grace: float = 0) -> dict:
-    """Build ``project``'s env as ``<base>/envs/<project>-<stamp>`` by ``steps`` (the
-    driver's ``envbuild.steps``, at nice 10), its requirement ``files`` in
-    ``<base>/run/req-<stamp>``; then point ``<project>-<variant>`` at it for each variant
-    (one rename each) and remove the project's builds no link holds but the newest, once no
-    link has held them for ``grace`` seconds (a job resolves its env's link when it starts,
-    ``slurmgate.job``, and may run that long). The egress is the relay (``tunnel``),
-    ``proxy`` or none (``direct``); a missing conda is installed from ``installer`` first,
-    offline (a partial install is removed and redone). A failed step leaves the links as
-    they were."""
+    """Build ``project``'s envs, one per entry of ``builds`` (``variant``: ``''`` for the
+    base build ``<base>/envs/<project>-<stamp>``, else that variant's own
+    ``<project>-<stamp>-<variant>``; ``steps``, the driver's ``envbuild.steps``, run at nice
+    10; ``install``; ``links``, the variants it serves), its requirement ``files`` in
+    ``<base>/run/req-<stamp>``. Only once every build has passed, point each
+    ``<project>-<variant>`` at its build (one rename each): a failed build removes this
+    run's builds and leaves every link as it was. Then remove the project's builds no link
+    holds but the newest ``KEEP`` of each kind, once no link has held them for ``grace``
+    seconds (a job resolves its env's link when it starts, ``slurmgate.job``, and may run
+    that long). The egress is the relay (``tunnel``), ``proxy`` or none (``direct``); a
+    missing conda is installed from ``installer`` first, offline (a partial install is
+    removed and redone)."""
     envs, run = os.path.join(base, 'envs'), os.path.join(base, 'run')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,39}', project) or not re.fullmatch(STAMP, stamp):
         raise LoginError('project or stamp is malformed')
-    d = os.path.join(envs, f'{project}-{stamp}')
+    names = [b['variant'] for b in builds]
+    served = [v for b in builds for v in b['links']]
+    if (not builds or len(set(names)) != len(names) or len(set(served)) != len(served)
+            or not all(re.fullmatch(VARIANT, v) for v in served + [n for n in names if n])):
+        raise LoginError('the builds are malformed')
+    dirs = [os.path.join(envs, f'{project}-{stamp}' + (f'-{n}' if n else '')) for n in names]
     reqdir = os.path.join(run, f'req-{stamp}')
     env = {'PATH': '/usr/bin:/bin', 'HOME': os.path.expanduser('~'), 'LANG': 'C.UTF-8', 'GIT_TERMINAL_PROMPT': '0',
            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull, 'PIP_NO_INPUT': '1', 'TMPDIR': run}
@@ -353,8 +362,9 @@ def build(base: str, project: str, stamp: str, steps: list, files: dict, record:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             raise LoginError(f'another build of {project} is running') from None
-        if os.path.lexists(d):
-            raise LoginError(f'{d} exists')
+        for d in dirs:
+            if os.path.lexists(d):
+                raise LoginError(f'{d} exists')
         url = ''
         if egress == 'tunnel':
             relay = Relay(secret, socket_path)
@@ -381,47 +391,60 @@ def build(base: str, project: str, stamp: str, steps: list, files: dict, record:
             os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(text)
-        commits = {}
+        commits: dict[str, str] = {}
         try:
-            for argv in steps:
-                _step(['nice', '-n', '10', *argv], env)
-            for name in record.get('upstream_names', []):
-                r = subprocess.run(['git', '-C', os.path.join(d, 'src', name), 'rev-parse', 'HEAD'], env=env,
-                                   capture_output=True, text=True, timeout=60)
-                commits[name] = r.stdout.strip()
-                if r.returncode != 0 or not re.fullmatch(r'[0-9a-f]{40}', commits[name]):
-                    raise LoginError(f'{name}: no commit checked out')
-            with open(os.path.join(d, 'ci-env.json'), 'w', encoding='utf-8') as f:
-                json.dump({**record, 'stamp': stamp, 'commits': commits}, f, indent=1)
+            for b, d in zip(builds, dirs):
+                sys.stderr.write(f'# {os.path.basename(d)}: for {", ".join(b["links"])}\n')
+                for argv in b['steps']:
+                    _step(['nice', '-n', '10', *argv], env)
+                got = {}
+                for name in record.get('upstream_names', []):
+                    r = subprocess.run(['git', '-C', os.path.join(d, 'src', name), 'rev-parse', 'HEAD'], env=env,
+                                       capture_output=True, text=True, timeout=60)
+                    got[name] = r.stdout.strip()
+                    if r.returncode != 0 or not re.fullmatch(r'[0-9a-f]{40}', got[name]):
+                        raise LoginError(f'{name}: no commit checked out')
+                commits = commits or got
+                with open(os.path.join(d, 'ci-env.json'), 'w', encoding='utf-8') as f:
+                    json.dump({**record, 'stamp': stamp, 'variant': b['variant'], 'install': b.get('install', []),
+                               'commits': got}, f, indent=1)
         except BaseException:
-            shutil.rmtree(d, ignore_errors=True)
+            for d in dirs:
+                shutil.rmtree(d, ignore_errors=True)
             raise
         links = []
-        for v in variants:
-            link = os.path.join(envs, f'{project}-{v}')
-            if os.path.lexists(link) and not os.path.islink(link):
-                raise LoginError(f'{link} is not a link')
-            tmp = f'{link}.new-{stamp}'
-            os.symlink(os.path.basename(d), tmp)
-            os.replace(tmp, link)
-            links.append(os.path.basename(link))
+        for b, d in zip(builds, dirs):
+            for v in b['links']:
+                link = os.path.join(envs, f'{project}-{v}')
+                if os.path.lexists(link) and not os.path.islink(link):
+                    raise LoginError(f'{link} is not a link')
+                tmp = f'{link}.new-{stamp}'
+                os.symlink(os.path.basename(d), tmp)
+                os.replace(tmp, link)
+                links.append(os.path.basename(link))
         held, now = _links(envs), time.time()
-        builds = sorted(n for n in os.listdir(envs) if re.fullmatch(re.escape(project) + '-' + STAMP, n))
+        kinds: dict[str, list[str]] = {}
+        for n in os.listdir(envs):
+            m = re.fullmatch(re.escape(project) + '-' + STAMP + f'(-{VARIANT})?', n)
+            if m:
+                kinds.setdefault(m.group(1) or '', []).append(n)
         removed = []
-        for i, n in enumerate(builds):
-            if n in held:
-                continue
-            mark = os.path.join(envs, n, UNLINKED)
-            try:
-                since = os.stat(mark).st_mtime
-            except FileNotFoundError:
-                open(mark, 'w').close()
-                since = now
-            if i < len(builds) - KEEP and now - since >= grace:
-                shutil.rmtree(os.path.join(envs, n), ignore_errors=True)
-                removed.append(n)
-        return {'build': os.path.basename(d), 'links': links, 'removed': removed, 'commits': commits,
-                'relay_port': relay.port if relay else 0}
+        for kind in kinds.values():
+            kind.sort()
+            for i, n in enumerate(kind):
+                if n in held:
+                    continue
+                mark = os.path.join(envs, n, UNLINKED)
+                try:
+                    since = os.stat(mark).st_mtime
+                except FileNotFoundError:
+                    open(mark, 'w').close()
+                    since = now
+                if i < len(kind) - KEEP and now - since >= grace:
+                    shutil.rmtree(os.path.join(envs, n), ignore_errors=True)
+                    removed.append(n)
+        return {'builds': {os.path.basename(d): b['links'] for b, d in zip(builds, dirs)}, 'links': links,
+                'removed': sorted(removed), 'commits': commits, 'relay_port': relay.port if relay else 0}
     finally:
         if relay is not None:
             relay.close()

@@ -77,9 +77,13 @@ repository = "chaobrain/brainstate"
 ref = "origin/main"
 [variables]                                       # 写进 registry 条目的环境变量（保留名会被拒绝）
 XLA_PYTHON_CLIENT_PREALLOCATE = "false"
+[variant.cuda12]                                  # 可选：集群目标的环境变体（只用于 slurm 类）
+install = ["jax[cuda12]"]                         # 替换基础的 install；只能写 install
 ```
 
 `conda` 表（design §4.9，决定 12.10）是可选的，不写时与以前完全一样。`packages` 和 `python` 在同一次 `conda create` 里一起求解，之后才跑 pip 的各步（`requirements`、`install`、upstream）。`python` 由 `python` 键决定，`packages` 里不能再写 `python`，同一个包也不能写两次。表里有未知的键、`channels` 里是 URL 或路径、`packages` 里有选项或 URL，整个规格都会被拒绝，什么都不会构建。例如需要 Python 3.13 加 conda-forge 的 `nest-simulator=3.10`，就写 `python = "3.13"` 加上面的 `[conda]` 表。
+
+`variant` 表（design §4.9，决定 14.9）只给 `slurm` 类用：集群站点配置里每个目标有一个环境变体（例如 `cpu`、`cuda12`、`cuda13`），`ci-run slurm env` 为规格里写了的每个变体单独建一个环境，用它的 `install` 替换基础的 `install`（`requirements`、`conda`、upstream 都不变）；规格里没写的变体用基础环境。表里只能有 `install`，其他键整个规格都会被拒绝。3090 主机上的 `ci-run env build` 只读基础部分，有没有这个表结果都一样。所以要按变体换的包（例如 jax 的 CUDA 插件）放在 `install` 里，不要放进 `requirements` 文件。
 
 项目本身**不会**装进环境：部件在作业的 checkout 里运行，`python -m pytest` 会直接从 checkout 导入项目。upstream 在建环境时 clone 并以 editable 方式安装，版本是当时分支的 head。
 
@@ -165,4 +169,4 @@ XLA_PYTHON_CLIENT_PREALLOCATE = "false"
 - **命令约定**同 §4，另有几点：节点不限制内存，部件的内存上限由集群上的 supervisor 按 `RssAnon` 执行，超出就是 `oom`；计算节点**不能访问外网**，命令不能下载任何东西；`RUNNER_TEMP` 和 `CI_PART_DIR` 指向集群上的目录，结束后同步回 runner，所以之后的 upload 步骤不用改；双卡部件开跑前先做 P2P 自检。
 - **结果**（design §4.4，没有新结果）：节点故障是 `unavailable`（`node fail`），在同一目标上重试一次；被站点其他用户取消、排队超时、预算不够、目标尚未启用是 `unavailable`，换池子；P2P 自检失败是 `unavailable`（`p2p`），不重试；登录节点 5 分钟连不上是 `lost`，verdict 从 3090 主机上的记录 salvage。
 - **目标先过验收再计入**（决定 14.10）：只读检查、canary、一个真实的单卡部件、一个带 P2P 自检的真实双卡部件，全部通过后维护者才在站点配置里启用它；未启用的目标会被拒绝（`unavailable`）。
-- **安全**：部件以集群账户的身份运行，能读到这个账户在集群上的所有文件（design T19）。所以只有私有仓库、只有 org 成员，并且要求用专门的 CI 账户；不要把 secret 传给这些任务。
+- **安全**：部件以集群账户的身份运行，能读到这个账户在集群上的所有文件（design T19）。所以只有私有仓库、只有 org 成员，并且要用专门的 CI 账户，或者账户主人自己的账户，但要先把这个账户上给其他工具用的凭据移走（决定 14.12）；不要把 secret 传给这些任务。

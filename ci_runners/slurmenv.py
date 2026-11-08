@@ -5,10 +5,13 @@ newer C library could pick wheels the nodes cannot load.
 The driver reads the project's env spec as ``ci-run env build`` does (``envbuild.fetch``:
 the default branch's ``.github/ci-runners.toml`` and its requirement files, with the
 maintainer's ``GH_TOKEN`` for this run only, which never leaves the driver), and computes
-its steps (``envbuild.steps``) for ``<root>/ci-runners/envs``. The login host
-(``slurmlogin.build``, through the account owner's login) runs them at nice 10, as
-``envs/<project>-<stamp>``, then points ``envs/<project>-<variant>`` at it for each
-variant the account's targets run (what the batch job uses, ``slurmgate.env_dir``).
+the steps of each build (``plan_builds``) for ``<root>/ci-runners/envs``: one build,
+``envs/<project>-<stamp>``, for the variants the account's targets run that the spec does
+not name, and one of its own, ``envs/<project>-<stamp>-<variant>``, for each it names
+(``[variant.<name>]``: its ``install`` replaces the base's). The login host
+(``slurmlogin.build``, through the account owner's login) runs them at nice 10, then,
+once every build has passed, points ``envs/<project>-<variant>`` at its build for each
+variant (what the batch job uses, ``slurmgate.env_dir``).
 
 Egress, by the site's ``egress`` (D4):
 
@@ -25,8 +28,8 @@ Without conda on the login host, the build first installs Miniforge (``MINIFORGE
 sha256 pinned) into ``<root>/ci-runners/conda``, offline, from an installer the driver
 downloads once into its cache. Upstreams are cloned anonymously (a private one fails).
 ``--refresh`` rebuilds from the spec the driver kept of the last build
-(``state/slurm/<site>/env-<account>-<project>.json``) only when an upstream's branch moved,
-without a token.
+(``state/slurm/<site>/env-<account>-<project>.json``) only when an upstream's branch moved
+since the first build of that run, without a token; it rebuilds every variant asked for.
 """
 from __future__ import annotations
 
@@ -77,6 +80,25 @@ def grace(site, alias: str) -> int:
     return 60 * (max(site.targets[t].max_minutes for t in site.accounts[alias].a['targets']) + 60)
 
 
+def plan_builds(spec: envbuild.Spec, variants: list[str], *, project: str, envs: str, stamp: str, reqdir: str,
+                conda: str) -> list[dict]:
+    """The builds an env run makes: one for the variants the spec does not name (the base),
+    and one of its own for each it names (``[variant.<name>]``, whose ``install`` replaces
+    the base's). Pure."""
+    out = []
+    base = [v for v in variants if v not in spec.variants]
+    if base:
+        out.append({'variant': '', 'links': base, 'install': list(spec.install),
+                    'steps': envbuild.steps(spec, project=project, envs=envs, stamp=stamp, reqdir=reqdir, conda=conda)})
+    for v in variants:
+        if v in spec.variants:
+            vs = spec.variant(v)
+            out.append({'variant': v, 'links': [v], 'install': list(vs.install),
+                        'steps': envbuild.steps(vs, project=project, envs=envs, stamp=stamp, reqdir=reqdir, conda=conda,
+                                                variant=v)})
+    return out
+
+
 def env(ctx: Ctx, name: str, alias: str, project: str, via: str, *, variants: list[str] = (), refresh: bool = False,
         tunnel_port: int = 0, call: Callable | None = None, opener: Callable = urllib.request.urlopen) -> int:
     site = ctx.account(name, alias)
@@ -106,8 +128,8 @@ def env(ctx: Ctx, name: str, alias: str, project: str, via: str, *, variants: li
     base = slurmsetup.base_of(site, alias)
     stamp = envbuild._stamp()
     conda = f'{base}/conda/bin/conda'
-    steps = envbuild.steps(spec, project=project, envs=f'{base}/envs', stamp=stamp, reqdir=f'{base}/run/req-{stamp}',
-                           conda=conda)
+    builds = plan_builds(spec, list(variants) or own, project=project, envs=f'{base}/envs', stamp=stamp,
+                         reqdir=f'{base}/run/req-{stamp}', conda=conda)
     lc = dict(ssh=ctx.ssh, run=ctx.run)
     inst = ''
     if not slurmsetup.login_call(site, via, 'conda_state', {'base': base}, **lc)['conda']:
@@ -117,9 +139,9 @@ def env(ctx: Ctx, name: str, alias: str, project: str, via: str, *, variants: li
                      f'{via}:{inst}'], capture_output=True, timeout=1800, env=slurmsetup.ssh_env())
         if r.returncode != 0:
             raise SetupError(f'the installer copy: rsync exit {r.returncode}')
-    args = {'base': base, 'project': project, 'stamp': stamp, 'steps': steps, 'files': files,
+    args = {'base': base, 'project': project, 'stamp': stamp, 'builds': builds, 'files': files,
             'record': {'repository': proj.repository, 'sha': sha, 'upstream_names': [u.name for u in spec.upstream]},
-            'variants': list(variants) or own, 'egress': mode, 'proxy': str(site.site.get('proxy', '')),
+            'egress': mode, 'proxy': str(site.site.get('proxy', '')),
             'installer': inst, 'grace': grace(site, alias)}
     opts: tuple[str, ...] = ()
     if mode == 'tunnel':
@@ -128,13 +150,14 @@ def env(ctx: Ctx, name: str, alias: str, project: str, via: str, *, variants: li
             raise SetupError(f'{sock}: longer than a Unix socket path may be')
         args.update(secret=secrets.token_urlsafe(24), socket_path=sock)
         opts = ('-o', 'ExitOnForwardFailure=yes', '-o', 'StreamLocalBindMask=0177', '-R', f'{sock}:127.0.0.1:{tunnel_port}')
-    ctx.say(f'{site.name} {alias}: building {project} ({proj.repository} at {sha[:12]}) as {project}-{stamp}, '
-            f'egress {mode}')
+    ctx.say(f'{site.name} {alias}: building {project} ({proj.repository} at {sha[:12]}), egress {mode}: '
+            + '; '.join(f'{project}-{stamp}' + (f'-{b["variant"]}' if b['variant'] else '') + f' for {", ".join(b["links"])}'
+                        for b in builds))
     t0 = time.monotonic()
     r = slurmsetup.login_call(site, via, 'build', args, timeout=4 * 3600, opts=opts, stream=True, **lc)
     os.makedirs(os.path.dirname(kept_path), mode=0o700, exist_ok=True)
     slurmpart._write_json(kept_path, {'sha': sha, 'spec': spec.text, 'files': files, 'stamp': stamp,
-                                      'commits': r['commits'], 'build': r['build']})
-    ctx.say(f'{site.name} {alias}: {", ".join(r["links"])} -> {r["build"]} in {time.monotonic() - t0:.0f} s; '
-            f'removed {r["removed"] or "none"}')
+                                      'commits': r['commits'], 'builds': r['builds']})
+    ctx.say(f'{site.name} {alias}: ' + '; '.join(f'{", ".join(links)} -> {b}' for b, links in r['builds'].items())
+            + f' in {time.monotonic() - t0:.0f} s; removed {r["removed"] or "none"}')
     return 0

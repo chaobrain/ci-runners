@@ -20,10 +20,13 @@ file are read at that commit through the contents API, never from a pull request
     ref = "origin/main"                      # a branch of origin
     [variables]                              # for the registry entry (printed, not applied)
     XLA_PYTHON_CLIENT_PREALLOCATE = "false"
+    [variant.cuda12]                         # a cluster target's env variant (14.9): its
+    install = ["jax[cuda12]"]                # install replaces the base's; nothing else changes
 
 The project itself is not installed: a part runs from the job's checkout. The ``conda``
 packages are solved together with ``python`` in the one ``conda create``, before any pip
-step; an unknown key or a malformed entry in the table builds nothing.
+step; an unknown key or a malformed entry in the table builds nothing. A ``variant`` table
+is read only by ``ci-run slurm env`` (``Spec.variant``); a build here uses the base.
 
 The env is built into a new directory ``<data>/ci-runners/envs/<project>-<stamp>``. Only
 when every step has passed does the link ``<data>/ci-runners/envs/<project>`` move to it
@@ -80,6 +83,9 @@ CONDA_SPEC = re.compile(r'([A-Za-z0-9][A-Za-z0-9._-]*)([<>=!~][A-Za-z0-9.*+!_,<>
 CONDA_KEYS = {'channels', 'packages'}
 BRANCH = re.compile(r'origin/([A-Za-z0-9._-][A-Za-z0-9._/-]{0,99})')
 STAMP = re.compile(r'[0-9]{8}T[0-9]{6}Z')
+#: an env variant's name, as a site config's target names it (``slurmsite.VARIANT``)
+VARIANT = re.compile(r'[a-z0-9][a-z0-9_.-]{0,30}')
+VARIANT_KEYS = {'install'}
 #: a requirement file's lines that name another file: ``-r f``, ``--requirement f``, ``-c f``
 NESTED = re.compile(r'\s*(?:-r|--requirement|-c|--constraint)[\s=]+(\S+)')
 
@@ -113,7 +119,16 @@ class Spec:
     upstream: tuple[Upstream, ...] = ()
     variables: Mapping[str, str] = dataclasses.field(default_factory=dict)
     conda: Conda = Conda()
+    #: ``[variant.<name>]``: each variant's ``install``, which replaces the base's
+    variants: Mapping[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
     text: str = dataclasses.field(default='', compare=False)  # the spec as read, kept in the env
+
+    def variant(self, name: str) -> 'Spec':
+        """The spec a target of env variant ``name`` builds: the base with the variant's
+        ``install``, or the base itself where the spec does not name it."""
+        if name not in self.variants:
+            return self
+        return dataclasses.replace(self, install=self.variants[name])
 
 
 def _path(where: str, p: object) -> str:
@@ -158,7 +173,7 @@ def parse_spec(text: str) -> Spec:
         raise SpecError(f'{SPEC}: not TOML: {e}') from None
     if doc.get('schema') != 1:
         raise SpecError(f'{SPEC}: schema must be 1')
-    unknown = set(doc) - {'schema', 'python', 'requirements', 'install', 'upstream', 'variables', 'conda'}
+    unknown = set(doc) - {'schema', 'python', 'requirements', 'install', 'upstream', 'variables', 'conda', 'variant'}
     if unknown:
         raise SpecError(f'{SPEC}: unknown keys {sorted(unknown)}')
     py = doc.get('python')
@@ -168,9 +183,7 @@ def parse_spec(text: str) -> Spec:
     if not isinstance(reqs, list):
         raise SpecError(f'{SPEC}: requirements must be a list')
     reqs = [_path('requirements', r) for r in reqs]
-    install = doc.get('install', [])
-    if not isinstance(install, list) or not all(isinstance(i, str) and SPECIFIER.fullmatch(i) for i in install):
-        raise SpecError(f'{SPEC}: install must list requirement specifiers (no options, URLs or paths)')
+    install = _install('install', doc.get('install', []))
     ups = doc.get('upstream', [])
     if not isinstance(ups, list):
         raise SpecError(f'{SPEC}: upstream must be an array of tables')
@@ -196,7 +209,31 @@ def parse_spec(text: str) -> Spec:
         if not isinstance(v, str) or '\0' in v or '\n' in v:
             raise SpecError(f'{SPEC}: variables.{k} must be a one-line string')
     conda = _conda(doc['conda']) if 'conda' in doc else Conda()
-    return Spec(py, tuple(reqs), tuple(install), tuple(upstream), dict(variables), conda, text)
+    return Spec(py, tuple(reqs), install, tuple(upstream), dict(variables), conda, _variants(doc.get('variant', {})), text)
+
+
+def _install(where: str, v: object) -> tuple[str, ...]:
+    if not isinstance(v, list) or not all(isinstance(i, str) and SPECIFIER.fullmatch(i) for i in v):
+        raise SpecError(f'{SPEC}: {where} must list requirement specifiers (no options, URLs or paths)')
+    return tuple(v)
+
+
+def _variants(doc: object) -> dict[str, tuple[str, ...]]:
+    """The ``variant`` table: ``[variant.<name>]`` with exactly ``install``. Raises SpecError."""
+    if not isinstance(doc, dict):
+        raise SpecError(f'{SPEC}: variant must be a table of tables')
+    out = {}
+    for name, v in doc.items():
+        if not VARIANT.fullmatch(name):
+            raise SpecError(f'{SPEC}: variant {name!r} is not a variant name')
+        if not isinstance(v, dict):
+            raise SpecError(f'{SPEC}: variant.{name} must be a table')
+        if set(v) - VARIANT_KEYS:
+            raise SpecError(f'{SPEC}: variant.{name}: unknown keys {sorted(set(v) - VARIANT_KEYS)} (only install)')
+        if 'install' not in v:
+            raise SpecError(f'{SPEC}: variant.{name} needs install')
+        out[name] = _install(f'variant.{name}.install', v['install'])
+    return out
 
 
 def nested(path: str, text: str) -> list[str]:
@@ -211,18 +248,20 @@ def nested(path: str, text: str) -> list[str]:
     return out
 
 
-def build_dir(envs: str, project: str, stamp: str) -> str:
-    if not registry.NAME.fullmatch(project) or not STAMP.fullmatch(stamp):
-        raise SpecError('project or stamp is malformed')
-    return os.path.join(envs, f'{project}-{stamp}')
+def build_dir(envs: str, project: str, stamp: str, variant: str = '') -> str:
+    """``<project>-<stamp>``, or a variant's own build ``<project>-<stamp>-<variant>``."""
+    if not registry.NAME.fullmatch(project) or not STAMP.fullmatch(stamp) or (variant and not VARIANT.fullmatch(variant)):
+        raise SpecError('project, stamp or variant is malformed')
+    return os.path.join(envs, f'{project}-{stamp}' + (f'-{variant}' if variant else ''))
 
 
 def steps(spec: Spec, *, project: str, envs: str, stamp: str, reqdir: str, conda: str,
-          scope: tuple[str, ...] = ()) -> list[list[str]]:
-    """The commands that build the env, in order. ``reqdir`` holds the requirement files
-    at their repository paths; ``scope`` prefixes the heavy commands (a memory scope).
-    Pure."""
-    d = build_dir(envs, project, stamp)
+          scope: tuple[str, ...] = (), variant: str = '') -> list[list[str]]:
+    """The commands that build the env, in order, into ``build_dir`` (a ``variant``'s own
+    where given: the caller passes ``spec.variant(variant)``). ``reqdir`` holds the
+    requirement files at their repository paths; ``scope`` prefixes the heavy commands (a
+    memory scope). Pure."""
+    d = build_dir(envs, project, stamp, variant)
     py = os.path.join(d, 'bin', 'python')
     pip = [*scope, py, '-m', 'pip', 'install', '--no-input', '--disable-pip-version-check']
     channels = [a for c in spec.conda.channels for a in ('-c', c)]

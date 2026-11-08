@@ -5,6 +5,7 @@ decision 14.9, operations §10), as the host's CI account::
     ci-run slurm plan      <site> <account>                 every change; changes nothing
     ci-run slurm apply     <site> <account> --plan FILE --via ALIAS
     ci-run slurm status    <site>
+    ci-run slurm env       <site> <account> <project> --via ALIAS [--variant V] [--refresh]   (slurmenv)
     ci-run slurm uninstall <site> <account> --via ALIAS [--cancel]
 
 The site config is ``etc/slurm/<site>.toml`` (``ci_runners.slurmsite``); the account's CI
@@ -243,8 +244,9 @@ def ssh_via(ssh: str, via: str) -> list[str]:
 
 
 def login_call(site: slurmsite.Site, via: str, call: str, args: dict, *, ssh: str, run: Callable,
-               timeout: float = 600) -> dict:
-    """``slurmlogin.<call>(**args)`` on the login host through ``via``."""
+               timeout: float = 600, opts: tuple[str, ...] = (), stream: bool = False) -> dict:
+    """``slurmlogin.<call>(**args)`` on the login host through ``via``, with more ssh
+    ``opts`` before the alias; ``stream``: its stderr (a build's steps) to ours."""
     mods = {'slurmlogin': slurmlogin, 'slurmgate': sys.modules.get('ci_runners.slurmgate')}
     if mods['slurmgate'] is None:
         from ci_runners import slurmgate
@@ -256,12 +258,14 @@ def login_call(site: slurmsite.Site, via: str, call: str, args: dict, *, ssh: st
     cmd = f'{shlex.quote(str(site.site["login_python"]))} -I -c {shlex.quote("import sys; exec(sys.stdin.readline())")}'
     data = f'exec({BOOT!r})\n' + json.dumps({'modules': src, 'call': call, 'args': args})
     try:
-        r = run([*ssh_via(ssh, via), cmd], input=data.encode(),
-                capture_output=True, timeout=timeout)
+        argv = ssh_via(ssh, via)
+        r = run([*argv[:-1], *opts, argv[-1], cmd], input=data.encode(), stdout=subprocess.PIPE,
+                stderr=None if stream else subprocess.PIPE, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise SetupError(f'{call} on {via}: no answer in {timeout:g} s') from None
     if r.returncode != 0:
-        raise SetupError(f'{call} on {via}: {(r.stderr or b"").decode(errors="replace").strip()[-300:] or r.returncode}')
+        why = (r.stderr or b'').decode(errors='replace').strip()[-300:] or f'exit {r.returncode} (its output is above)'
+        raise SetupError(f'{call} on {via}: {why}')
     _, mark, out = r.stdout.decode(errors='replace').rpartition(SENTINEL)
     try:
         return json.loads(out if mark else '')
@@ -448,6 +452,13 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, **kw) -> int:
         if verb == 'uninstall':
             s.add_argument('--cancel', action='store_true')
     sub.add_parser('status').add_argument('site')
+    s = sub.add_parser('env')
+    s.add_argument('site')
+    s.add_argument('account')
+    s.add_argument('project')
+    s.add_argument('--via', required=True, help="an ssh alias of the account owner's own login")
+    s.add_argument('--variant', action='append', default=[], help='only these of the account\'s variants')
+    s.add_argument('--refresh', action='store_true', help='rebuild from the kept spec only if an upstream moved')
     a = p.parse_args(argv)
     ctx = Ctx(etc, str(inv.host['data']), inv.this, **kw)
     try:
@@ -459,7 +470,11 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, **kw) -> int:
             return apply(ctx, a.site, a.account, a.plan, a.via)
         if a.verb == 'uninstall':
             return uninstall(ctx, a.site, a.account, a.via, a.cancel)
+        if a.verb == 'env':
+            from ci_runners import slurmenv
+            return slurmenv.env(ctx, a.site, a.account, a.project, a.via, variants=a.variant, refresh=a.refresh,
+                                tunnel_port=int((inv.host.get('tunnel') or {}).get('http_port') or 0))
         return status(ctx, a.site)
-    except (SetupError, slurmsite.SiteError) as e:
+    except (SetupError, slurmsite.SiteError, ValueError) as e:
         print(f'ci-run slurm {a.verb}: {e}', file=sys.stderr)
         return 2

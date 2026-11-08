@@ -1,0 +1,291 @@
+"""``ci-run slurm env`` (design decision 14.9, D4; RUN-9e): a project's env built on the login
+host through the owner's login, its egress a reverse forward to the driver behind a relay
+that takes only the build's secret, and nothing listening after the build."""
+from __future__ import annotations
+
+import base64
+import hashlib
+import io
+import json
+import os
+import pathlib
+import socket
+import sys
+import threading
+import unittest
+from unittest import mock
+
+from ci_runners import envbuild, slurmenv, slurmlogin, slurmsetup as ss
+from tests.test_envbuild import HEAD, Api
+from tests.test_slurmsetup import Site
+
+SPEC = 'schema = 1\npython = "3.12"\nrequirements = ["requirements.txt"]\n[conda]\npackages = ["nest-simulator=3.10"]\n'
+#: a conda and the python it creates: each asks its proxy (https_proxy) for a tunnel, as
+#: pip and conda would, and logs what it was asked to do
+PROBE = r'''
+import base64, os, socket, sys, urllib.parse
+def probe(host):
+    url = os.environ.get('https_proxy')
+    if not url:
+        return 'direct'
+    u = urllib.parse.urlsplit(url)
+    s = socket.create_connection((u.hostname, u.port), timeout=10)
+    auth = base64.b64encode(f'{u.username}:{u.password}'.encode()).decode()
+    s.sendall(f'CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\nProxy-Authorization: Basic {auth}\r\n\r\n'.encode())
+    return s.recv(200).split(b'\r\n')[0].decode()
+'''
+CONDA = r'''
+args = sys.argv[1:]
+d = args[args.index('--prefix') + 1]
+os.makedirs(os.path.join(d, 'bin'))
+py = os.path.join(d, 'bin', 'python')
+with open(py, 'w') as f:
+    f.write(PYTHON)
+os.chmod(py, 0o755)
+got = probe('conda.anaconda.org')
+with open(os.path.join(d, 'conda.log'), 'w') as f:
+    f.write(' '.join(args) + '\n' + got + '\n')
+sys.exit(0 if got.endswith(('200 Connection established', 'direct')) else 1)
+'''
+PY = r'''
+got = probe('pypi.org')
+d = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+reqs = [open(a).read() for a in sys.argv if a.endswith('.txt')]
+with open(os.path.join(d, 'pip.log'), 'a') as f:
+    f.write(' '.join(sys.argv[1:4]) + '\n' + got + '\n' + ''.join(reqs))
+sys.exit(0 if got.endswith(('200 Connection established', 'direct')) else 1)
+'''
+
+
+def fake_conda() -> str:
+    python = f'#!{sys.executable}\n' + PROBE + PY
+    return f'#!{sys.executable}\n' + PROBE + f'PYTHON = {python!r}\n' + CONDA
+
+
+class Egress:
+    """The driver's egress forward: an HTTP proxy that records each request head and
+    answers 200."""
+
+    def __init__(self):
+        self.srv = socket.create_server(('127.0.0.1', 0))
+        self.port, self.heads = self.srv.getsockname()[1], []
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        while True:
+            try:
+                c, _ = self.srv.accept()
+            except OSError:
+                return
+            with c:
+                head = b''
+                while b'\r\n\r\n' not in head and (chunk := c.recv(4096)):
+                    head += chunk
+                self.heads.append(head.decode())
+                c.sendall(b'HTTP/1.1 200 Connection established\r\n\r\n')
+
+    def close(self):
+        self.srv.close()
+
+
+class Relay(unittest.TestCase):
+    def test_only_the_builds_secret_passes_and_the_header_is_dropped(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 's.sock')
+            got = []
+            up = socket.socket(socket.AF_UNIX)
+            up.bind(path)
+            up.listen(4)
+            self.addCleanup(up.close)
+
+            def serve():
+                c, _ = up.accept()
+                with c:
+                    got.append(c.recv(4096))
+                    c.sendall(b'HTTP/1.1 200 Connection established\r\n\r\nhello')
+            threading.Thread(target=serve, daemon=True).start()
+            r = slurmlogin.Relay('s3cret', path)
+            self.addCleanup(r.close)
+
+            def ask(auth):
+                with socket.create_connection(('127.0.0.1', r.port), timeout=10) as s:
+                    s.sendall(b'CONNECT pypi.org:443 HTTP/1.1\r\nHost: pypi.org:443\r\n' + auth + b'\r\n')
+                    out = b''
+                    while chunk := s.recv(4096):
+                        out += chunk
+                    return out
+            good = 'Basic ' + base64.b64encode(b'ci:s3cret').decode()
+            wrong = 'Basic ' + base64.b64encode(b'ci:other').decode()
+            self.assertTrue(ask(b'').startswith(b'HTTP/1.1 407'))
+            self.assertTrue(ask(f'Proxy-Authorization: {wrong}\r\n'.encode()).startswith(b'HTTP/1.1 407'))
+            self.assertTrue(ask(f'Proxy-Authorization: {good}\r\nProxy-Authorization: {good}\r\n'.encode())
+                            .startswith(b'HTTP/1.1 407'))  # one header, not two
+            self.assertEqual(got, [])
+            self.assertEqual(ask(f'Proxy-Authorization: {good}\r\n'.encode()),
+                             b'HTTP/1.1 200 Connection established\r\n\r\nhello')
+            self.assertEqual(got, [b'CONNECT pypi.org:443 HTTP/1.1\r\nHost: pypi.org:443\r\n\r\n'])
+            r.close()
+            with self.assertRaises(OSError):
+                socket.create_connection(('127.0.0.1', r.port), timeout=5)
+
+
+class Env(Site):
+    def setUp(self):
+        super().setUp()
+        self.apply()
+        self.egress = Egress()
+        self.addCleanup(self.egress.close)
+        (self.etc / 'projects').mkdir()
+        (self.etc / 'projects' / 'p.toml').write_text('name = "p"\nrepository = "org/repo"\ncontext = "p/ci"\n[hosts.hb]\nmemory_max = "2G"\n')
+        self.api = Api({HEAD: {'.github/ci-runners.toml': SPEC, 'requirements.txt': 'numpy\n'}})
+        self.envs = self.base / 'envs'
+
+    def conda(self):
+        c = self.base / 'conda' / 'bin' / 'conda'
+        c.parent.mkdir(parents=True)
+        c.write_text(fake_conda())
+        c.chmod(0o755)
+
+    def env(self, **kw) -> tuple[int, str]:
+        ctx, out = self.ctx()
+        kw.setdefault('tunnel_port', self.egress.port)
+        self.n = getattr(self, 'n', 0) + 1  # a build a second apart from the last
+        with mock.patch.dict(os.environ, {'GH_TOKEN': 'tok'}), \
+                mock.patch.object(envbuild, '_stamp', return_value=f'20261108T1200{self.n:02d}Z'):
+            rc = slurmenv.env(ctx, 'cluster1', 'acct1', 'p', 'owner', call=self.api, **kw)
+        return rc, out.getvalue()
+
+    def test_a_build_through_the_tunnel_links_each_variant_and_leaves_nothing_listening(self):
+        self.conda()
+        rc, said = self.env()
+        self.assertEqual(rc, 0, said)
+        build = next(n for n in os.listdir(self.envs) if n.startswith('p-2'))
+        self.assertEqual({n: os.readlink(self.envs / n) for n in ('p-cpu', 'p-cuda13')},
+                         {'p-cpu': build, 'p-cuda13': build})  # the account's targets' variants
+        d = self.envs / build
+        conda_log = (d / 'conda.log').read_text()
+        self.assertIn('--override-channels -c conda-forge python=3.12 pip nest-simulator=3.10', conda_log)
+        self.assertIn('200 Connection established', conda_log)  # its egress: relay, socket, the driver's forward
+        self.assertIn('-m pip install\nHTTP/1.1 200 Connection established\nnumpy\n', (d / 'pip.log').read_text())
+        heads = self.egress.heads
+        self.assertEqual([h.split('\r\n')[0] for h in heads], ['CONNECT conda.anaconda.org:443 HTTP/1.1',
+                                                               'CONNECT pypi.org:443 HTTP/1.1'])
+        self.assertFalse(any('roxy-Authorization' in h for h in heads))  # the secret stays on the login host
+        rec = json.loads((d / 'ci-env.json').read_text())
+        self.assertEqual((rec['repository'], rec['sha'], rec['stamp']), ('org/repo', HEAD, build[2:]))
+        self.assertEqual(os.listdir(self.base / 'run'), [])  # no socket, no requirement files left
+        self.assertEqual((self.d / 'ssh' / 'forwarded').read_text().count('1'), 2)
+        kept = json.loads((self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'env-acct1-p.json').read_text())
+        self.assertEqual((kept['spec'], kept['files'], kept['build']), (SPEC, {'requirements.txt': 'numpy\n'}, build))
+        calls = (self.d / 'ssh' / 'calls.log').read_text()
+        self.assertNotIn('tok', calls)  # neither the token nor the secret is in an argv
+        self.assertNotIn(self.base.name + '/run/egress', ''.join(h for h in heads))
+
+    def test_a_failed_step_leaves_the_links_and_removes_its_build(self):
+        self.conda()
+        self.env()
+        before = {n: os.readlink(self.envs / n) for n in ('p-cpu', 'p-cuda13')}
+        self.egress.close()  # the driver's egress is gone: conda's tunnel fails
+        with self.assertRaisesRegex(ss.SetupError, 'build on owner: exit 2'):
+            self.env(variants=['cpu'])
+        self.assertEqual({n: os.readlink(self.envs / n) for n in ('p-cpu', 'p-cuda13')}, before)
+        self.assertEqual(sorted(n for n in os.listdir(self.envs) if n.startswith('p-2')), [before['p-cpu']])
+        self.assertEqual(os.listdir(self.base / 'run'), [])
+
+    def test_old_builds_are_removed_but_linked_ones(self):
+        self.conda()
+        for stamp in ('20260101T000000Z', '20260102T000000Z', '20260103T000000Z', '20260104T000000Z'):
+            (self.envs / f'p-{stamp}').mkdir()
+        os.symlink('p-20260101T000000Z', self.envs / 'p-other')  # a variant this account no longer builds
+        self.env()
+        left = sorted(n for n in os.listdir(self.envs) if n.startswith('p-2'))
+        self.assertEqual(left[:3], ['p-20260101T000000Z', 'p-20260103T000000Z', 'p-20260104T000000Z'])
+        self.assertEqual(len(left), 4)
+
+    def test_without_conda_the_pinned_installer_goes_first(self):
+        script = (f'#!/bin/sh\nmkdir -p "$3/bin"\ncat > "$3/bin/conda" <<\'EOF\'\n{fake_conda()}\nEOF\n'
+                  'chmod 755 "$3/bin/conda"\n')
+        sha = hashlib.sha256(script.encode()).hexdigest()
+        fetched = []
+
+        def opener(url, timeout):
+            fetched.append(url)
+            return io.BytesIO(script.encode())
+        with mock.patch.object(slurmenv, 'MINIFORGE', ('Mf.sh', 'https://x/Mf.sh', sha)):
+            rc, said = self.env(opener=opener)
+            self.assertEqual(rc, 0, said)
+            self.assertTrue(os.access(self.base / 'conda' / 'bin' / 'conda', os.X_OK))
+            self.assertEqual(fetched, ['https://x/Mf.sh'])
+            self.assertFalse((self.base / 'run' / 'Mf.sh').exists())
+            self.env(opener=opener)
+            self.assertEqual(len(fetched), 1)  # the conda is there now
+            slurmenv.installer(str(self.data / 'ci-runners' / 'cache'), opener)
+            self.assertEqual(len(fetched), 1)  # and the installer cached
+        with mock.patch.object(slurmenv, 'MINIFORGE', ('Mf.sh', 'https://x/Mf.sh', '0' * 64)):
+            with self.assertRaisesRegex(ss.SetupError, 'is not the pinned'):
+                slurmenv.installer(str(self.data / 'ci-runners' / 'cache'), opener)
+            self.assertFalse((self.data / 'ci-runners' / 'cache' / 'Mf.sh').exists())
+
+    def test_egress_modes_and_refusals(self):
+        self.conda()
+        with self.assertRaisesRegex(ss.SetupError, 'needs this host\'s egress forward'):
+            self.env(tunnel_port=0)
+        with self.assertRaisesRegex(ss.SetupError, 'not a variant'):
+            self.env(variants=['rocm'])
+        self.site_file.write_text(self.site_file.read_text().replace('egress = "tunnel"', 'egress = "direct"'))
+        rc, said = self.env(tunnel_port=0, variants=['cpu'])
+        build = os.readlink(self.envs / 'p-cpu')
+        self.assertFalse(os.path.lexists(self.envs / 'p-cuda13'))  # only the variant asked for
+        self.assertIn('direct', (self.envs / build / 'conda.log').read_text())
+        self.assertFalse((self.d / 'ssh' / 'forwarded').exists())
+        self.site_file.write_text(self.site_file.read_text().replace(
+            'egress = "direct"', f'egress = "proxy"\nproxy = "http://127.0.0.1:{self.egress.port}"'))
+        self.env(tunnel_port=0)
+        build = os.readlink(self.envs / 'p-cpu')
+        self.assertIn('200 Connection established', (self.envs / build / 'conda.log').read_text())
+        self.assertFalse((self.d / 'ssh' / 'forwarded').exists())  # the site's proxy, not a forward
+        self.assertEqual(len(self.egress.heads), 2)
+        self.site_file.write_text(self.site_file.read_text().replace('egress = "proxy"', 'egress = "push"').replace(
+            f'proxy = "http://127.0.0.1:{self.egress.port}"', ''))
+        with self.assertRaisesRegex(ss.SetupError, 'D4 b'):
+            self.env()
+        self.site_file.write_text(self.site_file.read_text().replace('egress = "push"', 'egress = "tunnel"'))
+        with mock.patch.object(slurmenv, 'SOCKET_MAX', 20), self.assertRaisesRegex(ss.SetupError, 'Unix socket path'):
+            self.env()
+
+    def test_a_requirement_file_stays_in_its_directory(self):
+        self.conda()
+        with self.assertRaisesRegex(slurmlogin.LoginError, 'outside the requirements'):
+            slurmlogin.build(str(self.base), 'p', '20261108T120000Z', [], {'../../etc/python': 'x'}, {}, ['cpu'],
+                             'direct')
+        self.assertEqual((self.base / 'etc' / 'python').read_text(), f'{sys.executable}\n')
+        self.assertEqual(os.listdir(self.base / 'run'), [])
+
+    def test_refresh_rebuilds_only_when_an_upstream_moved(self):
+        ctx, out = self.ctx()
+        with self.assertRaisesRegex(ss.SetupError, 'no build of p kept'):
+            slurmenv.env(ctx, 'cluster1', 'acct1', 'p', 'owner', refresh=True, tunnel_port=1)
+        state = self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1'
+        spec = SPEC + '[[upstream]]\nrepository = "chaobrain/brainstate"\nref = "origin/main"\n'
+        (state / 'env-acct1-p.json').write_text(json.dumps({'sha': HEAD, 'spec': spec, 'files': {'requirements.txt': 'x\n'},
+                                                            'commits': {'brainstate': 'a' * 40}}))
+        sent = []
+        with mock.patch.object(envbuild, 'head_of', return_value='a' * 40), \
+                mock.patch.object(envbuild, '_token', side_effect=AssertionError('a refresh holds no token')):
+            self.assertEqual(slurmenv.env(ctx, 'cluster1', 'acct1', 'p', 'owner', refresh=True, tunnel_port=1), 0)
+        self.assertIn('up to date', out.getvalue())
+        with mock.patch.object(envbuild, 'head_of', return_value='b' * 40), \
+                mock.patch.object(envbuild, '_token', side_effect=AssertionError('a refresh holds no token')), \
+                mock.patch.object(ss, 'login_call', side_effect=lambda site, via, call, args, **kw:
+                                  sent.append((call, args)) or ({'conda': True} if call == 'conda_state' else
+                                                                {'commits': {}, 'build': 'b', 'links': [], 'removed': []})):
+            slurmenv.env(ctx, 'cluster1', 'acct1', 'p', 'owner', refresh=True, tunnel_port=1)
+        self.assertIn('moved: brainstate', out.getvalue())
+        build = sent[-1][1]
+        self.assertEqual((build['files'], build['record']['sha']), ({'requirements.txt': 'x\n'}, HEAD))
+        self.assertTrue(any(s[:3] == ['git', 'clone', '--quiet'] for s in build['steps']))
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1651,6 +1651,22 @@ Rules:
   No step input or output, setup code or hook changes: the install moves `releases/hook`,
   a host's plan adds nothing, and no runner restarts. A `v1.5.1` artifact without
   `run-attempt` is read by its `record`. `v1` moves to `v1.5.2` after the 3090 canary.
+- **`v1.6.0`** (minor, stamped 2026-11-08; lead-approved, decision 13.6 and issue #69):
+  1. a first attempt no longer waits behind a `nightly` part: it goes to the other host's
+     pool at once (`busy: nightly holds every slot and card`); a retry queues past the
+     project cap (13.6). No input or output a consumer passes or reads changes; the new
+     reason is an `unavailable` like 13.2's, so a consumer with a retry job on `retry-on`
+     (§4.8 rule 4) needs no change. It holds for a caller of `@v1.6.0` or later; the hold
+     record is written by a `nightly` part of `v1.6.0` or later, so until `v1` moves and
+     the nightly runs on it, first attempts wait as in `v1.5`;
+  2. `ci-lock`'s light probes take turns under the probe file (12.9, issue #69), and each
+     3090 host's plan adds that file to the `tmpfiles.d` file and the private namespace's
+     `BindPaths=` (12.16): root steps, then the user manager's restart, which restarts
+     every runner, so it is applied drained (`ci-run drain on`, no scope left). Until
+     a host's apply, `ci-lock` finds no probe file in the account's `/tmp` and probes
+     without turns, as in `v1.5`.
+  3. also in the tag, unused by any host path: decision 14's text and the Slurm site
+     config's loader (RUN-9a, RUN-9b); no action, setup step or hook reads them yet.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

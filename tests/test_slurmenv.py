@@ -589,6 +589,19 @@ class Env(Site):
         self.assertEqual({v: e['build'] for v, e in kept['variants'].items()}, {'cpu': second, 'cuda13': first})
         self.assertEqual(kept['variants']['cuda13']['sha'], HEAD)
 
+    def test_a_subset_run_from_another_data_dir_keeps_the_other_variants_builds(self):
+        self.conda()
+        self.assertEqual(self.env()[0], 0)
+        first = self.builds()[0]
+        path = self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'env-acct1-p.json'
+        path.unlink()  # a maintainer's run from a fresh data dir: no kept file
+        (self.envs / 'p-stray').mkdir()  # a directory with a variant's name: no link, not a variant
+        self.assertEqual(self.env(variants=['cpu'])[0], 0)
+        kept = json.loads(path.read_text())
+        second = self.builds()[1]
+        self.assertEqual({v: e['build'] for v, e in kept['variants'].items()}, {'cpu': second, 'cuda13': first})
+        self.assertEqual((kept['variants']['cuda13']['sha'], kept['variants']['cuda13']['commits']), (HEAD, {}))
+
     def git_steps(self, d, how):
         """Steps that check an upstream ``u`` out in build ``d``: a fresh commit (``how``, its
         message) or a clone of ``how``'s."""

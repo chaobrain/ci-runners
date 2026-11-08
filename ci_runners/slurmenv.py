@@ -165,6 +165,7 @@ def env(ctx: Ctx, name: str, alias: str, project: str, via: str, *, variants: li
     r = slurmsetup.login_call(site, via, 'build', args, timeout=4 * 3600, opts=opts, stream=True, **lc)
     os.makedirs(os.path.dirname(kept_path), mode=0o700, exist_ok=True)
     built = dict((kept or {}).get('variants', {}))  # each variant's own build, kept across subset runs
+    built.update(r.get('variants') or {})  # what the login host links: also a run from another data dir
     built.update({v: {'build': b, 'sha': sha, 'commits': r['commits']} for b, links in r['builds'].items() for v in links})
     slurmpart._write_json(kept_path, {'sha': sha, 'spec': spec.text, 'files': files, 'stamp': stamp,
                                       'builds': r['builds'],

@@ -243,16 +243,18 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 **装一个账户**（决定 14.9）：
 
-1. `ci-run slurm check <site> <account>`：只读检查。ssh 免交互登录；登录节点上有 `sbatch`、`squeue`、`sacct`、`scancel`、`sinfo`、`rsync` 和 Python；Slurm ≥ 20.11；每个目标的分区可用、账户所在组被允许、association 的卡数 CPU 数节点数够、`sbatch --test-only` 接受生成的申请（GPU 语法不对会在这里报出）；根目录可写、剩余 50 GiB 以上；egress 方式的前提条件。
+先生成这个账户的 CI 密钥：`ssh-keygen -t ed25519 -N '' -f etc/slurm/keys/<account>`（私钥 600）。CI 密钥的 `authorized_keys` 行强制只能运行 gate，gate 不能写 release 或 `etc/`，所以 `apply`、`uninstall` 和安装之前的 `check` 要经过 `--via <ssh 别名>`：账户主人自己的登录（不受限的 key），驱动主机把要执行的代码从 stdin 送过去，登录节点上不装任何东西、不留任何进程。
+
+1. `ci-run slurm check <site> <account> --via <别名>`：只读检查（安装之后不带 `--via`，经 CI 密钥的 gate）。ssh 免交互登录；登录节点上有 `sbatch`、`squeue`、`sacct`、`scancel`、`sinfo`、`rsync` 和 Python；Slurm ≥ 20.11；每个目标的分区可用、账户所在组被允许、association 的卡数 CPU 数节点数够、`sbatch --test-only` 接受生成的申请（GPU 语法不对会在这里报出）；根目录可写、剩余 50 GiB 以上；egress 方式的前提条件。
 2. `ci-run slurm plan <site> <account> > plan.txt`：列出所有改动（目录、从驱动主机复制过去的 release、账户在集群上的配置副本、`authorized_keys` 那一行、环境构建、canary 作业及其花费），什么都不改。维护者批准；账户的**主人**把计划打印的 `authorized_keys` 那一行加进自己的账户（`restrict`，强制命令只能运行 gate）。
-3. `ci-run slurm apply <site> <account> --plan plan.txt`：只执行批准过的计划。
+3. `ci-run slurm apply <site> <account> --plan plan.txt --via <别名>`：只执行批准过的计划（目录、release、`etc/account.json`、`etc/python`；计划过期就拒绝；再跑一次不改变什么）。`authorized_keys` 那一行由账户主人加，apply 不碰它。
 4. `ci-run slurm env <site> <account> <project>`：在登录节点上建环境（节点的 C 库版本；不在驱动主机上建，那里的 C 库更新，pip 可能选到节点加载不了的 wheel）。egress 只在构建期间打开：`tunnel` 是从驱动主机反向转发到 700 目录里的 Unix socket，登录节点上的 relay 只接受这次构建随机生成的 `Proxy-Authorization`，构建结束后不留任何监听；`push` 是在驱动主机上下载、在登录节点离线安装；站点有外网或镜像时用 `direct` 或 `proxy`。上游有更新时，驱动主机的刷新定时器会触发集群上的重建。
 5. `ci-run slurm canary <site> <account>`：每个目标一个不超过 3 分钟的作业，检查环境、卡、驱动是否满足变体的下限、P2P（失败就把 `max_cards` 降为 1）、文件往返、开始延迟和计费字段。
 6. **启用目标**（决定 14.10）：canary 之后再各跑一个真实的单卡部件和双卡部件（CPU 目标跑一个 CPU 部件），都通过后才把站点配置里的 `enabled` 设为 true。
 
 **加第二个账户**：账户主人同意并加上 key 那一行，维护者在站点配置里加 `[accounts.<alias>]`，再走一遍 1–5。不需要在 GitHub 上做任何事。部件按"本月花费 ÷ 权重"最少的账户优先选择，相同时轮流（决定 14.8）。
 
-**卸载**：`ci-run slurm uninstall <site> <account>`。账户还有 `ci-` 作业在跑就拒绝（`--cancel` 会先取消它们）；删掉它写的 key 那一行和根目录下的 `ci-runners`；账户在站点配置里标为 retired，本月的账本记录保留。
+**卸载**：`ci-run slurm uninstall <site> <account> --via <别名>`。账户还有 `ci-` 作业在跑就拒绝（`--cancel` 会先取消它们）；先在站点配置里把账户标为 retired（本月的账本记录保留，仍计入站点上限），再删掉强制运行它的 gate 的 key 行（`authorized_keys` 是链接时拒绝），最后删根目录下的 `ci-runners`。
 
 **花费**：`ci-run slurm status <site>` 显示各账户本月花费和正在跑的作业。账本来自每个账户的 `sacct`，按站点价格表计算，只是防我们自己的错误；真正的上限要请站点管理员设在 CI 账户上（design T21）。
 

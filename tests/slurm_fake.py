@@ -22,7 +22,10 @@ States move when a command looks at them, as a scheduler's would between polls.
 
 ``ssh`` maps a host to a base directory by ``$FAKE_SSH/hosts.json``
 (``{"<alias>": {"base": ..., "release": ..., "down": false}}``) and runs the gate there
-with ``SSH_ORIGINAL_COMMAND``, as a forced command would; ``-O`` control calls pass; an
+with ``SSH_ORIGINAL_COMMAND``, as a forced command would; a host with ``"login": true``
+and a ``home`` is an owner's login, which prints its ``motd`` and runs the command with
+``sh -c`` in ``home``; ``sbatch --test-only`` records each script's directives in
+``test_only.json``; ``-O`` control calls pass; an
 unknown or down host fails with 255. ``$FAKE_SSH/calls.log`` records each call.
 """
 from __future__ import annotations
@@ -172,6 +175,8 @@ def sbatch(args: list[str]) -> int:
         print('sbatch: error: Batch job submission failed: Unspecified error', file=sys.stderr)
         return 1
     if test_only:
+        tried = _load(os.path.join(_state_dir(), 'test_only.json'), [])
+        _save(os.path.join(_state_dir(), 'test_only.json'), tried + [sb])
         print(f'sbatch: Job 1 to start at {_iso(time.time() + 3600)} using 1 processors on nodes fake01',
               file=sys.stderr)
         return 0
@@ -193,9 +198,12 @@ def sbatch(args: list[str]) -> int:
 def squeue(args: list[str]) -> int:
     fmt = args[args.index('-o') + 1] if '-o' in args else '%i %T'
     ids = args[args.index('-j') + 1].split(',') if '-j' in args else None
+    account = args[args.index('-A') + 1] if '-A' in args else None
     shown = 0
     for j in _all():
         if (j['state'] in FINAL and time.time() - j.get('end', 0) > MIN_JOB_AGE) or (ids is not None and str(j['id']) not in ids):
+            continue
+        if account is not None and j['sb'].get('--account') != account:
             continue
         shown += 1
         b = j['plan']
@@ -309,6 +317,11 @@ def ssh(args: list[str]) -> int:
         return 255
     if control:
         return 0
+    if h.get('login'):  # the account owner's own login: a shell, as sshd runs the command
+        sys.stdout.write(h.get('motd', ''))  # what a login's rc files may print first
+        sys.stdout.flush()
+        os.chdir(h['home'])
+        os.execve('/bin/sh', ['sh', '-c', ' '.join(rest)], dict(os.environ, HOME=h['home']))
     env = dict(os.environ, SSH_ORIGINAL_COMMAND=' '.join(rest))
     gate = ('import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.slurmgate import main; '
             'sys.exit(main())')

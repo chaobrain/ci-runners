@@ -14,6 +14,7 @@
     ci-run drain on|off [--pool P] | status   the drain switch (decision 13.1)
     ci-run hostload sample|status   the load record and the busy rule (decision 13.2)
     ci-run hooks copy      the hooks' copies in the private /tmp (ci-hooks.service; decision 13.5)
+    ci-run slurm check|plan|apply|status|uninstall ...   a Slurm site's accounts (decision 14.9)
 
 The inventory is ``$CI_RUNNERS_ETC/inventory.toml``, else ``~/data/ci-runners/etc``.
 """
@@ -83,6 +84,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'drain':
         from ci_runners import drain
         return drain.main(args, load_inventory())
+    if cmd == 'slurm':
+        from ci_runners import slurmsetup
+        return slurmsetup.main(args, load_inventory(), etc_dir())
     if cmd in ('plan', 'apply', 'runners'):
         from ci_runners import setup
         return setup.main([cmd, *args])

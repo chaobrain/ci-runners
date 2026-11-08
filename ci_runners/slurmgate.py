@@ -458,7 +458,9 @@ def _newest(path: str) -> float:
 def check(base: str, release: str, run: Callable = subprocess.run) -> dict:
     """What this account sees of the site (RUN-9e's ``check`` reads it): the Python,
     the Slurm commands and version, the root's room, and per target its partition's
-    state and whether ``sbatch --test-only`` takes its rendered request."""
+    state and whether ``sbatch --test-only`` takes the largest request a part may make
+    (its ``max_cards`` and ``max_minutes``: the partition access and the association's
+    limits on cards, CPUs and time)."""
     def out_of(argv: Sequence[str], **kw) -> tuple[int, str]:
         try:
             r = run(list(argv), capture_output=True, text=True, timeout=60, **kw)
@@ -487,7 +489,9 @@ def check(base: str, release: str, run: Callable = subprocess.run) -> dict:
     for name, t in sorted(account['targets'].items()):
         rc, text = out_of(['sinfo', '-h', '-p', str(t['partition']), '-o', '%a'])
         up = rc == 0 and 'up' in text.split()
-        req = {'project': 'check', 'target': name, 'cards': 1 if 'gpu_model' in t else 0, 'minutes': 10,
+        # the largest request a part may make: --test-only then checks the association's limits too
+        req = {'project': 'check', 'target': name, 'cards': int(t['max_cards']) if 'gpu_model' in t else 0,
+               'minutes': int(t['max_minutes']),
                'queue_minutes': 0, 'memory': '1G', 'command': 'true', 'variables': {},
                'run_url': 'https://github.com/o/r/actions/runs/1', 'host': 'check', 'resume': False}
         with tempfile.TemporaryDirectory(dir=base) as d:

@@ -1772,6 +1772,11 @@ Rules:
   5. **Setup:** no new unit. The site config, the cluster key and the gate's ssh alias
      are host files the maintainer writes; a host's plan adds the `slurm` pool's runners
      where its inventory gives the pool.
+- **`v1.7.1`** (patch, stamped 2026-11-09; a patch of `v1.7`): a cluster env build runs
+  with an empty `HOME` of its own and no pip config file, and a part's job reads neither
+  the account's `~/.local` packages (`PYTHONNOUSERSITE=1`) nor its pip config: the
+  account's own conda and pip settings (a package mirror the egress does not allow)
+  reach neither (14.9). No input or output changes.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

@@ -46,6 +46,8 @@ os.chmod(py, 0o755)
 got = probe('conda.anaconda.org')
 with open(os.path.join(d, 'conda.log'), 'w') as f:
     f.write(' '.join(args) + '\n' + got + '\n' + f'nice {os.nice(0)}\n')
+    f.write(f'home {os.environ["HOME"]} {sorted(os.listdir(os.environ["HOME"]))}\n')
+    f.write(f'pip {os.environ.get("PIP_CONFIG_FILE")} {os.environ.get("PYTHONNOUSERSITE")}\n')
 sys.exit(0 if got.endswith(('200 Connection established', 'direct')) else 1)
 '''
 PY = r'''
@@ -297,6 +299,20 @@ class Env(Site):
         calls = (self.d / 'ssh' / 'calls.log').read_text()
         self.assertNotIn('tok', calls)  # the token is in no argv and no ssh child's environment
         self.assertNotIn(self.base.name + '/run/egress', ''.join(h for h in heads))
+
+    def test_the_accounts_own_conda_and_pip_settings_do_not_reach_the_build(self):
+        self.conda()
+        (self.home / '.condarc').write_text('custom_channels:\n  conda-forge: https://mirror.example/cloud\n')
+        (self.home / '.config' / 'pip').mkdir(parents=True)
+        (self.home / '.config' / 'pip' / 'pip.conf').write_text('[global]\nindex-url = https://mirror.example/simple\n')
+        rc, said = self.env()
+        self.assertEqual(rc, 0, said)
+        log = (self.envs / self.builds()[0] / 'conda.log').read_text()
+        home = next(x for x in log.splitlines() if x.startswith('home ')).split()[1]
+        self.assertEqual(os.path.dirname(home), str(self.base / 'run'))  # its own, empty
+        self.assertIn(f'home {home} []\n', log)
+        self.assertIn(f'pip {os.devnull} 1\n', log)
+        self.assertEqual(os.listdir(self.base / 'run'), [])  # and removed after
 
     def builds(self):
         return sorted(n for n in os.listdir(self.envs) if n.startswith('p-2'))

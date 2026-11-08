@@ -72,6 +72,9 @@ class Load(unittest.TestCase):
             ss.load(edit('cpus = 8                          # a CPU part\'s CPUs\n', ''))
         with self.assertRaisesRegex(ss.SiteError, 'not cpus'):
             ss.load(edit('cpus_per_card = 8\n', 'cpus_per_card = 8\ncpus = 4\n'))
+        for nodes in ('["node01", "node02"]', '["node[01-02]"]'):  # --nodelist would ask for every one
+            with self.subTest(nodes=nodes), self.assertRaisesRegex(ss.SiteError, 'nodes is malformed'):
+                ss.load(edit('nodes = ["node01"]', f'nodes = {nodes}'))
         with self.assertRaisesRegex(ss.SiteError, 'not both'):
             ss.load(edit('nodes = ["node01"]', 'nodes = ["node01"]\nexclude = ["node02"]'))
 

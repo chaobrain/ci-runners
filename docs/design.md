@@ -1653,7 +1653,7 @@ Rules:
   No step input or output, setup code or hook changes: the install moves `releases/hook`,
   a host's plan adds nothing, and no runner restarts. A `v1.5.1` artifact without
   `run-attempt` is read by its `record`. `v1` moves to `v1.5.2` after the 3090 canary.
-- **`v1.6.0`** (minor, stamped 2026-11-08; lead-approved, decision 13.6 and issue #69):
+- **`v1.6.0`** (minor, stamped 2026-11-08; lead-approved, decision 13.6 and issue #69; `v1` moved to it after the 3090 canary at `@v1.6.0`, 2026-11-08; both 3090 hosts applied, drained):
   1. a first attempt no longer waits behind a `nightly` part: it goes to the other host's
      pool at once (`busy: nightly holds every slot and card`); a retry queues past the
      project cap (13.6). No input or output a consumer passes or reads changes; the new

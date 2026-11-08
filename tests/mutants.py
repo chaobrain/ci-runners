@@ -84,6 +84,8 @@ SPT = 'ci_runners/slurmpart.py'
 SS = 'ci_runners/slurmsetup.py'
 SL = 'ci_runners/slurmlogin.py'
 TSU = 'tests.test_slurmsetup'
+SE = 'ci_runners/slurmenv.py'
+TSE = 'tests.test_slurmenv'
 TSP = 'tests.test_slurmpart'
 TSG = 'tests.test_slurmgate'
 TSS = 'tests.test_slurmsite'
@@ -93,6 +95,53 @@ THC = 'tests.test_hookcopy'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
+    # RUN-9e: ci-run slurm env (decision 14.9, D4)
+    (SL, '            if len(auth) != 1 or not hmac.compare_digest(auth[0].encode(), self.expected.encode()):', '            if not auth:', [f'{TSE}.Relay.test_only_the_builds_secret_passes_and_the_header_is_dropped']),
+    (SL, '            if len(auth) != 1 or not hmac.compare_digest(auth[0].encode(), self.expected.encode()):', "            if not hmac.compare_digest(auth[0].encode() if auth else b'', self.expected.encode()):", [f'{TSE}.Relay.test_only_the_builds_secret_passes_and_the_header_is_dropped']),
+    (SL, "            kept = [x for x in lines if not x.lower().startswith(b'proxy-authorization:')]", '            kept = lines', [f'{TSE}.Relay.test_only_the_builds_secret_passes_and_the_header_is_dropped']),
+    (SL, '        try:\n            self.srv.shutdown(socket.SHUT_RDWR)\n        except OSError:\n            pass\n        self.srv.close()\n', '        pass\n', [f'{TSE}.Relay.test_only_the_builds_secret_passes_and_the_header_is_dropped']),
+    (SL, "            relay = Relay(secret, socket_path)\n            url = f'http://ci:{secret}@127.0.0.1:{relay.port}'", '            pass', [f'{TSE}.Env.test_a_build_through_the_tunnel_links_each_variant_and_leaves_nothing_listening']),
+    (SL, "        elif egress == 'proxy':\n            url = proxy", '        elif False:\n            url = proxy', [f'{TSE}.Env.test_egress_modes_and_refusals']),
+    (SL, '        except BaseException:\n            shutil.rmtree(d, ignore_errors=True)', '        except BaseException:\n            pass', [f'{TSE}.Env.test_a_failed_step_leaves_the_links_and_removes_its_build']),
+    (SL, '            os.replace(tmp, link)\n            links.append', '            links.append', [f'{TSE}.Env.test_a_build_through_the_tunnel_links_each_variant_and_leaves_nothing_listening']),
+    (SL, '            if n in held:\n                continue', '            if False:\n                continue', [f'{TSE}.Env.test_old_builds_are_removed_but_linked_ones_and_those_unlinked_within_the_grace']),
+    (SL, 'KEEP = 3  # builds', 'KEEP = 2  # builds', [f'{TSE}.Env.test_old_builds_are_removed_but_linked_ones_and_those_unlinked_within_the_grace']),
+    (SL, '            if i < len(builds) - KEEP and now - since >= grace:', '            if i < len(builds) - KEEP:', [f'{TSE}.Env.test_old_builds_are_removed_but_linked_ones_and_those_unlinked_within_the_grace']),
+    (SL, '                open(mark, \'w\').close()\n                since = now', '                since = now', [f'{TSE}.Env.test_old_builds_are_removed_but_linked_ones_and_those_unlinked_within_the_grace']),
+    (SE, "'grace': grace(site, alias)}", "'grace': 0}", [f'{TSE}.Env.test_old_builds_are_removed_but_linked_ones_and_those_unlinked_within_the_grace']),
+    (SL, "            if not _conda_ok(conda):", '            if False:', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
+    (SL, ' and os.path.isfile(os.path.join(conda, CONDA_DONE))', '', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
+    (SL, '                shutil.rmtree(conda, ignore_errors=True)  # a partial install', '                pass', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
+    (SL, '                open(os.path.join(conda, CONDA_DONE), \'w\').close()', '                pass', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
+    (SL, "                if r.returncode != 0 or not re.fullmatch(r'[0-9a-f]{40}', commits[name]):", '                if False:', [f'{TSE}.Env.test_an_upstream_without_a_commit_fails_the_build']),
+    (SL, "                _step(['nice', '-n', '10', *argv], env)", '                _step(argv, env)', [f'{TSE}.Env.test_a_build_through_the_tunnel_links_each_variant_and_leaves_nothing_listening']),
+    (SL, "        self.srv.bind(('127.0.0.1', 0))", "        self.srv.bind(('0.0.0.0', 0))", [f'{TSE}.Relay.test_only_the_builds_secret_passes_and_the_header_is_dropped']),
+    (SL, '                if not chunk or len(head) + len(chunk) > RELAY_HEAD:', '                if not chunk:', [f'{TSE}.Relay.test_only_connect_passes_and_a_long_head_is_refused']),
+    (SL, "            if not lines[0].startswith(b'CONNECT '):", '            if False:', [f'{TSE}.Relay.test_only_connect_passes_and_a_long_head_is_refused']),
+    (SL, "            if _peer_uid(c) not in (None, os.getuid()) or", "            if False or", [f'{TSE}.Relay.test_another_users_connection_is_closed_before_it_takes_a_slot']),
+    (SL, "int(r[2].rsplit(':', 1)[1], 16) == mine:", "True:", [f'{TSE}.Relay.test_another_users_connection_is_closed_before_it_takes_a_slot']),
+    (SL, "                c.settimeout(max(0.01, deadline - time.monotonic()))", "                c.settimeout(RELAY_IDLE)", [f'{TSE}.Relay.test_idle_and_surplus_connections_are_closed_and_close_ends_every_tunnel']),
+    (SL, "            fcntl.flock(clock, fcntl.LOCK_EX)  # another", "            (lambda *a: None)(clock, fcntl.LOCK_EX)  # another", [f'{TSE}.Env.test_builds_of_two_projects_install_conda_one_at_a_time']),
+    (SL, ' or not self.slots.acquire(blocking=False):', ':', [f'{TSE}.Relay.test_idle_and_surplus_connections_are_closed_and_close_ends_every_tunnel']),
+    (SL, '                c.settimeout(max(0.01, deadline - time.monotonic()))', '                pass', [f'{TSE}.Relay.test_idle_and_surplus_connections_are_closed_and_close_ends_every_tunnel']),
+    (SL, '            for s in self.live:\n                try:\n                    s.shutdown(socket.SHUT_RDWR)', '            for s in ():\n                try:\n                    s.shutdown(socket.SHUT_RDWR)', [f'{TSE}.Relay.test_idle_and_surplus_connections_are_closed_and_close_ends_every_tunnel']),
+    (SS, '                stderr=None if stream else subprocess.PIPE, timeout=timeout, env=ssh_env())', '                stderr=None if stream else subprocess.PIPE, timeout=timeout)', [f'{TSE}.Env.test_a_build_through_the_tunnel_links_each_variant_and_leaves_nothing_listening']),
+    (SGT, "    envd = os.path.realpath(env_dir(base, req['project'], str(t['variant'])))", "    envd = (env_dir(base, req['project'], str(t['variant'])))", [f'{TSG}.Jobs.test_a_job_runs_its_command_and_its_results_come_back']),
+    (SL, '            if path and os.path.lexists(path) and os.path.dirname(path) == run:', '            if False:', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
+    (SL, '        shutil.rmtree(reqdir, ignore_errors=True)', '        pass', [f'{TSE}.Env.test_a_build_through_the_tunnel_links_each_variant_and_leaves_nothing_listening']),
+    (SL, '            if not path.startswith(reqdir + os.sep):', '            if False:', [f'{TSE}.Env.test_a_requirement_file_stays_in_its_directory']),
+    (SE, "    if mode == 'push':", '    if False:', [f'{TSE}.Env.test_egress_modes_and_refusals']),
+    (SE, "    if mode == 'tunnel' and not 1 <= tunnel_port <= 65535:", '    if False:', [f'{TSE}.Env.test_egress_modes_and_refusals']),
+    (SE, '    if set(variants) - set(own):', '    if False:', [f'{TSE}.Env.test_egress_modes_and_refusals']),
+    (SE, '        if not moved:', '        if False:', [f'{TSE}.Env.test_refresh_rebuilds_only_when_an_upstream_moved']),
+    (SE, "if envbuild.head_of(ctx.run, u, genv) != kept['commits'].get(u.name)]", "if envbuild.head_of(ctx.run, u, genv) == kept['commits'].get(u.name)]", [f'{TSE}.Env.test_refresh_rebuilds_only_when_an_upstream_moved']),
+    (SE, '    if h.hexdigest() != sha:', '    if False:', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
+    (SE, '    if not os.path.exists(path):\n        os.makedirs(cache', '    if True:\n        os.makedirs(cache', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
+    (SE, '        if len(sock.encode()) > SOCKET_MAX:', '        if False:', [f'{TSE}.Env.test_egress_modes_and_refusals']),
+    (SE, ", '-R', f'{sock}:127.0.0.1:{tunnel_port}')", ')', [f'{TSE}.Env.test_a_build_through_the_tunnel_links_each_variant_and_leaves_nothing_listening']),
+    (SE, "    slurmpart._write_json(kept_path, {'sha': sha,", "    (lambda *a: None)(kept_path, {'sha': sha,", [f'{TSE}.Env.test_a_build_through_the_tunnel_links_each_variant_and_leaves_nothing_listening']),
+    (SE, "            'variants': list(variants) or own,", "            'variants': own,", [f'{TSE}.Env.test_egress_modes_and_refusals']),
+    (SS, '        r = run([*argv[:-1], *opts, argv[-1], cmd]', '        r = run([*argv, cmd]', [f'{TSE}.Env.test_a_build_through_the_tunnel_links_each_variant_and_leaves_nothing_listening']),
     # RUN-9e: ci-run slurm check|plan|apply|status|uninstall (decision 14.9)
     (SS, '    if not isinstance(py, list) or tuple(py[:2]) < slurmsite.MIN_PYTHON:', '    if not isinstance(py, list):', [f'{TSU}.Pure.test_findings']),
     (SS, '    missing = [c for c in COMMANDS if not cmds.get(c)]', '    missing = []', [f'{TSU}.Pure.test_findings']),
@@ -113,7 +162,7 @@ MUTANTS = [
     (SS, "            lines[i] = 'retired = true\\n'", '            pass', [f'{TSU}.Pure.test_retire']),
     (SS, "        lines.insert(head + 1, 'retired = true\\n')", '        pass', [f'{TSU}.Pure.test_retire']),
     (SS, '    if not slurmsite.SSH_ALIAS.fullmatch(via):', '    if False:', [f'{TSU}.Install.test_apply_refuses_a_stale_plan_and_a_retired_account']),
-    (SS, "    if r.returncode != 0:\n        raise SetupError(f'{call} on {via}", "    if False:\n        raise SetupError(f'{call} on {via}", [f'{TSU}.Install.test_a_refusal_on_the_login_host_is_reported']),
+    (SS, "    if r.returncode != 0:\n        why = (r.stderr", "    if False:\n        why = (r.stderr", [f'{TSU}.Install.test_a_refusal_on_the_login_host_is_reported']),
     (SS, "        live = [j for j in rows[alias] if j.get('JobName', '').startswith('ci-')", '        live = [j for j in rows[alias] if True', [f'{TSU}.Status.test_spend_live_jobs_and_held_targets']),
     (SS, '                and slurmpart.row_cost(site, j)[1]]', '                ]', [f'{TSU}.Status.test_spend_live_jobs_and_held_targets']),
     (SS, '        text = retire_text(f.read(), alias)', '        text = f.read()', [f'{TSU}.Uninstall.test_refused_while_a_ci_job_is_there_then_cancel_removes_everything_of_ours']),

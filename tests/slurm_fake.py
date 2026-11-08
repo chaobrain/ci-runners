@@ -302,15 +302,20 @@ _SSH_VALUE = set('BbcDEeFIiJLlmOoPpQRSWw')
 
 def ssh(args: list[str]) -> int:
     d = os.environ['FAKE_SSH']
-    i, control = 0, False
+    i, control, forwards = 0, False, []
     while i < len(args) and args[i].startswith('-'):
         flag = args[i][1:2]
         if flag == 'O':
             control = True
+        if flag == 'R':
+            forwards.append(args[i + 1])
         i += 2 if flag in _SSH_VALUE and len(args[i]) == 2 else 1
     host, rest = args[i], args[i + 1:]
     with open(os.path.join(d, 'calls.log'), 'a') as f:
         f.write(json.dumps([host, ' '.join(rest)]) + '\n')
+        for k in ('GH_TOKEN', 'GITHUB_TOKEN'):  # what ssh could send on (SendEnv)
+            if k in os.environ:
+                f.write(json.dumps(['env', f'{k}={os.environ[k]}']) + '\n')
     h = _load(os.path.join(d, 'hosts.json'), {}).get(host)
     if h is None or h.get('down'):
         print(f'ssh: connect to host {host} port 22: Connection refused', file=sys.stderr)
@@ -321,12 +326,70 @@ def ssh(args: list[str]) -> int:
         sys.stdout.write(h.get('motd', ''))  # what a login's rc files may print first
         sys.stdout.flush()
         os.chdir(h['home'])
+        if forwards:
+            return _forwarded(forwards, ['sh', '-c', ' '.join(rest)], dict(os.environ, HOME=h['home']))
         os.execve('/bin/sh', ['sh', '-c', ' '.join(rest)], dict(os.environ, HOME=h['home']))
     env = dict(os.environ, SSH_ORIGINAL_COMMAND=' '.join(rest))
     gate = ('import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.slurmgate import main; '
             'sys.exit(main())')
     os.execve(sys.executable, [sys.executable, '-I', '-c', gate, h['release'], h['base']], env)
     return 255
+
+
+def _forwarded(forwards: list[str], argv: list[str], env: dict) -> int:
+    """``-R <socket>:127.0.0.1:<port>``: a Unix socket at the login end that each
+    connection of passes to the port, for as long as the command runs (sshd's remote
+    forward); a socket it cannot bind fails the call (``ExitOnForwardFailure``). Its
+    connections are counted in ``$FAKE_SSH/forwarded``."""
+    import socket
+    import threading
+
+    def pipe(a, b):
+        try:
+            while data := a.recv(65536):
+                b.sendall(data)
+        except OSError:
+            pass
+        try:
+            b.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+    def serve(srv, port):
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            with open(os.path.join(os.environ['FAKE_SSH'], 'forwarded'), 'a') as f:
+                f.write('1\n')
+            try:
+                t = socket.create_connection(('127.0.0.1', port))
+            except OSError:  # the forward's far end is gone: sshd closes the channel
+                c.close()
+                continue
+            threading.Thread(target=pipe, args=(c, t), daemon=True).start()
+            threading.Thread(target=pipe, args=(t, c), daemon=True).start()
+    servers = []
+    for spec in forwards:
+        path, _, port = spec.rpartition(':127.0.0.1:')
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            srv.bind(path)
+        except OSError as e:
+            print(f'Error: remote port forwarding failed for listen path {path}: {e}', file=sys.stderr)
+            return 255
+        os.chmod(path, 0o600)
+        srv.listen(8)
+        servers.append((srv, path))
+        threading.Thread(target=serve, args=(srv, int(port)), daemon=True).start()
+    try:
+        return subprocess.run(argv, env=env).returncode
+    finally:
+        for srv, path in servers:
+            srv.close()
+            if os.path.exists(path):
+                os.unlink(path)
 
 
 def main(argv: list[str]) -> int:

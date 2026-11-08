@@ -6,6 +6,7 @@ decision 14.9, operations §10), as the host's CI account::
     ci-run slurm apply     <site> <account> --plan FILE --via ALIAS
     ci-run slurm status    <site>
     ci-run slurm env       <site> <account> <project> --via ALIAS [--variant V] [--refresh]   (slurmenv)
+    ci-run slurm canary    <site> <account> --project P [--target T] [--import M] [--wait MIN]   (slurmcanary)
     ci-run slurm uninstall <site> <account> --via ALIAS [--cancel]
 
 The site config is ``etc/slurm/<site>.toml`` (``ci_runners.slurmsite``); the account's CI
@@ -468,6 +469,13 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, **kw) -> int:
     s.add_argument('--via', required=True, help="an ssh alias of the account owner's own login")
     s.add_argument('--variant', action='append', default=[], help='only these of the account\'s variants')
     s.add_argument('--refresh', action='store_true', help='rebuild from the kept spec only if an upstream moved')
+    s = sub.add_parser('canary')
+    s.add_argument('site')
+    s.add_argument('account')
+    s.add_argument('--project', required=True, help='whose env the jobs run in')
+    s.add_argument('--target', action='append', default=[], help='only these of the account\'s targets')
+    s.add_argument('--import', dest='imports', action='append', default=[], help='a module the env must load')
+    s.add_argument('--wait', type=float, default=30.0, help='minutes a job may pend')
     a = p.parse_args(argv)
     ctx = Ctx(etc, str(inv.host['data']), inv.this, **kw)
     try:
@@ -479,6 +487,10 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, **kw) -> int:
             return apply(ctx, a.site, a.account, a.plan, a.via)
         if a.verb == 'uninstall':
             return uninstall(ctx, a.site, a.account, a.via, a.cancel)
+        if a.verb == 'canary':
+            from ci_runners import slurmcanary
+            return slurmcanary.canary(ctx, a.site, a.account, a.project, targets=a.target, imports=a.imports,
+                                      wait=a.wait)
         if a.verb == 'env':
             from ci_runners import slurmenv
             return slurmenv.env(ctx, a.site, a.account, a.project, a.via, variants=a.variant, refresh=a.refresh,

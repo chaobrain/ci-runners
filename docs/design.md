@@ -829,6 +829,7 @@ ci_runners/           stdlib-only Python: pure functions, thin I/O
   slurmsetup.py       `ci-run slurm check|plan|apply|status|uninstall`: an account's install (14.9)
   slurmlogin.py       the install's steps on the login host, through the owner's own login (14.9)
   slurmenv.py         `ci-run slurm env`: a project's env on the login host, its egress for the build only (14.9, D4)
+  slurmcanary.py      `ci-run slurm canary`: a short job per target, and the check it runs on the node (14.9, 14.10)
   cli.py              `ci-run`
 bin/                  ci-run, ci-lock, ci-slot: CLIs over the package; ci-slurm-gate, a cluster
                       key's forced command (14.5)

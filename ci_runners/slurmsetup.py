@@ -60,7 +60,10 @@ MIN_SLURM = (20, 11)
 CANARY_MINUTES = 3
 COMMANDS = ('sbatch', 'squeue', 'sacct', 'scancel', 'sinfo', 'rsync')
 GATE = 'releases/hook/bin/ci-slurm-gate'
-#: the boot of a login step: the modules' sources and the call on stdin, its JSON on stdout
+#: the boot of a login step, read as stdin's first line by a one-line command (any login
+#: shell runs it): the modules' sources and the call follow on stdin; its JSON is printed
+#: after ``SENTINEL``, so that what a login prints itself is passed over
+SENTINEL = '@@ci-runners-result@@'
 BOOT = ('import json, sys, types\n'
         'd = json.loads(sys.stdin.read())\n'
         'for n, src in d["modules"].items():\n'
@@ -73,7 +76,7 @@ BOOT = ('import json, sys, types\n'
         'except (login.LoginError, OSError) as e:\n'
         '    sys.stderr.write(f"refused: {e}\\n")\n'
         '    sys.exit(2)\n'
-        'sys.stdout.write(json.dumps(r))\n')
+        f'sys.stdout.write("\\n" + {SENTINEL!r} + json.dumps(r))\n')
 
 
 class SetupError(Exception):
@@ -146,7 +149,7 @@ def plan_text(site: slurmsite.Site, alias: str, *, release: str, key: str, drive
     a = site.accounts[alias]
     base = base_of(site, alias)
     tag = os.path.basename(os.path.realpath(release))
-    if not TAG.fullmatch(tag):
+    if not TAG.fullmatch(tag) or tag == 'hook':
         raise SetupError(f'release {tag!r}: not a release name')
     files = release_files(release)
     entry = json.dumps(slurmsite.account_entry(site, alias), indent=1, sort_keys=True)
@@ -250,16 +253,18 @@ def login_call(site: slurmsite.Site, via: str, call: str, args: dict, *, ssh: st
     for n, m in mods.items():
         with open(m.__file__, encoding='utf-8') as f:  # type: ignore[union-attr]
             src[n] = f.read()
-    cmd = f'{shlex.quote(str(site.site["login_python"]))} -I -c {shlex.quote(BOOT)}'
+    cmd = f'{shlex.quote(str(site.site["login_python"]))} -I -c {shlex.quote("import sys; exec(sys.stdin.readline())")}'
+    data = f'exec({BOOT!r})\n' + json.dumps({'modules': src, 'call': call, 'args': args})
     try:
-        r = run([*ssh_via(ssh, via), cmd], input=json.dumps({'modules': src, 'call': call, 'args': args}).encode(),
+        r = run([*ssh_via(ssh, via), cmd], input=data.encode(),
                 capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise SetupError(f'{call} on {via}: no answer in {timeout:g} s') from None
     if r.returncode != 0:
         raise SetupError(f'{call} on {via}: {(r.stderr or b"").decode(errors="replace").strip()[-300:] or r.returncode}')
+    _, mark, out = r.stdout.decode(errors='replace').rpartition(SENTINEL)
     try:
-        return json.loads(r.stdout)
+        return json.loads(out if mark else '')
     except ValueError:
         raise SetupError(f'{call} on {via}: not JSON') from None
 
@@ -268,7 +273,7 @@ def copy_release(release: str, files: list[str], base: str, tag: str, via: str, 
                  run: Callable) -> None:
     rules = [f'--include=/{d}/' for d in sorted({f.split('/')[0] for f in files})]
     rules += [f'--include=/{f}' for f in files] + ['--exclude=*']
-    argv = [rsync, '-rlpt', '--delete', '--delete-excluded', '--chmod=go=', '-e', shlex.join(ssh_via(ssh, via)[:-1]),
+    argv = [rsync, '-rlpt', '--delete-excluded', '--chmod=go=', '-e', shlex.join(ssh_via(ssh, via)[:-1]),
             *rules, release.rstrip('/') + '/', f'{via}:{base}/releases/{tag}/']
     r = run(argv, capture_output=True, timeout=1800)
     if r.returncode != 0:
@@ -372,22 +377,22 @@ def status(ctx: Ctx, name: str) -> int:
     now = time.time()
     day = datetime.date.fromtimestamp(now)
     gates = {a: ctx.gate(site, a) for a, x in site.accounts.items() if not x.retired}
-    rows, silent = slurmpart.ledgers(gates, slurmpart.state_dir(ctx.data, site.name), now, day.strftime('%Y-%m'))
+    cache = slurmpart.state_dir(ctx.data, site.name)
+    rows, silent = slurmpart.ledgers(gates, cache, now, day.strftime('%Y-%m'))
+    rows.update(slurmpart.retired_rows(site, cache, day.strftime('%Y-%m')))
     total_m = total_d = 0.0
     for alias, a in sorted(site.accounts.items()):
         rec = slurmpart._read_json(ctx.record(site, alias)) or {}
         inst = f'release {rec["release"]}' if rec.get('release') else 'not installed from this host'
-        if a.retired:
-            ctx.say(f'{alias}: retired')
-            continue
         if alias not in rows:
-            ctx.say(f'{alias}: {inst}; the login host does not answer, no ledger cached')
+            ctx.say(f'{alias}: {"retired" if a.retired else inst + "; the login host does not answer"}, no ledger cached')
             continue
         month, today = slurmpart.spend(site, rows[alias], day.isoformat())
         total_m, total_d = total_m + month, total_d + today
         live = [j for j in rows[alias] if j.get('JobName', '').startswith('ci-')
                 and slurmpart.row_cost(site, j)[1]]
-        ctx.say(f'{alias}: {inst}; month {month:.2f} of {float(a.a["monthly_cap"]):g}, today {today:.2f}'
+        ctx.say(f'{alias}: {"retired" if a.retired else inst}; month {month:.2f} of {float(a.a["monthly_cap"]):g}, '
+                f'today {today:.2f}'
                 f'{" (cached: the login host does not answer)" if alias in silent else ""}; '
                 f'{len(live)} ci- job(s) live' + ''.join(f'\n  job {j["JobID"]} {j["JobName"]} {j["State"]}' for j in live))
     ctx.say(f'site {site.name}: month {total_m:.2f} of {float(site.site["monthly_cap"]):g}, '
@@ -400,18 +405,25 @@ def status(ctx: Ctx, name: str) -> int:
 
 
 def uninstall(ctx: Ctx, name: str, alias: str, via: str, cancel: bool) -> int:
+    """Refuse while a ``ci-`` job of the account is there (unless ``cancel``); retire the
+    account in the site config first, so that no part takes it; then the login host's
+    steps (``slurmlogin.uninstall``)."""
     site = ctx.account(name, alias)
     _, path = ctx.site(name)
     base = base_of(site, alias)
-    r = login_call(site, via, 'uninstall', {'base': base, 'slurm_account': str(site.accounts[alias].a['slurm_account']),
-                                            'cancel': cancel, 'gate': f'{base}/{GATE}'}, ssh=ctx.ssh, run=ctx.run)
+    acct = str(site.accounts[alias].a['slurm_account'])
     with open(path, encoding='utf-8') as f:
-        text = retire_text(f.read(), alias)
+        text = retire_text(f.read(), alias)  # before any step: a config it cannot edit stops here
+    jobs = login_call(site, via, 'ci_jobs', {'slurm_account': acct}, ssh=ctx.ssh, run=ctx.run)['jobs']
+    if jobs and not cancel:
+        raise SetupError(f'ci- jobs of the account are there: {" ".join(jobs)} (--cancel cancels them)')
     tmp = f'{path}.{os.getpid()}.new'
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
         f.write(text)
     os.replace(tmp, path)
+    r = login_call(site, via, 'uninstall', {'base': base, 'slurm_account': acct, 'gate': f'{base}/{GATE}'},
+                   ssh=ctx.ssh, run=ctx.run)
     try:
         os.unlink(ctx.record(site, alias))
     except FileNotFoundError:

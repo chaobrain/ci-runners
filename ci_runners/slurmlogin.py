@@ -112,13 +112,36 @@ def _jobs(slurm_account: str) -> list[str]:
             line.split('|')[1].startswith('ci-')]
 
 
-def uninstall(base: str, slurm_account: str, cancel: bool, gate: str) -> dict:
-    """Refuse while a ``ci-`` job of the account is there (``cancel``: cancel them and
-    wait for their end), then remove the ``authorized_keys`` lines that force ``gate``
-    and the tree ``base``."""
+def ci_jobs(slurm_account: str) -> dict:
+    return {'jobs': _jobs(slurm_account)}
+
+
+def uninstall(base: str, slurm_account: str, gate: str) -> dict:
+    """Take the account's install down, in an order that lets nothing new start: the
+    ``authorized_keys`` lines that force ``gate`` go first (no new submit), then every
+    ``ci-`` job of the account is cancelled and its end awaited, then the tree ``base`` is
+    removed. A link in place of ``authorized_keys`` or of ``base`` refuses."""
+    if os.path.basename(base) != 'ci-runners':
+        raise LoginError(f'{base} is not a ci-runners tree')
+    present = _own_dir(base)
+    keys = os.path.join(os.path.expanduser('~'), '.ssh', 'authorized_keys')
+    removed = 0
+    try:
+        fd = os.open(keys, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        fd = None
+    except OSError:
+        raise LoginError(f'{keys} is a link: edit it by hand') from None
+    if fd is not None:
+        with os.fdopen(fd, encoding='utf-8') as f:
+            mode = stat.S_IMODE(os.fstat(f.fileno()).st_mode)
+            lines = f.read().splitlines(keepends=True)
+        keep = [x for x in lines if f'command="{gate}"' not in x]
+        removed = len(lines) - len(keep)
+        if removed:
+            _write(keys, ''.join(keep))
+            os.chmod(keys, mode)
     jobs = _jobs(slurm_account)
-    if jobs and not cancel:
-        raise LoginError(f'ci- jobs of the account are there: {" ".join(jobs)} (--cancel cancels them)')
     if jobs:
         subprocess.run(['scancel', *jobs], capture_output=True, timeout=60)
         end = time.monotonic() + CANCEL_WAIT
@@ -126,22 +149,6 @@ def uninstall(base: str, slurm_account: str, cancel: bool, gate: str) -> dict:
             time.sleep(2)
         if left:
             raise LoginError(f'ci- jobs still there after scancel: {" ".join(left)}')
-    keys = os.path.join(os.path.expanduser('~'), '.ssh', 'authorized_keys')
-    removed = 0
-    try:
-        with open(keys, encoding='utf-8') as f:
-            lines = f.read().splitlines(keepends=True)
-    except FileNotFoundError:
-        lines = []
-    keep = [x for x in lines if f'command="{gate}"' not in x]
-    removed = len(lines) - len(keep)
-    if removed:
-        mode = stat.S_IMODE(os.stat(keys).st_mode)
-        _write(keys, ''.join(keep))
-        os.chmod(keys, mode)
-    gone = _own_dir(base)
-    if gone:
-        if os.path.basename(base) != 'ci-runners':
-            raise LoginError(f'{base} is not a ci-runners tree')
+    if present:
         shutil.rmtree(base)
-    return {'cancelled': jobs, 'key_lines': removed, 'removed': gone}
+    return {'cancelled': jobs, 'key_lines': removed, 'removed': present}

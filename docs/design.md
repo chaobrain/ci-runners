@@ -709,8 +709,13 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
          `max_cards` ≥ 2 (a failure sets it to 1), a file round trip, the start latency
          and the accounting fields;
        - `uninstall` refuses while a `ci-` job of the account runs (`--cancel` cancels
-         them), removes the key line it wrote and the root's `ci-runners` tree, and marks
-         the account retired (its ledger rows stay for the month).
+         them), marks the account retired (its ledger rows stay for the month and count
+         against the site's caps), removes the key lines that force its gate, then the
+         root's `ci-runners` tree.
+       `apply`, `uninstall` and a `check` before an install run through the account
+       owner's own login (`--via`), since the CI key reaches only the gate; `check`'s
+       `--test-only` asks for each target's largest part (`max_cards`, `max_minutes`), which
+       checks the association's limits; the egress prerequisites are checked by `env`.
        Another Slurm system is another site config; the code assumes only ssh key login
        to a login host, the Slurm client commands there, a file system shared with the
        nodes, and Slurm ≥ 20.11.

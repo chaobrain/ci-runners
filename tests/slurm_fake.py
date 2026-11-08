@@ -23,7 +23,9 @@ States move when a command looks at them, as a scheduler's would between polls.
 ``ssh`` maps a host to a base directory by ``$FAKE_SSH/hosts.json``
 (``{"<alias>": {"base": ..., "release": ..., "down": false}}``) and runs the gate there
 with ``SSH_ORIGINAL_COMMAND``, as a forced command would; a host with ``"login": true``
-and a ``home`` is an owner's login, which runs the command with ``sh -c`` in ``home``; ``-O`` control calls pass; an
+and a ``home`` is an owner's login, which prints its ``motd`` and runs the command with
+``sh -c`` in ``home``; ``sbatch --test-only`` records each script's directives in
+``test_only.json``; ``-O`` control calls pass; an
 unknown or down host fails with 255. ``$FAKE_SSH/calls.log`` records each call.
 """
 from __future__ import annotations
@@ -173,6 +175,8 @@ def sbatch(args: list[str]) -> int:
         print('sbatch: error: Batch job submission failed: Unspecified error', file=sys.stderr)
         return 1
     if test_only:
+        tried = _load(os.path.join(_state_dir(), 'test_only.json'), [])
+        _save(os.path.join(_state_dir(), 'test_only.json'), tried + [sb])
         print(f'sbatch: Job 1 to start at {_iso(time.time() + 3600)} using 1 processors on nodes fake01',
               file=sys.stderr)
         return 0
@@ -314,6 +318,8 @@ def ssh(args: list[str]) -> int:
     if control:
         return 0
     if h.get('login'):  # the account owner's own login: a shell, as sshd runs the command
+        sys.stdout.write(h.get('motd', ''))  # what a login's rc files may print first
+        sys.stdout.flush()
         os.chdir(h['home'])
         os.execve('/bin/sh', ['sh', '-c', ' '.join(rest)], dict(os.environ, HOME=h['home']))
     env = dict(os.environ, SSH_ORIGINAL_COMMAND=' '.join(rest))

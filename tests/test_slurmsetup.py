@@ -21,6 +21,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXAMPLE = (ROOT / 'setup' / 'slurm' / 'site.example.toml').read_text()
 PUB = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI' + 'k' * 43
 OTHER = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI' + 'o' * 43 + ' owner@laptop\n'
+#: another account root's gate on the same login (a second install): not this one's to remove
+ANOTHER = f'restrict,command="/elsewhere/ci-runners/releases/hook/bin/ci-slurm-gate" {PUB} ci-runners-slurm-hb\n'
 
 
 def good_facts() -> dict:
@@ -91,7 +93,7 @@ class Site(unittest.TestCase):
             x.mkdir(parents=True)
         self.keys = self.home / '.ssh' / 'authorized_keys'
         self.keys.write_text(OTHER + f'restrict,command="{self.base}/releases/hook/bin/ci-slurm-gate" {PUB} '
-                                     'ci-runners-slurm-ha\n')
+                                     'ci-runners-slurm-ha\n' + ANOTHER)
         self.keys.chmod(0o644)  # sshd takes it so; uninstall keeps its mode
         self.site_file = self.etc / 'slurm' / 'cluster1.toml'
         self.site_file.write_text(EXAMPLE.replace('root = "/shared/fs/acct1"', f'root = "{self.root}"')
@@ -161,6 +163,18 @@ class Plan(Site):
         self.assertIn('\n'.join(f'   {x}' for x in entry.splitlines()), text)
         self.assertNotIn('private', text)
 
+    def test_a_release_named_hook_is_refused(self):
+        hook = self.d / 'releases' / 'hook'
+        hook.parent.mkdir()
+        hook.symlink_to(ROOT)
+        text = ss.plan_text(self.site(), 'acct1', release=str(hook), key=PUB, driver='hb')  # its real name counts
+        self.assertIn(f'release {ROOT.resolve().name},', text)
+        named = self.d / 'h' / 'hook'
+        named.parent.mkdir()
+        named.mkdir()
+        with self.assertRaisesRegex(ss.SetupError, "release 'hook'"):
+            ss.plan_text(self.site(), 'acct1', release=str(named), key=PUB, driver='hb')
+
     def test_the_ci_key_must_be_the_owners_only_and_ed25519(self):
         key = self.etc / 'slurm' / 'keys' / 'acct1'
         ctx, _ = self.ctx()
@@ -178,12 +192,19 @@ class Plan(Site):
 
 class Install(Site):
     def test_check_before_an_install_goes_through_the_owners_login(self):
+        hosts = json.loads((self.d / 'ssh' / 'hosts.json').read_text())
+        hosts['owner']['motd'] = 'Welcome {"not": "ours"}\n'  # what a login's rc files print is passed over
+        (self.d / 'ssh' / 'hosts.json').write_text(json.dumps(hosts))
         ctx, out = self.ctx()
         with self.assertRaisesRegex(ss.SetupError, 'before an install, check through --via'):
             ss.check(ctx, 'cluster1', 'acct1')
         self.assertEqual(ss.check(ctx, 'cluster1', 'acct1', 'owner'), 0, out.getvalue())
         self.assertIn('0 finding(s)', out.getvalue())
         self.assertEqual(os.listdir(self.root), [])  # its temporary tree is gone
+        tried = {t['--partition']: (t.get('--gpus'), t['--time']) for t in
+                 json.loads((self.d / 'slurm' / 'test_only.json').read_text())}
+        self.assertEqual(tried, {'cpu-partition': (None, '125'), 'gpu-partition-a': ('2', '125'),
+                                 'gpu-partition-b': ('2', '65')})  # each target's largest part: its limits
         (self.d / 'slurm' / 'down.json').write_text(json.dumps(['gpu-partition-b']))
         ctx, out = self.ctx()
         self.assertEqual(ss.check(ctx, 'cluster1', 'acct1', 'owner'), 1)
@@ -215,7 +236,7 @@ class Install(Site):
         self.assertEqual((self.base / 'etc' / 'account.json').stat().st_mode & 0o777, 0o600)
         rec = json.loads((self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'install-acct1.json').read_text())
         self.assertEqual(rec['release'], tag)
-        self.assertEqual(self.keys.read_text().count('ci-slurm-gate'), 1)  # authorized_keys is the owner's step
+        self.assertEqual(self.keys.read_text().count(f'{self.base}/'), 1)  # authorized_keys is the owner's step
         ctx, out = self.ctx()
         self.assertEqual(ss.check(ctx, 'cluster1', 'acct1'), 0, out.getvalue())  # the CI key's gate, installed
         self.assertIn('envs []', out.getvalue())
@@ -265,6 +286,11 @@ class Status(Site):
         self.assertNotIn('mine', text)
         self.assertIn('site cluster1: month 16.', text)
         self.assertIn('target a40: held at 1 card(s): p2p: copies read zeros', text)
+        self.site_file.write_text(ss.retire_text(self.site_file.read_text(), 'acct1'))
+        ctx, out = self.ctx()
+        ss.status(ctx, 'cluster1')  # its gate is no longer asked; its cached rows still count
+        self.assertIn('acct1: retired; month 16.', out.getvalue())
+        self.assertIn('site cluster1: month 16.', out.getvalue())
 
 
 class Uninstall(Site):
@@ -282,7 +308,7 @@ class Uninstall(Site):
         states = {j['id']: slurm_fake.refresh(j)['state'] for j in
                   (json.loads(p.read_text()) for p in (self.d / 'slurm' / 'jobs').glob('*.json'))}
         self.assertEqual(states, {ours: 'CANCELLED', mine: 'PENDING', elsewhere: 'PENDING'})
-        self.assertEqual(self.keys.read_text(), OTHER)  # the gate's line gone, the owner's own kept
+        self.assertEqual(self.keys.read_text(), OTHER + ANOTHER)  # this gate's line gone, the others kept
         self.assertEqual(self.keys.stat().st_mode & 0o777, 0o644)
         self.assertFalse(self.base.exists())
         self.assertTrue(self.root.exists())
@@ -290,6 +316,42 @@ class Uninstall(Site):
         self.assertEqual(self.site_file.stat().st_mode & 0o777, 0o600)
         self.assertFalse((self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'install-acct1.json').exists())
         self.assertIn('1 ci- job(s) cancelled, 1 key line(s) removed, the tree removed', out.getvalue())
+
+
+class Guards(Site):
+    """The login host's steps refuse what is not theirs."""
+
+    def test_uninstall_refuses_a_link_for_authorized_keys_or_the_tree_and_a_tree_not_ours(self):
+        self.apply()
+        real = self.home / 'keys.real'
+        self.keys.rename(real)
+        self.keys.symlink_to(real)
+        ctx, _ = self.ctx()
+        with self.assertRaisesRegex(ss.SetupError, 'is a link: edit it by hand'):
+            ss.uninstall(ctx, 'cluster1', 'acct1', 'owner', cancel=False)
+        self.assertIn('ci-slurm-gate', real.read_text())
+        self.assertTrue(self.base.exists())
+        self.assertTrue(os.path.islink(self.keys))
+        gate = f'{self.base}/{ss.GATE}'
+        with mock.patch.dict(os.environ, {'HOME': str(self.home)}):
+            with self.assertRaisesRegex(ss.slurmlogin.LoginError, 'not a ci-runners tree'):
+                ss.slurmlogin.uninstall(str(self.root), 'lab-acct1', gate)
+            other = self.d / 'other' / 'ci-runners'
+            other.parent.mkdir()
+            other.symlink_to(self.base)
+            with self.assertRaisesRegex(ss.slurmlogin.LoginError, 'not a directory of this account'):
+                ss.slurmlogin.uninstall(str(other), 'lab-acct1', gate)
+        self.assertTrue(self.base.exists())
+
+    def test_install_refuses_a_hook_that_is_not_a_link(self):
+        self.apply()
+        hook = self.base / 'releases' / 'hook'
+        hook.unlink()
+        hook.mkdir()
+        with self.assertRaisesRegex(ss.slurmlogin.LoginError, 'is not a link'):
+            ss.slurmlogin.install(str(self.base), ROOT.resolve().name, {})
+        with self.assertRaisesRegex(ss.slurmlogin.LoginError, 'not a plain name'):
+            ss.slurmlogin.install(str(self.base), ROOT.resolve().name, {'../x': ''})
 
 
 class Cli(Site):

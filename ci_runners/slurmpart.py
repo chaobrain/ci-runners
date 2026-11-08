@@ -303,6 +303,17 @@ def ledgers(gates: Mapping[str, Gate], cache: str, now: float, month: str) -> tu
     return out, silent
 
 
+def retired_rows(site: slurmsite.Site, cache: str, month: str) -> dict[str, list[dict]]:
+    """The retired accounts' last cached ledger rows of ``month``: their spend still
+    counts against the site's caps, though their gate is gone (14.9)."""
+    out = {}
+    for alias, a in site.accounts.items():
+        c = _read_json(os.path.join(cache, f'ledger-{alias}.json')) if a.retired else None
+        if c and c.get('month') == month and isinstance(c.get('jobs'), list):
+            out[alias] = c['jobs']
+    return out
+
+
 def stale_ledger(cache: str, alias: str) -> None:
     """Mark an account's cached ledger stale (a job was just submitted): the next part
     reads ``sacct`` again, and keeps the rows should the gate not answer then."""
@@ -480,6 +491,7 @@ class Driver:
         cache = state_dir(p['data'], self.site.name)
         rows, silent = ledgers(gates, cache, now, month)
         unknown = sorted(set(gates) - set(rows))
+        rows.update(retired_rows(self.site, cache, month))
         if unknown:  # the site's caps count every account: fail closed
             return self.finish({'rc': None, 'unavailable': f'budget: the spend of {", ".join(unknown)} is unknown (its '
                                                            'login host does not answer, and no ledger is cached)'})

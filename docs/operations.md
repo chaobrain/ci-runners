@@ -254,7 +254,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 **加第二个账户**：账户主人同意并加上 key 那一行，维护者在站点配置里加 `[accounts.<alias>]`，再走一遍 1–5。不需要在 GitHub 上做任何事。部件按"本月花费 ÷ 权重"最少的账户优先选择，相同时轮流（决定 14.8）。
 
-**卸载**：`ci-run slurm uninstall <site> <account> --via <别名>`。账户还有 `ci-` 作业在跑就拒绝（`--cancel` 会先取消它们）；删掉它写的 key 那一行和根目录下的 `ci-runners`；账户在站点配置里标为 retired，本月的账本记录保留。
+**卸载**：`ci-run slurm uninstall <site> <account> --via <别名>`。账户还有 `ci-` 作业在跑就拒绝（`--cancel` 会先取消它们）；先在站点配置里把账户标为 retired（本月的账本记录保留，仍计入站点上限），再删掉强制运行它的 gate 的 key 行（`authorized_keys` 是链接时拒绝），最后删根目录下的 `ci-runners`。
 
 **花费**：`ci-run slurm status <site>` 显示各账户本月花费和正在跑的作业。账本来自每个账户的 `sacct`，按站点价格表计算，只是防我们自己的错误；真正的上限要请站点管理员设在 CI 账户上（design T21）。
 

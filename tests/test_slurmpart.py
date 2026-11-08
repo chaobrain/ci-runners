@@ -442,6 +442,18 @@ class Pending(Driver):
             accounts.append(self.block(out)['account'])
         self.assertEqual(accounts, ['acct1', 'acct2', 'acct1'])
 
+    def test_a_retired_accounts_spend_still_counts(self):
+        site = self.etc / 'slurm' / 'cluster1.toml'
+        site.write_text(site.read_text() + 'retired = true\n')  # acct2, the last table
+        cache = self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1'
+        cache.mkdir(parents=True)
+        (cache / 'ledger-acct2.json').write_text(json.dumps({'month': time.strftime('%Y-%m'), 'at': 0, 'jobs': [
+            ledger_row(Start=time.strftime('%Y-%m-%dT00:00:00'))]}))  # 32 today, over the site's daily 30
+        code, out = self.execute(target='cpu')
+        self.assertEqual(out['outcome'], 'unavailable')
+        self.assertIn("budget: the site's daily cap 30", out['reason'])
+        self.assertEqual(self.jobs(), [])
+
     def test_a_budget_refusal_is_unavailable_budget(self):
         # each account's sacct shows the row: 2 x 14.90 of the daily 30; an a40 card for 6 min is 0.45 more
         (self.d / 'slurm' / 'ledger.json').write_text(json.dumps([ledger_row(

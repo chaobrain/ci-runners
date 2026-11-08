@@ -1802,6 +1802,11 @@ Rules:
   adds it only after its hosts run `v1.7.4`. `ci-run slurm env` run from another data
   directory (a maintainer's temporary one) keeps the record of the variants it did not
   build, from what the login host's links serve. No input or output changes.
+- **`v1.7.5`** (patch, stamped 2026-11-09; a patch of `v1.7`): the ssh master's socket on
+  a driver host is named by a short hash of the account's alias, not ssh's `%C`, so a data
+  root of up to about 75 characters fits a Unix socket path (at `v1.7.4` a driver whose
+  data root passed about 45 could not reach its gate); a longer one ends the part
+  `unavailable` with that reason. No input or output changes.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

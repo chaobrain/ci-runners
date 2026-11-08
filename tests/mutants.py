@@ -450,7 +450,7 @@ MUTANTS = [
     (VRD, "    if isinstance(v, int) and not isinstance(v, bool) and v > 0:", "    if False:", [f'{TV}.Artifacts.test_a_first_attempt_without_a_record_still_drops_a_stale_retry']),
     (VRD, "    if isinstance(v, int) and not isinstance(v, bool) and v > 0:", "    if isinstance(v, int) and v > 0:", [f'{TV}.Artifacts.test_a_first_attempt_without_a_record_still_drops_a_stale_retry']),
     (PRT, "            'run-attempt': record_run_attempt(record),\n", "", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
-    (PRT, "    return int(m.group(1)) if m else 0", "    return 1", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (PRT, "os.path.dirname(record.rstrip(os.sep))))\n    return int(m.group(1)) if m else 0", "os.path.dirname(record.rstrip(os.sep))))\n    return 1", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
     (LCH, "run_attempt=${GITHUB_RUN_ATTEMPT:-0}", "run_attempt=1", [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, "[[ $run_attempt =~ ^[1-9][0-9]{0,3}$ ]] || run_attempt=0", ":", [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (VRD, "    return int(m.group(1)) if m else 0", "    return 0", [f'{TV}.Artifacts.test_a_retry_an_earlier_run_attempt_left_is_dropped']),

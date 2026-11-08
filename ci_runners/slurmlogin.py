@@ -338,6 +338,26 @@ def _links(envs: str) -> set[str]:
     return {os.readlink(os.path.join(envs, n)) for n in os.listdir(envs) if os.path.islink(os.path.join(envs, n))}
 
 
+def linked_variants(envs: str, project: str) -> dict[str, dict]:
+    """Each ``<project>-<variant>`` link's build, spec commit and upstream commits, as
+    its build's ``ci-env.json`` holds them: what the login host serves, whatever the
+    driver that asks has kept."""
+    out = {}
+    for n in sorted(os.listdir(envs)):
+        m = re.fullmatch(re.escape(project) + f'-({VARIANT})', n)
+        path = os.path.join(envs, n)
+        if not m or not os.path.islink(path):
+            continue
+        target = os.readlink(path)
+        try:
+            with open(os.path.join(envs, target, 'ci-env.json'), encoding='utf-8') as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        out[m.group(1)] = {'build': target, 'sha': rec.get('sha'), 'commits': rec.get('commits', {})}
+    return out
+
+
 def build(base: str, project: str, stamp: str, builds: list, files: dict, record: dict, egress: str,
           proxy: str = '', secret: str = '', socket_path: str = '', installer: str = '', grace: float = 0) -> dict:
     """Build ``project``'s envs, one per entry of ``builds`` (``variant``: ``''`` for the
@@ -472,7 +492,8 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
                     shutil.rmtree(os.path.join(envs, n), ignore_errors=True)
                     removed.append(n)
         return {'builds': {os.path.basename(d): b['links'] for b, d in zip(builds, dirs)}, 'links': links,
-                'removed': sorted(removed), 'commits': commits, 'relay_port': relay.port if relay else 0}
+                'removed': sorted(removed), 'commits': commits, 'relay_port': relay.port if relay else 0,
+                'variants': linked_variants(envs, project)}
     finally:
         if relay is not None:
             relay.close()

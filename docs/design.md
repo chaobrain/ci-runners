@@ -747,7 +747,8 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
          job reads neither the account's `~/.local` packages (`PYTHONNOUSERSITE=1`) nor
          its pip config, and has no conda on its `PATH`. One build runs at a time per
          root, whatever its project (they share conda and its package cache), and a
-         `conda create` that exits 0 yet leaves no python fails the build. It builds one env for the
+         `conda create` that exits 0 yet leaves no python fails the build. The driver's record
+         of each variant's build also takes what the login host's links serve. It builds one env for the
          variants the account's targets run that the spec does not name, and one of its own
          for each `[variant.<name>]` the spec holds (its `install` replaces the base's,
          §4.9), and points each `<project>-<variant>` at its build only once every build

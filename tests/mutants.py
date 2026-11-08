@@ -135,6 +135,11 @@ MUTANTS = [
     # RUN-9h: what a part shows on GitHub is redacted; a root others may write is refused; the canary at its --time
     # RUN-9h review: redact, then cut; the cluster's node lists; the directories above the root; the nits
     (SS, "        if isinstance(h, dict) and h.get('max_cards') is not None:", '        if isinstance(h, dict):', [f'{TSU}.Status.test_spend_live_jobs_and_held_targets']),
+    # the kept file takes the login host's links: a run from another data dir keeps the other variants
+    (SE, "    built.update(r.get('variants') or {})", '    pass', [f'{TSE}.Env.test_a_subset_run_from_another_data_dir_keeps_the_other_variants_builds']),
+    (SL, "                'variants': linked_variants(envs, project)}", "                'variants': {}}", [f'{TSE}.Env.test_a_subset_run_from_another_data_dir_keeps_the_other_variants_builds']),
+    (SL, "        if not m or not os.path.islink(path):", "        if not m:", [f'{TSE}.Env.test_a_subset_run_from_another_data_dir_keeps_the_other_variants_builds']),
+    (SL, "        out[m.group(1)] = {'build': target, 'sha': rec.get('sha'), 'commits': rec.get('commits', {})}", "        out[m.group(1)] = {'build': target, 'sha': None, 'commits': rec.get('commits', {})}", [f'{TSE}.Env.test_a_subset_run_from_another_data_dir_keeps_the_other_variants_builds']),
     # two parts of a run make its work directory at once
     (SGT, "            except FileExistsError:  # another part of the run made it meanwhile\n                pass", "            except OSError:\n                raise", [f'{TSG}.Stage.test_two_parts_of_a_run_make_its_directory_at_once']),
     (SGT, "            st = os.lstat(path)  # whatever is there now", "            continue  # whatever is there now", [f'{TSG}.Stage.test_two_parts_of_a_run_make_its_directory_at_once']),

@@ -341,6 +341,18 @@ class Env(Site):
         self.assertEqual(kept['builds'], {b[0]: ['cpu'], b[1]: ['cuda13']})
         self.assertIn(f'cpu -> {b[0]}; cuda13 -> {b[1]}', said)
 
+    def test_a_variants_conda_packages_join_the_base_s_in_its_own_build_only(self):
+        self.conda()
+        self.api.files[HEAD]['.github/ci-runners.toml'] = (
+            SPEC + '[variant.cuda13]\ninstall = ["jax-cuda13-plugin"]\nconda = { packages = ["cuda-nvcc=13.0"] }\n')
+        rc, said = self.env()
+        self.assertEqual(rc, 0, said)
+        b = self.builds()
+        self.assertEqual(b, ['p-20261108T120001Z', 'p-20261108T120001Z-cuda13'])
+        base, cuda = ((self.envs / n / 'conda.log').read_text().splitlines()[0] for n in b)
+        self.assertTrue(base.endswith('python=3.12 pip nest-simulator=3.10'), base)  # the cpu target's: the base
+        self.assertTrue(cuda.endswith('python=3.12 pip nest-simulator=3.10 cuda-nvcc=13.0'), cuda)
+
     def test_a_variant_the_spec_does_not_name_links_the_base_build(self):
         self.conda()
         self.api.files[HEAD]['.github/ci-runners.toml'] = SPEC + '[variant.cuda13]\ninstall = ["jax-cuda13-plugin"]\n'

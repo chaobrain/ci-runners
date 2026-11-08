@@ -78,12 +78,13 @@ ref = "origin/main"
 [variables]                                       # 写进 registry 条目的环境变量（保留名会被拒绝）
 XLA_PYTHON_CLIENT_PREALLOCATE = "false"
 [variant.cuda12]                                  # 可选：集群目标的环境变体（只用于 slurm 类）
-install = ["jax[cuda12]"]                         # 替换基础的 install；只能写 install
+install = ["jax[cuda12]"]                         # 替换基础的 install
+conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 conda 包里，同一次求解
 ```
 
 `conda` 表（design §4.9，决定 12.10）是可选的，不写时与以前完全一样。`packages` 和 `python` 在同一次 `conda create` 里一起求解，之后才跑 pip 的各步（`requirements`、`install`、upstream）。`python` 由 `python` 键决定，`packages` 里不能再写 `python`，同一个包也不能写两次。表里有未知的键、`channels` 里是 URL 或路径、`packages` 里有选项或 URL，整个规格都会被拒绝，什么都不会构建。例如需要 Python 3.13 加 conda-forge 的 `nest-simulator=3.10`，就写 `python = "3.13"` 加上面的 `[conda]` 表。
 
-`variant` 表（design §4.9，决定 14.9）只给 `slurm` 类用：集群站点配置里每个目标有一个环境变体（例如 `cpu`、`cuda12`、`cuda13`），`ci-run slurm env` 为规格里写了的每个变体单独建一个环境，用它的 `install` 替换基础的 `install`（`requirements`、`conda`、upstream 都不变）；规格里没写的变体用基础环境。表里只能有 `install`，其他键整个规格都会被拒绝。3090 主机上的 `ci-run env build` 只读基础部分，有没有这个表结果都一样。所以要按变体换的包（例如 jax 的 CUDA 插件）放在 `install` 里，不要放进 `requirements` 文件。
+`variant` 表（design §4.9，决定 14.9）只给 `slurm` 类用：集群站点配置里每个目标有一个环境变体（例如 `cpu`、`cuda12`、`cuda13`），`ci-run slurm env` 为规格里写了的每个变体单独建一个环境，用它的 `install` 替换基础的 `install`（`requirements`、upstream 都不变）；规格里没写的变体用基础环境。变体还可以有一个 `conda` 表（`packages`，需要时加 `channels`，检查规则和基础的一样）：它的包加在基础的 `conda` 包后面，在同一次 `conda create` 里一起求解；它的 channel（默认没有）排在基础的后面。变体不能再写基础已经写了的包或 channel。表里只能有 `install` 和 `conda`，有其他键整个规格都会被拒绝。3090 主机上的 `ci-run env build` 只读基础部分，有没有这个表结果都一样。所以要按变体换的包（例如 jax 的 CUDA 插件、和变体 CUDA 版本一致的 nvcc）放在变体里，不要放进 `requirements` 文件或基础部分。
 
 项目本身**不会**装进环境：部件在作业的 checkout 里运行，`python -m pytest` 会直接从 checkout 导入项目。upstream 在建环境时 clone 并以 editable 方式安装，版本是当时分支的 head。
 

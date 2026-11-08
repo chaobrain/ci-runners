@@ -750,8 +750,10 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
          `conda create` that exits 0 yet leaves no python fails the build. The driver's record
          of each variant's build also takes what the login host's links serve. It builds one env for the
          variants the account's targets run that the spec does not name, and one of its own
-         for each `[variant.<name>]` the spec holds (its `install` replaces the base's,
-         §4.9), and points each `<project>-<variant>` at its build only once every build
+         for each `[variant.<name>]` the spec holds (its `install` replaces the base's
+         and its optional `conda` packages join the base's in the same solve, amended
+         2026-11-09 for a CUDA compiler per variant; §4.9),
+         and points each `<project>-<variant>` at its build only once every build
          has passed, every build holds the first's upstream commits (one branch that moves
          during the run fails it) and every link path is a link; a job resolves that link
          when it starts. Old builds no link holds go after the grace, but the newest 3 of
@@ -1205,14 +1207,20 @@ and an optional `variant` table, read only by `ci-run slurm env` (14.9):
 
 ```toml
 [variant.cuda12]                             # a cluster target's env variant
-install = ["jax[cuda12]"]                    # replaces the base's install; the only key
+install = ["jax[cuda12]"]                    # replaces the base's install
+[variant.cuda12.conda]                       # optional: joins the base's conda table
+packages = ["cuda-nvcc=12.2"]                # added to the base's packages, one solve
 ```
 
 A target of a variant the spec names gets an env of its own, built as the base with the
-variant's `install`; a variant the spec does not name uses the base env. An unknown key in
-a variant is a spec error. A 3090 host's `ci-run env build` reads the base only: a spec
-with a variant table builds there exactly as without it, so a package that changes per
-variant (jax's CUDA plugin) goes in `install`, not in a requirement file.
+variant's `install`; a variant the spec does not name uses the base env. A variant's
+optional `conda` table takes `packages` and `channels`, checked as the base's: its
+packages are added to the base's and solved with them in the same `conda create`, and its
+channels (none by default) follow the base's. It names no package or channel the base
+names; such a spec, or an unknown key in a variant, is a spec error. A 3090 host's
+`ci-run env build` reads the base only: a spec with a variant table builds there exactly
+as without it, so a package that changes per variant (jax's CUDA plugin, a CUDA compiler
+of the variant's version) goes in the variant, not in a requirement file or the base.
 
 `ci-run env build` creates the env with `python` and the `conda` packages in one solve,
 then runs the pip steps (`requirements`, `install`, the upstreams) as before. A spec

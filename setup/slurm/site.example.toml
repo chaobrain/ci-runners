@@ -1,0 +1,66 @@
+# A Slurm site config, schema 1 (design decision 14.6). This file holds placeholders
+# only: the real one is <data>/ci-runners/etc/slurm/<site>.toml on each driver host,
+# mode 600, and is never committed. `python -m ci_runners.slurmsite check FILE` validates
+# it; `... deny FILE` prints the hashes of its names for tests/deny.sha256 (operations
+# §10). Every string value but `name`, `gpu_request`, `egress`, `gpu_model`, `variant`,
+# `mem_per_node`, `enabled` and a system `login_python` (under /usr) is treated as
+# inventory by the deny list; target names and account aliases are role names of ours.
+schema = 1
+
+[site]
+name = "cluster1"                 # a role name and the file's name; never the site's host name
+gpu_request = "--gpus={n}"        # the site's one working GPU request, {n} the cards ("--gres=gpu:{n}" elsewhere)
+submit_args = []                  # site-wide extra sbatch arguments, e.g. ["--qos=<qos>"]
+login_python = "/usr/bin/python3" # the gate's and the cluster supervisor's interpreter, 3.11 or later
+egress = "tunnel"                 # env builds: direct | proxy | tunnel | push (14.9)
+# proxy = "http://<proxy>:<port>" # egress = "proxy" only
+max_parts = 4                     # running cluster parts per driver host
+pending_minutes = 3               # a target's pending bound, then the next account or target (14.3)
+daily_cap = 30.0                  # every account's spend a day and a month, in the prices' currency (14.7)
+monthly_cap = 600.0
+
+[site.prices]
+cpu_core_hour = 0.06
+cpu_on_gpu_jobs = false           # a GPU job pays its cards only
+card_hour = { v100 = 1.60, a40 = 4.50, h100sxm = 16.00 }
+
+[targets.cpu]                     # a target name of ours: what a part's `target` input names
+partition = "cpu-partition"
+cpus = 8                          # a CPU part's CPUs
+variant = "cpu"                   # the env variant its parts run in
+mem_per_node = "480G"             # the upper bound of a part's --mem
+max_minutes = 120
+enabled = true                    # after its acceptance gates (14.10): true, or a list of projects
+
+[targets.a40]
+partition = "gpu-partition-a"
+nodes = ["node01"]                # optional -w; or exclude = [...]
+gpu_model = "a40"                 # a key of site.prices.card_hour
+cards_per_node = 4
+max_cards = 2                     # 1 where the P2P canary fails (14.4)
+cpus_per_card = 8
+variant = "cuda13"
+mem_per_node = "480G"
+max_minutes = 120
+pending_minutes = 3               # optional: this target's own bound
+enabled = ["project-a"]
+
+[targets.h100]
+partition = "gpu-partition-b"
+gpu_model = "h100sxm"
+cards_per_node = 8
+max_cards = 2
+cpus_per_card = 16
+variant = "cuda13"
+mem_per_node = "1000G"
+max_minutes = 60
+enabled = false
+
+[accounts.acct1]                  # an alias of ours, never the account's own name
+ssh = "cluster1-acct1"            # an ssh alias of the CI account's ssh config
+root = "/shared/fs/acct1"         # on the file system the login host shares with the nodes
+slurm_account = "lab-acct1"
+targets = ["cpu", "a40", "h100"]  # `check` checks them against the account's associations
+weight = 1.0                      # its share of the spend (14.8)
+monthly_cap = 200.0
+# retired = true                  # set by `ci-run slurm uninstall`: no part uses it

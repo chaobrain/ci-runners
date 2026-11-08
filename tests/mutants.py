@@ -78,12 +78,64 @@ TX = 'tests.test_interop'
 DRN = 'ci_runners/drain.py'
 TD = 'tests.test_drain'
 HL = 'ci_runners/hostload.py'
+SST = 'ci_runners/slurmsite.py'
+TSS = 'tests.test_slurmsite'
 THL = 'tests.test_hostload'
 HC = 'ci_runners/hookcopy.py'
 THC = 'tests.test_hookcopy'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
+    # RUN-9b: the Slurm site config (decision 14.6)
+    (SST, "    unknown = set(t) - set(keys)\n    if unknown:", "    unknown = set()\n    if unknown:",
+     [f'{TSS}.Load.test_an_unknown_key_is_refused_at_every_level']),
+    (SST, "    if set(doc) - top:", "    if False:", [f'{TSS}.Load.test_an_unknown_key_is_refused_at_every_level']),
+    (SST, "    'partition': (lambda v: isinstance(v, str) and bool(SLURM_NAME.fullmatch(v)), True),",
+     "    'partition': (lambda v: isinstance(v, str) and bool(SLURM_NAME.fullmatch(v)), False),",
+     [f'{TSS}.Load.test_a_target_without_a_partition_is_refused']),
+    (SST, "        if t['gpu_model'] not in card_hour:", "        if False:",
+     [f'{TSS}.Load.test_a_gpu_target_without_a_price_is_refused']),
+    (SST, "        if t['max_cards'] > t['cards_per_node']:", "        if t['max_cards'] > t['cards_per_node'] + 1:",
+     [f'{TSS}.Load.test_max_cards_above_cards_per_node_is_refused']),
+    (SST, "        if t['max_cards'] > t['cards_per_node']:", "        if t['max_cards'] >= t['cards_per_node']:",
+     [f'{TSS}.Load.test_max_cards_above_cards_per_node_is_refused']),
+    (SST, "        unknown = [t for t in a['targets'] if t not in targets]", "        unknown = []",
+     [f'{TSS}.Load.test_an_account_naming_an_unknown_target_is_refused']),
+    (SST, "            if k not in t:\n                raise SiteError(f'{where}: a GPU target needs {k}')", "            pass",
+     [f'{TSS}.Load.test_gpu_and_cpu_target_keys']),
+    (SST, "            if k in t:\n                raise SiteError(f'{where}: {k} on a CPU target", "            if False:\n                raise SiteError(f'{where}: {k} on a CPU target",
+     [f'{TSS}.Load.test_gpu_and_cpu_target_keys']),
+    (SST, "        if 'cpus' not in t:", "        if False:", [f'{TSS}.Load.test_gpu_and_cpu_target_keys']),
+    (SST, "    if 'nodes' in t and 'exclude' in t:", "    if False:", [f'{TSS}.Load.test_gpu_and_cpu_target_keys']),
+    (SST, " and not any(x.split('=', 1)[0] in OWN_ARGS for x in v)", "", [f'{TSS}.Load.test_malformed_values']),
+    (SST, " and '..' not in v.split('/')", "", [f'{TSS}.Load.test_malformed_values']),
+    (SST, "    if (site['egress'] == 'proxy') != ('proxy' in site):", "    if False:",
+     [f'{TSS}.Load.test_the_schema_and_the_proxy']),
+    (SST, "        if stat.S_IMODE(os.fstat(f.fileno()).st_mode) & 0o077:", "        if False:",
+     [f'{TSS}.Load.test_the_file_is_its_owners_only_and_named_after_the_site']),
+    (SST, "    if os.path.basename(path) != f'{site.name}.toml':", "    if False:",
+     [f'{TSS}.Load.test_the_file_is_its_owners_only_and_named_after_the_site']),
+    (SST, "        return e is True or (isinstance(e, list) and project in e)", "        return bool(e)",
+     [f'{TSS}.Targets.test_enabled_for_a_project']),
+    (SST, "        e = self.t.get('enabled', False)", "        e = self.t.get('enabled', True)",
+     [f'{TSS}.Targets.test_enabled_for_a_project']),
+    (SST, "        if not (t.gpu and cards) or p['cpu_on_gpu_jobs']:", "        if True:",
+     [f'{TSS}.Targets.test_prices_a_gpu_job_pays_its_cards_and_a_cpu_job_its_cores']),
+    (SST, "        if not (t.gpu and cards) or p['cpu_on_gpu_jobs']:", "        if not (t.gpu and cards):",
+     [f'{TSS}.Targets.test_prices_a_gpu_job_pays_its_cards_and_a_cpu_job_its_cores']),
+    (SST, " * (minutes + TIME_MARGIN) / 60", " * minutes / 60",
+     [f'{TSS}.Targets.test_prices_a_gpu_job_pays_its_cards_and_a_cpu_job_its_cores']),
+    (SST, "        return float(self.targets[target].t.get('pending_minutes', self.site['pending_minutes']))",
+     "        return float(self.site['pending_minutes'])", [f'{TSS}.Targets.test_cpus_and_the_pending_bound']),
+    (SST, "'targets': {n: {k: v for k, v in site.targets[n].t.items() if k in keep} for n in a.a['targets']},",
+     "'targets': {n: {k: v for k, v in t.t.items() if k in keep} for n, t in site.targets.items()},",
+     [f'{TSS}.Entry.test_the_cluster_side_copy_holds_the_account_and_its_targets_only']),
+    (SST, "                and not (k == 'targets' and path[:1] == ('accounts',))", "",
+     [f'{TSS}.Deny.test_the_sites_names_are_denied_and_the_public_values_not']),
+    (SST, "PUBLIC_KEYS = frozenset({'name', 'gpu_request', 'egress',", "PUBLIC_KEYS = frozenset({'name', 'egress',",
+     [f'{TSS}.Deny.test_the_sites_names_are_denied_and_the_public_values_not']),
+    (SST, "                and not (k == 'login_python' and isinstance(v, str) and v.startswith('/usr/'))}", "}",
+     [f'{TSS}.Deny.test_the_sites_names_are_denied_and_the_public_values_not']),
     # the hook policy
     (POL, "    if cls not in CLASSES:", "    if cls is None:", [f'{TP}.Refused.test_an_unknown_runner_class']),
     (POL, "    if name == SELF:\n        return no('self')", "    if name == 'x/y':\n        return no('self')",

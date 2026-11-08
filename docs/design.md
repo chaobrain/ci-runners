@@ -764,6 +764,7 @@ ci_runners/           stdlib-only Python: pure functions, thin I/O
   hook.py             the pre-job and post-job hooks; their copy in `/tmp` (decision 13.5)
   setup.py            plan and apply
   inventory.py        schema, loader, lint
+  slurmsite.py        the Slurm site config: schema, loader, prices, deny tokens (14.6)
   cli.py              `ci-run`
 bin/                  ci-run, ci-lock, ci-slot: CLIs over the package
 hooks/                job-started.sh, job-completed.sh -> python -I -m ci_runners.hook
@@ -775,6 +776,7 @@ setup/units/          user unit templates: ci-runner@.service, ci-reaper.{servic
 setup/egress/         ci-egress.service and allow: the egress host's proxy unit and its
                       allowlist (11.10), installed by root there
 setup/inventory.example.toml  setup/policy.org.example.toml   placeholders only
+setup/slurm/          site.example.toml: a Slurm site config, placeholders only (14.6)
 setup/workstation/    orgsync-push.sh and ci-orgsync-push.{service,timer}: the snapshot
                       push from the maintainer's workstation (decision 11.9)
 actions/              claim/, part/, salvage/, verdict/ (composite, action.yml);

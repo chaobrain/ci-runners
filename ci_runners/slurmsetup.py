@@ -429,7 +429,7 @@ def status(ctx: Ctx, name: str) -> int:
             f'today {total_d:.2f} of {float(site.site["daily_cap"]):g}')
     held = slurmpart._read_json(os.path.join(slurmpart.state_dir(ctx.data, site.name), 'targets.json')) or {}
     for t, h in sorted(held.items()):
-        if isinstance(h, dict):
+        if isinstance(h, dict) and h.get('max_cards') is not None:  # a canary's record alone: not held
             ctx.say(f'target {t}: held at {h.get("max_cards")} card(s): {h.get("why", "")}')
     return 0
 

@@ -237,9 +237,10 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
 
 def shared_files(h: dict) -> tuple[list[str], str]:
     """The files the CI account shares with the local accounts (decision 12.9): the host
-    lock with its turnstile and shared marker, when the host has one, and every slot file;
-    and the slot queue directory. Pure."""
-    files = list(locks.paths(h['files']['host_lock'])) if h['files'].get('host_lock') else []
+    lock with its turnstile, shared marker and probe file (issue #69), when the host has
+    one, and every slot file; and the slot queue directory. Pure."""
+    lock = h['files'].get('host_lock')
+    files = [*locks.paths(lock), locks.probe_path(lock)] if lock else []
     files += slots.slot_paths(h['files']['slot_lock'], h['slots'])
     return files, h['files']['slot_queue']
 

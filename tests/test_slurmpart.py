@@ -132,11 +132,14 @@ class Pure(unittest.TestCase):
                 if verb == 'cancel':
                     return {'cancelled': True}
                 st = self.states.pop(0)
-                if st is None:
-                    raise sp.Refused('k has no job')
+                if st is None or st.startswith('!'):
+                    raise sp.Refused(st[1:] if st else 'k has no job')
                 return {'state': st}
         g = G([None])
         self.assertEqual((sp.cancel_job(g, 'k'), g.calls), ({'state': 'GONE'}, ['status']))  # nothing to cancel
+        self.assertEqual(sp.cancel_job(G(['!no part k']), 'k'), {'state': 'GONE'})
+        with self.assertRaisesRegex(sp.Refused, 'squeue: TimeoutExpired'):  # no answer: not gone
+            sp.cancel_job(G(['!squeue: TimeoutExpired']), 'k')
         g = G(['RUNNING'])
         self.assertEqual((sp.cancel_job(g, 'k'), g.calls), (None, ['status', 'cancel']))  # its end not seen yet
         g = G(['CANCELLED'])

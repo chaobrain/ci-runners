@@ -331,11 +331,13 @@ def git_config(text: str) -> str:
 def cancel_job(g: Gate, key: str) -> dict | None:
     """The part's job on ``g``'s account, cancelled: its last status once it has ended
     (``{'state': 'GONE'}`` when the account holds no job of the key), else None after
-    one ``scancel``. Raises Unreachable."""
+    one ``scancel``. Raises Unreachable, and Refused for any other refusal."""
     try:
         st = g.json('status', key, timeout=60)
-    except Refused:
-        return {'state': 'GONE'}
+    except Refused as e:  # gone only if the account holds no job of the key; a failing squeue is no answer
+        if str(e).endswith((f'{key} has no job', f'no part {key}')):
+            return {'state': 'GONE'}
+        raise
     if str(st.get('state')) not in LIVE:
         return st
     g.json('cancel', key, timeout=60)

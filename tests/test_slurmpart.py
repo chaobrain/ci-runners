@@ -418,6 +418,21 @@ files = {{ slot_lock = "{d}/s.lock", slot_queue = "{d}/s.queue" }}
 
 
 class Ends(Driver):
+    def test_the_driver_scope_gets_the_user_managers_bus(self):
+        self.env.update(XDG_RUNTIME_DIR='/run/user/4242', DBUS_SESSION_BUS_ADDRESS='unix:path=/run/user/4242/bus')
+        ex, seen = self.executor(), []
+        spawn = ex.spawn
+
+        def watch(argv, **kw):
+            seen.append(kw['env'])
+            return spawn(argv, **kw)
+        ex.spawn = watch
+        code, out = self.execute(ex)
+        self.assertEqual(out['outcome'], 'pass')
+        self.assertEqual({k: seen[0].get(k) for k in part.USER_BUS},
+                         {'XDG_RUNTIME_DIR': '/run/user/4242', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/4242/bus'})
+        self.assertNotIn('SECRET_TOKEN', seen[0])  # the rest of the runner's environment stays out
+
     def test_a_passing_part_its_results_come_back_and_its_record_names_job_target_account_and_cost(self):
         cmd = ('cat src.txt; cat "$RUNNER_TEMP/input.txt"; test ! -e "$RUNNER_TEMP/_runner_file_commands" || exit 9; '
                'echo "host $CI_RUNNERS_HOST $P_HOST $GITHUB_SHA ${SECRET_TOKEN:-none}"; '

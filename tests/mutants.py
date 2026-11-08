@@ -135,6 +135,9 @@ MUTANTS = [
     # RUN-9h: what a part shows on GitHub is redacted; a root others may write is refused; the canary at its --time
     # RUN-9h review: redact, then cut; the cluster's node lists; the directories above the root; the nits
     (SS, "        if isinstance(h, dict) and h.get('max_cards') is not None:", '        if isinstance(h, dict):', [f'{TSU}.Status.test_spend_live_jobs_and_held_targets']),
+    # a slurm part's driver scope reaches the user manager
+    (PRT, "               **{k: e[k] for k in USER_BUS if k in e}, **self.slurm_env}", "               **self.slurm_env}", [f'{TSP}.Ends.test_the_driver_scope_gets_the_user_managers_bus']),
+    (PRT, "USER_BUS = ('XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS')", "USER_BUS = ('XDG_RUNTIME_DIR',)", [f'{TSP}.Ends.test_the_driver_scope_gets_the_user_managers_bus']),
     # one env build at a time per base; a conda create that leaves no python fails
     (SL, '        fcntl.flock(block, fcntl.LOCK_EX)', '        pass', [f'{TSE}.Env.test_builds_of_two_projects_run_one_at_a_time']),
     (SL, "                    if 'create' in argv and '--prefix' in argv:", '                    if False:', [f'{TSE}.Env.test_a_conda_create_that_leaves_no_python_fails_the_build']),

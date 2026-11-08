@@ -765,8 +765,10 @@ ci_runners/           stdlib-only Python: pure functions, thin I/O
   setup.py            plan and apply
   inventory.py        schema, loader, lint
   slurmsite.py        the Slurm site config: schema, loader, prices, deny tokens (14.6)
+  slurmgate.py        the cluster's gate (14.5), the batch template and the job's supervisor (14.3)
   cli.py              `ci-run`
-bin/                  ci-run, ci-lock, ci-slot: CLIs over the package
+bin/                  ci-run, ci-lock, ci-slot: CLIs over the package; ci-slurm-gate, a cluster
+                      key's forced command (14.5)
 hooks/                job-started.sh, job-completed.sh -> python -I -m ci_runners.hook
 setup/                plan.sh, apply.sh, install.sh, register.sh, uninstall.sh
 setup/units/          user unit templates: ci-runner@.service, ci-reaper.{service,timer},

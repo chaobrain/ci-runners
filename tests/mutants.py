@@ -86,6 +86,8 @@ SL = 'ci_runners/slurmlogin.py'
 TSU = 'tests.test_slurmsetup'
 SE = 'ci_runners/slurmenv.py'
 TSE = 'tests.test_slurmenv'
+SC = 'ci_runners/slurmcanary.py'
+TSC = 'tests.test_slurmcanary'
 TSP = 'tests.test_slurmpart'
 TSG = 'tests.test_slurmgate'
 TSS = 'tests.test_slurmsite'
@@ -95,6 +97,31 @@ THC = 'tests.test_hookcopy'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
+    # RUN-9e: ci-run slurm canary (decision 14.9, 14.10)
+    (SC, '        elif major < a.floor:', '        elif False:', [f'{TSC}.Canary.test_findings_fail_the_canary']),
+    (SC, '        if not versions:\n            why.append', '        if False:\n            why.append', [f'{TSC}.Check.test_the_node_side_check']),
+    (SC, "        shutil.copyfile(os.path.join(env.get('GITHUB_WORKSPACE', ''), MARKER), os.path.join(results, MARKER))", '        pass', [f'{TSC}.Check.test_the_node_side_check']),
+    (SC, '    return 0 if not why else 1', '    return 0', [f'{TSC}.Check.test_the_node_side_check']),
+    (SC, "            why.append(f'import {m}: {type(e).__name__}')", '            pass', [f'{TSC}.Canary.test_findings_fail_the_canary']),
+    (SC, '            entry = {}  # a pass lifts', '            pass  # a pass lifts', [f'{TSC}.Canary.test_a_failed_p2p_self_test_holds_the_target_at_one_card_and_a_pass_lifts_it']),
+    (SC, '            entry.update(max_cards=1, why=', '            dict(max_cards=1, why=', [f'{TSC}.Canary.test_a_failed_p2p_self_test_holds_the_target_at_one_card_and_a_pass_lifts_it']),
+    (SC, '    cards = t.max_cards if t.gpu else 0', '    cards = 1 if t.gpu else 0', [f'{TSC}.Canary.test_a_failed_p2p_self_test_holds_the_target_at_one_card_and_a_pass_lifts_it']),
+    (SC, "    if ex.get('p2p'):\n        why.insert(0,", '    if False:\n        why.insert(0,', [f'{TSC}.Canary.test_a_failed_p2p_self_test_holds_the_target_at_one_card_and_a_pass_lifts_it']),
+    (SC, '            if slurmpart.cancel_job(g, key) is not None:\n                return True', '            if True:\n                return True', [f'{TSC}.Cancel.test_a_cancel_counts_only_once_the_job_is_seen_gone']),
+    (SC, '            if slurmpart.cancel_job(g, key) is not None:\n                return True', '            if slurmpart.cancel_job(g, key) is None:\n                return True', [f'{TSC}.Cancel.test_a_cancel_counts_only_once_the_job_is_seen_gone']),
+    (SC, 'latency=round(start - queued, 1) if start and queued else None,', 'latency=round(start - submitted, 1) if start else None,', [f'{TSC}.Canary.test_a_cpu_target_passes_and_its_record_holds_latency_cost_and_the_round_trip']),
+    (SC, "    start, queued = _epoch(str(st.get('start', ''))), _epoch(str(st.get('submit', '')))", "    start, queued = _epoch(str(st.get('start', ''))), None", [f'{TSC}.Canary.test_a_cpu_target_passes_and_its_record_holds_latency_cost_and_the_round_trip']),
+    (SGT, "start=x['Start'], end=x['End'], submit=x['Submit'],", "start=x['Start'], end=x['End'],", [f'{TSC}.Canary.test_a_cpu_target_passes_and_its_record_holds_latency_cost_and_the_round_trip']),
+    (SC, '            if pending or time.time() > deadline:', '            if pending:', [f'{TSC}.Canary.test_a_job_whose_end_cannot_be_seen_is_cancelled_at_the_deadline']),
+    (SC, "    if cards and variant not in FLOOR:", "    if False:", [f'{TSC}.Canary.test_a_gpu_variant_without_a_floor_fails_closed']),
+    (SC, "        round_trip = f.read() == token", "        round_trip = True", [f'{TSC}.Canary.test_a_marker_that_does_not_come_back_fails_the_canary']),
+    (SC, "        if seen != a.cards:", "        if False:", [f'{TSC}.Check.test_the_node_side_check']),
+    (SC, "        elif versions and len(versions) < a.cards:", "        elif False:", [f'{TSC}.Check.test_the_node_side_check']),
+    (SC, "        seen = len([x for x in cvd.split(',') if x.strip()]) if cvd is not None else len(versions)", "        seen = len(versions)", [f'{TSC}.Check.test_the_node_side_check']),
+    (SC, "                why.append(f'jax: {type(e).__name__}: {e}'[:300])", "                pass", [f'{TSC}.Check.test_the_node_side_check']),
+    (SC, 'cost=round(site.hourly(target, cards, t.cpus(cards)) * elapsed / 3600, 4)', 'cost=round(site.hourly(target, cards, t.cpus(cards)), 4)', [f'{TSC}.Canary.test_a_cpu_target_passes_and_its_record_holds_latency_cost_and_the_round_trip']),
+    (SC, "FLOOR = {'cuda13': 580,", "FLOOR = {'cuda13': 570,", [f'{TSC}.Canary.test_findings_fail_the_canary']),
+    (SC, '    if set(targets) - set(own):', '    if False:', [f'{TSC}.Canary.test_only_the_accounts_targets']),
     # RUN-9e: ci-run slurm env (decision 14.9, D4)
     (SL, '            if len(auth) != 1 or not hmac.compare_digest(auth[0].encode(), self.expected.encode()):', '            if not auth:', [f'{TSE}.Relay.test_only_the_builds_secret_passes_and_the_header_is_dropped']),
     (SL, '            if len(auth) != 1 or not hmac.compare_digest(auth[0].encode(), self.expected.encode()):', "            if not hmac.compare_digest(auth[0].encode() if auth else b'', self.expected.encode()):", [f'{TSE}.Relay.test_only_the_builds_secret_passes_and_the_header_is_dropped']),
@@ -265,7 +292,7 @@ MUTANTS = [
      [f'{TSP}.Pending.test_an_account_of_unknown_spend_stops_every_part']),
     (SPT, "    tres = job.get('AllocTRES') or job.get('ReqTRES', '')", "    tres = job.get('AllocTRES') or ''",
      [f'{TSP}.Pure.test_a_ledger_is_priced_by_the_sites_table']),
-    (SGT, "'End', 'TimelimitRaw', 'ReqTRES')", "'End', 'TimelimitRaw')", ['tests.test_slurmgate.Ledger.test_the_months_jobs']),
+    (SGT, "'End', 'TimelimitRaw', 'ReqTRES', 'Submit')", "'End', 'TimelimitRaw', 'Submit')", ['tests.test_slurmgate.Ledger.test_the_months_jobs']),
     (SPT, "            skip = s.lower().startswith('[includeif')", "            skip = False",
      [f'{TSP}.Pure.test_the_staged_git_config_holds_no_credentials']),
     (SPT, "        if skip or s.split('=', 1)[0].strip().lower() == 'extraheader':", "        if skip:",

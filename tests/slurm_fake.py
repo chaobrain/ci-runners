@@ -86,7 +86,9 @@ def _job_path(jid: int) -> str:
 
 
 def _iso(t: float | None) -> str:
-    return datetime.datetime.fromtimestamp(t).strftime('%Y-%m-%dT%H:%M:%S') if t else 'Unknown'
+    """``sacct``'s time: the cluster's local time, ``$FAKE_SLURM_CLOCK`` seconds ahead of ours."""
+    shift = float(os.environ.get('FAKE_SLURM_CLOCK') or 0)
+    return datetime.datetime.fromtimestamp(t + shift).strftime('%Y-%m-%dT%H:%M:%S') if t else 'Unknown'
 
 
 def _alive(pid: int) -> bool:
@@ -228,6 +230,7 @@ def _row(j: dict) -> dict[str, str]:
             'State': state, 'ExitCode': f'{j.get("rc", 0)}:0', 'ElapsedRaw': str(elapsed),
             'NodeList': j['sb'].get('--nodelist', 'fake01') if j.get('start') else 'None assigned',
             'AllocTRES': tres if j.get('start') else '', 'ReqTRES': tres, 'Start': _iso(j.get('start')), 'End': _iso(end),
+            'Submit': _iso(j['submit']),
             'TimelimitRaw': j['sb'].get('--time', '0')}
 
 

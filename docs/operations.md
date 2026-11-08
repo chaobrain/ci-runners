@@ -234,3 +234,31 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 - h100 的 9 个 runner 已在 org 注销；工作站的快照推送不再推到 h100；
 - `h100-test.yml` 已删除，它唯一的调用方是金丝雀仓库；之后只能自己组合 action（[consumers.md](consumers.md) §3）。
+
+## 10. Slurm 集群（design 决定 14，RUN-9 起）
+
+集群是 3090 主机 runner 的远程目标：`slurm` 池在 3090 主机上，部件以 `sbatch` 作业跑在集群上，集群上不常驻任何东西（没有单元、定时器、隧道或监听端口，决定 14.11）。所有命令都在一台驱动主机（3090）上以 CI 账户运行。
+
+**站点配置**：`etc/slurm/<site>.toml`（模式 600），格式见 `setup/slurm/site.example.toml`（RUN-9b 起；只有占位符）。站点名用角色名，不用机构的主机名。写的是：GPU 申请语法（例如 `--gpus={n}`）、额外的 `sbatch` 参数、登录节点的 Python、egress 方式、预算（每日、每月）、每个目标的排队上限；价格表（每核时、每种卡的卡时、GPU 作业是否另付 CPU）；目标（分区、节点、卡型号、每节点卡数、`max_cards`、环境变体、每卡 CPU、每节点内存、`max_minutes`、`enabled`）；账户（ssh 别名、共享文件系统上的根目录、Slurm 账户、可用目标、权重、每月上限）。`python -m ci_runners.slurmsite check etc/slurm/<site>.toml` 校验它（文件名要等于 `site.name`，权限要是 600）。把站点的名字加进 deny 清单（同 §2 第 4 步）：`python -m ci_runners.slurmsite deny etc/slurm/<site>.toml` 打印分区、节点、账户、ssh 别名、路径等值的哈希；目标名和账户别名是我们自己起的角色名，不算；配置里没有、但同样不能进仓库的名字（登录节点、机构名、其他节点）用 `python -m ci_runners.inventory hash` 从 stdin 生成。保证它们不会进入仓库。
+
+**装一个账户**（决定 14.9）：
+
+1. `ci-run slurm check <site> <account>`：只读检查。ssh 免交互登录；登录节点上有 `sbatch`、`squeue`、`sacct`、`scancel`、`sinfo`、`rsync` 和 Python；Slurm ≥ 20.11；每个目标的分区可用、账户所在组被允许、association 的卡数 CPU 数节点数够、`sbatch --test-only` 接受生成的申请（GPU 语法不对会在这里报出）；根目录可写、剩余 50 GiB 以上；egress 方式的前提条件。
+2. `ci-run slurm plan <site> <account> > plan.txt`：列出所有改动（目录、从驱动主机复制过去的 release、账户在集群上的配置副本、`authorized_keys` 那一行、环境构建、canary 作业及其花费），什么都不改。维护者批准；账户的**主人**把计划打印的 `authorized_keys` 那一行加进自己的账户（`restrict`，强制命令只能运行 gate）。
+3. `ci-run slurm apply <site> <account> --plan plan.txt`：只执行批准过的计划。
+4. `ci-run slurm env <site> <account> <project>`：在登录节点上建环境（节点的 C 库版本；不在驱动主机上建，那里的 C 库更新，pip 可能选到节点加载不了的 wheel）。egress 只在构建期间打开：`tunnel` 是从驱动主机反向转发到 700 目录里的 Unix socket，登录节点上的 relay 只接受这次构建随机生成的 `Proxy-Authorization`，构建结束后不留任何监听；`push` 是在驱动主机上下载、在登录节点离线安装；站点有外网或镜像时用 `direct` 或 `proxy`。上游有更新时，驱动主机的刷新定时器会触发集群上的重建。
+5. `ci-run slurm canary <site> <account>`：每个目标一个不超过 3 分钟的作业，检查环境、卡、驱动是否满足变体的下限、P2P（失败就把 `max_cards` 降为 1）、文件往返、开始延迟和计费字段。
+6. **启用目标**（决定 14.10）：canary 之后再各跑一个真实的单卡部件和双卡部件（CPU 目标跑一个 CPU 部件），都通过后才把站点配置里的 `enabled` 设为 true。
+
+**加第二个账户**：账户主人同意并加上 key 那一行，维护者在站点配置里加 `[accounts.<alias>]`，再走一遍 1–5。不需要在 GitHub 上做任何事。部件按"本月花费 ÷ 权重"最少的账户优先选择，相同时轮流（决定 14.8）。
+
+**卸载**：`ci-run slurm uninstall <site> <account>`。账户还有 `ci-` 作业在跑就拒绝（`--cancel` 会先取消它们）；删掉它写的 key 那一行和根目录下的 `ci-runners`；账户在站点配置里标为 retired，本月的账本记录保留。
+
+**花费**：`ci-run slurm status <site>` 显示各账户本月花费和正在跑的作业。账本来自每个账户的 `sacct`，按站点价格表计算，只是防我们自己的错误；真正的上限要请站点管理员设在 CI 账户上（design T21）。
+
+**排障**：
+
+- 部件 `unavailable: pending …`：目标排队太久，原因来自 `squeue`（例如 association 的节点数上限）。
+- `unavailable: p2p …`：这个目标的双卡互拷读回错误数据，告诉站点管理员；它的 `max_cards` 已降为 1。
+- 驱动主机宕机时作业会一直跑到 `--time`；reaper 会在 GitHub 作业消失后用 gate 的 `reap` 取消它。
+- 不要在登录节点上手工 `scancel` 别的作业，只动名字以 `ci-` 开头、属于自己账户的作业。

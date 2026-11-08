@@ -103,7 +103,7 @@ REQUEST = {
 LIVE_STATES = frozenset({'PENDING', 'CONFIGURING', 'RUNNING', 'COMPLETING', 'SUSPENDED', 'REQUEUED', 'RESIZING',
                          'SIGNALING', 'STAGE_OUT', 'STOPPED', 'REQUEUE_HOLD', 'REQUEUE_FED', 'RESV_DEL_HOLD'})
 SACCT_FIELDS = ('JobID', 'JobName', 'Partition', 'State', 'ExitCode', 'ElapsedRaw', 'NodeList', 'AllocTRES', 'Start',
-                'End', 'TimelimitRaw', 'ReqTRES')
+                'End', 'TimelimitRaw', 'ReqTRES', 'Submit')
 
 
 class GateError(Exception):
@@ -340,7 +340,7 @@ def status(base: str, key: str, run: Callable = subprocess.run) -> dict:
     supervisor's ``exit.json``, once written."""
     d, job = _job(base, key)
     out: dict[str, object] = {'job': job, 'state': 'UNKNOWN', 'reason': '', 'node': '', 'elapsed': 0, 'exit_code': '',
-                              'by': '', 'start': '', 'end': ''}
+                              'by': '', 'start': '', 'end': '', 'submit': ''}
     r = run(['squeue', '-h', '-j', str(job), '-o', '%T|%r|%N|%M'], capture_output=True, text=True, timeout=60)
     line = (r.stdout or '').strip().splitlines()
     if r.returncode == 0 and line and line[0].count('|') == 3:
@@ -354,7 +354,7 @@ def status(base: str, key: str, run: Callable = subprocess.run) -> dict:
             x = rows[0]
             st, _, by = x['State'].partition(' by ')
             out.update(state=st or 'UNKNOWN', exit_code=x['ExitCode'], node=x['NodeList'] if x['NodeList'] not in
-                       ('None assigned', '') else out['node'], start=x['Start'], end=x['End'],
+                       ('None assigned', '') else out['node'], start=x['Start'], end=x['End'], submit=x['Submit'],
                        elapsed=int(x['ElapsedRaw']) if x['ElapsedRaw'].isdigit() else 0)
             if by.strip():
                 out['by'] = 'us' if by.strip() == str(os.getuid()) else 'other'

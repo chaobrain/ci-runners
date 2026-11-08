@@ -194,6 +194,119 @@ class Pure(unittest.TestCase):
         self.assertEqual(out['next'], 'none')
         self.assertEqual(outcome.hint('unavailable', retry_here=True), outcome.Hint('retry', where='same-host'))
 
+    def test_ssh_facts_need_both_the_host_and_the_user(self):
+        import subprocess as sp_
+        out = {'rc': 0, 'text': b'user labuser\nhostname login7\nport 22\n'}
+        g = sp.Gate('/e', '/d', self.site, 'acct1', run=lambda argv, **kw: sp_.CompletedProcess(argv, out['rc'], out['text'], b''))
+        self.assertEqual(g.ssh_facts(), {'user': 'labuser', 'hostname': 'login7'})
+        out['text'] = b'hostname login7\nport 22\n'
+        self.assertIsNone(g.ssh_facts())  # no user to redact: fail closed
+        out.update(rc=255, text=b'user labuser\nhostname login7\n')
+        self.assertIsNone(g.ssh_facts())
+
+        def hangs(argv, **kw):
+            raise sp_.TimeoutExpired(argv, kw.get('timeout'))
+        g.run = hangs
+        self.assertIsNone(g.ssh_facts())  # an ssh -G that hangs: no facts, and no error that names the alias
+        g.run = lambda argv, **kw: sp_.CompletedProcess(argv, 0, b'user u1\nhostname h1\nproxyjump j@jump.example\n', b'')
+        self.assertEqual(g.ssh_facts(), {'user': 'u1', 'hostname': 'h1', 'proxyjump': 'j@jump.example'})
+
+    def test_the_gates_and_sshs_error_text_is_redacted(self):
+        import io
+        import tempfile
+        d = object.__new__(sp.Driver)
+        d.out, d.log_tail, d.clock, d.block = io.StringIO(), '', time.time, {}
+        d.log_decoder = sp.codecs.getincrementaldecoder('utf-8')('replace')
+        d.redact = slurmsite.Redactor(self.site)
+        d.say('cpu@acct1: acct1: ssh: connect to host cluster1-acct1 port 22: Connection refused')
+        self.assertEqual(d.out.getvalue(), 'ci-runners: cpu@<account>: <account>: ssh: connect to host <host> port 22: '
+                                           'Connection refused\n')
+        with tempfile.TemporaryDirectory() as t:
+            d.record = t
+            d.finish({'rc': None, 'unavailable': 'sbatch refused it: Invalid account lab-acct1 or partition cpu-partition',
+                      'red': 'on node01', 'p2p': '/shared/fs/acct1/x'})
+            ex = json.loads((pathlib.Path(t) / 'exit.json').read_text())
+        self.assertEqual((ex['unavailable'], ex['red'], ex['p2p']),
+                         ('sbatch refused it: Invalid account <account> or partition <partition>', 'on <node>', '<root>/x'))
+
+    def test_an_unexpected_error_ends_the_part_unavailable_and_its_traceback_stays_here(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(err):
+                self.assertEqual(sp.drive(t), 0)  # no plan: the driver cannot even start
+            ex = json.loads((pathlib.Path(t) / 'exit.json').read_text())
+            self.assertEqual((ex['rc'], ex['unavailable']), (None, 'driver: KeyError'))
+            self.assertIn('Traceback', (pathlib.Path(t) / 'driver-error.txt').read_text())
+            self.assertEqual(err.getvalue(), '')
+        with tempfile.TemporaryDirectory() as t:
+            site = pathlib.Path(t) / 'cluster1.toml'
+            site.write_text(SITE)
+            site.chmod(0o600)
+            (pathlib.Path(t) / 'slurm-plan.json').write_text(json.dumps({'site_file': str(site), 'key': 'k'}))
+            err = io.StringIO()
+            with mock.patch.object(sp.Driver, 'drive', side_effect=ValueError('at /shared/fs/acct1')), \
+                    contextlib.redirect_stderr(err), contextlib.redirect_stdout(err):
+                self.assertEqual(sp.drive(t), 0)
+            ex = json.loads((pathlib.Path(t) / 'exit.json').read_text())
+            self.assertEqual(ex['unavailable'], 'driver: ValueError')
+            self.assertIn('/shared/fs/acct1', (pathlib.Path(t) / 'driver-error.txt').read_text())  # this host's own
+            self.assertEqual(err.getvalue(), '')
+            self.assertTrue((pathlib.Path(t) / 'slurm.json').exists())  # the driver's own finish
+
+    def test_the_job_log_is_redacted_by_whole_lines(self):
+        import io
+        d = object.__new__(sp.Driver)
+        d.out, d.log_tail = io.StringIO(), ''
+        d.redact = slurmsite.Redactor(self.site)
+        d.write_log('a cpu-part')
+        self.assertEqual(d.out.getvalue(), '')  # held: the line may go on
+        d.write_log('ition b\nc lab-')
+        self.assertEqual(d.out.getvalue(), 'a <partition> b\n')
+        long = 'x ' * (sp.LOG_LINE_MAX // 2) + 'lab-'
+        d.write_log(long)
+        self.assertEqual(len(d.log_tail), sp.LOG_KEEP)  # a line too long goes out but its end
+        d.write_log('acct1 end', end=True)
+        self.assertTrue(d.out.getvalue().endswith('x <account> end'), d.out.getvalue()[-40:])
+        self.assertEqual(d.log_tail, '')
+        # no blank: the cut moves to the start of the value it would split
+        d.out = io.StringIO()
+        text = 'y' * (sp.LOG_LINE_MAX + 1) + '/shared/fs/acct1' + 'z' * (sp.LOG_KEEP - 8)
+        d.write_log(text)
+        self.assertEqual(d.log_tail, '/shared/fs/acct1' + 'z' * (sp.LOG_KEEP - 8))
+        d.write_log('\n')
+        self.assertEqual(d.out.getvalue(), 'y' * (sp.LOG_LINE_MAX + 1) + '<root>' + 'z' * (sp.LOG_KEEP - 8) + '\n')
+        d.out = io.StringIO()
+        d.write_log('q' * (sp.LOG_LINE_MAX + sp.LOG_KEEP))
+        self.assertEqual((len(d.out.getvalue()), len(d.log_tail)), (sp.LOG_LINE_MAX, sp.LOG_KEEP))  # nothing to move
+
+    def test_a_gates_error_text_is_redacted_before_it_is_cut(self):
+        import subprocess as sp_
+        red = slurmsite.Redactor(self.site)
+        res = {}
+        g = sp.Gate('/e', '/d', self.site, 'acct1', redact=red,
+                    run=lambda argv, **kw: sp_.CompletedProcess(argv, res['rc'], b'', res['err']))
+        g.ssh_argv = lambda: ['ssh']
+        for rc, exc, keep in ((2, sp.Refused, 300), (255, sp.Unreachable, 200)):
+            res.update(rc=rc, err=(' lab-acct1' + 'y' * (keep - 4)).encode())  # a cut at its end splits the name
+            with self.assertRaises(exc) as e:
+                g.call('status', 'k')
+            self.assertNotIn('acct1', str(e.exception).replace('acct1:', ''), rc)
+            self.assertIn('unt>', str(e.exception))  # the placeholder was cut, not the name
+        g.run = lambda argv, **kw: sp_.CompletedProcess(argv, 23, b'', (' lab-acct1' + 'y' * 196).encode())
+        with self.assertRaises(sp.Refused) as e:
+            g.sync('stage', '/a/', 'h:k/')
+        self.assertNotIn('cct1', str(e.exception))
+        g.run = lambda argv, **kw: sp_.CompletedProcess(argv, 255, b'', (' lab-acct1' + 'y' * 196).encode())
+        with self.assertRaises(sp.Unreachable) as e:
+            g.sync('stage', '/a/', 'h:k/')
+        self.assertNotIn('cct1', str(e.exception).replace('acct1:', ''))
+        d = object.__new__(sp.Driver)
+        d.plan, d.site, d.run, d.redact = {'etc': '/e', 'data': '/d', 'ssh': 'ssh', 'rsync': 'rsync'}, self.site, None, red
+        self.assertIs(d.gate('acct1').redact, red)  # the driver's gates redact with its redactor
+
     def test_the_class_row(self):
         s, data = self.site, '/nonexistent'
         ok, why = sp.row(data, s, ['a40', 'cpu', 'h100', 'l40'], project='p', gpus=1, minutes=90, lock='none')
@@ -323,9 +436,9 @@ class Ends(Driver):
                          ('cluster1', 'acct1', 'cpu', 'cpu-partition', 1001, 'COMPLETED'))
         self.assertEqual((b['cards'], b['cpus'], b['node']), (0, 8, 'fake01'))
         self.assertAlmostEqual(b['cost'], 8 * 0.06 * b['elapsed'] / 3600)
-        self.assertIn('hb → cluster1:cpu (acct1), job 1001 on fake01', out['slurm'])
+        self.assertIn('hb → cpu, job 1001, ', out['slurm'])  # not its site, account or node
         summary = (rec / 'summary.md').read_text()
-        self.assertIn('| cluster | hb → cluster1:cpu (acct1), job 1001 on fake01', summary)
+        self.assertIn('| cluster | hb → cpu, job 1001, ', summary)
         self.assertIn('cost', summary)
         r = json.loads((rec / 'record.json').read_text())
         self.assertEqual(r['class'], 'slurm')
@@ -339,6 +452,48 @@ class Ends(Driver):
         self.assertTrue((ws.parent / 'tmp' / 'input.txt').exists())
         cache = json.loads((self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'ledger-acct1.json').read_text())
         self.assertEqual(cache['at'], 0)  # read again by the next part: the job counts from its submission
+
+    def private_site(self, **ssh):
+        """The site config names the accounts' real roots, as a real one does, and acct1's
+        ssh config ``ssh`` (a login host and user)."""
+        site = self.etc / 'slurm' / 'cluster1.toml'
+        site.write_text(site.read_text().replace('/shared/fs/acct1', str(self.d / 'root'))
+                        .replace('/shared/fs/acct2', str(self.d / 'root2')))
+        h = json.loads((self.d / 'ssh' / 'hosts.json').read_text())
+        h['cluster1-acct1'].update(ssh)
+        (self.d / 'ssh' / 'hosts.json').write_text(json.dumps(h))
+
+    def test_what_a_part_shows_on_github_names_no_inventory(self):
+        self.private_site(hostname='login7.example.org', user='labuser')
+        self.env['GITHUB_STEP_SUMMARY'] = str(self.d / 'step_summary.md')
+        (self.d / 'slurm' / 'nodes.json').write_text('["other[1-2]"]')  # its node: only from the job's status
+        cmd = ('echo "dir $CI_PART_DIR"; echo "fake01 labuser@LOGIN7.example.org lab-acct1 cluster1-acct1 cluster1:cpu"; '
+               'printf "x cpu-part"; sleep 1; printf "ition y\\nlast lab-acct1"; exit 3')
+        code, out = self.execute(command=cmd)
+        log = self.log.read_text()
+        self.assertIn('dir <root>/ci-runners/', log)
+        self.assertIn('<node> <user>@<host> <account> <host> <site>:cpu\n', log)  # the target stays
+        self.assertIn('x <partition> y\n', log)  # one name, split across two reads of the job's log
+        self.assertIn('last <account>', log)  # and the log's last line, without its newline
+        summary = (self.record(out) / 'summary.md').read_text()
+        art = self.temp / 'ci-runners' / 'unit'  # the part's uploaded artifacts
+        shown = (json.dumps(out) + summary + (self.d / 'step_summary.md').read_text()
+                 + (art / 'outcome.json').read_text() + (art / 'summary.md').read_text())
+        self.assertIn('hb → cpu, job 1001, ', shown)  # the target, job and cost stay
+        for x in (str(self.d / 'root'), 'fake01', 'labuser', 'login7', 'lab-acct1', 'cluster1-acct1', 'cpu-partition'):
+            self.assertNotIn(x.lower(), log.lower())
+            self.assertNotIn(x, shown)
+        for x in ('cluster1', 'acct1'):  # our own names for the site and the account
+            self.assertNotIn(x, shown + log.replace('ci-runners', ''))
+        self.assertIn('fake01 labuser@', (self.record(out) / 'job.log').read_text())  # this host's own copy: as it was
+        self.assertEqual(self.block(out)['node'], 'fake01')
+
+    def test_without_its_ssh_config_a_part_runs_nowhere(self):
+        self.private_site(no_config=True)
+        code, out = self.execute()
+        self.assertEqual(out['outcome'], 'unavailable')
+        self.assertIn('ssh -G <account>: no host and user to redact', out['reason'])
+        self.assertEqual(self.jobs(), [])
 
     def test_a_red_part(self):
         code, out = self.execute(command='exit 3')
@@ -365,7 +520,7 @@ class Ends(Driver):
         code, out = self.execute()
         self.assertEqual((code, out['outcome'], out['next']), (0, 'unavailable', 'retry'))
         self.assertEqual(out['retry-on'], ['self-hosted', 'hb-slurm'])
-        self.assertIn('node fail', out['reason'])
+        self.assertEqual(out['reason'], 'node fail: NODE_FAIL on <node>')  # the node the job ran on, redacted
 
     def test_a_cancel_by_another_user_falls_back(self):
         self.plan({'other_cancel': 0.5})
@@ -400,6 +555,13 @@ class Ends(Driver):
         with self.assertRaisesRegex(part.Refused, 'names its target'):
             self.execute(id='none', target='')
         self.assertEqual(self.jobs(), [])
+        code, out = self.execute(id='nosite', target='l40')
+        self.assertIn('l40: no target of site <site>', out['reason'])  # the executor's own reason, redacted
+        site = self.etc / 'slurm' / 'cluster1.toml'
+        site.chmod(0o644)
+        code, out = self.execute(id='badsite', target='cpu')
+        self.assertEqual(out['reason'], 'site config: invalid (python -m ci_runners.slurmsite check)')
+        self.assertIn('readable by others', (self.record(out) / 'site-error.txt').read_text())  # the details: here
 
 
 class Pending(Driver):
@@ -426,6 +588,48 @@ class Pending(Driver):
         self.assertTrue(out['reason'].startswith('pending: '), out['reason'])
         self.assertIn('Priority', out['reason'])
         self.assertTrue(all(j['state'] == 'CANCELLED' for j in self.jobs()))
+
+    def test_a_pending_reason_that_names_nodes_outside_the_config_is_redacted(self):
+        (self.d / 'slurm' / 'nodes.json').write_text(json.dumps(['fake[01-02]', 'zq[17-20]']))
+        self.plan({'pend': -1, 'reason': 'ReqNodeNotAvail, UnavailableNodes:zq[19-20]'},
+                  {'pend': -1, 'reason': 'ReqNodeNotAvail, UnavailableNodes:zq19'})
+        code, out = self.execute(target='cpu', queue_timeout_minutes=0.03)
+        self.assertEqual(out['outcome'], 'unavailable')
+        self.assertIn('UnavailableNodes:<node>', out['reason'])
+        log = self.log.read_text()
+        self.assertIn('UnavailableNodes:<node>', log)
+        self.assertNotIn('zq', log + out['reason'])
+        cached = json.loads((self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'nodes.json').read_text())
+        self.assertEqual(cached['nodes'], ['fake[01-02]', 'zq[17-20]'])
+
+    def test_without_the_clusters_node_list_no_part_runs(self):
+        self.hosts({'acct1': True, 'acct2': True})
+        code, out = self.execute(target='cpu')
+        self.assertEqual(out['outcome'], 'unavailable')
+        self.assertIn("the cluster's node list is unknown", out['reason'])
+        self.hosts({})
+        self.assertEqual(self.execute(id='up', target='cpu')[1]['outcome'], 'pass')  # cached now
+        (self.d / 'slurm' / 'nodes.json').write_text(json.dumps(['other[1-2]']))
+        self.hosts({'acct1': True, 'acct2': True})
+        code, out = self.execute(id='down', target='cpu')
+        self.assertNotIn('node list', out['reason'])  # the cached lists, however old: the budget decides
+        cache = self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'nodes.json'
+        c = json.loads(cache.read_text())
+        c['at'] -= sp.NODES_TTL
+        cache.write_text(json.dumps(c))
+        self.hosts({})
+        self.execute(id='again', target='cpu')
+        self.assertEqual(json.loads(cache.read_text())['nodes'], ['other[1-2]'])  # read again past its TTL
+        for k, bad in enumerate(([], ['zq[1-x]'], ['zq[1-99999]'], ['zq[01-02]', 'zq[1,]'])):
+            c = json.loads(cache.read_text())  # a good cache past its TTL; the gate's answer does not parse
+            c['at'] -= sp.NODES_TTL
+            cache.write_text(json.dumps(c))
+            (self.d / 'slurm' / 'nodes.json').write_text(json.dumps(bad))
+            n = len(self.jobs())
+            code, out = self.execute(id=f'bad{k}', target='cpu')
+            self.assertEqual(out['outcome'], 'unavailable', bad)
+            self.assertIn("the cluster's node list is unknown", out['reason'])
+            self.assertEqual(len(self.jobs()), n)  # before any job
 
     def test_past_the_queue_timeout_no_next_account_is_tried(self):
         self.plan({'pend': -1, 'reason': 'Priority'}, {'pend': -1, 'reason': 'Priority'})
@@ -500,7 +704,7 @@ class Pending(Driver):
         self.hosts({'acct1': True})  # silent, and no ledger of it cached: the site's caps cannot be checked
         code, out = self.execute(target='cpu')
         self.assertEqual((out['outcome'], out['next']), ('unavailable', 'fallback'))
-        self.assertTrue(out['reason'].startswith('budget: the spend of acct1 is unknown'), out['reason'])
+        self.assertTrue(out['reason'].startswith('budget: the spend of <account> is unknown'), out['reason'])
         self.assertEqual(self.jobs(), [])
 
 
@@ -573,7 +777,7 @@ class Stop(Driver):
         (rec / 'record.json').write_text(json.dumps(r))
         _, done = part.salvage(self.inv, out['record'], self.env)
         self.assertEqual(done['outcome'], 'lost')
-        self.assertIn('cluster1:cpu (acct1), job 1001', done['slurm'])
+        self.assertIn('hb → cpu, job 1001', done['slurm'])
         self.hosts({})
         nested = rec / 'work' / 'x'  # a block below a record (results the job wrote): not the reaper's
         nested.mkdir(parents=True)

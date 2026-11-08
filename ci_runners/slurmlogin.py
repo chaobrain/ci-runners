@@ -73,6 +73,8 @@ def _write(path: str, text: str) -> None:
 def facts(root: str, entry: dict) -> dict:
     """``check`` before an install: the gate's ``check`` in a temporary tree under
     ``root``, with ``entry`` as its account, removed afterwards."""
+    if os.path.islink(root):
+        return {'root': f'{root} is a link: give the root as the directory it points to (realpath)'}
     if not _own_dir(root):
         return {'root': f'{root} does not exist'}
     tmp = tempfile.mkdtemp(prefix='.ci-runners-check-', dir=root)
@@ -85,9 +87,15 @@ def facts(root: str, entry: dict) -> dict:
 
 
 def prepare(base: str) -> dict:
-    """``<root>/ci-runners`` and its directories, mode 700; ``root`` must exist."""
-    if not _own_dir(os.path.dirname(base)):
-        raise LoginError(f'{os.path.dirname(base)} does not exist')
+    """``<root>/ci-runners`` and its directories, mode 700; ``root`` must exist, and only
+    its owner may write it."""
+    root = os.path.dirname(base)
+    if not _own_dir(root):
+        raise LoginError(f'{root} does not exist')
+    unsafe = _gate().unsafe_dirs(root)
+    if unsafe:
+        raise LoginError('another user could swap the root: ' + '; '.join(f'{p} ({w})' for p, w in sorted(unsafe.items()))
+                         + ' (see check)')
     made = []
     for d in (base, *(os.path.join(base, x) for x in DIRS)):
         if not _own_dir(d):

@@ -214,5 +214,105 @@ class Deny(unittest.TestCase):
                 self.assertEqual(ss.main(['entry', p, 'nobody']), 2)
 
 
+class Redact(unittest.TestCase):
+    """What a part shows on GitHub: the site's inventory as placeholders (RUN-9h)."""
+
+    def site(self) -> ss.Site:
+        text = edit('submit_args = []', 'submit_args = ["--qos=labqos"]')
+        text = edit('login_python = "/usr/bin/python3"', 'login_python = "/opt/labpy/bin/python3"\n'
+                    'proxy = "http://proxy.lab.example:3128"', text).replace('egress = "tunnel"', 'egress = "proxy"')
+        text = edit('partition = "gpu-partition-b"', 'partition = "h100sxm"\nexclude = ["zq[08-10,3]"]', text)
+        text = edit('partition = "gpu-partition-a"', 'partition = "standard"', text)
+        return ss.load(edit('partition = "cpu-partition"', 'partition = "cpu"', text))
+
+    def test_each_kind_of_inventory_has_its_placeholder(self):
+        r = ss.Redactor(self.site())
+        r.add_ssh({'hostname': 'login7.lab.example', 'user': 'labuser'})
+        cases = [
+            ('/shared/fs/acct1/ci-runners/envs/p-cpu', '<root>/ci-runners/envs/p-cpu'),
+            ('/shared/fs/other', '<home>/other'),
+            ('cd /shared/fs/acct10', 'cd <root>0'),  # a long value: wherever it occurs
+            ('x%2Fshared%2Ffs%2Facct1%2Fy', 'x<root>%2Fy'),  # URL-encoded
+            ('home%2Flabuser %2flabuser \\nlabuser \\tlabuser', 'home%2F<user> %2f<user> \\n<user> \\t<user>'),
+            ('\x1b[32mlabuser\x1b[0m xlab-acct1', '<user> x<account>'),  # no escape hides a value's start
+            ('node01.hpc.lab.example login7.lab.example.', '<node> <host>.'),  # with its domain
+            ('ReqNodeNotAvail, UnavailableNodes:node[01-02]', 'ReqNodeNotAvail, UnavailableNodes:<node>'),
+            ('test[1-2] node[02-03]', 'test[1-2] node[02-03]'),  # names no known node
+            ('UnavailableNodes:node[01-02]. (node[01-02]-ib) -node[01-02]_x', 'UnavailableNodes:<node>. (<node>-ib) -<node>_x'),
+            ('nonstandard test_standard_normal standard', 'nonstandard test_standard_normal <partition>'),  # letters only: words
+            ('xnode01 node01-ib node01_x gpu-x', 'xnode01 <node>-ib <node>_x gpu-x'),
+            ('-A lab-acct1 -p standard -w node01', '-A <account> -p <partition> -w <node>'),
+            ('labuser@login7.lab.example via cluster1-acct1', '<user>@<host> via <host>'),
+            ('cluster1-acct1.ib.lab.example:22', '<host>:22'),  # a host with a domain the config does not hold
+            ('LabUser on NODE01', '<user> on <node>'),  # in any case
+            ('node011 xnode01 node01x', 'node011 xnode01 node01x'),
+            ('zq08 zq09 zq10 zq3 zq[08-10,3] zq11', '<node> <node> <node> <node> <node> zq11'),
+            ('/opt/labpy/bin/python3 http://proxy.lab.example:3128 --qos=labqos', '<python> <proxy> <submit-arg>'),
+            ('qos labqos', 'qos <submit-arg>'),
+            # a target, variant or GPU model name says nothing; the site's and an account's alias go
+            ('cluster1:a40 acct1 cuda13 h100sxm cpu', '<site>:a40 <account> cuda13 h100sxm cpu'),
+        ]
+        for text, want in cases:
+            self.assertEqual(r(text), want, text)
+
+    def test_proxyjump_hosts_and_users(self):
+        r = ss.Redactor()
+        r.add_ssh({'hostname': 'login9.lab.example', 'user': 'labuser', 'proxyjump': 'jumper@gate.lab.example:2222,ssh://hop2.example,[fd00::7]:22'})
+        self.assertEqual(r('login9.lab.example gate.lab.example hop2.example fd00::7 jumper'), '<host> <host> <host> <host> <user>')
+        r = ss.Redactor()
+        r.add_ssh({'hostname': 'login7', 'user': 'labuser', 'proxyjump': 'none'})
+        self.assertEqual(r('none'), 'none')
+
+    def test_a_cut_never_splits_a_value(self):
+        r = ss.Redactor(self.site())
+        text = 'aaaa lab-acct1 bbbb'
+        for cut in range(len(text) + 1):
+            c = r.safe_cut(text, cut)
+            self.assertEqual(r(text[:c]) + r(text[c:]), r(text), cut)
+        self.assertEqual(r.safe_cut(text, 7), 5)
+        self.assertEqual(r.safe_cut('x \x1b[32mz', 5), 2)  # nor an escape sequence
+        self.assertEqual(r.safe_cut('x node[01-02] y', 9), 2)  # nor a host list
+        r.add_nodes('gz09')
+        line = 'y ' * 35000 + '\x1b[1mgz' + '09 ' + 'z' * 509  # the review's repro: a name right after a colour code
+        for cut in range(70000, 70012):
+            c = r.safe_cut(line, cut)
+            self.assertEqual(r(line[:c]) + r(line[c:]), r(line), cut)
+        long = 'a ' + 'q' * (ss.RUN_MAX + 10)
+        self.assertEqual(r.safe_cut(long, ss.RUN_MAX + 5), ss.RUN_MAX + 5)  # no name is that long
+        self.assertEqual(r.safe_cut(long, ss.RUN_MAX), 2)
+
+    def test_the_nodes_a_job_ran_on_are_added_as_seen(self):
+        r = ss.Redactor(self.site())
+        self.assertEqual(r('on c07 and c08'), 'on c07 and c08')
+        r.add_nodes('c[07-08]')
+        self.assertEqual(r('on c07 and c08, c[07-08]'), 'on <node> and <node>, <node>')
+        for x in ('None assigned', '', 'a b'):
+            r.add_nodes(x)
+        self.assertEqual(r('None assigned'), 'None assigned')
+
+    def test_a_short_or_common_value_is_kept_as_the_deny_list_keeps_it(self):
+        r = ss.Redactor()
+        r.add('gpu', '<partition>')
+        r.add('home', '<home>')
+        r.add('/data', '<root>')
+        self.assertEqual(r('gpu home /data'), 'gpu home <root>')
+        self.assertEqual(ss.Redactor()('anything'), 'anything')
+
+    def test_a_host_list(self):
+        self.assertEqual(ss.hostlist('zq[01-03,7],cpu1'), ['zq01', 'zq02', 'zq03', 'zq7', 'cpu1'])
+        self.assertEqual(ss.hostlist('a[1-2]-ib'), ['a1-ib', 'a2-ib'])
+        for bad in ('None assigned', '', 'a[x-2]', 'a[1-]', '(null)'):
+            self.assertEqual(ss.hostlist(bad), [], bad)
+        self.assertEqual(len(ss.hostlist(f'n[1-{ss.HOSTLIST_MAX}]')), ss.HOSTLIST_MAX)
+        self.assertEqual(ss.hostlist('n[1-99999]'), [])  # too many: unknown, not a part of it
+        self.assertEqual(ss.hostlist('n[1-3000],m[1-3000]'), [])
+        scattered = ','.join(f'{i:03d}' for i in range(1, 120, 2))  # 239 characters in its brackets
+        self.assertEqual(len(ss.hostlist(f'cn[{scattered}]')), 60)
+        r = ss.Redactor()
+        r.add_nodes(f'cn[{scattered}]')
+        r.add_nodes('qa[1-2]-ib')
+        self.assertEqual(r(f'UnavailableNodes:cn[{scattered}]. qa[1-2]-ib.'), 'UnavailableNodes:<node>. <node>.')
+
+
 if __name__ == '__main__':
     unittest.main()

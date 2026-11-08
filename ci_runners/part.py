@@ -669,14 +669,16 @@ def slurm_record(record: str, rec: dict[str, object]) -> dict[str, object]:
 
 
 def slurm_line(rec: Mapping[str, object]) -> str:
-    """A slurm part's summary line: ``<driver> → <site>:<target>``, its job, node and
-    cost (decision 14.4); empty for any other part. Pure."""
+    """A slurm part's summary line: ``<driver> → <target>``, its job and cost (decision
+    14.4), but not its site, account or node (``slurm.json`` keeps them): what the step
+    summary, ``outcome.json`` and the part's artifacts show; empty for any other part.
+    Pure."""
     b = rec.get('slurm')
     if not isinstance(b, dict) or not b.get('target'):
         return ''
-    line = f'{rec.get("host", "")} → {b.get("site")}:{b.get("target")} ({b.get("account")})'
+    line = f'{rec.get("host", "")} → {b.get("target")}'
     if b.get('job'):
-        line += f', job {b["job"]}' + (f' on {b["node"]}' if b.get('node') else '')
+        line += f', job {b["job"]}'
     if isinstance(b.get('cost'), (int, float)):
         line += f', {b.get("elapsed", 0)} s, cost {b["cost"]:.3f}'
     return line
@@ -1205,12 +1207,14 @@ class Executor:
             raise Refused('a slurm part\'s targets are of one site')
         try:
             site = slurmsite.load_file(found[0][0])
-        except slurmsite.SiteError as e:
-            return self._end(record, rec, a, unavailable=f'site config: {e}')
+        except slurmsite.SiteError as e:  # its text may name the site: it stays in the record
+            with open(os.path.join(record, 'site-error.txt'), 'w', encoding='utf-8') as f:
+                f.write(f'{e}\n')
+            return self._end(record, rec, a, unavailable='site config: invalid (python -m ci_runners.slurmsite check)')
         targets, why = slurmpart.row(str(h['data']), site, [t for _, t in found], project=proj.name, gpus=a.gpus,
                                      minutes=a.timeout_minutes, lock=lock)
         if not targets:
-            return self._end(record, rec, a, unavailable=why)
+            return self._end(record, rec, a, unavailable=slurmsite.Redactor(site)(why))  # what GitHub shows
         e = self.env
         ws = e.get('GITHUB_WORKSPACE', '')
         if not ws or not os.path.isdir(ws):

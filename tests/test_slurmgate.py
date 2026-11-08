@@ -497,6 +497,14 @@ class Check(Cluster):
         self.assertEqual(sorted(facts['targets']), ['a40', 'cpu', 'h100'])
         self.assertTrue(all(t['test_only'] and t['partition_up'] for t in facts['targets'].values()))
         self.assertEqual(facts['envs'], ['p-cpu', 'p-cuda13'])
+        self.assertEqual(facts['unsafe'], {})
+        self.base.chmod(0o720)
+        self.addCleanup(self.base.chmod, 0o700)
+        self.assertEqual(self.gate_json('ci-slurm-gate check')['unsafe'], {str(self.base): 'writable'})  # the tree
+        self.base.chmod(0o700)
+        self.base.parent.chmod(0o703)
+        self.addCleanup(self.base.parent.chmod, 0o700)
+        self.assertEqual(self.gate_json('ci-slurm-gate check')['unsafe'], {str(self.base.parent): 'writable'})
         self.assertEqual(list((self.base / 'work').iterdir()) if (self.base / 'work').exists() else [], [])
 
     def test_a_wrong_gpu_syntax_and_a_down_partition_show(self):
@@ -507,6 +515,86 @@ class Check(Cluster):
         t = self.gate_json('ci-slurm-gate check')['targets']
         self.assertEqual((t['a40']['test_only'], t['cpu']['test_only']), (False, True))
         self.assertEqual((t['h100']['partition_up'], t['cpu']['partition_up']), (False, True))
+
+
+class ErrorText(Cluster):
+    """A Slurm command's error text goes out whole up to ``ERR_KEEP`` characters: the
+    driver redacts it before it cuts it, so the gate must not cut a name in two first."""
+
+    def test_the_gate_keeps_the_error_text_past_the_drivers_cut(self):
+        long = 'x' * 600 + ' zq[01-09].'
+        fail = lambda argv, **kw: subprocess.CompletedProcess(argv, 1, '', long)  # noqa: E731
+        for call in (lambda: sg.submit(str(self.base), str(ROOT), KEY, json.dumps(request()).encode(), run=fail),
+                     lambda: sg.ledger('', fail), lambda: sg.nodes(fail)):
+            with self.assertRaises(sg.GateError) as e:
+                call()
+            self.assertTrue(str(e.exception).endswith(long), str(e.exception)[:40])
+        self.assertGreaterEqual(sg.ERR_KEEP, 2000)
+
+
+class UnsafeDirs(unittest.TestCase):
+    """``unsafe_dirs``: what another user could swap under the root (S2 of RUN-9h)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.top = pathlib.Path(self.tmp.name) / 'top'
+        self.root = self.top / 'home' / 'root'
+        self.tree = self.root / 'ci-runners'
+        self.tree.mkdir(parents=True)
+        for d in (self.top, self.top / 'home', self.root, self.tree):
+            d.chmod(0o755)
+        self.addCleanup(lambda: [d.chmod(0o755) for d in (self.top, self.top / 'home')])
+
+    def test_a_safe_root_and_each_way_another_user_could_swap_it(self):
+        self.assertEqual(sg.unsafe_dirs(str(self.root), str(self.tree)), {})
+        (self.top / 'home').chmod(0o775)  # a group may rename the root
+        self.assertEqual(sg.unsafe_dirs(str(self.root), str(self.tree)), {str(self.top / 'home'): 'writable'})
+        (self.top / 'home').chmod(0o1777)  # sticky: only the root's owner may
+        self.assertEqual(sg.unsafe_dirs(str(self.root), str(self.tree)), {})
+        (self.top / 'home').chmod(0o755)
+        self.top.chmod(0o757)  # any directory up to /
+        self.assertEqual(sg.unsafe_dirs(str(self.root)), {str(self.top): 'writable'})
+        self.top.chmod(0o755)
+        self.tree.rmdir()
+        self.assertEqual(sg.unsafe_dirs(str(self.root), str(self.tree)), {str(self.tree): 'missing'})
+        link = self.top / 'link'
+        link.symlink_to(self.root)
+        self.assertEqual(sg.unsafe_dirs(str(link)), {str(link): 'link'})
+        self.root.chmod(0o1777)
+        self.assertEqual(sg.unsafe_dirs(str(self.root)), {str(self.root): 'writable'})  # the root itself: no sticky
+        self.root.chmod(0o755)
+        with mock.patch.object(sg.os, 'getuid', return_value=os.getuid() + 1):  # every directory here: another user's
+            got = sg.unsafe_dirs(str(self.root))
+        self.assertEqual({got[str(self.root)], got[str(self.top)]}, {'owner'})
+
+    def test_the_directories_above_the_root_as_resolved(self):
+        real = self.top / 'real'
+        real.mkdir()
+        (real / 'root').mkdir(mode=0o755)
+        (self.top / 'home' / 'alias').symlink_to(real)
+        real.chmod(0o777)  # reached only through the link
+        self.addCleanup(real.chmod, 0o755)
+        self.assertEqual(sg.unsafe_dirs(str(self.top / 'home' / 'alias' / 'root')),
+                         {str(real): 'writable', str(self.top / 'home' / 'alias'): 'writable'})  # as written, too
+
+    def test_a_link_above_the_root_that_another_user_owns(self):
+        real = self.top / 'real'
+        (real / 'root').mkdir(parents=True, mode=0o755)
+        real.chmod(0o755)
+        alias = self.top / 'home' / 'alias'
+        alias.symlink_to(real)
+        (self.top / 'home').chmod(0o1777)  # sticky: yet the link's owner may still point it elsewhere
+        self.assertEqual(sg.unsafe_dirs(str(alias / 'root')), {})
+        lstat = os.lstat
+
+        def other(p):
+            st = lstat(p)
+            if os.fspath(p) != str(alias):
+                return st
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, os.getuid() + 1) + tuple(st)[5:])
+        with mock.patch.object(sg.os, 'lstat', other):
+            self.assertEqual(sg.unsafe_dirs(str(alias / 'root')), {str(alias): 'owner'})
 
 
 class Wrapper(Cluster):

@@ -50,7 +50,10 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 
-VERBS = ('stage', 'fetch', 'submit', 'status', 'log', 'cancel', 'ledger', 'reap', 'check')
+#: the end of a command's error text the gate passes on: far more than the driver keeps
+#: (``slurmpart.Gate``: 300), so that the driver redacts a name whole before it cuts
+ERR_KEEP = 4000
+VERBS = ('stage', 'fetch', 'submit', 'status', 'log', 'cancel', 'ledger', 'nodes', 'reap', 'check')
 TIME_MARGIN = 5  # min of a job's --time over the part's timeout (14.3; slurmsite.TIME_MARGIN)
 WARN_SECONDS = 120  # the warning TERM before the time limit
 LOG_CHUNK = 1 << 20
@@ -305,7 +308,7 @@ def submit(base: str, release: str, key: str, data: bytes, run: Callable = subpr
     r = run(['sbatch', '--parsable', script], capture_output=True, text=True, timeout=120, cwd=d, env=sbatch_env())
     out = (r.stdout or '').strip().split(';')[0]
     if r.returncode != 0 or not out.isdigit():
-        raise GateError(f'sbatch refused it: {(r.stderr or r.stdout or "").strip()[-300:]}')
+        raise GateError(f'sbatch refused it: {(r.stderr or r.stdout or "").strip()[-ERR_KEEP:]}')
     now = time.time()
     job = {'job': int(out), 'submit_epoch': now, 'target': req['target'], 'cards': req['cards'],
            'deadline': now + (float(req['queue_minutes']) + math.ceil(float(req['minutes'])) + TIME_MARGIN) * 60}
@@ -397,8 +400,17 @@ def ledger(month: str, run: Callable = subprocess.run, now: datetime.datetime | 
     r = run(['sacct', '-n', '-P', '-X', '-S', f'{month}-01T00:00:00', '-E', 'now', '-o', ','.join(SACCT_FIELDS)],
             capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
-        raise GateError(f'sacct failed: {(r.stderr or "").strip()[-200:]}')
+        raise GateError(f'sacct failed: {(r.stderr or "").strip()[-ERR_KEEP:]}')
     return {'month': month, 'jobs': parse_sacct(r.stdout or '')}
+
+
+def nodes(run: Callable = subprocess.run) -> dict:
+    """The cluster's node lists, as ``sinfo`` compresses them (``%N``): what the driver's
+    redactor replaces, since a pending job's reason may name any of them."""
+    r = run(['sinfo', '-h', '-o', '%N'], capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise GateError(f'sinfo failed: {(r.stderr or "").strip()[-ERR_KEEP:]}')
+    return {'nodes': sorted({x.strip() for x in (r.stdout or '').splitlines() if x.strip()})}
 
 
 def reap(base: str, now: float | None = None, run: Callable = subprocess.run) -> dict:
@@ -455,9 +467,54 @@ def _newest(path: str) -> float:
 # ------------------------------------------------------------------ check
 
 
+def unsafe_dirs(root: str, tree: str = '') -> dict[str, str]:
+    """What another user could swap under ``root`` (and ``tree`` in it): ``root`` and
+    ``tree`` must be this account's directories (not links: ``link``; ``owner``), that
+    its group and others may not write (``writable``); ``tree`` may be ``missing``.
+    Every directory above ``root`` up to ``/`` (as written and as resolved) must belong
+    to this account or to root (``owner``) and be writable by its group or others only
+    with the sticky bit (``writable``): whoever may rename an entry there may swap the
+    root. Path -> why; ``{}`` if none."""
+    out: dict[str, str] = {}
+    me = os.getuid()
+    for p in ([root, tree] if tree else [root]):
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            out[p] = 'missing'
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            out[p] = 'link'
+        elif not stat.S_ISDIR(st.st_mode) or st.st_uid != me:
+            out[p] = 'owner'
+        elif st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            out[p] = 'writable'
+    above = set()
+    for start in (os.path.abspath(root), os.path.realpath(root)):
+        p = start
+        while os.path.dirname(p) != p:
+            p = os.path.dirname(p)
+            above.add(p)
+    for p in sorted(above):
+        try:
+            lst, st = os.lstat(p), os.stat(p)
+        except OSError:
+            out[p] = 'missing'
+            continue
+        if stat.S_ISLNK(lst.st_mode) and lst.st_uid not in (0, me):  # its owner may point it elsewhere
+            out[p] = 'owner'
+            continue
+        if st.st_uid not in (0, me):
+            out[p] = 'owner'
+        elif st.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not st.st_mode & stat.S_ISVTX:
+            out[p] = 'writable'
+    return out
+
+
 def check(base: str, release: str, run: Callable = subprocess.run) -> dict:
     """What this account sees of the site (RUN-9e's ``check`` reads it): the Python,
-    the Slurm commands and version, the root's room, and per target its partition's
+    the Slurm commands and version, what another user could swap under the root
+    (``unsafe``, ``unsafe_dirs``), the root's room, and per target its partition's
     state and whether ``sbatch --test-only`` takes the largest request a part may make
     (its ``max_cards`` and ``max_minutes``: the partition access and the association's
     limits on cards, CPUs and time)."""
@@ -473,6 +530,8 @@ def check(base: str, release: str, run: Callable = subprocess.run) -> dict:
     rc, text = out_of(['sbatch', '--version'])
     m = re.search(r'(\d+)\.(\d+)\.(\d+)', text)
     facts['slurm'] = [int(x) for x in m.groups()] if rc == 0 and m else None
+    # whoever else may write the root, the tree or a directory above may swap the gate, the env or a job's files
+    facts['unsafe'] = unsafe_dirs(os.path.dirname(base), base)
     try:
         st = os.statvfs(base)
         facts['free_gib'] = st.f_bavail * st.f_frsize / (1 << 30)
@@ -586,6 +645,8 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
             res = cancel(base, args[0], run)
         elif verb == 'ledger' and len(args) <= 1:
             res = ledger(args[0] if args else '', run)
+        elif verb == 'nodes' and not args:
+            res = nodes(run)
         elif verb == 'reap' and not args:
             res = reap(base, run=run)
         elif verb == 'check' and not args:

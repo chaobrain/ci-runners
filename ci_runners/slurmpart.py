@@ -28,6 +28,7 @@ its submission: the account's cached ledger is then read again. Every call to th
 """
 from __future__ import annotations
 
+import codecs
 import datetime
 import fcntl
 import glob
@@ -40,6 +41,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 
 from ci_runners import slots, slurmsite
@@ -49,8 +51,13 @@ POLL = 10.0  # s between status calls (14.3)
 LOST_AFTER = 300  # s the login host may be unreachable mid-part (14.4)
 CANCEL_WAIT = 90  # s a cancelled job has to end
 LEDGER_TTL = 600  # s a ledger is cached (14.7)
+NODES_TTL = 3600  # s the cluster's node lists are cached (the redactor's)
 DRIVER_MEMORY = '1G'  # the driver's scope
 LOG_CHUNK = 1 << 20  # slurmgate.LOG_CHUNK
+#: a job log line longer than this goes out redacted up to ``LOG_KEEP`` before its end,
+#: never through a value; ``LOG_KEEP`` is longer than any value the redactor replaces
+LOG_LINE_MAX = 1 << 16
+LOG_KEEP = 512
 #: the job's environment from the runner's: what a command may read of its job
 JOB_VARS = ('GITHUB_REPOSITORY', 'GITHUB_SHA', 'GITHUB_REF', 'GITHUB_REF_NAME', 'GITHUB_HEAD_REF', 'GITHUB_BASE_REF',
             'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_RUN_NUMBER', 'GITHUB_JOB', 'GITHUB_EVENT_NAME',
@@ -222,8 +229,10 @@ class Gate:
     account's key only. ``ssh`` and ``rsync`` are the tools' paths."""
 
     def __init__(self, etc: str, data: str, site: slurmsite.Site, alias: str, *, ssh: str = '/usr/bin/ssh',
-                 rsync: str = '/usr/bin/rsync', run: Callable = subprocess.run) -> None:
+                 rsync: str = '/usr/bin/rsync', run: Callable = subprocess.run,
+                 redact: Callable[[str], str] = str) -> None:
         self.site, self.alias, self.ssh, self.rsync, self.run = site, alias, ssh, rsync, run
+        self.redact = redact  # the error text it raises, redacted before it is cut
         self.key = os.path.join(etc, 'slurm', 'keys', alias)
         self.cm = os.path.join(state_dir(data, site.name), 'cm')
 
@@ -237,6 +246,22 @@ class Gate:
     def host(self) -> str:
         return str(self.site.accounts[self.alias].a['ssh'])
 
+    def ssh_facts(self) -> dict[str, str] | None:
+        """``ssh -G``'s ``hostname``, ``user`` and ``proxyjump`` of the account's alias (no
+        connection), for the redactor; None if ssh cannot say the first two."""
+        try:
+            r = self.run([self.ssh, '-G', self.host], capture_output=True, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if r.returncode != 0:
+            return None
+        out = {}
+        for line in (r.stdout or b'').decode(errors='replace').splitlines():
+            k, _, v = line.partition(' ')
+            if k in ('hostname', 'user', 'proxyjump'):
+                out[k] = v.strip()
+        return out if out.get('hostname') and out.get('user') else None
+
     def call(self, verb: str, *args: str, data: bytes = b'', timeout: float = 120) -> bytes:
         try:
             r = self.run([*self.ssh_argv(), self.host, 'ci-slurm-gate', verb, *args], input=data, capture_output=True,
@@ -244,10 +269,10 @@ class Gate:
         except subprocess.TimeoutExpired:
             raise Unreachable(f'{self.alias}: the gate did not answer in {timeout:g} s') from None
         if r.returncode == 255:
-            raise Unreachable(f'{self.alias}: {(r.stderr or b"").decode(errors="replace").strip()[-200:]}')
+            raise Unreachable(f'{self.alias}: {self.redact((r.stderr or b"").decode(errors="replace").strip())[-200:]}')
         if r.returncode != 0:
             why = (r.stderr or b'').decode(errors='replace').strip().removeprefix('ci-slurm-gate: refused: ')
-            raise Refused(why[-300:] or f'exit {r.returncode}')
+            raise Refused(self.redact(why)[-300:] or f'exit {r.returncode}')
         return r.stdout or b''
 
     def json(self, verb: str, *args: str, data: bytes = b'', timeout: float = 120) -> dict:
@@ -271,9 +296,10 @@ class Gate:
         except subprocess.TimeoutExpired:
             raise Unreachable(f'{self.alias}: {verb} ran past {timeout:g} s') from None
         if r.returncode == 255 or (r.returncode in (12, 35) and b'connection' in (r.stderr or b'').lower()):
-            raise Unreachable(f'{self.alias}: {verb}: {(r.stderr or b"").decode(errors="replace").strip()[-200:]}')
+            raise Unreachable(f'{self.alias}: {verb}: {self.redact((r.stderr or b"").decode(errors="replace").strip())[-200:]}')
         if r.returncode != 0:
-            raise Refused(f'{verb}: rsync exit {r.returncode}: {(r.stderr or b"").decode(errors="replace").strip()[-200:]}')
+            raise Refused(f'{verb}: rsync exit {r.returncode}: '
+                          f'{self.redact((r.stderr or b"").decode(errors="replace").strip())[-200:]}')
 
 
 def ledgers(gates: Mapping[str, Gate], cache: str, now: float, month: str) -> tuple[dict[str, list[dict]], set[str]]:
@@ -301,6 +327,37 @@ def ledgers(gates: Mapping[str, Gate], cache: str, now: float, month: str) -> tu
         _write_json(path, {'month': month, 'at': now, 'jobs': jobs})
         out[alias] = jobs
     return out, silent
+
+
+def site_nodes(gates: Mapping[str, Gate], cache: str, now: float) -> list[str] | None:
+    """The cluster's node lists (``sinfo``'s ``%N``, through the first gate that answers),
+    cached ``NODES_TTL`` s in ``cache``: every node a pending reason may name, for the
+    redactor. The last cached ones, however old, if no gate answers; None if none are,
+    or if the answer is not lists of nodes (empty, or a list that does not parse): then
+    some node could not be redacted."""
+    os.makedirs(cache, mode=0o700, exist_ok=True)
+    path = os.path.join(cache, 'nodes.json')
+    c = _read_json(path) or {}
+    cached = _node_lists(c.get('nodes'))
+    if cached is not None and now - float(c.get('at', 0)) < NODES_TTL:
+        return cached
+    for g in gates.values():
+        try:
+            got = g.json('nodes').get('nodes')
+        except (Unreachable, Refused):
+            continue
+        lists = _node_lists(got)
+        if lists is not None:
+            _write_json(path, {'at': now, 'nodes': lists})
+        return lists  # an answer that does not parse: unknown, not the cache
+    return cached
+
+
+def _node_lists(v: object) -> list[str] | None:
+    """``v`` if it is a non-empty list of host lists that each expand, else None. Pure."""
+    if not isinstance(v, list) or not v or not all(isinstance(x, str) and slurmsite.hostlist(x) for x in v):
+        return None
+    return list(v)
 
 
 def retired_rows(site: slurmsite.Site, cache: str, month: str) -> dict[str, list[dict]]:
@@ -426,27 +483,49 @@ class Driver:
         self.block: dict[str, object] = {'site': self.site.name, 'tried': [],
                                          'driver': [os.getpid(), round(slots._start_of(os.getpid()))]}
         self.key = self.plan['key']
+        # what the part shows on GitHub (its log, reason and summary) names no inventory
+        self.redact = slurmsite.Redactor(self.site)
+        self.log_tail = ''
+        self.log_decoder = codecs.getincrementaldecoder('utf-8')('replace')
 
     def say(self, text: str) -> None:
-        self.out.write(f'ci-runners: {text}\n')
+        self.out.write(self.redact(f'ci-runners: {text}') + '\n')
         self.out.flush()
+
+    def write_log(self, text: str, end: bool = False) -> None:
+        """The job's log to the job log, redacted by whole lines, so that no name is
+        split across two chunks; a line longer than ``LOG_LINE_MAX`` goes up to
+        ``LOG_KEEP`` before its end, or before the value that would split there
+        (``Redactor.safe_cut``). ``end``: the rest."""
+        text = self.log_tail + text
+        cut = len(text) if end else text.rfind('\n') + 1
+        if not end and cut == 0 and len(text) > LOG_LINE_MAX:
+            cut = self.redact.safe_cut(text, len(text) - LOG_KEEP)
+        self.log_tail = text[cut:]
+        if cut:
+            self.out.write(self.redact(text[:cut]))
+            self.out.flush()
+
+    def node_seen(self, st: Mapping[str, object]) -> None:
+        self.redact.add_nodes(str(st.get('node') or ''))
 
     def save(self) -> None:
         _write_json(os.path.join(self.record, 'slurm.json'), self.block)
 
     def finish(self, ex: dict[str, object]) -> int:
+        self.write_log(self.log_decoder.decode(b'', final=True), end=True)
         ex = {'timed_out': False, 'oom_kills': 0, 'signalled': False, **ex, 'end_epoch': self.clock(),
               'boot_end': boot_id()}
         for k in ('unavailable', 'red', 'p2p'):  # one line each: they become the part's reason output
             if isinstance(ex.get(k), str):
-                ex[k] = ' '.join(re.sub(r'[^\x20-\x7e]', '?', ex[k]).split())[:400]
+                ex[k] = ' '.join(re.sub(r'[^\x20-\x7e]', '?', self.redact(ex[k])).split())[:400]
         self.save()
         _write_json(os.path.join(self.record, 'exit.json'), ex)
         return 0
 
     def gate(self, alias: str) -> Gate:
         return Gate(self.plan['etc'], self.plan['data'], self.site, alias, ssh=self.plan['ssh'],
-                    rsync=self.plan['rsync'], run=self.run)
+                    rsync=self.plan['rsync'], run=self.run, redact=self.redact)
 
     def on_signal(self, _signum, _frame) -> None:
         self.stopping = True
@@ -488,7 +567,17 @@ class Driver:
         now = self.clock()
         month, today = datetime.date.fromtimestamp(now).strftime('%Y-%m'), datetime.date.fromtimestamp(now).isoformat()
         gates = {a: self.gate(a) for a, x in self.site.accounts.items() if not x.retired}
+        for a, g in gates.items():
+            facts = g.ssh_facts()
+            if facts is None:  # its login host and user would show unredacted: fail closed
+                return self.finish({'rc': None, 'unavailable': f'ssh -G {a}: no host and user to redact'})
+            self.redact.add_ssh(facts)
         cache = state_dir(p['data'], self.site.name)
+        nodes = site_nodes(gates, cache, now)
+        if nodes is None:  # a pending reason may name any node: fail closed
+            return self.finish({'rc': None, 'unavailable': 'the cluster\'s node list is unknown (no login host answers)'})
+        for n in nodes:
+            self.redact.add_nodes(n)
         rows, silent = ledgers(gates, cache, now, month)
         unknown = sorted(set(gates) - set(rows))
         rows.update(retired_rows(self.site, cache, month))
@@ -516,11 +605,11 @@ class Driver:
                     return self.finish({'rc': None, 'signalled': True})
                 why.append(str(self.block['tried'][-1]['why']) if self.block['tried'] else f'{target}@{alias}')
                 if self.clock() >= deadline:
-                    return self.finish({'rc': None, 'unavailable': '; '.join(why[-3:])[:400]})
+                    return self.finish({'rc': None, 'unavailable': '; '.join(why[-3:])})  # finish redacts, then cuts
         budget = [w for w in why if w.startswith('budget:')]
         if budget and len(budget) == len(why):
             return self.finish({'rc': None, 'unavailable': budget[0]})
-        return self.finish({'rc': None, 'unavailable': ('; '.join(why) or 'no eligible account')[:400]})
+        return self.finish({'rc': None, 'unavailable': '; '.join(why) or 'no eligible account'})
 
     def opened(self, alias: str, job: int | None) -> None:
         """A job of the part on ``alias`` that may run: kept in ``open`` until its end is
@@ -606,6 +695,7 @@ class Driver:
             except Refused as e:
                 st = {'state': 'UNKNOWN', 'why': str(e)}
             state = str(st.get('state', 'UNKNOWN'))
+            self.node_seen(st)
             if state != self.block.get('state'):
                 self.block.update(state=state, node=st.get('node', ''))
                 if state == 'RUNNING' and 'run_epoch' not in self.block:
@@ -636,8 +726,7 @@ class Driver:
                 return offset
             if not chunk:
                 return offset
-            self.out.write(chunk.decode('utf-8', 'replace'))
-            self.out.flush()
+            self.write_log(self.log_decoder.decode(chunk))
             with open(os.path.join(self.record, 'job.log'), 'ab') as f:
                 f.write(chunk)
             offset += len(chunk)
@@ -665,6 +754,7 @@ class Driver:
 
     def ended(self, g: Gate, st: Mapping[str, object], target: str) -> int:
         p = self.plan
+        self.node_seen(st)
         ran = isinstance(st.get('exit'), dict) or int(st.get('elapsed') or 0) > 0
         if ran:
             for sub, dst, excl in (('tmp', p.get('temp'), TEMP_EXCLUDES), ('part', p['part_dir'], ())):
@@ -687,14 +777,33 @@ class Driver:
 
 
 def drive(record: str) -> int:
-    """The driver of one part, run in the part's scope by the executor."""
-    d = Driver(record)
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, d.on_signal)
+    """The driver of one part, run in the part's scope by the executor. Its stderr is the
+    job's log: an error it did not expect ends the part ``unavailable`` with the
+    error's type only, and its traceback goes to the record (``driver-error.txt``)."""
+    d = None
     try:
+        d = Driver(record)
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(sig, d.on_signal)
         return d.drive()
     except slurmsite.SiteError as e:
-        return d.finish({'rc': None, 'unavailable': f'site config: {e}'})
+        why = f'site config: {e}'
+    except Exception as e:  # noqa: BLE001  (any error: the part still ends)
+        why = f'driver: {type(e).__name__}'
+        try:
+            with open(os.path.join(record, 'driver-error.txt'), 'a', encoding='utf-8') as f:
+                f.write(traceback.format_exc())
+        except OSError:
+            pass
+    try:
+        if d is not None:
+            return d.finish({'rc': None, 'unavailable': why})
+    except Exception:  # noqa: BLE001
+        pass
+    _write_json(os.path.join(record, 'exit.json'), {'rc': None, 'unavailable': why[:400],  # no driver to finish
+                                                     'timed_out': False, 'oom_kills': 0, 'signalled': False,
+                                                     'end_epoch': time.time(), 'boot_end': boot_id()})
+    return 0
 
 
 # ------------------------------------------------------------------ the reaper's orphan cancel

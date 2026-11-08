@@ -1432,7 +1432,7 @@ Rules:
   host left a lost part `lost`. No input, output, setup code or hook changes: the install
   moves `releases/hook`, a host's plan adds nothing, and no runner restarts. `v1` moves to
   `v1.5.1` after the 3090 canary.
-- **`v1.5.2`** (patch, stamped 2026-11-08; lead-approved as a patch of `v1.5`): after a
+- **`v1.5.2`** (patch, stamped 2026-11-08; lead-approved as a patch of `v1.5`; `v1` moved to it after the 3090 canary at `@v1.5.2`, 2026-11-08): after a
   GitHub re-run, the verdict no longer reads a part's attempt that an earlier run attempt
   left behind (§4.8 rule 5; issue #64), and `outcome.json` gains `run-attempt` (§4.3).
   No step input or output, setup code or hook changes: the install moves `releases/hook`,

@@ -10,6 +10,8 @@ the host-lock and slot interop and the classes that brainspike's test CI needs.
 Decision 12.17 (2026-11-07) retires h100 and `h100-test.yml`: the CI runs on the two
 3090 hosts only. Decision 13 (`v1.5.0`, RUN-8) adds a drain switch and busy-host
 avoidance, deletes the h100 class and the watchdog, and moves the hooks' path off the disk.
+Decision 14 (2026-11-08, RUN-9) adds a time-billed Slurm cluster as a remote target of the
+3090 hosts' runners: the `slurm` class, the gate, the site config and the install commands.
 
 Guides, in Chinese: [consumers.md](consumers.md) for the repositories that use the CI,
 [operations.md](operations.md) for the maintainer of the hosts. This file is the contract;
@@ -524,6 +526,151 @@ from the load record they add.
        - Known limit, unchanged: the runner still writes the machine name into every job
          log.
 
+## Lead decisions (2026-11-08): a Slurm cluster as a remote target (RUN-9)
+
+Approved by the lead on 2026-11-08, each open choice as recommended, with one amendment
+(14.10). The request: add a time-billed Slurm cluster (CPU nodes and several GPU
+partitions) as a test host, with one standard install that works under several accounts
+of the cluster, to spread its cost, and moves to another Slurm system. The site's names
+(its login host, partitions, nodes, accounts and paths) are inventory: they live in a
+private site config on the driving hosts (§3.3) and never here.
+
+*Measured on the first site* (2026-11-08, twelve short jobs): compute nodes have no route
+out and the login node resolves no outside name; `srun` from the login node fails while
+`sbatch` works, and `srun` inside an allocation works; a job's memory is not enforced
+(cgroup v1 with no memory controller for the job: a `--mem=1G` job touched 12 GiB); the
+only GPU request that works is `--gpus=N`; a job on a free resource starts within 1 s and
+`sbatch --test-only` over-estimates the wait by hours; accounting is per second; `scancel`
+sends TERM to the batch shell at once, and the time limit TERM then KILL after the site's
+`KillWait`; no container runtime on any node; drivers differ per node type; and on one
+node type with its two cards on different sockets the driver reports peer access while
+peer copies read zeros, so a two-card jax `psum` returned a wrong result with exit 0.
+
+14. **A Slurm cluster as a remote target.**
+    1. **Option A, a remote executor.** The runners stay on the 3090 hosts, which have the
+       egress, the host layer and the records. A part of the new `slurm` class runs as one
+       batch job on the cluster; nothing of ours runs there between parts, so the site
+       bills only while a part's job runs (pending is not billed). Rejected: a runner on the
+       login node (a resident daemon and a permanent tunnel on a shared login node, and a
+       runner credential on the cluster) and a runner per allocation (compute nodes have
+       no route to GitHub; runner set-up would be billed card time; a JIT runner needs an
+       org-admin credential at the dispatcher).
+    2. **The `slurm` class.** A host's `slurm` pool (labels `<host>-slurm`, a shared label
+       across hosts, as `3090-multi`) takes no CI slot and no card of its host. It is
+       opt-in per repository (`classes` in `policy.toml`, as 12.14). Its `part` takes one
+       new optional input, `target`: a target name of the site config, or a list in the
+       order to try. It accepts `gpus` up to the target's `max_cards`, `lock: none`, and
+       `timeout-minutes` up to the target's `max_minutes`.
+    3. **One batch job per part attempt.** The executor (driver side):
+       - **gate**: the drain (13.1), the class row, the target enabled for the project
+         (14.10), the budget (14.7);
+       - **choice**: for each target in the part's order, the eligible accounts, least
+         spent this month relative to their weight first, round-robin on ties (14.8);
+       - **stage**: `rsync` of the workspace and of the part's inputs under `RUNNER_TEMP`
+         to the account's work directory on the cluster's shared file system, through
+         the gate's `stage` verb;
+       - **submit** through the gate's `submit` verb, with a JSON request (target, cards,
+         CPUs, memory, minutes, the project's variables); the gate renders the release's
+         batch template, never a flag from the request verbatim: the account, the
+         target's partition and node list, the site's GPU request syntax, `--time` = the
+         part's timeout + 5 min, a warning signal before it, a job name `ci-<repo>-<id>-<n>`,
+         the run's URL as the job's comment, `--export=NONE` with an explicit environment;
+       - **pending bound**: a job pending past the site's per-target bound is cancelled
+         and the next account or target is tried, within the part's
+         `queue-timeout-minutes`; past that the part ends `unavailable` (`pending`);
+       - **watch**: the part's supervisor, in its systemd scope on the driver host (so a
+         stopped runner leaves it running, §4.3), polls the job's state and relays its log
+         by offset over one ssh master connection;
+       - **cancel**: the part's TERM cancels the job (`scancel`), and the part ends
+         `stopped`;
+       - **results**: after the end, `RUNNER_TEMP` and the part's results are synced back,
+         so the consumer's upload steps run unchanged; the full log goes into the record.
+       In the job, the cluster supervisor (`supervise`, §4.3) enforces the inner timeout
+       and the memory cap by `RssAnon` (11.11: the nodes enforce none), and runs the P2P
+       self-test before a two-card command (12.6).
+    4. **The end, mapped to the outcomes of §4.4** (no new outcome):
+
+       | the cluster's end | outcome, `next` |
+       |---|---|
+       | the command exits 0 | pass |
+       | the command fails, or the inner timeout | red |
+       | the cluster supervisor's memory cap | oom, retry with `resume` on the same target |
+       | the job's own time limit (the supervisor stuck) | red, with the reason |
+       | a node failure (`NODE_FAIL`, `BOOT_FAIL`) | unavailable (`node fail`), retry on the same target |
+       | cancelled by another user of the site, or killed by the node | unavailable, fallback |
+       | the P2P self-test failed | unavailable (`p2p`), none; the target's `max_cards` drops to 1 until its canary passes again |
+       | pending past the bound, the budget, no eligible account, a target not enabled | unavailable, fallback |
+       | the login host unreachable for 5 min during a part | lost: the record keeps the job's id; the verdict salvages it, and the reaper cancels the job once its GitHub job is gone |
+
+       The record stays on the driver host, so `salvage` and `verdict` do not change. It
+       gains a `slurm` block: site, account alias, target, job id, node, state, elapsed,
+       cards, CPUs and the cost by the site's prices; the part's summary names the target
+       and the cost.
+    5. **The gate.** The only command a cluster key runs: its `authorized_keys` line is
+       `restrict` and forces `<root>/ci-runners/releases/hook/bin/ci-slurm-gate`. Its verbs:
+       `stage` (a restricted `rsync --server` into `work/` only), `submit`, `status`, `log`,
+       `cancel`, `fetch`, `ledger`, `reap`, `check`. It validates each request against the
+       cluster-side copy of the account's entry (targets, caps, minutes) and exits; it
+       keeps nothing running.
+    6. **The site config** (`etc/slurm/<site>.toml` on each driver host, mode 600; never in
+       the repository; `setup/slurm/site.example.toml` holds placeholders, and the deny list
+       gains the site's tokens). It holds the site (GPU request syntax, extra `sbatch`
+       arguments, the login host's Python, the egress mode, caps, the per-target pending
+       bound), the prices (per core-hour, per card-hour by GPU model; whether a GPU job also
+       pays its CPUs), the targets (partition, nodes, GPU model, cards per node,
+       `max_cards`, env variant, CPUs per card, memory per node, `max_minutes`, `enabled`)
+       and the accounts (ssh alias, root on the shared file system, Slurm account,
+       targets, weight, monthly cap).
+    7. **Budget.** A ledger from each account's `sacct` (all its jobs this month; ours named
+       `ci-`), priced by the site table, cached 10 min. A part whose worst case (cards ×
+       `--time` × price, or cores × time) would cross the site's daily or monthly cap, or
+       the account's, ends `unavailable` (`budget`). It guards against our own faults and
+       runaway retries, not against job code (T19, T21); a hard cap is the site's.
+    8. **Accounts.** Each account is one config entry and one install (14.9); the
+       account's owner installs the key line the plan prints. Choice per part: least
+       spent this month relative to `weight`, round-robin on ties, skipping an account
+       over its own cap or without the target.
+    9. **Install** is `ci-run slurm check|plan|apply|env|canary|status|uninstall <site>
+       <account>`, run on a driver host as its CI account:
+       - `check` (read-only): ssh in batch mode; `sbatch`, `squeue`, `sacct`, `scancel`,
+         `sinfo`, `rsync` and the login Python on the login host; Slurm ≥ 20.11; per
+         target: the partition up, the account's groups allowed, its association with
+         enough cards, CPUs and nodes, `sbatch --test-only` accepting the rendered
+         request; the root writable with 50 GiB free; the egress mode's prerequisites;
+       - `plan` prints every change (the root's directories, mode 700; the release copied
+         from the driver, of the tag the driver runs; the account's cluster-side entry; the
+         key line; each env build; the canary's jobs and their cost), and changes nothing;
+         `apply` applies exactly an approved plan, as `setup/apply.sh` does;
+       - `env` builds the project's env on the login host (the nodes' C library; not on the
+         driver, whose newer one could pick wheels the nodes cannot load), with egress for
+         the build only, by the site's mode: `tunnel` (a reverse forward from the driver to
+         a Unix socket in a 700 directory, and on the login host a stdlib relay on
+         127.0.0.1 that accepts only the build's random `Proxy-Authorization`, passed in
+         the environment; the egress host's allowlist applies, 11.10; nothing listens
+         after the build), `push` (a wheelhouse and conda packages downloaded on the
+         driver, installed offline), `direct` or `proxy`. The driver's refresh timer
+         compares the upstreams' refs and rebuilds on the cluster when one moved;
+       - `canary`, per target, one job of at most 3 min: the env imports and sees the
+         cards, the driver against the variant's floor, the P2P self-test where
+         `max_cards` ≥ 2 (a failure sets it to 1), a file round trip, the start latency
+         and the accounting fields;
+       - `uninstall` refuses while a `ci-` job of the account runs (`--cancel` cancels
+         them), removes the key line it wrote and the root's `ci-runners` tree, and marks
+         the account retired (its ledger rows stay for the month).
+       Another Slurm system is another site config; the code assumes only ssh key login
+       to a login host, the Slurm client commands there, a file system shared with the
+       nodes, and Slurm ≥ 20.11.
+    10. **Targets count only after their acceptance gates** (lead, 2026-11-08; amends a
+        proposed observation week: no observation periods). A target is `enabled` in the
+        site config only after, in order: `check`, `canary`, one real one-card part and
+        one real two-card part with the P2P self-test (a CPU target: one real CPU part),
+        each green. Until then the executor refuses it (`unavailable`).
+    11. **Nothing resident on the cluster.** No unit, timer, tunnel or listener of ours on
+        the login host or a node; an env build runs on the login host only while a
+        maintainer runs it, at nice 10.
+    12. **Threats** T19–T22 (§6.4). The exit path for T19 is a dedicated cluster account
+        per site, from the site's admins, with a hard spending cap.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -888,6 +1035,7 @@ hosts, a coverage job). These rules are the consumer's:
    | `multi` | `<host>-multi` (3090 hosts) | two-card parts, after the P2P self-test | 2 | any | both cards' leases | ≤ 240 |
    | `compile` | `<host>-compile` (3090b), opt-in (12.14) | exclusive timing parts on `compile_cpus` | 0 | `x` | one | ≤ 240 |
    | `nightly` | `<host>-nightly` (3090a), opt-in (12.14) | the consumer's nightly | 0 to all cards | any | every slot and card lease | ≤ 600 |
+   | `slurm` | `<host>-slurm` and a shared label (from RUN-9), opt-in (14.2) | one batch job on a Slurm cluster's `target` (14.3) | up to the target's `max_cards` | `none` | none on its host | ≤ the target's `max_minutes` |
 
    `part` refuses a `gpus` or `lock` value outside its class's row (`unavailable`). A
    `nightly` part holds every lease, whatever `gpus` says; its `gpu-mem-mib` is checked
@@ -1194,6 +1342,10 @@ bound).
 | T16 | (3090 hosts) A job, or a local user, holds the shared host lock or a slot, and stalls the other side's work; or a local account empties the ticket queue. | the files are `flock` locks, so a hold ends with its process: a part's hold ends with its scope (inner timeout, the job-completed hook, the reaper); a waiting part ends `unavailable` at its queue timeout; the files hold no data, and a lost ticket only loses a place in the queue |
 | T17 | (3090 hosts) A job plants a link in the shared ticket queue (a `seq`, a ticket, a holder record, a temp name or a lock file there) so that a script of the other account writes, creates or truncates a file the link names, or blocks on a FIFO it reads. | the queue directory is not sticky and both accounts write in it (decision 12.9; lead, 2026-11-07), so no script of either account writes or creates through a link there. `slots.py` creates each file exclusively under a random name (`O_EXCL`, `O_NOFOLLOW`) and renames it over its name (a rename replaces a link, never its target). A FIFO is covered on each side: `slots.py` opens `seq.lock` and `take.lock` `O_NOFOLLOW` and `O_NONBLOCK` and uses them only if `fstat` shows a regular file, and reads `seq`, tickets and holder records the same way, so a FIFO there is refused at once; brainspike's `ci_slot.sh` (since ceb68a77) writes through exclusive temporaries renamed into place, exits 2 on a linked queue directory or a `seq.lock` that is not a regular file, and deletes a ticket that is a link or not a regular file as malformed, and (since a546b92f) opens every entry of the queue `O_NOFOLLOW` and `O_NONBLOCK` and checks it with `fstat` before it reads, locks or writes, creating `seq.lock` with `O_EXCL`. The plan checks that the queue is a root-owned directory, not a link. Residual: a job can delete or forge tickets and holder records, which disturbs the queueing only (T16), never a file of a local account; and a FIFO or a directory a job leaves at `seq` or `seq.lock` makes the other side refuse or fail until it is removed, never hang. |
 | T18 | (3090 hosts) A job reads other accounts' files that are readable by everyone, or their processes' command lines in `/proc`: temp files in `/tmp`, `/var/tmp` and `/dev/shm` left with a 002 or 022 umask (copies of private code, logs, notes), and other people's directories on the data disks. Measured before any job ran (2026-11-07): tens of thousands of the local account's temp files on 3090b, other people's on 3090a, and other people's data-disk directories on both. | the CI account's user manager runs in its own mount namespace (decision 12.16, §5.3): private `/tmp` and `/var/tmp`, an empty `/dev/shm`, and `/home` and the data-disk root emptied but for the account's own `home` and `data`; only brainspike's five shared lock files and the slot queue are bound in; `/proc` shows only the account's own processes (`ProtectProc=invisible`; lead, 2026-11-07). No local account's file modes change. The runners stay stopped until the drop-in is applied on the host, and a leak check inside a live job on each host (no other account's temp or data file readable) comes before any other job. Residual: files that other accounts leave readable elsewhere on the root disk (outside `/home`, the temp directories and the data disk) stay readable, as for any local user; system directories hold no user data. |
+| T19 | (the `slurm` class, 14) A job reads a cluster key from the CI account's `etc` (job code runs as that account, T13) and uses the cluster account. | the key's forced command runs only the gate: no shell, no forward, `rsync` only into `work/`; private repositories of org members only; the class is opt-in per repository; the budget ledger | `submit` runs any code as the cluster account by design, so a job can read everything that account holds on the cluster, send it out through its log or artifacts, and submit billed jobs from inside a job. Exit path: a dedicated cluster account (14.12). |
+| T20 | (14) Other users of the cluster reach our files or a forward. | the account's root and every part directory mode 700; a part's temporary files on a node only inside a 700 directory of its own; the build's forward is a Unix socket in a 700 directory behind a relay that accepts only the build's random credential | a node's `/tmp` and process table are shared with other users' jobs, as for any user of the site |
+| T21 | (14) Runaway cost: a lost driver, a stuck job, a retry loop. | every job has `--time`; the reaper cancels a job whose GitHub job is gone; pending is bounded; one retry (§4.4); the daily and monthly caps (14.7) | job code (T19) can spend up to the site's association limits |
+| T22 | (14) A node silently corrupts multi-card results (peer copies that read zeros). | the P2P self-test before every two-card part (12.6); a target's `max_cards` from its canary | – |
 
 ### 6.5 The org snapshot
 
@@ -1653,6 +1805,33 @@ tests and evidence:
 5. The canary passes green and ends red in its own parts on `@v1.5.0` on both hosts, as
    RUN-7 acceptance 6; then `v1` moves to `v1.5.0`.
 
+**RUN-9: a Slurm cluster as a remote target** (decision 14). Sub-PRs, each with its tests
+and evidence, none with a site fact:
+
+- RUN-9a: this contract (decision 14) and the guides;
+- RUN-9b: the site config: schema, loader, lint, the example with placeholders, the deny
+  list's site tokens;
+- RUN-9c: the gate and the batch template; the cluster supervisor;
+- RUN-9d: the executor's `slurm` path (14.3, 14.4), the record's `slurm` block, the
+  reaper's orphan cancel;
+- RUN-9e: `ci-run slurm check|plan|apply|env|canary|status|uninstall` and the build relay;
+- RUN-9f: a minor release; the `slurm` pools registered by the lead.
+
+*Acceptance:*
+
+1. Unit tests, each failing on a mutant: the site config refuses an unknown key, a target
+   without a partition, a GPU target without a price, `max_cards` above `cards_per_node`
+   and an account naming an unknown target; the gate refuses a request outside the
+   account's targets, caps or minutes, writes only under `work/`, and renders `--time`,
+   `--export=NONE` and the site's GPU syntax with no flag from the request verbatim; every
+   row of 14.4's table; a pending job cancelled at its bound and the next target tried; a
+   budget refusal; TERM cancels the job; the reaper cancels an orphan.
+2. Live on one account of the first site, with the lead's approved plan: `check` passes;
+   `env` builds the consumer's env with no listener left after it; `canary` passes on
+   each target to be enabled, its cost recorded.
+3. Live at the release: one CPU part and one one-card part of the canary repository pass
+   on the cluster, and a cancelled one ends `stopped` with its job gone; then `v1` moves.
+
 ## 11. brainspike on top of this (decision 12)
 
 brainspike composes the actions in its own `ci.yml` (§4.8), on both 3090 hosts. Its
@@ -1671,6 +1850,7 @@ takes from here:
 | local performance and CI runs beside the runners | `ci-lock` and `ci-slot` on its files (12.9) |
 | coverage over the parts | a `part` that combines the parts' data artifacts |
 | a verdict over both hosts | a `salvage` job per host, then `verdict` (§4.5) |
+| overflow parts and GPU-architecture coverage on a Slurm cluster | the `slurm` class (decision 14) |
 
 ## 12. Decided choices (lead, 2026-11-05)
 

@@ -11,6 +11,7 @@ import fcntl
 import io
 import json
 import os
+import re
 import pathlib
 import tempfile
 import types
@@ -32,6 +33,7 @@ ref = "origin/main"
 XLA_PYTHON_CLIENT_PREALLOCATE = "false"
 '''
 HEAD, OTHER = 'b' * 40, 'c' * 40
+VARIANTS = '[variant.cuda12]\ninstall = ["jax[cuda12]==0.4.30"]\n[variant.cpu]\ninstall = []\n'
 #: the first consumer: live NEST from conda-forge with Python 3.13, two upstreams
 RICH = '''schema = 1
 python = "3.13"
@@ -111,6 +113,25 @@ class Spec(unittest.TestCase):
             with self.assertRaises(SpecError):
                 envbuild.parse_spec(bad)
 
+    def test_a_variant_table_gives_a_variants_install(self):
+        s = envbuild.parse_spec(GOOD + VARIANTS)
+        self.assertEqual(s.variants, {'cuda12': ('jax[cuda12]==0.4.30',), 'cpu': ()})
+        self.assertEqual(s.variant('cuda12').install, ('jax[cuda12]==0.4.30',))
+        self.assertEqual(s.variant('cuda12').requirements, s.requirements)  # only install changes
+        self.assertEqual(s.variant('cpu').install, ())
+        self.assertIs(s.variant('cuda13'), s)  # a variant the spec does not name: the base
+
+    def test_a_malformed_variant_is_refused(self):
+        for bad, why in (('[variant.cuda12]\ninstall = ["x"]\nrequirements = ["r.txt"]\n', r"unknown keys \['requirements'\]"),
+                         ('[variant.cuda12]\n', 'needs install'),
+                         ('[variant.cuda12]\ninstall = ["--index-url=https://evil"]\n', 'variant.cuda12.install must'),
+                         ('[variant."CUDA 12"]\ninstall = []\n', 'is not a variant name'),
+                         ('variant = 3\n', 'variant must be a table'),
+                         ('[variant]\ncuda12 = 3\n', 'variant.cuda12 must be a table')):
+            text = bad + GOOD if bad.startswith('variant') else GOOD + bad
+            with self.assertRaisesRegex(SpecError, why, msg=bad):
+                envbuild.parse_spec(text)
+
     def test_the_conda_table_can_ask_for_live_nest_on_python_313(self):
         s = envbuild.parse_spec(RICH)
         self.assertEqual(s.python, '3.13')
@@ -153,6 +174,16 @@ class Steps(unittest.TestCase):
                                         'jax[cuda12]==0.4.30'])
         self.assertEqual(cmds[3][-2:], ['-e', f'{d}/src/brainstate'])
         self.assertTrue(all(c[1] == f'{d}/bin/python' for c in cmds[2:]))
+
+    def test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table(self):
+        base, with_table = envbuild.parse_spec(GOOD), envbuild.parse_spec(GOOD + VARIANTS)
+        kw = dict(project='p', envs='/e', stamp='20261106T010203Z', reqdir='/r', conda='conda')
+        self.assertEqual(envbuild.steps(with_table, **kw), envbuild.steps(base, **kw))  # the base, as before
+        v = envbuild.steps(with_table.variant('cuda12'), variant='cuda12', **kw)
+        self.assertEqual(v[0][5], '/e/p-20261106T010203Z-cuda12')
+        self.assertEqual(v[2][-3:], ['-r', '/r/requirements-dev.txt', 'jax[cuda12]==0.4.30'])
+        with self.assertRaises(SpecError):
+            envbuild.build_dir('/e', 'p', '20261106T010203Z', '../x')
 
     def test_the_conda_packages_are_solved_with_python_in_one_step_before_pip(self):
         spec = envbuild.parse_spec(RICH.replace('["conda-forge"]', '["bioconda", "conda-forge"]'))
@@ -348,6 +379,18 @@ class Main(Base):
         self.assertIn('XLA_PYTHON_CLIENT_PREALLOCATE = "false"', out)
         self.assertEqual(self.ran, [])
         self.assertFalse(self.envs.exists())
+
+    def test_a_spec_with_a_variant_table_builds_here_as_before(self):
+        code, before = self.main('--dry-run')
+        self.api = Api({HEAD: {'.github/ci-runners.toml': GOOD + VARIANTS, 'requirements-dev.txt': 'pytest\n'}})
+        code, after = self.main('--dry-run')
+        same = lambda t: re.sub(r'ci-envbuild-[^/]+', 'TMP', t.replace('T000002Z', 'T000001Z'))  # noqa: E731
+        self.assertEqual((code, same(after)), (0, same(before)))
+        code, out = self.main('--conda', '/c/conda')
+        self.assertEqual(code, 0, out)
+        pips = [cmd for cmd, _ in self.ran if '-m' in cmd and 'pip' in cmd and '-e' not in cmd]
+        self.assertEqual(pips[0][-3:], ['pytest-xdist', 'numpy>=1.26,<3', 'jax[cuda12]==0.4.30'])  # the base install
+        self.assertRegex(os.readlink(self.envs / 'p'), r'\Ap-[0-9]{8}T[0-9]{6}Z\Z')
 
     def test_a_build_is_linked_when_complete(self):
         code, out = self.main('--conda', '/c/conda')

@@ -1784,6 +1784,9 @@ Rules:
   `v1.7.1` every slurm part ended `lost` before its driver ran); one cluster env build
   at a time per root, and a `conda create` that exits 0 yet leaves no python fails the
   build; `ci-run slurm status` lists only held targets. No input or output changes.
+- **`v1.7.3`** (patch, stamped 2026-11-09; a patch of `v1.7`): two slurm parts of one
+  run may make the run's work directory on the cluster at once (at `v1.7.2` the second
+  ended `unavailable` before its job). No input or output changes.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

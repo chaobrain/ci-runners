@@ -20,7 +20,9 @@
 # cannot keep that request waiting (#222 review, LOW-11). So an exclusive job runs
 # alone, and a waiting one is delayed by at most the normal shared jobs already in and
 # one light job that entered beside them. Normal shared holders mark themselves with a
-# shared hold on ${LOCAL_CI_HOST_LOCK%.lock}.shared.lock, which a light request probes.
+# shared hold on ${LOCAL_CI_HOST_LOCK%.lock}.shared.lock, which a light request probes
+# (a non-blocking exclusive request, so two probes at once would refuse each other and
+# both think a normal job is in: the probes take turns, under ${LOCAL_CI_HOST_LOCK%.lock}.probe.lock; #409).
 # The host lock is $LOCAL_CI_HOST_LOCK (default /tmp/brainspike-host.lock);
 # scripts/local_ci.sh takes it per command through the same functions (it sources this
 # file).
@@ -56,6 +58,22 @@
 HOST_LOCK=${LOCAL_CI_HOST_LOCK:-/tmp/brainspike-host.lock}
 HOST_LOCK_TURNSTILE=${HOST_LOCK%.lock}.turnstile.lock
 HOST_LOCK_SHARED=${HOST_LOCK%.lock}.shared.lock
+HOST_LOCK_PROBE=${HOST_LOCK%.lock}.probe.lock
+
+# _hl_normal_shared_in: whether a normal shared job holds the marker. The probe is an
+# exclusive try on the marker, which a concurrent probe would refuse as a holder, so the
+# probes take turns: no light request enters past a waiting exclusive one because another
+# light request was probing at that moment (#409).
+_hl_normal_shared_in() {
+  local pfd= rc
+  # a probe file this user cannot open (made by another user with a narrower mode): probe without turns
+  { command exec {pfd}>>"$HOST_LOCK_PROBE"; } 2> /dev/null || pfd=
+  [ -z "$pfd" ] || flock -x "$pfd"
+  flock -n -x "$HOST_LOCK_SHARED" true 2> /dev/null
+  rc=$?
+  [ -z "$pfd" ] || exec {pfd}>&-
+  [ $rc -ne 0 ]
+}
 
 # _hl_held_here: whether this shell or one of its ancestors has the host lock open
 # (the holder whose cover BRAINSPIKE_HOST_LOCK is)
@@ -100,7 +118,7 @@ host_lock_acquire() {
     *) echo "host_lock: BRAINSPIKE_HOST_LOCK=$held: expected s or x (or unset)" >&2
        return 2 ;;
   esac
-  if [ -n "$light" ] && ! flock -n -x "$HOST_LOCK_SHARED" true 2> /dev/null; then
+  if [ -n "$light" ] && _hl_normal_shared_in; then
     # a normal shared job is in: enter beside it, past an exclusive request that waits
     # for it anyway
     exec {_HL_FD}>>"$HOST_LOCK"

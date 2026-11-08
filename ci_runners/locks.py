@@ -11,7 +11,12 @@ The same files and the same ``flock(2)`` protocol, so a holder here and a
   out (writer preference);
 - the shared marker ``<stem>.shared.lock``, held shared by every normal shared holder.
   A light request (``-l``) enters past the turnstile, beside them, while one is in;
-  otherwise it queues like ``-s``.
+  otherwise it queues like ``-s``. It finds out with a non-blocking exclusive try on the
+  marker, which a concurrent try would refuse as if a holder were in, so the tries take
+  turns under ``<stem>.probe.lock`` (issue #69; brainspike's #409): without the turns two
+  light requests made together each took the other's try for a shared holder and entered
+  past a waiting exclusive request. A probe file that cannot be opened (missing from a
+  sticky directory, or another account's) leaves the try without turns, as before.
 
 Nesting: the command runs with ``BRAINSPIKE_HOST_LOCK=s|x``, the mode it holds. Under
 ``x`` every request is a no-op; under ``s`` a shared request is a no-op and an
@@ -61,6 +66,11 @@ def paths(lock: str) -> tuple[str, str, str]:
     """``(host lock, turnstile, shared marker)``, as ``host_lock.sh`` derives them."""
     stem = lock[:-len('.lock')] if lock.endswith('.lock') else lock
     return lock, stem + '.turnstile.lock', stem + '.shared.lock'
+
+
+def probe_path(lock: str) -> str:
+    """The file the light requests' probes take turns under, as ``host_lock.sh`` derives it."""
+    return (lock[:-len('.lock')] if lock.endswith('.lock') else lock) + '.probe.lock'
 
 
 class MissingSharedFile(OSError):
@@ -127,6 +137,7 @@ class HostLock:
 
     def __init__(self, lock: str, *, timeout: float | None = None, held: str | None = None) -> None:
         self.path, self.turnstile, self.marker = paths(lock)
+        self.probe = probe_path(lock)
         self.held = os.environ.get(ENV, '') if held is None else held
         if self.held not in ('', 's', 'x'):
             raise ValueError(f'host_lock: {ENV}={self.held}: expected s or x (or unset)')
@@ -173,7 +184,7 @@ class HostLock:
                                       'would wait for itself')
         t0 = time.monotonic()
         try:
-            if mode == 'l' and self._normal_shared_in():
+            if mode == 'l' and self._normal_shared_in(t0):
                 fd = open_lock(self.path)  # enter beside the shared holders, past the turnstile
                 self._fds.append(fd)
                 self._flock(fd, fcntl.LOCK_SH, t0)
@@ -218,15 +229,28 @@ class HostLock:
         self._close()
         self.mode, self.covered = None, False
 
-    def _normal_shared_in(self) -> bool:
-        fd = open_lock(self.marker)
+    def _normal_shared_in(self, t0: float) -> bool:
+        """Whether a normal shared holder holds the marker: a non-blocking exclusive try,
+        made in turn with the other probes (see the module doc). The wait for the turn
+        counts against the request's timeout."""
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
+            turn = open_lock(self.probe)
+        except OSError:  # missing from a sticky directory, or not ours to open: no turns
+            turn = None
+        try:
+            if turn is not None:
+                self._flock(turn, fcntl.LOCK_EX, t0)
+            fd = open_lock(self.marker)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            finally:
+                os.close(fd)
+            return False
         finally:
-            os.close(fd)
-        return False
+            if turn is not None:
+                os.close(turn)
 
     def _flock(self, fd: int, op: int, t0: float) -> None:
         if self.timeout is None:

@@ -134,6 +134,13 @@ MUTANTS = [
     (SE, "    built = dict((kept or {}).get('variants', {}))", '    built = {}', [f'{TSE}.Env.test_a_subset_run_keeps_the_other_variants_builds_in_the_kept_file']),
     # RUN-9h: what a part shows on GitHub is redacted; a root others may write is refused; the canary at its --time
     # RUN-9h review: redact, then cut; the cluster's node lists; the directories above the root; the nits
+    # RUN-9h: what the executor itself writes (the summary line, its own reasons)
+    (PRT, '    line = f\'{rec.get("host", "")} → {b.get("target")}\'', '    line = f\'{rec.get("host", "")} → {b.get("site")}:{b.get("target")} ({b.get("account")})\'', [f'{TSP}.Ends.test_what_a_part_shows_on_github_names_no_inventory']),
+    (SST, "        self.add(site.name, '<site>')", '        pass', [f'{TSS}.Redact.test_each_kind_of_inventory_has_its_placeholder']),
+    (SST, "            self.add(alias, '<account>')", '            pass', [f'{TSS}.Redact.test_each_kind_of_inventory_has_its_placeholder']),
+    (PRT, 'unavailable=slurmsite.Redactor(site)(why))', 'unavailable=why)', [f'{TSP}.Ends.test_refusals_before_a_job']),
+    (PRT, "            return self._end(record, rec, a, unavailable='site config: invalid (python -m ci_runners.slurmsite check)')", "            return self._end(record, rec, a, unavailable=f'site config: {e}')", [f'{TSP}.Ends.test_refusals_before_a_job']),
+    (PRT, "                f.write(f'{e}\\n')\n", '                pass\n', [f'{TSP}.Ends.test_refusals_before_a_job']),
     (SST, "            self.add_path(root, '<root>')", '            pass', [f'{TSS}.Redact.test_each_kind_of_inventory_has_its_placeholder']),
     (SST, "        self.add(path.replace('/', '%2F'), placeholder)", '        pass', [f'{TSS}.Redact.test_each_kind_of_inventory_has_its_placeholder']),
     (SST, "        text = ANSI.sub('', text)", '        text = text', [f'{TSS}.Redact.test_each_kind_of_inventory_has_its_placeholder']),

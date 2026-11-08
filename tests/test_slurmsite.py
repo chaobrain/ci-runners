@@ -244,8 +244,8 @@ class Redact(unittest.TestCase):
             ('zq08 zq09 zq10 zq3 zq[08-10,3] zq11', '<node> <node> <node> <node> <node> zq11'),
             ('/opt/labpy/bin/python3 http://proxy.lab.example:3128 --qos=labqos', '<python> <proxy> <submit-arg>'),
             ('qos labqos', 'qos <submit-arg>'),
-            # our own names say nothing: the site, its targets, accounts, variants and GPU models
-            ('cluster1:a40 acct1 cuda13 h100sxm cpu', 'cluster1:a40 acct1 cuda13 h100sxm cpu'),
+            # a target, variant or GPU model name says nothing; the site's and an account's alias go
+            ('cluster1:a40 acct1 cuda13 h100sxm cpu', '<site>:a40 <account> cuda13 h100sxm cpu'),
         ]
         for text, want in cases:
             self.assertEqual(r(text), want, text)

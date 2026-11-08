@@ -420,8 +420,9 @@ class Redactor:
     domain with it. ANSI escape sequences are removed first. A value of
     ``SUBSTRING_MIN`` characters or more is replaced wherever it occurs; a shorter one
     as a whole word only (no letter or digit next to it, but after ``%2F`` or a repr's
-    ``\\n``). The longest first, in any case. A value that is one of our role names
-    (site, target, account, variant, GPU model) says nothing and is kept, as is one the
+    ``\\n``). The longest first, in any case. Our site and account aliases go too
+    (``<site>``, ``<account>``: an alias may name its owner); a value that is a target,
+    variant or GPU model name says nothing and is kept, as is one the
     deny list would not hold (``REDACT_MIN``), but a node name (``NODE_MIN``)."""
 
     def __init__(self, site: Site | None = None) -> None:
@@ -430,10 +431,13 @@ class Redactor:
         self._rx: re.Pattern | None = None
         if site is None:
             return
-        self.public = {site.name.lower(), *(t.lower() for t in site.targets), *(a.lower() for a in site.accounts)}
+        self.public = {t.lower() for t in site.targets}
         for t in site.targets.values():
             self.public.update(str(t.t[k]).lower() for k in ('variant', 'gpu_model') if k in t.t)
-        for a in site.accounts.values():
+        # our own names for the site and its accounts go too: an alias may name the account's owner
+        self.add(site.name, '<site>')
+        for alias, a in site.accounts.items():
+            self.add(alias, '<account>')
             root = str(a.a['root']).rstrip('/')
             self.add_path(root, '<root>')
             if root.count('/') >= 2:

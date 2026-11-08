@@ -219,7 +219,7 @@ class Pure(unittest.TestCase):
         d.log_decoder = sp.codecs.getincrementaldecoder('utf-8')('replace')
         d.redact = slurmsite.Redactor(self.site)
         d.say('cpu@acct1: acct1: ssh: connect to host cluster1-acct1 port 22: Connection refused')
-        self.assertEqual(d.out.getvalue(), 'ci-runners: cpu@acct1: acct1: ssh: connect to host <host> port 22: '
+        self.assertEqual(d.out.getvalue(), 'ci-runners: cpu@<account>: <account>: ssh: connect to host <host> port 22: '
                                            'Connection refused\n')
         with tempfile.TemporaryDirectory() as t:
             d.record = t
@@ -436,9 +436,9 @@ class Ends(Driver):
                          ('cluster1', 'acct1', 'cpu', 'cpu-partition', 1001, 'COMPLETED'))
         self.assertEqual((b['cards'], b['cpus'], b['node']), (0, 8, 'fake01'))
         self.assertAlmostEqual(b['cost'], 8 * 0.06 * b['elapsed'] / 3600)
-        self.assertIn('hb → cluster1:cpu (acct1), job 1001, ', out['slurm'])  # not its node: inventory
+        self.assertIn('hb → cpu, job 1001, ', out['slurm'])  # not its site, account or node
         summary = (rec / 'summary.md').read_text()
-        self.assertIn('| cluster | hb → cluster1:cpu (acct1), job 1001, ', summary)
+        self.assertIn('| cluster | hb → cpu, job 1001, ', summary)
         self.assertIn('cost', summary)
         r = json.loads((rec / 'record.json').read_text())
         self.assertEqual(r['class'], 'slurm')
@@ -465,18 +465,26 @@ class Ends(Driver):
 
     def test_what_a_part_shows_on_github_names_no_inventory(self):
         self.private_site(hostname='login7.example.org', user='labuser')
+        self.env['GITHUB_STEP_SUMMARY'] = str(self.d / 'step_summary.md')
+        (self.d / 'slurm' / 'nodes.json').write_text('["other[1-2]"]')  # its node: only from the job's status
         cmd = ('echo "dir $CI_PART_DIR"; echo "fake01 labuser@LOGIN7.example.org lab-acct1 cluster1-acct1 cluster1:cpu"; '
                'printf "x cpu-part"; sleep 1; printf "ition y\\nlast lab-acct1"; exit 3')
         code, out = self.execute(command=cmd)
         log = self.log.read_text()
         self.assertIn('dir <root>/ci-runners/', log)
-        self.assertIn('<node> <user>@<host> <account> <host> cluster1:cpu\n', log)  # our role names stay
+        self.assertIn('<node> <user>@<host> <account> <host> <site>:cpu\n', log)  # the target stays
         self.assertIn('x <partition> y\n', log)  # one name, split across two reads of the job's log
         self.assertIn('last <account>', log)  # and the log's last line, without its newline
         summary = (self.record(out) / 'summary.md').read_text()
+        art = self.temp / 'ci-runners' / 'unit'  # the part's uploaded artifacts
+        shown = (json.dumps(out) + summary + (self.d / 'step_summary.md').read_text()
+                 + (art / 'outcome.json').read_text() + (art / 'summary.md').read_text())
+        self.assertIn('hb → cpu, job 1001, ', shown)  # the target, job and cost stay
         for x in (str(self.d / 'root'), 'fake01', 'labuser', 'login7', 'lab-acct1', 'cluster1-acct1', 'cpu-partition'):
             self.assertNotIn(x.lower(), log.lower())
-            self.assertNotIn(x, json.dumps(out) + summary)
+            self.assertNotIn(x, shown)
+        for x in ('cluster1', 'acct1'):  # our own names for the site and the account
+            self.assertNotIn(x, shown + log.replace('ci-runners', ''))
         self.assertIn('fake01 labuser@', (self.record(out) / 'job.log').read_text())  # this host's own copy: as it was
         self.assertEqual(self.block(out)['node'], 'fake01')
 
@@ -484,7 +492,7 @@ class Ends(Driver):
         self.private_site(no_config=True)
         code, out = self.execute()
         self.assertEqual(out['outcome'], 'unavailable')
-        self.assertIn('ssh -G acct1: no host and user to redact', out['reason'])
+        self.assertIn('ssh -G <account>: no host and user to redact', out['reason'])
         self.assertEqual(self.jobs(), [])
 
     def test_a_red_part(self):
@@ -547,6 +555,13 @@ class Ends(Driver):
         with self.assertRaisesRegex(part.Refused, 'names its target'):
             self.execute(id='none', target='')
         self.assertEqual(self.jobs(), [])
+        code, out = self.execute(id='nosite', target='l40')
+        self.assertIn('l40: no target of site <site>', out['reason'])  # the executor's own reason, redacted
+        site = self.etc / 'slurm' / 'cluster1.toml'
+        site.chmod(0o644)
+        code, out = self.execute(id='badsite', target='cpu')
+        self.assertEqual(out['reason'], 'site config: invalid (python -m ci_runners.slurmsite check)')
+        self.assertIn('readable by others', (self.record(out) / 'site-error.txt').read_text())  # the details: here
 
 
 class Pending(Driver):
@@ -679,7 +694,7 @@ class Pending(Driver):
         self.hosts({'acct1': True})  # silent, and no ledger of it cached: the site's caps cannot be checked
         code, out = self.execute(target='cpu')
         self.assertEqual((out['outcome'], out['next']), ('unavailable', 'fallback'))
-        self.assertTrue(out['reason'].startswith('budget: the spend of acct1 is unknown'), out['reason'])
+        self.assertTrue(out['reason'].startswith('budget: the spend of <account> is unknown'), out['reason'])
         self.assertEqual(self.jobs(), [])
 
 
@@ -752,7 +767,7 @@ class Stop(Driver):
         (rec / 'record.json').write_text(json.dumps(r))
         _, done = part.salvage(self.inv, out['record'], self.env)
         self.assertEqual(done['outcome'], 'lost')
-        self.assertIn('cluster1:cpu (acct1), job 1001', done['slurm'])
+        self.assertIn('hb → cpu, job 1001', done['slurm'])
         self.hosts({})
         nested = rec / 'work' / 'x'  # a block below a record (results the job wrote): not the reaper's
         nested.mkdir(parents=True)

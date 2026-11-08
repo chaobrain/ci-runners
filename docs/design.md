@@ -658,11 +658,14 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
 
        The record stays on the driver host, so `salvage` and `verdict` do not change. It
        gains a `slurm` block: site, account alias, target, job id, node, state, elapsed,
-       cards, CPUs and the cost by the site's prices; the part's summary names the target
-       and the cost, not the node.
+       cards, CPUs and the cost by the site's prices; the part's summary line (the step
+       summary, `outcome.json`'s `slurm`, the `ci-part-*` artifacts) names the target, the
+       job and the cost, not the site, the account or the node, and the executor's own
+       reasons pass the redactor too.
        What a part shows on GitHub (the job's log it relays, the gate's and ssh's error
        text, its reason and summary) passes a redactor built from the site config
-       (`slurmsite.Redactor`): each account's root (`<root>`) and its parent (`<home>`),
+       (`slurmsite.Redactor`): our site and account aliases (`<site>`, `<account>`: an
+       alias may name its owner), each account's root (`<root>`) and its parent (`<home>`),
        also URL-encoded, Slurm account (`<account>`), ssh alias and the login host,
        ProxyJump hosts and users its ssh config names (`ssh -G`: `<host>`, `<user>`), the
        partitions (`<partition>`), the nodes (`<node>`: the config's, the cluster's whole
@@ -672,7 +675,7 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
        arguments. A host or node takes its domain with it, and ANSI escape sequences are
        removed first. A value of 8 characters or more is replaced wherever it occurs; a
        shorter one as a whole word only (also after `%2F` or a repr's `\n`), in any case. A
-       value equal to a role name of ours (site, target, account, variant, GPU model) or
+       value equal to a target, variant or GPU model name or
        one the deny list would not hold (under 4 characters or a common word; nodes from
        2) is kept. Text is redacted before it is cut. The log is redacted by whole lines,
        a line over 64 KiB never cut through a value, so that no name splits across two

@@ -204,6 +204,24 @@ class Pure(unittest.TestCase):
         out.update(rc=255, text=b'user labuser\nhostname login7\n')
         self.assertIsNone(g.ssh_facts())
 
+    def test_the_gates_and_sshs_error_text_is_redacted(self):
+        import io
+        import tempfile
+        d = object.__new__(sp.Driver)
+        d.out, d.log_tail, d.clock, d.block = io.StringIO(), '', time.time, {}
+        d.log_decoder = sp.codecs.getincrementaldecoder('utf-8')('replace')
+        d.redact = slurmsite.Redactor(self.site)
+        d.say('cpu@acct1: acct1: ssh: connect to host cluster1-acct1 port 22: Connection refused')
+        self.assertEqual(d.out.getvalue(), 'ci-runners: cpu@acct1: acct1: ssh: connect to host <host> port 22: '
+                                           'Connection refused\n')
+        with tempfile.TemporaryDirectory() as t:
+            d.record = t
+            d.finish({'rc': None, 'unavailable': 'sbatch refused it: Invalid account lab-acct1 or partition cpu-partition',
+                      'red': 'on node01', 'p2p': '/shared/fs/acct1/x'})
+            ex = json.loads((pathlib.Path(t) / 'exit.json').read_text())
+        self.assertEqual((ex['unavailable'], ex['red'], ex['p2p']),
+                         ('sbatch refused it: Invalid account <account> or partition <partition>', 'on <node>', '<root>/x'))
+
     def test_the_job_log_is_redacted_by_whole_lines(self):
         import io
         d = object.__new__(sp.Driver)

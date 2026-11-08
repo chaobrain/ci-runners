@@ -167,6 +167,33 @@ class Relay(unittest.TestCase):
             self.assertEqual(s.recv(4096), b'')  # closed, nothing passed
         self.assertEqual(got, [])
 
+    def test_another_users_connection_is_closed_before_it_takes_a_slot(self):
+        r, got = self.relay()
+        with socket.create_connection(('127.0.0.1', r.port), timeout=10) as s:
+            mine = (s.getsockname()[1], r.port)
+            for _ in range(100):
+                if len(r.live) == 1:
+                    break
+                time.sleep(0.05)
+            c = next(iter(r.live))
+            self.assertEqual(slurmlogin._peer_uid(c), os.getuid())  # by /proc/net/tcp
+            self.assertEqual((c.getpeername()[1], c.getsockname()[1]), mine)
+            with mock.patch('builtins.open', side_effect=OSError('no /proc')):
+                self.assertIsNone(slurmlogin._peer_uid(c))  # unknown: the header check still holds
+            client, ours = mine
+            proc = ('  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid\n'
+                    f'   0: 0100007F:{client:04X} 0100007F:{ours + 1:04X} 01 0:0 00:0 0 1001\n'  # the port to another
+                    f'   1: 0100007F:{ours:04X} 0100007F:{client:04X} 01 0:0 00:0 0 1002\n'  # the relay's end
+                    f'   2: 0100007F:{client:04X} 0100007F:{ours:04X} 01 0:0 00:0 0 1003\n')
+            with mock.patch('builtins.open', mock.mock_open(read_data=proc)):
+                self.assertEqual(slurmlogin._peer_uid(c), 1003)
+        with mock.patch.object(slurmlogin, '_peer_uid', return_value=os.getuid() + 1), \
+                mock.patch.object(slurmlogin, 'RELAY_CONNS', 1):
+            r, got = self.relay()
+            with socket.create_connection(('127.0.0.1', r.port), timeout=10) as s:
+                self.assertEqual(s.recv(4096), b'')
+            self.assertEqual(r.slots._value, 1)  # it took no slot
+
     def test_idle_and_surplus_connections_are_closed_and_close_ends_every_tunnel(self):
         good = 'Basic ' + base64.b64encode(b'ci:s3cret').decode()
         with mock.patch.object(slurmlogin, 'RELAY_CONNS', 2), mock.patch.object(slurmlogin, 'RELAY_IDLE', 2.0):
@@ -180,6 +207,21 @@ class Relay(unittest.TestCase):
             for s in idle:
                 with s:
                     self.assertEqual(s.recv(4096), b'')  # no head within RELAY_IDLE: closed
+            with socket.create_connection(('127.0.0.1', r.port), timeout=10) as s:
+                t0 = time.monotonic()
+                s.setblocking(False)
+                closed = False
+                while time.monotonic() - t0 < 6 and not closed:  # a byte at a time, each well within the limit
+                    try:
+                        s.send(b'C')
+                        closed = s.recv(1) == b''
+                    except BlockingIOError:
+                        pass
+                    except OSError:
+                        closed = True
+                    time.sleep(0.4)
+                self.assertTrue(closed)
+                self.assertLess(time.monotonic() - t0, 3.5)  # one deadline for the whole head
             time.sleep(0.3)
             tunnel = socket.create_connection(('127.0.0.1', r.port), timeout=10)
             self.addCleanup(tunnel.close)
@@ -341,6 +383,23 @@ class Env(Site):
         self.site_file.write_text(self.site_file.read_text().replace('egress = "push"', 'egress = "tunnel"'))
         with mock.patch.object(slurmenv, 'SOCKET_MAX', 20), self.assertRaisesRegex(ss.SetupError, 'Unix socket path'):
             self.env()
+
+    def test_builds_of_two_projects_install_conda_one_at_a_time(self):
+        import fcntl
+        inst = self.base / 'run' / 'Mf.sh'
+        inst.write_text('#!/bin/sh\nmkdir -p "$3/bin"\nprintf "#!/bin/sh\\n" > "$3/bin/conda"\nchmod 755 "$3/bin/conda"\n')
+        done = []
+        with open(self.base / '.conda.lock', 'a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)  # another project's build, installing conda
+            t = threading.Thread(target=lambda: done.append(slurmlogin.build(
+                str(self.base), 'q', '20261108T120000Z', [['mkdir', str(self.envs / 'q-20261108T120000Z')]], {}, {}, ['cpu'],
+                'direct', installer=str(inst))))
+            t.start()
+            time.sleep(1.0)
+            self.assertFalse((self.base / 'conda').exists())  # it waits for the lock
+        t.join(30)
+        self.assertEqual(done[0]['links'], ['q-cpu'])
+        self.assertTrue((self.base / 'conda' / slurmlogin.CONDA_DONE).exists())
 
     def test_an_upstream_without_a_commit_fails_the_build(self):
         self.conda()

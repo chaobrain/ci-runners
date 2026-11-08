@@ -33,7 +33,7 @@ DIRS = ('releases', 'etc', 'envs', 'work', 'state', 'logs', 'run')
 CANCEL_WAIT = 120  # s ``uninstall --cancel`` waits for the account's ci- jobs to end
 RELAY_HEAD = 16 << 10  # the longest request head the relay reads
 RELAY_CONNS = 32  # connections the relay serves at once; more are closed
-RELAY_IDLE = 30.0  # s a connection may take to send its request head
+RELAY_IDLE = 30.0  # s a connection may take to send its whole request head
 KEEP = 3  # builds of a project kept: the linked ones and the newest
 UNLINKED = '.ci-unlinked'  # in a build no link holds: its mtime is when that was first seen
 CONDA_DONE = '.ci-installed'  # in <base>/conda once its installer finished
@@ -177,8 +177,9 @@ class Relay:
     Unix socket the driver's reverse forward listens on (its egress proxy's allowlist
     applies there, 11.10). It passes only ``CONNECT``: the connection is then a tunnel, and
     no later request on it carries the header past the check. At most ``RELAY_CONNS``
-    connections at once, each sending its head within ``RELAY_IDLE``: another user of the
-    login host cannot tie it up. It lives in the build's process, and ``close`` ends every
+    connections at once, each sending its whole head within ``RELAY_IDLE``, and a connection
+    from another user of the login host is closed before it takes one: they cannot tie it
+    up. It lives in the build's process, and ``close`` ends every
     connection: nothing listens after it."""
 
     def __init__(self, secret: str, target: str) -> None:
@@ -221,7 +222,7 @@ class Relay:
                 c, _ = self.srv.accept()
             except OSError:
                 return
-            if not self.slots.acquire(blocking=False):
+            if _peer_uid(c) not in (None, os.getuid()) or not self.slots.acquire(blocking=False):
                 c.close()
                 continue
             threading.Thread(target=self._slot, args=(c,), daemon=True).start()
@@ -240,9 +241,10 @@ class Relay:
 
     def _handle(self, c: socket.socket) -> None:
         with c:
-            c.settimeout(RELAY_IDLE)
+            deadline = time.monotonic() + RELAY_IDLE
             head = b''
             while b'\r\n\r\n' not in head:
+                c.settimeout(max(0.01, deadline - time.monotonic()))  # one deadline for the whole head
                 chunk = c.recv(4096)
                 if not chunk or len(head) + len(chunk) > RELAY_HEAD:
                     return
@@ -282,6 +284,21 @@ class Relay:
         back.start()
         _pipe(c, u)
         back.join(60)
+
+
+def _peer_uid(c: socket.socket) -> int | None:
+    """The uid that owns the other end of a loopback TCP connection, from
+    ``/proc/net/tcp``; None where that cannot be read (the header check still holds)."""
+    try:
+        port, mine = c.getpeername()[1], c.getsockname()[1]
+        with open('/proc/net/tcp', encoding='ascii') as f:
+            rows = [r.split() for r in f.read().splitlines()[1:]]
+    except (OSError, ValueError):
+        return None
+    for r in rows:  # the client's socket: local is its port, remote is ours
+        if len(r) > 7 and int(r[1].rsplit(':', 1)[1], 16) == port and int(r[2].rsplit(':', 1)[1], 16) == mine:
+            return int(r[7])
+    return None
 
 
 def _pipe(src: socket.socket, dst: socket.socket) -> None:
@@ -348,12 +365,14 @@ def build(base: str, project: str, stamp: str, steps: list, files: dict, record:
             env.update({k: url for k in ('https_proxy', 'http_proxy', 'HTTPS_PROXY', 'HTTP_PROXY')},
                        no_proxy='localhost,127.0.0.1', NO_PROXY='localhost,127.0.0.1')
         conda = os.path.join(base, 'conda')
-        if not _conda_ok(conda):
-            if not installer:
-                raise LoginError('no conda and no installer')
-            shutil.rmtree(conda, ignore_errors=True)  # a partial install
-            _step(['bash', installer, '-b', '-p', conda], env)
-            open(os.path.join(conda, CONDA_DONE), 'w').close()
+        with open(os.path.join(base, '.conda.lock'), 'a') as clock:
+            fcntl.flock(clock, fcntl.LOCK_EX)  # another project's build may be installing it
+            if not _conda_ok(conda):
+                if not installer:
+                    raise LoginError('no conda and no installer')
+                shutil.rmtree(conda, ignore_errors=True)  # a partial install
+                _step(['bash', installer, '-b', '-p', conda], env)
+                open(os.path.join(conda, CONDA_DONE), 'w').close()
         os.makedirs(reqdir, mode=0o700)
         for rel, text in files.items():
             path = os.path.normpath(os.path.join(reqdir, rel))

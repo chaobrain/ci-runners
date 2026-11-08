@@ -175,6 +175,7 @@ class Render(Cluster):
         self.assertEqual(s['--partition'], 'gpu-partition-a')
         self.assertEqual(s['--nodelist'], 'node01')
         self.assertEqual(s['--cpus-per-task'], '16')
+        self.assertEqual((s['--nodes'], s['--ntasks']), ('1', '1'))
         self.assertEqual(s['--mem'], '2048M')
         self.assertEqual(s['--comment'], URL)
         self.assertEqual(s['--output'], str(self.base / 'work' / KEY / 'log'))
@@ -185,6 +186,14 @@ class Render(Cluster):
         req = json.loads((self.base / 'work' / KEY / 'request.json').read_text())
         self.assertEqual(req['command'], 'echo "#SBATCH --uid=0"; #SBATCH --export=ALL')
         self.assertEqual(oct((self.base / 'work' / KEY).stat().st_mode & 0o777), '0o700')
+
+    def test_sbatchs_own_variables_do_not_reach_it(self):
+        self.plan({'pend': -1})
+        with mock.patch.dict(os.environ, {'SBATCH_EXPORT': 'ALL', 'SBATCH_TIMELIMIT': '9999', 'SLURM_CONF': '/x'}):
+            self.submit()
+        job = json.loads((self.d / 'slurm' / 'jobs' / '1001.json').read_text())
+        self.assertEqual(job['sbatch_env'], [])
+        self.assertEqual(sg.sbatch_env({'SBATCH_X': '1', 'SRUN_X': '1', 'SALLOC_X': '1', 'PATH': '/b'}), {'PATH': '/b'})
 
     def test_a_cpu_target_asks_for_no_card(self):
         self.plan({'pend': -1})
@@ -256,6 +265,34 @@ class Stage(Cluster):
             sg.rsync_argv(str(self.base), 'stage', ['--server', '--sender', '-l', '.', f'{KEY}/ws/'])
         with self.assertRaisesRegex(sg.GateError, 'not allowed'):
             sg.rsync_argv(str(self.base), 'stage', ['--server', '-l', '--server', '.', f'{KEY}/ws/'])
+        for word in ('-logDtpKre.iLsfxCIvu', '-logDtpLre.iLs', '-logDtpkr', '-bl', '-Tx', '-le.iLs-x'):
+            with self.assertRaisesRegex(sg.GateError, 'not allowed', msg=word):
+                sg.rsync_argv(str(self.base), 'stage', ['--server', word, '.', f'{KEY}/ws/'])
+        sg.rsync_argv(str(self.base), 'stage', ['--server', '-logDtpre.iLsfxCIvu', '--delete', '.', f'{KEY}/ws/'])
+
+    def test_a_link_is_never_followed_out_of_work(self):
+        """Stage a link out of work/ (as job code could leave one), then try to write
+        through it (-K) and read through it (-L, -k): refused, nothing written or read."""
+        (self.outside / 'secret').write_text('s\n')
+        evil = self.d / 'evil'
+        evil.mkdir()
+        os.symlink(self.outside, evil / 'esc')
+        os.symlink(self.outside / 'secret', evil / 'sec')
+        self.assertEqual(self.rsync(f'{evil}/', f'acct1:{KEY}/ws/').returncode, 0)
+        self.assertEqual(self.rsync(f'{evil}/', f'acct1:{KEY}/tmp/').returncode, 0)
+        two = self.d / 'two'
+        (two / 'esc').mkdir(parents=True)
+        (two / 'esc' / 'pwn').write_text('x')
+        r = self.rsync(f'{two}/', f'acct1:{KEY}/ws/', 'stage', '-K')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(sorted(p.name for p in self.outside.iterdir()), ['secret'])
+        back = self.d / 'back'
+        back.mkdir()
+        for flag in ('-L', '-k'):
+            r = subprocess.run(['rsync', '-a', flag, '-e', os.path.join(self.bin, 'ssh'), '--rsync-path=ci-slurm-gate fetch',
+                                f'acct1:{KEY}/tmp/', f'{back}/'], capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(r.returncode, 0, flag)
+        self.assertFalse((back / 'sec').exists() and (back / 'sec').is_file() and not (back / 'sec').is_symlink())
 
     def test_a_link_on_the_way_is_refused(self):
         (self.base / 'work' / 'o').mkdir(parents=True)
@@ -283,6 +320,7 @@ class Jobs(Cluster):
         j = self.submit(command=cmd)
         st = self.wait_end()
         self.assertEqual((st['job'], st['state'], st['exit']['rc']), (j['job'], 'COMPLETED', 0))
+        self.assertEqual(st['exit_code'], '0:0')  # sacct's, also while squeue still lists the job
         log = b''
         while True:
             rc, chunk, _ = self.gate(f'ci-slurm-gate log {KEY} {len(log)}')
@@ -419,6 +457,23 @@ class Reap(Cluster):
         res = sg.reap(str(self.base), now=time.time() + 4 * 86400)
         self.assertEqual(res['removed'], 1)  # key2's, its job gone; KEY's job still pends
         self.assertTrue((self.base / 'work' / KEY).exists())
+
+    def test_a_controller_that_does_not_answer_removes_nothing(self):
+        self.plan({'pend': -1})
+        self.submit()
+        down = lambda argv, **kw: subprocess.CompletedProcess(  # noqa: E731
+            argv, 1, '', 'slurm_load_jobs error: Unable to contact slurm controller (connect failure)')
+        res = sg.reap(str(self.base), now=time.time() + 30 * 86400, run=down)
+        self.assertEqual(res, {'cancelled': [], 'removed': 0})
+        gone = lambda argv, **kw: subprocess.CompletedProcess(  # noqa: E731
+            argv, 1, '', 'slurm_load_jobs error: Invalid job id specified')
+        self.assertEqual(sg.reap(str(self.base), now=time.time() + 30 * 86400, run=gone)['removed'], 1)
+
+    def test_a_slurm_command_that_is_missing_is_a_refusal(self):
+        with mock.patch.dict(os.environ, {'PATH': '/nonexistent'}):
+            rc, _, err = self.gate(f'ci-slurm-gate submit {KEY}', json.dumps(request()).encode())
+        self.assertEqual(rc, 2)
+        self.assertIn('sbatch: FileNotFoundError', err)
 
 
 class Check(Cluster):

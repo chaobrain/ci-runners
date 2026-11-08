@@ -1796,6 +1796,12 @@ Rules:
 - **`v1.7.3`** (patch, stamped 2026-11-09; a patch of `v1.7`; `v1` moved to it after the slurm canary at `@v1.7.3`, 2026-11-09: a CPU part, a one-card a40 part, and a part cancelled while its job ran, which ended `stopped` with no job left): two slurm parts of one
   run may make the run's work directory on the cluster at once (at `v1.7.2` the second
   ended `unavailable` before its job). No input or output changes.
+- **`v1.7.4`** (patch, stamped 2026-11-09; a patch of `v1.7`): an env spec's
+  `[variant.<name>]` may carry a `conda` table whose packages join the base's in the
+  same solve (14.9, §4.9); a host on `v1.7.3` or older refuses that key, so a consumer
+  adds it only after its hosts run `v1.7.4`. `ci-run slurm env` run from another data
+  directory (a maintainer's temporary one) keeps the record of the variants it did not
+  build, from what the login host's links serve. No input or output changes.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

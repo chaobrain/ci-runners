@@ -65,7 +65,9 @@ STAGE_DIRS = ('ws', 'tmp')
 FETCH_DIRS = ('tmp', 'part')
 #: rsync's long options a stage or fetch may pass; its short ones are one ``-[A-Za-z.]`` word
 RSYNC_LONG = frozenset({'--server', '--sender', '--delete', '--delete-excluded', '--numeric-ids', '--safe-links'})
-_RSYNC_SHORT = re.compile(r'-[A-Za-z0-9.]{1,40}\Z')
+#: rsync's short options, before the ``e`` of the capability string: none that follows a
+#: link (``-L``, ``-k``, ``-K``), keeps a backup or takes an argument
+_RSYNC_SHORT = re.compile(r'-[vlogDtprzciuxSHAXWCEOJmn]{1,30}(?:e[.A-Za-z]{0,30})?\Z')
 PROJECT = re.compile(r'[a-z0-9][a-z0-9-]{0,39}\Z')
 NAME = re.compile(r'[a-z][a-z0-9-]{0,30}\Z')
 ROLE = re.compile(r'[a-z0-9][a-z0-9-]{0,30}\Z')
@@ -266,6 +268,14 @@ def render(account: Mapping[str, object], req: Mapping[str, object], key: str, d
             + f'exec {shlex.quote(py)} -I -c {shlex.quote(launcher)} {shlex.quote(release)} {shlex.quote(d)}\n')
 
 
+def sbatch_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """``sbatch``'s environment: the gate's without the variables that override a batch
+    script's ``#SBATCH`` lines (``SBATCH_*``, and ``SALLOC_*``, ``SRUN_*``, ``SLURM_*``),
+    which a site's login profile may set. Pure."""
+    env = os.environ if env is None else env
+    return {k: v for k, v in env.items() if not k.startswith(('SBATCH_', 'SALLOC_', 'SRUN_', 'SLURM_'))}
+
+
 def submit(base: str, release: str, key: str, data: bytes, run: Callable = subprocess.run) -> dict:
     account = load_account(base)
     if len(data) > MAX_REQUEST:
@@ -279,7 +289,9 @@ def submit(base: str, release: str, key: str, data: bytes, run: Callable = subpr
     prev = _read_json(os.path.join(d, 'job.json'))
     if prev is not None:  # a part tries the next target with the same key: only once its job is gone
         r = run(['squeue', '-h', '-j', str(prev.get('job')), '-o', '%T'], capture_output=True, text=True, timeout=60)
-        if r.returncode != 0 or (r.stdout or '').strip() in LIVE_STATES or type(prev.get('job')) is not int:
+        gone = ((r.stdout or '').strip() not in LIVE_STATES if r.returncode == 0
+                else 'invalid job id' in (r.stderr or '').lower())
+        if not gone or type(prev.get('job')) is not int:
             raise GateError(f'{key} has a job already')
         os.replace(os.path.join(d, 'job.json'), os.path.join(d, f'job-{prev["job"]}.json'))
     for sub in ('part', 'record', 'tmp', 'ws'):
@@ -290,7 +302,7 @@ def submit(base: str, release: str, key: str, data: bytes, run: Callable = subpr
     with open(script, 'w', encoding='utf-8') as f:
         f.write(render(account, req, key, d, release))
     os.chmod(script, 0o700)
-    r = run(['sbatch', '--parsable', script], capture_output=True, text=True, timeout=120, cwd=d)
+    r = run(['sbatch', '--parsable', script], capture_output=True, text=True, timeout=120, cwd=d, env=sbatch_env())
     out = (r.stdout or '').strip().split(';')[0]
     if r.returncode != 0 or not out.isdigit():
         raise GateError(f'sbatch refused it: {(r.stderr or r.stdout or "").strip()[-300:]}')
@@ -404,10 +416,12 @@ def reap(base: str, now: float | None = None, run: Callable = subprocess.run) ->
                     if j and type(j.get('job')) is int:
                         r = run(['squeue', '-h', '-j', str(j['job']), '-o', '%T'], capture_output=True, text=True,
                                 timeout=60)
-                        live = r.returncode == 0 and (r.stdout or '').strip() in LIVE_STATES
+                        # gone: listed in a final state, or purged; any other failure counts as live
+                        live = ((r.stdout or '').strip() in LIVE_STATES if r.returncode == 0
+                                else 'invalid job id' not in (r.stderr or '').lower())
                         if live and now > float(j.get('deadline', 0)):
-                            run(['scancel', str(j['job'])], capture_output=True, timeout=60)
-                            cancelled.append(j['job'])
+                            if run(['scancel', str(j['job'])], capture_output=True, timeout=60).returncode == 0:
+                                cancelled.append(j['job'])
                     if not live and now - _newest(d) > WORK_DAYS * 86400:
                         shutil.rmtree(d, ignore_errors=True)
                         removed += 1
@@ -445,12 +459,12 @@ def check(base: str, release: str, run: Callable = subprocess.run) -> dict:
     """What this account sees of the site (RUN-9e's ``check`` reads it): the Python,
     the Slurm commands and version, the root's room, and per target its partition's
     state and whether ``sbatch --test-only`` takes its rendered request."""
-    def out_of(argv: Sequence[str]) -> tuple[int, str]:
+    def out_of(argv: Sequence[str], **kw) -> tuple[int, str]:
         try:
-            r = run(list(argv), capture_output=True, text=True, timeout=60)
+            r = run(list(argv), capture_output=True, text=True, timeout=60, **kw)
             return r.returncode, (r.stdout or '') + (r.stderr or '')
-        except (OSError, subprocess.SubprocessError) as e:
-            return 127, type(e).__name__
+        except (OSError, subprocess.SubprocessError, GateError) as e:
+            return 127, str(e) or type(e).__name__
     facts: dict[str, object] = {'python': list(sys.version_info[:3]),
                                 'commands': {c: bool(shutil.which(c)) for c in
                                              ('sbatch', 'squeue', 'sacct', 'scancel', 'sinfo', 'rsync')}}
@@ -480,7 +494,7 @@ def check(base: str, release: str, run: Callable = subprocess.run) -> dict:
             script = os.path.join(d, 'job.sh')
             with open(script, 'w', encoding='utf-8') as f:
                 f.write(render(account, req, 'o/r/1-1/check-1', d, release))
-            rc, text = out_of(['sbatch', '--test-only', script])
+            rc, text = out_of(['sbatch', '--test-only', script], env=sbatch_env())
         targets[name] = {'partition_up': up, 'test_only': rc == 0, 'test_only_text': text.strip()[-300:]}
     facts['targets'] = targets
     facts['envs'] = [os.path.basename(x) for x in _dirs(os.path.join(base, 'envs'))]
@@ -538,6 +552,13 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
     stdin = sys.stdin.buffer if stdin is None else stdin
     stdout = sys.stdout.buffer if stdout is None else stdout
     release, base = os.path.dirname(os.path.dirname(os.path.abspath(__file__))), argv[0]
+    real_run = run
+
+    def run(*a, **kw):  # a Slurm command that hangs or is missing: a refusal
+        try:
+            return real_run(*a, **kw)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise GateError(f'{a[0][0] if a and a[0] else "a command"}: {type(e).__name__}') from None
     try:
         words = shlex.split(env.get('SSH_ORIGINAL_COMMAND', ''))
         if len(words) < 2 or words[0] != 'ci-slurm-gate' or words[1] not in VERBS:

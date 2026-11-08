@@ -114,7 +114,8 @@ PRICE_KEYS = {
 }
 TARGET_KEYS = {
     'partition': (lambda v: isinstance(v, str) and bool(SLURM_NAME.fullmatch(v)), True),
-    'nodes': (lambda v: _list(v, NODE), False),      # its -w; or exclude
+    # its -w: one node (Slurm's --nodelist asks for every node it names); or exclude
+    'nodes': (lambda v: _list(v, NODE) and len(v) == 1 and '[' not in v[0], False),
     'exclude': (lambda v: _list(v, NODE), False),
     'gpu_model': (lambda v: isinstance(v, str) and bool(VARIANT.fullmatch(v)), False),  # a key of card_hour
     'cards_per_node': (_int, False),   # GPU targets

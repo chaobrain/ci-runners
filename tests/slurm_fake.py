@@ -11,6 +11,9 @@
 - ``ledger.json``: more ``sacct`` rows, for the ledger;
 - ``down.json``: partitions ``sinfo`` reports down.
 
+``squeue -j`` lists a finished job ``MIN_JOB_AGE`` s in its final state, then fails with
+"Invalid job id", as a real one does.
+
 A job that runs runs its batch script with ``bash`` under a runner (``--run``), in a
 session of its own, with ``SLURM_JOB_ID`` and, for cards, ``CUDA_VISIBLE_DEVICES`` (of cards no host has); the
 script's output goes to its ``--output``. ``scancel`` TERMs the runner, which TERMs the
@@ -34,6 +37,7 @@ import sys
 import time
 
 KILL_WAIT = 3.0
+MIN_JOB_AGE = 1.0  # s squeue still lists a finished job, then 'Invalid job id' (exit 1), as Slurm's MinJobAge
 OTHER_UID = 4243
 NAMES = ('sbatch', 'squeue', 'sacct', 'scancel', 'sinfo', 'ssh')
 FINAL = ('COMPLETED', 'FAILED', 'CANCELLED', 'TIMEOUT', 'NODE_FAIL', 'BOOT_FAIL', 'OUT_OF_MEMORY')
@@ -178,7 +182,8 @@ def sbatch(args: list[str]) -> int:
     b = plan[n - 1] if n - 1 < len(plan) else {}
     gpus = re.search(r'([0-9]+)$', sb.get('--gpus', '')) if '--gpus' in sb else None
     j = {'id': 1000 + n, 'script': os.path.abspath(script), 'sb': sb, 'state': 'PENDING', 'submit': time.time(),
-         'plan': b, 'cards': int(gpus.group(1)) if gpus else 0, 'uid': os.getuid()}
+         'plan': b, 'cards': int(gpus.group(1)) if gpus else 0, 'uid': os.getuid(),
+         'sbatch_env': sorted(k for k in os.environ if k.startswith(('SBATCH_', 'SLURM_')))}
     _save(_job_path(j['id']), j)
     refresh(j)
     print(j['id'])
@@ -188,15 +193,20 @@ def sbatch(args: list[str]) -> int:
 def squeue(args: list[str]) -> int:
     fmt = args[args.index('-o') + 1] if '-o' in args else '%i %T'
     ids = args[args.index('-j') + 1].split(',') if '-j' in args else None
+    shown = 0
     for j in _all():
-        if j['state'] in FINAL or (ids is not None and str(j['id']) not in ids):
+        if (j['state'] in FINAL and time.time() - j.get('end', 0) > MIN_JOB_AGE) or (ids is not None and str(j['id']) not in ids):
             continue
+        shown += 1
         b = j['plan']
         vals = {'i': str(j['id']), 'T': j['state'], 'j': j['sb'].get('--job-name', ''),
                 'r': b.get('reason', 'Resources') if j['state'] == 'PENDING' else 'None',
-                'N': j['sb'].get('--nodelist', 'fake01') if j['state'] == 'RUNNING' else '',
+                'N': j['sb'].get('--nodelist', 'fake01') if j['state'] != 'PENDING' else '',
                 'M': str(int(time.time() - j['start'])) if j.get('start') else '0'}
         print(re.sub(r'%([a-zA-Z])', lambda m: vals.get(m.group(1), ''), fmt))
+    if ids is not None and not shown:
+        print('slurm_load_jobs error: Invalid job id specified', file=sys.stderr)
+        return 1
     return 0
 
 

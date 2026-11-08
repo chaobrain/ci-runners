@@ -134,6 +134,14 @@ MUTANTS = [
     (SE, "    built = dict((kept or {}).get('variants', {}))", '    built = {}', [f'{TSE}.Env.test_a_subset_run_keeps_the_other_variants_builds_in_the_kept_file']),
     # RUN-9h: what a part shows on GitHub is redacted; a root others may write is refused; the canary at its --time
     # RUN-9h review: redact, then cut; the cluster's node lists; the directories above the root; the nits
+    # the env build reads none of the account's own conda and pip settings
+    (SL, "    env = {'PATH': '/usr/bin:/bin', 'HOME': home,", "    env = {'PATH': '/usr/bin:/bin', 'HOME': os.path.expanduser('~'),", [f'{TSE}.Env.test_the_accounts_own_conda_and_pip_settings_do_not_reach_the_build']),
+    (SL, "           'PIP_CONFIG_FILE': os.devnull, 'PYTHONNOUSERSITE': '1',", "           'PYTHONNOUSERSITE': '1',", [f'{TSE}.Env.test_the_accounts_own_conda_and_pip_settings_do_not_reach_the_build']),
+    (SL, "           'PIP_CONFIG_FILE': os.devnull, 'PYTHONNOUSERSITE': '1',", "           'PIP_CONFIG_FILE': os.devnull,", [f'{TSE}.Env.test_the_accounts_own_conda_and_pip_settings_do_not_reach_the_build']),
+    (SL, '        os.mkdir(home, 0o700)', '        pass', [f'{TSE}.Env.test_the_accounts_own_conda_and_pip_settings_do_not_reach_the_build']),
+    (SL, '        shutil.rmtree(home, ignore_errors=True)', '        pass', [f'{TSE}.Env.test_the_accounts_own_conda_and_pip_settings_do_not_reach_the_build']),
+    (SGT, "                    'PYTHONNOUSERSITE': '1', 'PIP_CONFIG_FILE': os.devnull})", "                    'PIP_CONFIG_FILE': os.devnull})", [f'{TSG}.Jobs.test_a_job_runs_its_command_and_its_results_come_back']),
+    (SGT, "                    'PYTHONNOUSERSITE': '1', 'PIP_CONFIG_FILE': os.devnull})", "                    'PYTHONNOUSERSITE': '1'})", [f'{TSG}.Jobs.test_a_job_runs_its_command_and_its_results_come_back']),
     # RUN-9h re-review: long and punctuated host lists, unknown lists fail closed, a cut after a colour code,
     # the gate keeps the error text, letters-only words, a link above the root another user owns
     (SST, "_HOSTLIST_TOKEN = re.compile(r'[A-Za-z0-9_.-]{0,64}\\[[0-9,-]{1,8192}\\]", "_HOSTLIST_TOKEN = re.compile(r'[A-Za-z0-9_.-]{0,64}\\[[0-9,-]{1,64}\\]", [f'{TSS}.Redact.test_a_host_list']),

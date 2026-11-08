@@ -352,7 +352,9 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
     for ``grace`` seconds (a job resolves its env's link when it starts, ``slurmgate.job``, and may run
     that long). The egress is the relay (``tunnel``), ``proxy`` or none (``direct``); a
     missing conda is installed from ``installer`` first, offline (a partial install is
-    removed and redone)."""
+    removed and redone). The steps run with an empty ``HOME`` of their own in
+    ``<base>/run`` and no pip config file: the account's own conda and pip settings (a
+    mirror the egress does not allow, say) do not reach the build."""
     envs, run = os.path.join(base, 'envs'), os.path.join(base, 'run')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,39}', project) or not re.fullmatch(STAMP, stamp):
         raise LoginError('project or stamp is malformed')
@@ -363,8 +365,10 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
         raise LoginError('the builds are malformed')
     dirs = [os.path.join(envs, f'{project}-{stamp}' + (f'-{n}' if n else '')) for n in names]
     reqdir = os.path.join(run, f'req-{stamp}')
-    env = {'PATH': '/usr/bin:/bin', 'HOME': os.path.expanduser('~'), 'LANG': 'C.UTF-8', 'GIT_TERMINAL_PROMPT': '0',
-           'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull, 'PIP_NO_INPUT': '1', 'TMPDIR': run}
+    home = os.path.join(run, f'home-{stamp}')  # the account's own ~/.condarc, pip.conf, .netrc: not read
+    env = {'PATH': '/usr/bin:/bin', 'HOME': home, 'LANG': 'C.UTF-8', 'GIT_TERMINAL_PROMPT': '0',
+           'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull, 'PIP_NO_INPUT': '1',
+           'PIP_CONFIG_FILE': os.devnull, 'PYTHONNOUSERSITE': '1', 'TMPDIR': run}
     lock = open(os.path.join(envs, f'.{project}.lock'), 'a')
     relay = None
     try:
@@ -377,6 +381,7 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
                 raise LoginError(f'{d} exists')
         paths = [os.path.join(envs, f'{project}-{v}') for v in served]
         _all_links(paths)
+        os.mkdir(home, 0o700)
         url = ''
         if egress == 'tunnel':
             relay = Relay(secret, socket_path)
@@ -465,6 +470,7 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
             relay.close()
         lock.close()
         shutil.rmtree(reqdir, ignore_errors=True)
+        shutil.rmtree(home, ignore_errors=True)
         for path in (socket_path, installer):
             if path and os.path.lexists(path) and os.path.dirname(path) == run:
                 os.unlink(path)

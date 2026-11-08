@@ -571,7 +571,9 @@ def job(d: str) -> int:
     """The batch job's body (14.3): the part's command under the cluster supervisor
     (``part.supervise``), in the part's workspace, with an explicit environment: the
     node's Slurm and card variables, the project's env and variables, and ours. The
-    command's temporary files go to a 700 directory of its own on the node (T20)."""
+    account's own Python packages (``~/.local``) and pip config are not read; no conda is
+    on its ``PATH``, so ``~/.condarc`` has no reader. The command's temporary files go to
+    a 700 directory of its own on the node (T20)."""
     from ci_runners import part  # the release's supervisor
     req = _read_json(os.path.join(d, 'request.json'))
     base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(d)))))
@@ -582,7 +584,8 @@ def job(d: str) -> int:
     try:
         env = {k: v for k, v in os.environ.items() if k.startswith('SLURM_') or k in KEEP_VARS}
         env.update({'HOME': os.environ.get('HOME') or os.path.expanduser('~'), 'LANG': 'C.UTF-8', 'TMPDIR': tmp,
-                    'PATH': f'{envd}/bin:/usr/local/bin:/usr/bin:/bin', 'CONDA_PREFIX': envd})
+                    'PATH': f'{envd}/bin:/usr/local/bin:/usr/bin:/bin', 'CONDA_PREFIX': envd,
+                    'PYTHONNOUSERSITE': '1', 'PIP_CONFIG_FILE': os.devnull})  # the account's ~/.local, pip.conf: not read
         env.update(req['variables'])
         cards = int(req['cards'])
         env.update({'CI_RUNNERS_HOST': req['host'], 'CI_PROJECT': req['project'], 'CI_PART_DIR': f'{d}/part',

@@ -28,7 +28,7 @@ ANOTHER = f'restrict,command="/elsewhere/ci-runners/releases/hook/bin/ci-slurm-g
 def good_facts() -> dict:
     t = {'partition_up': True, 'test_only': True, 'test_only_text': ''}
     return {'python': [3, 12, 1], 'commands': {c: True for c in ss.COMMANDS}, 'slurm': [24, 5, 3], 'free_gib': 400.0,
-            'writable': True, 'shared': [], 'targets': {'cpu': dict(t), 'a40': dict(t), 'h100': dict(t)}, 'envs': []}
+            'writable': True, 'unsafe': {}, 'targets': {'cpu': dict(t), 'a40': dict(t), 'h100': dict(t)}, 'envs': []}
 
 
 class Pure(unittest.TestCase):
@@ -39,8 +39,11 @@ class Pure(unittest.TestCase):
         self.assertEqual(ss.findings(self.site, 'acct1', good_facts()), [])
         cases = [(('python', [3, 10, 12]), 'login Python'), (('slurm', [20, 2, 1]), 'Slurm [20, 2, 1]'),
                  (('slurm', None), 'Slurm None'), (('writable', False), 'not writable'),
-                 (('free_gib', 49.0), '49 GiB free, 50 needed'), (('shared', ['/r']), 'others may write /r: chmod go-w'),
-                 (('shared', None), 'does not say who may write the root')]  # an older gate's facts: fail closed
+                 (('free_gib', 49.0), '49 GiB free, 50 needed'), (('unsafe', {'/r': 'writable'}), '/r: its group or others may write it: chmod go-w'),
+                 (('unsafe', {'/r': 'link'}), '/r: is a link: give the root as the directory it points to'),
+                 (('unsafe', {'/r': 'owner'}), '/r: belongs to another user'),
+                 (('unsafe', {'/r/ci-runners': 'missing'}), '/r/ci-runners: is missing'),
+                 (('unsafe', None), 'does not say who could swap the root')]  # an older gate's facts: fail closed
         for (k, v), why in cases:
             f = good_facts()
             f[k] = v
@@ -266,13 +269,27 @@ class Install(Site):
         self.addCleanup(self.root.chmod, 0o700)
         ctx, out = self.ctx()
         self.assertEqual(ss.check(ctx, 'cluster1', 'acct1', 'owner'), 1)
-        self.assertIn(f'finding: its group or others may write {self.root}: chmod go-w', out.getvalue())
-        with self.assertRaisesRegex(ss.SetupError, 'may be written by its group or others: chmod go-w it first'):
+        self.assertIn(f'finding: {self.root}: its group or others may write it: chmod go-w', out.getvalue())
+        with self.assertRaisesRegex(ss.SetupError, f'another user could swap the root: {self.root} \\(writable\\)'):
             ss.apply(ctx, 'cluster1', 'acct1', self.plan_file(), 'owner')
         self.assertEqual(os.listdir(self.root), [])
-        self.root.chmod(0o702)
-        with self.assertRaisesRegex(ss.SetupError, 'may be written by its group or others'):
+        self.root.chmod(0o700)
+        self.root.parent.chmod(0o777)  # a directory above it
+        self.addCleanup(self.root.parent.chmod, 0o700)
+        ctx, out = self.ctx()
+        self.assertEqual(ss.check(ctx, 'cluster1', 'acct1', 'owner'), 1)
+        self.assertIn(f'finding: {self.root.parent}: its group or others may write it', out.getvalue())
+        with self.assertRaisesRegex(ss.SetupError, f'{self.root.parent} \\(writable\\)'):
             ss.apply(ctx, 'cluster1', 'acct1', self.plan_file(), 'owner')
+        self.assertEqual(os.listdir(self.root), [])
+
+    def test_a_linked_root_is_advised_to_give_its_target(self):
+        real = self.root.parent / 'real'
+        self.root.rename(real)
+        self.root.symlink_to(real)
+        ctx, out = self.ctx()
+        self.assertEqual(ss.check(ctx, 'cluster1', 'acct1', 'owner'), 1)
+        self.assertIn(f'finding: {self.root} is a link: give the root as the directory it points to', out.getvalue())
 
     def test_a_refusal_on_the_login_host_is_reported(self):
         (self.root).chmod(0o500)

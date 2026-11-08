@@ -9,7 +9,8 @@
   reason), ``end`` (a final state it takes instead of running: ``NODE_FAIL``,
   ``TIMEOUT``, ...), ``other_cancel`` (s after its start another uid cancels it);
 - ``ledger.json``: more ``sacct`` rows, for the ledger;
-- ``down.json``: partitions ``sinfo`` reports down.
+- ``down.json``: partitions ``sinfo`` reports down;
+- ``nodes.json``: the node lists ``sinfo -o %N`` prints (``fake[01-02]``, ``fake[03-04]``).
 
 ``squeue -j`` lists a finished job ``MIN_JOB_AGE`` s in its final state, then fails with
 "Invalid job id", as a real one does.
@@ -264,6 +265,9 @@ def scancel(args: list[str], uid: int | None = None) -> int:
 
 
 def sinfo(args: list[str]) -> int:
+    if '%N' in args:  # the node lists, one per partition and state
+        print('\n'.join(_load(os.path.join(_state_dir(), 'nodes.json'), ['fake[01-02]', 'fake[03-04]'])))
+        return 0
     p = args[args.index('-p') + 1] if '-p' in args else ''
     print('down' if p in _load(os.path.join(_state_dir(), 'down.json'), []) else 'up')
     return 0

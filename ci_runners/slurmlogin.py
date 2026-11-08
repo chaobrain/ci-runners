@@ -62,11 +62,6 @@ def _own_dir(path: str) -> bool:
     return True
 
 
-def _shared(path: str) -> bool:
-    """``path`` may be written by its group or others: whoever can may swap what is in it."""
-    return bool(os.lstat(path).st_mode & (stat.S_IWGRP | stat.S_IWOTH))
-
-
 def _write(path: str, text: str) -> None:
     tmp = f'{path}.{os.getpid()}.new'
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -78,6 +73,8 @@ def _write(path: str, text: str) -> None:
 def facts(root: str, entry: dict) -> dict:
     """``check`` before an install: the gate's ``check`` in a temporary tree under
     ``root``, with ``entry`` as its account, removed afterwards."""
+    if os.path.islink(root):
+        return {'root': f'{root} is a link: give the root as the directory it points to (realpath)'}
     if not _own_dir(root):
         return {'root': f'{root} does not exist'}
     tmp = tempfile.mkdtemp(prefix='.ci-runners-check-', dir=root)
@@ -95,8 +92,10 @@ def prepare(base: str) -> dict:
     root = os.path.dirname(base)
     if not _own_dir(root):
         raise LoginError(f'{root} does not exist')
-    if _shared(root):
-        raise LoginError(f'{root} may be written by its group or others: chmod go-w it first')
+    unsafe = _gate().unsafe_dirs(root)
+    if unsafe:
+        raise LoginError('another user could swap the root: ' + '; '.join(f'{p} ({w})' for p, w in sorted(unsafe.items()))
+                         + ' (see check)')
     made = []
     for d in (base, *(os.path.join(base, x) for x in DIRS)):
         if not _own_dir(d):

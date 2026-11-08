@@ -204,6 +204,13 @@ class Pure(unittest.TestCase):
         out.update(rc=255, text=b'user labuser\nhostname login7\n')
         self.assertIsNone(g.ssh_facts())
 
+        def hangs(argv, **kw):
+            raise sp_.TimeoutExpired(argv, kw.get('timeout'))
+        g.run = hangs
+        self.assertIsNone(g.ssh_facts())  # an ssh -G that hangs: no facts, and no error that names the alias
+        g.run = lambda argv, **kw: sp_.CompletedProcess(argv, 0, b'user u1\nhostname h1\nproxyjump j@jump.example\n', b'')
+        self.assertEqual(g.ssh_facts(), {'user': 'u1', 'hostname': 'h1', 'proxyjump': 'j@jump.example'})
+
     def test_the_gates_and_sshs_error_text_is_redacted(self):
         import io
         import tempfile
@@ -222,6 +229,33 @@ class Pure(unittest.TestCase):
         self.assertEqual((ex['unavailable'], ex['red'], ex['p2p']),
                          ('sbatch refused it: Invalid account <account> or partition <partition>', 'on <node>', '<root>/x'))
 
+    def test_an_unexpected_error_ends_the_part_unavailable_and_its_traceback_stays_here(self):
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(err):
+                self.assertEqual(sp.drive(t), 0)  # no plan: the driver cannot even start
+            ex = json.loads((pathlib.Path(t) / 'exit.json').read_text())
+            self.assertEqual((ex['rc'], ex['unavailable']), (None, 'driver: KeyError'))
+            self.assertIn('Traceback', (pathlib.Path(t) / 'driver-error.txt').read_text())
+            self.assertEqual(err.getvalue(), '')
+        with tempfile.TemporaryDirectory() as t:
+            site = pathlib.Path(t) / 'cluster1.toml'
+            site.write_text(SITE)
+            site.chmod(0o600)
+            (pathlib.Path(t) / 'slurm-plan.json').write_text(json.dumps({'site_file': str(site), 'key': 'k'}))
+            err = io.StringIO()
+            with mock.patch.object(sp.Driver, 'drive', side_effect=ValueError('at /shared/fs/acct1')), \
+                    contextlib.redirect_stderr(err), contextlib.redirect_stdout(err):
+                self.assertEqual(sp.drive(t), 0)
+            ex = json.loads((pathlib.Path(t) / 'exit.json').read_text())
+            self.assertEqual(ex['unavailable'], 'driver: ValueError')
+            self.assertIn('/shared/fs/acct1', (pathlib.Path(t) / 'driver-error.txt').read_text())  # this host's own
+            self.assertEqual(err.getvalue(), '')
+            self.assertTrue((pathlib.Path(t) / 'slurm.json').exists())  # the driver's own finish
+
     def test_the_job_log_is_redacted_by_whole_lines(self):
         import io
         d = object.__new__(sp.Driver)
@@ -233,11 +267,45 @@ class Pure(unittest.TestCase):
         self.assertEqual(d.out.getvalue(), 'a <partition> b\n')
         long = 'x ' * (sp.LOG_LINE_MAX // 2) + 'lab-'
         d.write_log(long)
-        self.assertEqual(d.log_tail[-8:], 'x x lab-')  # a line too long goes out at a blank, its end held
-        self.assertLessEqual(len(d.log_tail), sp.LOG_KEEP)
+        self.assertEqual(len(d.log_tail), sp.LOG_KEEP)  # a line too long goes out but its end
         d.write_log('acct1 end', end=True)
         self.assertTrue(d.out.getvalue().endswith('x <account> end'), d.out.getvalue()[-40:])
         self.assertEqual(d.log_tail, '')
+        # no blank: the cut moves to the start of the value it would split
+        d.out = io.StringIO()
+        text = 'y' * (sp.LOG_LINE_MAX + 1) + '/shared/fs/acct1' + 'z' * (sp.LOG_KEEP - 8)
+        d.write_log(text)
+        self.assertEqual(d.log_tail, '/shared/fs/acct1' + 'z' * (sp.LOG_KEEP - 8))
+        d.write_log('\n')
+        self.assertEqual(d.out.getvalue(), 'y' * (sp.LOG_LINE_MAX + 1) + '<root>' + 'z' * (sp.LOG_KEEP - 8) + '\n')
+        d.out = io.StringIO()
+        d.write_log('q' * (sp.LOG_LINE_MAX + sp.LOG_KEEP))
+        self.assertEqual((len(d.out.getvalue()), len(d.log_tail)), (sp.LOG_LINE_MAX, sp.LOG_KEEP))  # nothing to move
+
+    def test_a_gates_error_text_is_redacted_before_it_is_cut(self):
+        import subprocess as sp_
+        red = slurmsite.Redactor(self.site)
+        res = {}
+        g = sp.Gate('/e', '/d', self.site, 'acct1', redact=red,
+                    run=lambda argv, **kw: sp_.CompletedProcess(argv, res['rc'], b'', res['err']))
+        g.ssh_argv = lambda: ['ssh']
+        for rc, exc, keep in ((2, sp.Refused, 300), (255, sp.Unreachable, 200)):
+            res.update(rc=rc, err=(' lab-acct1' + 'y' * (keep - 4)).encode())  # a cut at its end splits the name
+            with self.assertRaises(exc) as e:
+                g.call('status', 'k')
+            self.assertNotIn('acct1', str(e.exception).replace('acct1:', ''), rc)
+            self.assertIn('unt>', str(e.exception))  # the placeholder was cut, not the name
+        g.run = lambda argv, **kw: sp_.CompletedProcess(argv, 23, b'', (' lab-acct1' + 'y' * 196).encode())
+        with self.assertRaises(sp.Refused) as e:
+            g.sync('stage', '/a/', 'h:k/')
+        self.assertNotIn('cct1', str(e.exception))
+        g.run = lambda argv, **kw: sp_.CompletedProcess(argv, 255, b'', (' lab-acct1' + 'y' * 196).encode())
+        with self.assertRaises(sp.Unreachable) as e:
+            g.sync('stage', '/a/', 'h:k/')
+        self.assertNotIn('cct1', str(e.exception).replace('acct1:', ''))
+        d = object.__new__(sp.Driver)
+        d.plan, d.site, d.run, d.redact = {'etc': '/e', 'data': '/d', 'ssh': 'ssh', 'rsync': 'rsync'}, self.site, None, red
+        self.assertIs(d.gate('acct1').redact, red)  # the driver's gates redact with its redactor
 
     def test_the_class_row(self):
         s, data = self.site, '/nonexistent'
@@ -505,6 +573,38 @@ class Pending(Driver):
         self.assertTrue(out['reason'].startswith('pending: '), out['reason'])
         self.assertIn('Priority', out['reason'])
         self.assertTrue(all(j['state'] == 'CANCELLED' for j in self.jobs()))
+
+    def test_a_pending_reason_that_names_nodes_outside_the_config_is_redacted(self):
+        (self.d / 'slurm' / 'nodes.json').write_text(json.dumps(['fake[01-02]', 'zq[17-20]']))
+        self.plan({'pend': -1, 'reason': 'ReqNodeNotAvail, UnavailableNodes:zq[19-20]'},
+                  {'pend': -1, 'reason': 'ReqNodeNotAvail, UnavailableNodes:zq19'})
+        code, out = self.execute(target='cpu', queue_timeout_minutes=0.03)
+        self.assertEqual(out['outcome'], 'unavailable')
+        self.assertIn('UnavailableNodes:<node>', out['reason'])
+        log = self.log.read_text()
+        self.assertIn('UnavailableNodes:<node>', log)
+        self.assertNotIn('zq', log + out['reason'])
+        cached = json.loads((self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'nodes.json').read_text())
+        self.assertEqual(cached['nodes'], ['fake[01-02]', 'zq[17-20]'])
+
+    def test_without_the_clusters_node_list_no_part_runs(self):
+        self.hosts({'acct1': True, 'acct2': True})
+        code, out = self.execute(target='cpu')
+        self.assertEqual(out['outcome'], 'unavailable')
+        self.assertIn("the cluster's node list is unknown", out['reason'])
+        self.hosts({})
+        self.assertEqual(self.execute(id='up', target='cpu')[1]['outcome'], 'pass')  # cached now
+        (self.d / 'slurm' / 'nodes.json').write_text(json.dumps(['other[1-2]']))
+        self.hosts({'acct1': True, 'acct2': True})
+        code, out = self.execute(id='down', target='cpu')
+        self.assertNotIn('node list', out['reason'])  # the cached lists, however old: the budget decides
+        cache = self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'nodes.json'
+        c = json.loads(cache.read_text())
+        c['at'] -= sp.NODES_TTL
+        cache.write_text(json.dumps(c))
+        self.hosts({})
+        self.execute(id='again', target='cpu')
+        self.assertEqual(json.loads(cache.read_text())['nodes'], ['other[1-2]'])  # read again past its TTL
 
     def test_past_the_queue_timeout_no_next_account_is_tried(self):
         self.plan({'pend': -1, 'reason': 'Priority'}, {'pend': -1, 'reason': 'Priority'})

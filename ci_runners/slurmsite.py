@@ -392,17 +392,37 @@ def hostlist(text: str) -> list[str]:
     return out
 
 
+#: a value this long or longer is replaced wherever it occurs, also inside a word
+#: (``%2F<value>``, a repr's ``\\n<value>``); a shorter one as a whole word only
+SUBSTRING_MIN = 8
+#: an ANSI escape sequence (a colour, a cursor move): removed before redacting, so that
+#: none hides a value's start
+ANSI = re.compile(r'\x1b(?:\[[0-?]{0,32}[ -/]{0,8}[@-~]|[@-Z\\-_])')
+#: a compressed host list in text (``UnavailableNodes:n[19-20]``): redacted as a whole
+#: when it names a known node
+_HOSTLIST_TOKEN = re.compile(r'[A-Za-z0-9_.-]{0,64}\[[0-9,-]{1,64}\][A-Za-z0-9_.-]{0,64}'
+                             r'(?:,[A-Za-z0-9_.-]{1,64}(?:\[[0-9,-]{1,64}\][A-Za-z0-9_.-]{0,64})?){0,64}')
+#: before a short value: no letter or digit, or a URL-encoded ``/`` or a repr's escape
+_BEFORE = r'(?:(?<![A-Za-z0-9])|(?<=%2[Ff])|(?<=\\[ntr]))'
+#: a host's or node's domain, which goes with it
+_DOMAIN = r'(?:\.[A-Za-z0-9-]{1,63}){0,8}'
+
+
 class Redactor:
     """Replaces a site's inventory in text with placeholders, for what a part shows on
     GitHub (its job log, reason and summary): each account's root (``<root>``) and its
-    parent (``<home>``), Slurm account (``<account>``) and ssh alias (``<host>``), the
-    login host and user its ssh config names (``add_ssh``: ``<host>``, ``<user>``), each
-    target's partition (``<partition>``) and nodes (``<node>``, host lists expanded, and
-    the nodes a job ran on as they are seen: ``add_nodes``), the login Python, proxy and
-    submit arguments. A whole word only (no letter or digit next to it), the longest
-    first, in any case. A value that is one of our role names (site, target, account,
-    variant, GPU model) says nothing and is kept, as is one the deny list would not hold
-    (``REDACT_MIN``), but a node name (``NODE_MIN``)."""
+    parent (``<home>``), also URL-encoded, Slurm account (``<account>``) and ssh alias
+    (``<host>``), the login host, its ProxyJump hosts and the users its ssh config names
+    (``add_ssh``: ``<host>``, ``<user>``), each target's partition (``<partition>``), the
+    nodes (``<node>``: the config's, the cluster's from ``sinfo`` and those a job ran on,
+    ``add_nodes``; host lists expanded, and a compressed list that names one replaced
+    whole), the login Python, proxy and submit arguments. A host or node takes its
+    domain with it. ANSI escape sequences are removed first. A value of
+    ``SUBSTRING_MIN`` characters or more is replaced wherever it occurs; a shorter one
+    as a whole word only (no letter or digit next to it, but after ``%2F`` or a repr's
+    ``\\n``). The longest first, in any case. A value that is one of our role names
+    (site, target, account, variant, GPU model) says nothing and is kept, as is one the
+    deny list would not hold (``REDACT_MIN``), but a node name (``NODE_MIN``)."""
 
     def __init__(self, site: Site | None = None) -> None:
         self.public: set[str] = set()
@@ -415,9 +435,9 @@ class Redactor:
             self.public.update(str(t.t[k]).lower() for k in ('variant', 'gpu_model') if k in t.t)
         for a in site.accounts.values():
             root = str(a.a['root']).rstrip('/')
-            self.add(root, '<root>')
+            self.add_path(root, '<root>')
             if root.count('/') >= 2:
-                self.add(os.path.dirname(root), '<home>')
+                self.add_path(os.path.dirname(root), '<home>')
             self.add(str(a.a['slurm_account']), '<account>')
             self.add(str(a.a['ssh']), '<host>')
         for t in site.targets.values():
@@ -426,7 +446,7 @@ class Redactor:
                 self.add_nodes(str(n))
         py = str(site.site['login_python'])
         if not py.startswith('/usr/'):
-            self.add(py, '<python>')
+            self.add_path(py, '<python>')
         if site.site.get('proxy'):
             self.add(str(site.site['proxy']), '<proxy>')
         for x in site.site.get('submit_args', []):
@@ -442,30 +462,77 @@ class Redactor:
             self.pairs[v.lower()] = placeholder
             self._rx = None
 
+    def add_path(self, path: str, placeholder: str) -> None:
+        """A path, and its URL-encoded form (``%2Fshared%2F...``)."""
+        self.add(path, placeholder)
+        self.add(path.replace('/', '%2F'), placeholder)
+
     def add_nodes(self, text: str) -> None:
-        """A node name or host list, as sacct or the site config writes it."""
+        """A node name or host list, as sinfo, sacct or the site config writes it."""
         text = text.strip()
         names = hostlist(text)
-        for n in names:
+        for n in names:  # the list itself, in text, goes whole (_HOSTLIST_TOKEN)
             self.add(n, '<node>', NODE_MIN)
-        if names:
-            self.add(text, '<node>')
 
     def add_ssh(self, facts: Mapping[str, str]) -> None:
-        """``ssh -G``'s ``hostname`` and ``user`` of an account's alias."""
+        """``ssh -G``'s ``hostname``, ``user`` and ``proxyjump`` hosts (``[user@]host[:port]``,
+        comma-separated) of an account's alias."""
         if facts.get('hostname'):
             self.add(facts['hostname'], '<host>')
         if facts.get('user'):
             self.add(facts['user'], '<user>')
+        jump = facts.get('proxyjump', '')
+        for hop in jump.split(','):  # ssh's 'none' is a common word: kept
+            hop = hop.strip().removeprefix('ssh://')
+            user, _, host = hop.rpartition('@')
+            if host.startswith('['):  # [v6]:port
+                host = host[1:].split(']', 1)[0]
+            elif host.count(':') == 1:
+                host = host.split(':', 1)[0]
+            self.add(host, '<host>')
+            if user:
+                self.add(user, '<user>')
+
+    def _pattern(self) -> re.Pattern:
+        if self._rx is None:
+            alts = []
+            for k in sorted(self.pairs, key=len, reverse=True):
+                dom = _DOMAIN if self.pairs[k] in ('<node>', '<host>') else ''
+                if len(k) >= SUBSTRING_MIN:
+                    alts.append(re.escape(k) + dom)
+                else:
+                    alts.append(_BEFORE + re.escape(k) + dom + r'(?![A-Za-z0-9])')
+            self._rx = re.compile('|'.join(alts) or r'(?!)', re.IGNORECASE)
+        return self._rx
+
+    def _value(self, m: re.Match) -> str:
+        k = m.group().lower()
+        while k not in self.pairs and '.' in k:  # a host's or node's domain
+            k = k.rsplit('.', 1)[0]
+        return self.pairs.get(k, '<redacted>')
+
+    def _list(self, m: re.Match) -> str:
+        names = hostlist(m.group())
+        return '<node>' if any(self.pairs.get(n.lower()) == '<node>' for n in names) else m.group()
 
     def __call__(self, text: str) -> str:
+        text = ANSI.sub('', text)
         if not self.pairs:
             return text
-        if self._rx is None:
-            keys = sorted(self.pairs, key=len, reverse=True)
-            self._rx = re.compile(r'(?<![A-Za-z0-9])(?:' + '|'.join(re.escape(k) for k in keys) + r')(?![A-Za-z0-9])',
-                                  re.IGNORECASE)
-        return self._rx.sub(lambda m: self.pairs[m.group().lower()], text)
+        return self._pattern().sub(self._value, _HOSTLIST_TOKEN.sub(self._list, text))
+
+    def safe_cut(self, text: str, cut: int) -> int:
+        """``cut``, or the start of a value, host list or escape sequence it would split
+        in ``text`` (raw): where ``text`` may be cut before redacting its head. Pure."""
+        rxs = (ANSI, _HOSTLIST_TOKEN, self._pattern())
+        moved = True
+        while moved:
+            moved = False
+            for rx in rxs:
+                for m in rx.finditer(text, max(0, cut - 4096), min(len(text), cut + 4096)):
+                    if m.start() < cut < m.end():
+                        cut, moved = m.start(), True
+        return cut
 
 
 def main(argv: list[str]) -> int:

@@ -60,6 +60,14 @@ TAG = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
 MIN_FREE_GIB = 50
 MIN_SLURM = (20, 11)
 CANARY_MINUTES = 3
+#: what ``check`` advises for each finding of ``slurmgate.unsafe_dirs``
+UNSAFE = {
+    'writable': 'its group or others may write it: chmod go-w (above the root, or chmod +t)',
+    'owner': 'belongs to another user, who could swap what is in it: choose a root under directories of this '
+             'account or of root',
+    'link': 'is a link: give the root as the directory it points to (realpath)',
+    'missing': 'is missing (before an install: apply the plan)',
+}
 COMMANDS = ('sbatch', 'squeue', 'sacct', 'scancel', 'sinfo', 'rsync')
 GATE = 'releases/hook/bin/ci-slurm-gate'
 #: the boot of a login step, read as stdin's first line by a one-line command (any login
@@ -197,11 +205,12 @@ def findings(site: slurmsite.Site, alias: str, facts: dict) -> list[str]:
     v = facts.get('slurm')
     if not isinstance(v, list) or tuple(v[:2]) < MIN_SLURM:
         out.append(f'Slurm {v}: {".".join(map(str, MIN_SLURM))} or later needed')
-    shared = facts.get('shared')
-    if not isinstance(shared, list):
-        out.append('the gate does not say who may write the root (an older release: apply the plan)')
-    elif shared:
-        out.append(f'its group or others may write {", ".join(map(str, shared))}: chmod go-w')
+    unsafe = facts.get('unsafe')
+    if not isinstance(unsafe, dict):
+        out.append('the gate does not say who could swap the root (an older release: apply the plan)')
+    else:
+        for p, why in sorted(unsafe.items()):
+            out.append(f'{p}: {UNSAFE.get(str(why), why)}')
     if not facts.get('writable'):
         out.append('the root is not writable')
     elif float(facts.get('free_gib') or 0) < MIN_FREE_GIB:

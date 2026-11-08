@@ -663,19 +663,31 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
        What a part shows on GitHub (the job's log it relays, the gate's and ssh's error
        text, its reason and summary) passes a redactor built from the site config
        (`slurmsite.Redactor`): each account's root (`<root>`) and its parent (`<home>`),
-       Slurm account (`<account>`), ssh alias and the login host and user its ssh config
-       names (`ssh -G`: `<host>`, `<user>`), the partitions (`<partition>`), the nodes the
-       config names and those a job ran on (`<node>`, host lists expanded), the login
-       Python, proxy and extra `sbatch` arguments. Whole words only, in any case; a value
-       equal to a role name of ours (site, target, account, variant, GPU model) or one the
-       deny list would not hold (under 4 characters or a common word; nodes from 2) is
-       kept. The log is redacted by whole lines, so that no name splits across two reads.
-       An account whose ssh config `ssh -G` cannot read ends the part `unavailable`
-       before a job. The record on the driver host keeps everything as it was.
+       also URL-encoded, Slurm account (`<account>`), ssh alias and the login host,
+       ProxyJump hosts and users its ssh config names (`ssh -G`: `<host>`, `<user>`), the
+       partitions (`<partition>`), the nodes (`<node>`: the config's, the cluster's whole
+       node lists from `sinfo` through the gate's `nodes`, cached 1 h, and those a job ran
+       on; host lists expanded, and a compressed list in text such as a pending reason's
+       `UnavailableNodes:` replaced whole), the login Python, proxy and extra `sbatch`
+       arguments. A host or node takes its domain with it, and ANSI escape sequences are
+       removed first. A value of 8 characters or more is replaced wherever it occurs; a
+       shorter one as a whole word only (also after `%2F` or a repr's `\n`), in any case. A
+       value equal to a role name of ours (site, target, account, variant, GPU model) or
+       one the deny list would not hold (under 4 characters or a common word; nodes from
+       2) is kept. Text is redacted before it is cut. The log is redacted by whole lines,
+       a line over 64 KiB never cut through a value, so that no name splits across two
+       reads. An account whose ssh config `ssh -G` cannot read, or a cluster none of whose
+       login hosts gives its node lists (none cached either), ends the part `unavailable`
+       before a job; an error the driver did not expect ends it `unavailable` (`driver:
+       <type>`), its traceback only in the record. The record on the driver host keeps
+       everything as it was. The files a part fetches back (`part/` into `CI_PART_DIR`,
+       `tmp/` into `RUNNER_TEMP`: results, coverage data, the command's own logs) are
+       **not** redacted: they are the consumer's, and a consumer that uploads or prints
+       them publishes whatever paths and host names they hold (consumers §7).
     5. **The gate.** The only command a cluster key runs: its `authorized_keys` line is
        `restrict` and forces `<root>/ci-runners/releases/hook/bin/ci-slurm-gate`. Its verbs:
        `stage` (a restricted `rsync --server` into `work/` only), `submit`, `status`, `log`,
-       `cancel`, `fetch`, `ledger`, `reap`, `check`. It validates each request against the
+       `cancel`, `fetch`, `ledger`, `nodes` (`sinfo`'s node lists, for the redactor), `reap`, `check`. It validates each request against the
        cluster-side copy of the account's entry (targets, caps, minutes) and exits; it
        keeps nothing running.
     6. **The site config** (`etc/slurm/<site>.toml` on each driver host, mode 600; never in
@@ -702,9 +714,13 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
          `sinfo`, `rsync` and the login Python on the login host; Slurm ≥ 20.11; per
          target: the partition up, the account's groups allowed, its association with
          enough cards, CPUs and nodes, `sbatch --test-only` accepting the rendered
-         request; the root writable with 50 GiB free, and neither it nor its
-         `ci-runners` tree writable by its group or others (`prepare` in `apply` refuses
-         such a root too); the egress mode's prerequisites;
+         request; the root writable with 50 GiB free; nothing another user could swap
+         it with (`slurmgate.unsafe_dirs`): the root and its `ci-runners` tree the
+         account's own directories, not links, that its group and others may not write,
+         and every directory above it up to `/` (as written and as resolved) the
+         account's or root's, writable by others only with the sticky bit (`prepare` in
+         `apply` refuses such a root too; mode bits only, not ACLs); the egress mode's
+         prerequisites;
        - `plan` prints every change (the root's directories, mode 700; the release copied
          from the driver, of the tag the driver runs; the account's cluster-side entry; the
          key line; each env build; the canary's jobs and their cost), and changes nothing;
@@ -1453,7 +1469,7 @@ bound).
 | T17 | (3090 hosts) A job plants a link in the shared ticket queue (a `seq`, a ticket, a holder record, a temp name or a lock file there) so that a script of the other account writes, creates or truncates a file the link names, or blocks on a FIFO it reads. | the queue directory is not sticky and both accounts write in it (decision 12.9; lead, 2026-11-07), so no script of either account writes or creates through a link there. `slots.py` creates each file exclusively under a random name (`O_EXCL`, `O_NOFOLLOW`) and renames it over its name (a rename replaces a link, never its target). A FIFO is covered on each side: `slots.py` opens `seq.lock` and `take.lock` `O_NOFOLLOW` and `O_NONBLOCK` and uses them only if `fstat` shows a regular file, and reads `seq`, tickets and holder records the same way, so a FIFO there is refused at once; brainspike's `ci_slot.sh` (since ceb68a77) writes through exclusive temporaries renamed into place, exits 2 on a linked queue directory or a `seq.lock` that is not a regular file, and deletes a ticket that is a link or not a regular file as malformed, and (since a546b92f) opens every entry of the queue `O_NOFOLLOW` and `O_NONBLOCK` and checks it with `fstat` before it reads, locks or writes, creating `seq.lock` with `O_EXCL`. The plan checks that the queue is a root-owned directory, not a link. Residual: a job can delete or forge tickets and holder records, which disturbs the queueing only (T16), never a file of a local account; and a FIFO or a directory a job leaves at `seq` or `seq.lock` makes the other side refuse or fail until it is removed, never hang. |
 | T18 | (3090 hosts) A job reads other accounts' files that are readable by everyone, or their processes' command lines in `/proc`: temp files in `/tmp`, `/var/tmp` and `/dev/shm` left with a 002 or 022 umask (copies of private code, logs, notes), and other people's directories on the data disks. Measured before any job ran (2026-11-07): tens of thousands of the local account's temp files on 3090b, other people's on 3090a, and other people's data-disk directories on both. | the CI account's user manager runs in its own mount namespace (decision 12.16, §5.3): private `/tmp` and `/var/tmp`, an empty `/dev/shm`, and `/home` and the data-disk root emptied but for the account's own `home` and `data`; only brainspike's six shared lock files and the slot queue are bound in; `/proc` shows only the account's own processes (`ProtectProc=invisible`; lead, 2026-11-07). No local account's file modes change. The runners stay stopped until the drop-in is applied on the host, and a leak check inside a live job on each host (no other account's temp or data file readable) comes before any other job. Residual: files that other accounts leave readable elsewhere on the root disk (outside `/home`, the temp directories and the data disk) stay readable, as for any local user; system directories hold no user data. |
 | T19 | (the `slurm` class, 14) A job reads a cluster key from the CI account's `etc` (job code runs as that account, T13) and uses the cluster account. | the key's forced command runs only the gate: no shell, no forward, `rsync` only into `work/`; private repositories of org members only; the class is opt-in per repository; the budget ledger | `submit` runs any code as the cluster account by design, so a job can read everything that account holds on the cluster, send it out through its log or artifacts, and submit billed jobs from inside a job. Exit path: a dedicated cluster account (14.12). |
-| T20 | (14) Other users of the cluster reach our files or a forward, or read the site's names in our public logs. | the account's root and every part directory mode 700; `check` and `apply` refuse a root its group or others may write; what a part shows on GitHub is redacted (14.4); a part's temporary files on a node only inside a 700 directory of its own; the build's forward is a Unix socket in a 700 directory behind a relay that accepts only the build's random credential | a node's `/tmp` and process table are shared with other users' jobs, as for any user of the site |
+| T20 | (14) Other users of the cluster reach our files or a forward, or read the site's names in our public logs. | the account's root and every part directory mode 700; `check` and `apply` refuse a root another user could swap (its mode, a link, the directories above it); what a part shows on GitHub is redacted (14.4); a part's temporary files on a node only inside a 700 directory of its own; the build's forward is a Unix socket in a 700 directory behind a relay that accepts only the build's random credential | a node's `/tmp` and process table are shared with other users' jobs, as for any user of the site |
 | T21 | (14) Runaway cost: a lost driver, a stuck job, a retry loop. | every job has `--time`; the reaper cancels a job whose GitHub job is gone; pending is bounded; one retry (§4.4); the daily and monthly caps (14.7) | job code (T19) can spend up to the site's association limits |
 | T22 | (14) A node silently corrupts multi-card results (peer copies that read zeros). | the P2P self-test before every two-card part (12.6); a target's `max_cards` from its canary | – |
 

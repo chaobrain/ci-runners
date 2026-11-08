@@ -230,7 +230,13 @@ class Redact(unittest.TestCase):
         cases = [
             ('/shared/fs/acct1/ci-runners/envs/p-cpu', '<root>/ci-runners/envs/p-cpu'),
             ('/shared/fs/other', '<home>/other'),
-            ('cd /shared/fs/acct10', 'cd <home>/acct10'),  # a whole name only
+            ('cd /shared/fs/acct10', 'cd <root>0'),  # a long value: wherever it occurs
+            ('x%2Fshared%2Ffs%2Facct1%2Fy', 'x<root>%2Fy'),  # URL-encoded
+            ('home%2Flabuser %2flabuser \\nlabuser \\tlabuser', 'home%2F<user> %2f<user> \\n<user> \\t<user>'),
+            ('\x1b[32mlabuser\x1b[0m xlab-acct1', '<user> x<account>'),  # no escape hides a value's start
+            ('node01.hpc.lab.example login7.lab.example.', '<node> <host>.'),  # with its domain
+            ('ReqNodeNotAvail, UnavailableNodes:node[01-02]', 'ReqNodeNotAvail, UnavailableNodes:<node>'),
+            ('test[1-2] node[02-03]', 'test[1-2] node[02-03]'),  # names no known node
             ('-A lab-acct1 -p gpu-partition-a -w node01', '-A <account> -p <partition> -w <node>'),
             ('labuser@login7.lab.example via cluster1-acct1', '<user>@<host> via <host>'),
             ('LabUser on NODE01', '<user> on <node>'),  # in any case
@@ -243,6 +249,24 @@ class Redact(unittest.TestCase):
         ]
         for text, want in cases:
             self.assertEqual(r(text), want, text)
+
+    def test_proxyjump_hosts_and_users(self):
+        r = ss.Redactor()
+        r.add_ssh({'hostname': 'login9.lab.example', 'user': 'labuser', 'proxyjump': 'jumper@gate.lab.example:2222,ssh://hop2.example,[fd00::7]:22'})
+        self.assertEqual(r('login9.lab.example gate.lab.example hop2.example fd00::7 jumper'), '<host> <host> <host> <host> <user>')
+        r = ss.Redactor()
+        r.add_ssh({'hostname': 'login7', 'user': 'labuser', 'proxyjump': 'none'})
+        self.assertEqual(r('none'), 'none')
+
+    def test_a_cut_never_splits_a_value(self):
+        r = ss.Redactor(self.site())
+        text = 'aaaa lab-acct1 bbbb'
+        for cut in range(len(text) + 1):
+            c = r.safe_cut(text, cut)
+            self.assertEqual(r(text[:c]) + r(text[c:]), r(text), cut)
+        self.assertEqual(r.safe_cut(text, 7), 5)
+        self.assertEqual(r.safe_cut('x \x1b[32mz', 5), 2)  # nor an escape sequence
+        self.assertEqual(r.safe_cut('x node[01-02] y', 9), 2)  # nor a host list
 
     def test_the_nodes_a_job_ran_on_are_added_as_seen(self):
         r = ss.Redactor(self.site())

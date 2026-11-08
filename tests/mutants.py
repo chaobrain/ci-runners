@@ -134,6 +134,11 @@ MUTANTS = [
     (SE, "    built = dict((kept or {}).get('variants', {}))", '    built = {}', [f'{TSE}.Env.test_a_subset_run_keeps_the_other_variants_builds_in_the_kept_file']),
     # RUN-9h: what a part shows on GitHub is redacted; a root others may write is refused; the canary at its --time
     # RUN-9h review: redact, then cut; the cluster's node lists; the directories above the root; the nits
+    # one env build at a time per base; a conda create that leaves no python fails
+    (SL, '        fcntl.flock(block, fcntl.LOCK_EX)', '        pass', [f'{TSE}.Env.test_builds_of_two_projects_run_one_at_a_time']),
+    (SL, "                    if 'create' in argv and '--prefix' in argv:", '                    if False:', [f'{TSE}.Env.test_a_conda_create_that_leaves_no_python_fails_the_build']),
+    (SL, '                        if not os.access(py, os.X_OK):', '                        if False:', [f'{TSE}.Env.test_a_conda_create_that_leaves_no_python_fails_the_build']),
+    (SL, '                        if not os.access(py, os.X_OK):', '                        if True:', [f'{TSE}.Env.test_a_conda_create_that_leaves_no_python_fails_the_build']),
     # the env build reads none of the account's own conda and pip settings
     (SL, "    env = {'PATH': '/usr/bin:/bin', 'HOME': home,", "    env = {'PATH': '/usr/bin:/bin', 'HOME': os.path.expanduser('~'),", [f'{TSE}.Env.test_the_accounts_own_conda_and_pip_settings_do_not_reach_the_build']),
     (SL, "           'PIP_CONFIG_FILE': os.devnull, 'PYTHONNOUSERSITE': '1',", "           'PYTHONNOUSERSITE': '1',", [f'{TSE}.Env.test_the_accounts_own_conda_and_pip_settings_do_not_reach_the_build']),
@@ -290,10 +295,10 @@ MUTANTS = [
     (SL, '                if i < len(kind) - keep and now - since >= grace:', '                if i < len(kind) - keep:', [f'{TSE}.Env.test_old_builds_are_removed_but_linked_ones_and_those_unlinked_within_the_grace']),
     (SL, '                    open(mark, \'w\').close()\n                    since = now', '                    since = now', [f'{TSE}.Env.test_old_builds_are_removed_but_linked_ones_and_those_unlinked_within_the_grace']),
     (SE, "'grace': grace(site, alias)}", "'grace': 0}", [f'{TSE}.Env.test_old_builds_are_removed_but_linked_ones_and_those_unlinked_within_the_grace']),
-    (SL, "            if not _conda_ok(conda):", '            if False:', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
+    (SL, "        if not _conda_ok(conda):", '        if False:', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
     (SL, ' and os.path.isfile(os.path.join(conda, CONDA_DONE))', '', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
-    (SL, '                shutil.rmtree(conda, ignore_errors=True)  # a partial install', '                pass', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
-    (SL, '                open(os.path.join(conda, CONDA_DONE), \'w\').close()', '                pass', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
+    (SL, '            shutil.rmtree(conda, ignore_errors=True)  # a partial install', '            pass', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
+    (SL, '            open(os.path.join(conda, CONDA_DONE), \'w\').close()', '            pass', [f'{TSE}.Env.test_without_conda_the_pinned_installer_goes_first']),
     (SL, "                    if r.returncode != 0 or not re.fullmatch(r'[0-9a-f]{40}', got[name]):", '                    if False:', [f'{TSE}.Env.test_an_upstream_without_a_commit_fails_the_build']),
     (SL, "                _step(['nice', '-n', '10', *argv], env)", '                _step(argv, env)', [f'{TSE}.Env.test_a_build_through_the_tunnel_links_each_variant_and_leaves_nothing_listening']),
     (SL, "        self.srv.bind(('127.0.0.1', 0))", "        self.srv.bind(('0.0.0.0', 0))", [f'{TSE}.Relay.test_only_the_builds_secret_passes_and_the_header_is_dropped']),
@@ -302,7 +307,6 @@ MUTANTS = [
     (SL, "            if _peer_uid(c) not in (None, os.getuid()) or", "            if False or", [f'{TSE}.Relay.test_another_users_connection_is_closed_before_it_takes_a_slot']),
     (SL, "int(r[2].rsplit(':', 1)[1], 16) == mine:", "True:", [f'{TSE}.Relay.test_another_users_connection_is_closed_before_it_takes_a_slot']),
     (SL, "                c.settimeout(max(0.01, deadline - time.monotonic()))", "                c.settimeout(RELAY_IDLE)", [f'{TSE}.Relay.test_idle_and_surplus_connections_are_closed_and_close_ends_every_tunnel']),
-    (SL, "            fcntl.flock(clock, fcntl.LOCK_EX)  # another", "            (lambda *a: None)(clock, fcntl.LOCK_EX)  # another", [f'{TSE}.Env.test_builds_of_two_projects_install_conda_one_at_a_time']),
     (SL, ' or not self.slots.acquire(blocking=False):', ':', [f'{TSE}.Relay.test_idle_and_surplus_connections_are_closed_and_close_ends_every_tunnel']),
     (SL, '                c.settimeout(max(0.01, deadline - time.monotonic()))', '                pass', [f'{TSE}.Relay.test_idle_and_surplus_connections_are_closed_and_close_ends_every_tunnel']),
     (SL, '            for s in self.live:\n                try:\n                    s.shutdown(socket.SHUT_RDWR)', '            for s in ():\n                try:\n                    s.shutdown(socket.SHUT_RDWR)', [f'{TSE}.Relay.test_idle_and_surplus_connections_are_closed_and_close_ends_every_tunnel']),

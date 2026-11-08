@@ -38,6 +38,9 @@ def probe(host):
 CONDA = r'''
 args = sys.argv[1:]
 d = args[args.index('--prefix') + 1]
+if 'no-python' in args:  # a corrupt package, reported, yet exit 0
+    os.makedirs(d)
+    sys.exit(0)
 os.makedirs(os.path.join(d, 'bin'))
 py = os.path.join(d, 'bin', 'python')
 with open(py, 'w') as f:
@@ -464,22 +467,38 @@ class Env(Site):
         with mock.patch.object(slurmenv, 'SOCKET_MAX', 20), self.assertRaisesRegex(ss.SetupError, 'Unix socket path'):
             self.env()
 
-    def test_builds_of_two_projects_install_conda_one_at_a_time(self):
+    def test_builds_of_two_projects_run_one_at_a_time(self):
         import fcntl
         inst = self.base / 'run' / 'Mf.sh'
         inst.write_text('#!/bin/sh\nmkdir -p "$3/bin"\nprintf "#!/bin/sh\\n" > "$3/bin/conda"\nchmod 755 "$3/bin/conda"\n')
         done = []
-        with open(self.base / '.conda.lock', 'a') as held:
-            fcntl.flock(held, fcntl.LOCK_EX)  # another project's build, installing conda
+        with open(self.envs / slurmlogin.BUILD_LOCK, 'a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)  # another project's build: conda and its package cache are shared
             t = threading.Thread(target=lambda: done.append(slurmlogin.build(
                 str(self.base), 'q', '20261108T120000Z', [one(['cpu'], [['mkdir', str(self.envs / 'q-20261108T120000Z')]])],
                 {}, {}, 'direct', installer=str(inst))))
             t.start()
             time.sleep(1.0)
-            self.assertFalse((self.base / 'conda').exists())  # it waits for the lock
+            self.assertFalse((self.base / 'conda').exists())  # it waits for the lock: no install
+            self.assertFalse((self.envs / 'q-20261108T120000Z').exists())  # and no step
         t.join(30)
         self.assertEqual(done[0]['links'], ['q-cpu'])
         self.assertTrue((self.base / 'conda' / slurmlogin.CONDA_DONE).exists())
+
+    def test_a_conda_create_that_leaves_no_python_fails_the_build(self):
+        self.conda()
+        d = self.envs / 'p-20261108T120000Z'
+        conda = str(self.base / 'conda' / 'bin' / 'conda')
+        mark = self.base / 'run' / 'next-step'
+        steps = [[conda, 'create', '--yes', '--prefix', str(d), 'python=3.12', 'no-python'], ['touch', str(mark)]]
+        with self.assertRaisesRegex(slurmlogin.LoginError, 'conda create exited 0 but left no .*/bin/python'):
+            slurmlogin.build(str(self.base), 'p', '20261108T120000Z', [one(['cpu'], steps)], {}, {}, 'direct')
+        self.assertFalse(mark.exists())  # no later step runs
+        self.assertFalse(os.path.lexists(d))
+        slurmlogin.build(str(self.base), 'p', '20261108T120001Z',  # a create that makes its python goes on
+                         [one(['cpu'], [[conda, 'create', '--prefix', str(self.envs / 'p-20261108T120001Z')],
+                                        ['touch', str(mark)]])], {}, {}, 'direct')
+        self.assertTrue(mark.exists())
 
     def test_an_upstream_without_a_commit_fails_the_build(self):
         self.conda()

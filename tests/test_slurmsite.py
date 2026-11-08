@@ -243,6 +243,7 @@ class Redact(unittest.TestCase):
             ('xnode01 node01-ib node01_x gpu-x', 'xnode01 <node>-ib <node>_x gpu-x'),
             ('-A lab-acct1 -p standard -w node01', '-A <account> -p <partition> -w <node>'),
             ('labuser@login7.lab.example via cluster1-acct1', '<user>@<host> via <host>'),
+            ('cluster1-acct1.ib.lab.example:22', '<host>:22'),  # a host with a domain the config does not hold
             ('LabUser on NODE01', '<user> on <node>'),  # in any case
             ('node011 xnode01 node01x', 'node011 xnode01 node01x'),
             ('zq08 zq09 zq10 zq3 zq[08-10,3] zq11', '<node> <node> <node> <node> <node> zq11'),

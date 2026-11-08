@@ -207,7 +207,7 @@ MUTANTS = [
      [f'{TX}.TwoAccounts.test_a_missing_shared_file_in_a_sticky_directory_is_not_created']),
     (SET, "    files = [*locks.paths(lock), locks.probe_path(lock)] if lock else []", "    files = [*locks.paths(lock)] if lock else []",
      [f'{TU}.Shared.test_the_tmpfiles_d_file', f'{TU}.Shared.test_the_private_drop_in']),
-    (LCK, "            if mode == 'l' and self._normal_shared_in():", "            if False:",
+    (LCK, "            if mode == 'l' and self._normal_shared_in(t0):", "            if False:",
      [f'{TX}.LockInterop.test_light_enters_beside_a_normal_shared_holder_only']),
     (LCK, "                self._flock(ts, fcntl.LOCK_EX, t0)\n", "",
      [f'{TX}.LockInterop.test_a_waiting_exclusive_request_keeps_new_shared_ones_out']),

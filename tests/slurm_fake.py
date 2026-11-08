@@ -313,6 +313,9 @@ def ssh(args: list[str]) -> int:
     host, rest = args[i], args[i + 1:]
     with open(os.path.join(d, 'calls.log'), 'a') as f:
         f.write(json.dumps([host, ' '.join(rest)]) + '\n')
+        for k in ('GH_TOKEN', 'GITHUB_TOKEN'):  # what ssh could send on (SendEnv)
+            if k in os.environ:
+                f.write(json.dumps(['env', f'{k}={os.environ[k]}']) + '\n')
     h = _load(os.path.join(d, 'hosts.json'), {}).get(host)
     if h is None or h.get('down'):
         print(f'ssh: connect to host {host} port 22: Connection refused', file=sys.stderr)

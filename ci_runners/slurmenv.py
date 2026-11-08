@@ -71,6 +71,12 @@ def installer(cache: str, opener: Callable = urllib.request.urlopen) -> str:
     return path
 
 
+def grace(site, alias: str) -> int:
+    """Seconds a build no link holds is kept: the account's longest part, its margin and an
+    hour (a job resolves its env's link when it starts)."""
+    return 60 * (max(site.targets[t].max_minutes for t in site.accounts[alias].a['targets']) + 60)
+
+
 def env(ctx: Ctx, name: str, alias: str, project: str, via: str, *, variants: list[str] = (), refresh: bool = False,
         tunnel_port: int = 0, call: Callable | None = None, opener: Callable = urllib.request.urlopen) -> int:
     site = ctx.account(name, alias)
@@ -108,13 +114,13 @@ def env(ctx: Ctx, name: str, alias: str, project: str, via: str, *, variants: li
         local = installer(os.path.join(ctx.data, 'ci-runners', 'cache'), opener)
         inst = f'{base}/run/{MINIFORGE[0]}'
         r = ctx.run([ctx.rsync, '-t', '--chmod=go=', '-e', shlex.join(slurmsetup.ssh_via(ctx.ssh, via)[:-1]), local,
-                     f'{via}:{inst}'], capture_output=True, timeout=1800)
+                     f'{via}:{inst}'], capture_output=True, timeout=1800, env=slurmsetup.ssh_env())
         if r.returncode != 0:
             raise SetupError(f'the installer copy: rsync exit {r.returncode}')
     args = {'base': base, 'project': project, 'stamp': stamp, 'steps': steps, 'files': files,
             'record': {'repository': proj.repository, 'sha': sha, 'upstream_names': [u.name for u in spec.upstream]},
             'variants': list(variants) or own, 'egress': mode, 'proxy': str(site.site.get('proxy', '')),
-            'installer': inst}
+            'installer': inst, 'grace': grace(site, alias)}
     opts: tuple[str, ...] = ()
     if mode == 'tunnel':
         sock = f'{base}/run/egress-{stamp}.sock'

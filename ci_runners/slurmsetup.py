@@ -243,6 +243,15 @@ def ssh_via(ssh: str, via: str) -> list[str]:
     return [ssh, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', via]
 
 
+#: the variables an ssh or rsync child never gets: ssh may send the environment (``SendEnv``)
+SECRET_VARS = ('GH_TOKEN', 'GITHUB_TOKEN')
+
+
+def ssh_env() -> dict[str, str]:
+    """This process's environment without ``SECRET_VARS``: for ssh and rsync children."""
+    return {k: v for k, v in os.environ.items() if k not in SECRET_VARS}
+
+
 def login_call(site: slurmsite.Site, via: str, call: str, args: dict, *, ssh: str, run: Callable,
                timeout: float = 600, opts: tuple[str, ...] = (), stream: bool = False) -> dict:
     """``slurmlogin.<call>(**args)`` on the login host through ``via``, with more ssh
@@ -260,7 +269,7 @@ def login_call(site: slurmsite.Site, via: str, call: str, args: dict, *, ssh: st
     try:
         argv = ssh_via(ssh, via)
         r = run([*argv[:-1], *opts, argv[-1], cmd], input=data.encode(), stdout=subprocess.PIPE,
-                stderr=None if stream else subprocess.PIPE, timeout=timeout)
+                stderr=None if stream else subprocess.PIPE, timeout=timeout, env=ssh_env())
     except subprocess.TimeoutExpired:
         raise SetupError(f'{call} on {via}: no answer in {timeout:g} s') from None
     if r.returncode != 0:

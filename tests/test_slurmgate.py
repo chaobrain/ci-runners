@@ -323,6 +323,8 @@ class Jobs(Cluster):
         cmd = ('echo "out $CI_PROJECT $PROJECT_VAR $CUDA_DEVICE_ORDER"; test ! -e "$HOME/.never"; '
                'test "$GITHUB_WORKSPACE" = "$PWD"; echo r > "$CI_RESULTS_DIR/r.xml"; echo t > "$RUNNER_TEMP/t.txt"; echo "path $PATH"; '
                'echo "tmp $TMPDIR"; env | grep -c "^FAKE_SLURM=" || true; test -d "$TMPDIR" && pwd')
+        (self.base / 'envs' / 'p-cpu').rename(self.base / 'envs' / 'p-20261108T120000Z')
+        (self.base / 'envs' / 'p-cpu').symlink_to('p-20261108T120000Z')
         j = self.submit(command=cmd)
         st = self.wait_end()
         self.assertEqual((st['job'], st['state'], st['exit']['rc']), (j['job'], 'COMPLETED', 0))
@@ -335,7 +337,7 @@ class Jobs(Cluster):
             log += chunk
         text = log.decode()
         self.assertIn('out p v PCI_BUS_ID', text)
-        self.assertIn(f'path {self.base}/envs/p-cpu/bin:', text)
+        self.assertIn(f'path {self.base}/envs/p-20261108T120000Z/bin:', text)  # the build: a relink misses the job
         self.assertIn('\n0\n', text)  # --export=NONE: nothing of the submitting environment
         self.assertIn(f'{self.base}/work/{KEY}/ws', text)
         tmp = text.split('tmp ', 1)[1].split('\n', 1)[0]

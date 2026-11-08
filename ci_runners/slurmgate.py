@@ -518,7 +518,7 @@ def job(d: str) -> int:
     base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(d)))))
     account = load_account(base)
     t = account['targets'][req['target']]
-    envd = env_dir(base, req['project'], str(t['variant']))
+    envd = os.path.realpath(env_dir(base, req['project'], str(t['variant'])))  # a later build's relink: not in this job
     tmp = tempfile.mkdtemp(prefix='ci-')
     try:
         env = {k: v for k, v in os.environ.items() if k.startswith('SLURM_') or k in KEEP_VARS}

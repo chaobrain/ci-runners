@@ -12,6 +12,7 @@ import pathlib
 import socket
 import sys
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -44,7 +45,7 @@ with open(py, 'w') as f:
 os.chmod(py, 0o755)
 got = probe('conda.anaconda.org')
 with open(os.path.join(d, 'conda.log'), 'w') as f:
-    f.write(' '.join(args) + '\n' + got + '\n')
+    f.write(' '.join(args) + '\n' + got + '\n' + f'nice {os.nice(0)}\n')
 sys.exit(0 if got.endswith(('200 Connection established', 'direct')) else 1)
 '''
 PY = r'''
@@ -125,9 +126,78 @@ class Relay(unittest.TestCase):
             self.assertEqual(ask(f'Proxy-Authorization: {good}\r\n'.encode()),
                              b'HTTP/1.1 200 Connection established\r\n\r\nhello')
             self.assertEqual(got, [b'CONNECT pypi.org:443 HTTP/1.1\r\nHost: pypi.org:443\r\n\r\n'])
+            self.assertEqual(r.srv.getsockname()[0], '127.0.0.1')  # the login host's loopback only
             r.close()
             with self.assertRaises(OSError):
                 socket.create_connection(('127.0.0.1', r.port), timeout=5)
+
+    def relay(self):
+        import tempfile
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = os.path.join(d.name, 's.sock')
+        got = []
+        up = socket.socket(socket.AF_UNIX)
+        up.bind(path)
+        up.listen(8)
+        self.addCleanup(up.close)
+
+        def serve():
+            while True:
+                try:
+                    c, _ = up.accept()
+                except OSError:
+                    return
+                got.append(c)  # a tunnel that stays open
+        threading.Thread(target=serve, daemon=True).start()
+        r = slurmlogin.Relay('s3cret', path)
+        self.addCleanup(r.close)
+        return r, got
+
+    def test_only_connect_passes_and_a_long_head_is_refused(self):
+        r, got = self.relay()
+        good = 'Basic ' + base64.b64encode(b'ci:s3cret').decode()
+        with socket.create_connection(('127.0.0.1', r.port), timeout=10) as s:
+            s.sendall(f'GET http://pypi.org/ HTTP/1.1\r\nHost: pypi.org\r\nProxy-Authorization: {good}\r\n\r\n'
+                      'GET http://pypi.org/x HTTP/1.1\r\nProxy-Authorization: x\r\n\r\n'.encode())
+            self.assertTrue(s.recv(4096).startswith(b'HTTP/1.1 405'))  # a plain request could keep the connection
+            self.assertEqual(s.recv(4096), b'')
+        with socket.create_connection(('127.0.0.1', r.port), timeout=10) as s:
+            s.sendall(b'CONNECT pypi.org:443 HTTP/1.1\r\nX: ' + b'a' * slurmlogin.RELAY_HEAD)
+            self.assertEqual(s.recv(4096), b'')  # closed, nothing passed
+        self.assertEqual(got, [])
+
+    def test_idle_and_surplus_connections_are_closed_and_close_ends_every_tunnel(self):
+        good = 'Basic ' + base64.b64encode(b'ci:s3cret').decode()
+        with mock.patch.object(slurmlogin, 'RELAY_CONNS', 2), mock.patch.object(slurmlogin, 'RELAY_IDLE', 2.0):
+            r, got = self.relay()
+            idle = [socket.create_connection(('127.0.0.1', r.port), timeout=10) for _ in range(2)]
+            time.sleep(0.3)
+            with socket.create_connection(('127.0.0.1', r.port), timeout=10) as s:
+                t0 = time.monotonic()
+                self.assertEqual(s.recv(4096), b'')  # beyond the cap: closed at once
+                self.assertLess(time.monotonic() - t0, 1.0)
+            for s in idle:
+                with s:
+                    self.assertEqual(s.recv(4096), b'')  # no head within RELAY_IDLE: closed
+            time.sleep(0.3)
+            tunnel = socket.create_connection(('127.0.0.1', r.port), timeout=10)
+            self.addCleanup(tunnel.close)
+            tunnel.sendall(f'CONNECT pypi.org:443 HTTP/1.1\r\nProxy-Authorization: {good}\r\n\r\n'.encode())
+            for _ in range(100):
+                if got:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(len(got), 1)
+            time.sleep(2.5)
+            self.assertEqual(len(r.live), 2)  # a tunnel has no idle limit: both its sockets live
+            r.close()
+            self.assertEqual(tunnel.recv(4096), b'')  # close ends the tunnel too
+            for _ in range(100):
+                if not r.live:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(r.live, set())
 
 
 class Env(Site):
@@ -146,6 +216,7 @@ class Env(Site):
         c.parent.mkdir(parents=True)
         c.write_text(fake_conda())
         c.chmod(0o755)
+        (self.base / 'conda' / slurmlogin.CONDA_DONE).touch()
 
     def env(self, **kw) -> tuple[int, str]:
         ctx, out = self.ctx()
@@ -167,6 +238,7 @@ class Env(Site):
         conda_log = (d / 'conda.log').read_text()
         self.assertIn('--override-channels -c conda-forge python=3.12 pip nest-simulator=3.10', conda_log)
         self.assertIn('200 Connection established', conda_log)  # its egress: relay, socket, the driver's forward
+        self.assertIn(f'nice {min(19, os.nice(0) + 10)}\n', conda_log)  # the steps run at nice 10
         self.assertIn('-m pip install\nHTTP/1.1 200 Connection established\nnumpy\n', (d / 'pip.log').read_text())
         heads = self.egress.heads
         self.assertEqual([h.split('\r\n')[0] for h in heads], ['CONNECT conda.anaconda.org:443 HTTP/1.1',
@@ -179,7 +251,7 @@ class Env(Site):
         kept = json.loads((self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'env-acct1-p.json').read_text())
         self.assertEqual((kept['spec'], kept['files'], kept['build']), (SPEC, {'requirements.txt': 'numpy\n'}, build))
         calls = (self.d / 'ssh' / 'calls.log').read_text()
-        self.assertNotIn('tok', calls)  # neither the token nor the secret is in an argv
+        self.assertNotIn('tok', calls)  # the token is in no argv and no ssh child's environment
         self.assertNotIn(self.base.name + '/run/egress', ''.join(h for h in heads))
 
     def test_a_failed_step_leaves_the_links_and_removes_its_build(self):
@@ -193,15 +265,25 @@ class Env(Site):
         self.assertEqual(sorted(n for n in os.listdir(self.envs) if n.startswith('p-2')), [before['p-cpu']])
         self.assertEqual(os.listdir(self.base / 'run'), [])
 
-    def test_old_builds_are_removed_but_linked_ones(self):
+    def test_old_builds_are_removed_but_linked_ones_and_those_unlinked_within_the_grace(self):
         self.conda()
-        for stamp in ('20260101T000000Z', '20260102T000000Z', '20260103T000000Z', '20260104T000000Z'):
+        old = time.time() - slurmenv.grace(self.site(), 'acct1') - 60
+        for stamp in ('20260101T000000Z', '20260102T000000Z', '20260103T000000Z', '20260104T000000Z',
+                      '20260105T000000Z'):
             (self.envs / f'p-{stamp}').mkdir()
+            if stamp != '20260103T000000Z':  # unlinked for longer than any job runs, but this one
+                (self.envs / f'p-{stamp}' / slurmlogin.UNLINKED).touch()
+                os.utime(self.envs / f'p-{stamp}' / slurmlogin.UNLINKED, (old, old))
         os.symlink('p-20260101T000000Z', self.envs / 'p-other')  # a variant this account no longer builds
-        self.env()
+        rc, said = self.env()
         left = sorted(n for n in os.listdir(self.envs) if n.startswith('p-2'))
-        self.assertEqual(left[:3], ['p-20260101T000000Z', 'p-20260103T000000Z', 'p-20260104T000000Z'])
-        self.assertEqual(len(left), 4)
+        self.assertEqual(left[:4], ['p-20260101T000000Z', 'p-20260103T000000Z', 'p-20260104T000000Z',
+                                    'p-20260105T000000Z'])
+        self.assertEqual(len(left), 5)
+        self.assertIn("removed ['p-20260102T000000Z']", said)
+        self.assertTrue((self.envs / 'p-20260103T000000Z' / slurmlogin.UNLINKED).exists())  # its grace starts now
+        self.assertFalse((self.envs / left[-1] / slurmlogin.UNLINKED).exists())  # the new build is linked
+        self.assertGreaterEqual(slurmenv.grace(self.site(), 'acct1'), 60 * 60)
 
     def test_without_conda_the_pinned_installer_goes_first(self):
         script = (f'#!/bin/sh\nmkdir -p "$3/bin"\ncat > "$3/bin/conda" <<\'EOF\'\n{fake_conda()}\nEOF\n'
@@ -212,10 +294,16 @@ class Env(Site):
         def opener(url, timeout):
             fetched.append(url)
             return io.BytesIO(script.encode())
+        partial = self.base / 'conda' / 'bin' / 'conda'  # an install that stopped half way
+        partial.parent.mkdir(parents=True)
+        partial.write_text('#!/bin/sh\nexit 1\n')
+        partial.chmod(0o755)
+        (self.base / 'conda' / 'stale').touch()
         with mock.patch.object(slurmenv, 'MINIFORGE', ('Mf.sh', 'https://x/Mf.sh', sha)):
             rc, said = self.env(opener=opener)
             self.assertEqual(rc, 0, said)
             self.assertTrue(os.access(self.base / 'conda' / 'bin' / 'conda', os.X_OK))
+            self.assertEqual(sorted(os.listdir(self.base / 'conda')), [slurmlogin.CONDA_DONE, 'bin'])  # redone afresh
             self.assertEqual(fetched, ['https://x/Mf.sh'])
             self.assertFalse((self.base / 'run' / 'Mf.sh').exists())
             self.env(opener=opener)
@@ -254,6 +342,14 @@ class Env(Site):
         with mock.patch.object(slurmenv, 'SOCKET_MAX', 20), self.assertRaisesRegex(ss.SetupError, 'Unix socket path'):
             self.env()
 
+    def test_an_upstream_without_a_commit_fails_the_build(self):
+        self.conda()
+        with self.assertRaisesRegex(slurmlogin.LoginError, 'brainstate: no commit checked out'):
+            slurmlogin.build(str(self.base), 'p', '20261108T120000Z', [], {}, {'upstream_names': ['brainstate']},
+                             ['cpu'], 'direct')
+        self.assertFalse(os.path.lexists(self.envs / 'p-20261108T120000Z'))
+        self.assertFalse(os.path.lexists(self.envs / 'p-cpu'))
+
     def test_a_requirement_file_stays_in_its_directory(self):
         self.conda()
         with self.assertRaisesRegex(slurmlogin.LoginError, 'outside the requirements'):
@@ -273,18 +369,23 @@ class Env(Site):
         sent = []
         with mock.patch.object(envbuild, 'head_of', return_value='a' * 40), \
                 mock.patch.object(envbuild, '_token', side_effect=AssertionError('a refresh holds no token')):
-            self.assertEqual(slurmenv.env(ctx, 'cluster1', 'acct1', 'p', 'owner', refresh=True, tunnel_port=1), 0)
+            self.assertEqual(slurmenv.env(ctx, 'cluster1', 'acct1', 'p', 'owner', refresh=True, tunnel_port=1,
+                                          opener=no_network), 0)
         self.assertIn('up to date', out.getvalue())
         with mock.patch.object(envbuild, 'head_of', return_value='b' * 40), \
                 mock.patch.object(envbuild, '_token', side_effect=AssertionError('a refresh holds no token')), \
                 mock.patch.object(ss, 'login_call', side_effect=lambda site, via, call, args, **kw:
                                   sent.append((call, args)) or ({'conda': True} if call == 'conda_state' else
                                                                 {'commits': {}, 'build': 'b', 'links': [], 'removed': []})):
-            slurmenv.env(ctx, 'cluster1', 'acct1', 'p', 'owner', refresh=True, tunnel_port=1)
+            slurmenv.env(ctx, 'cluster1', 'acct1', 'p', 'owner', refresh=True, tunnel_port=1, opener=no_network)
         self.assertIn('moved: brainstate', out.getvalue())
         build = sent[-1][1]
         self.assertEqual((build['files'], build['record']['sha']), ({'requirements.txt': 'x\n'}, HEAD))
         self.assertTrue(any(s[:3] == ['git', 'clone', '--quiet'] for s in build['steps']))
+
+
+def no_network(url, timeout):
+    raise AssertionError(f'{url}: no network in a test')
 
 
 if __name__ == '__main__':

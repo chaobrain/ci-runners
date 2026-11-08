@@ -32,7 +32,11 @@ import time
 DIRS = ('releases', 'etc', 'envs', 'work', 'state', 'logs', 'run')
 CANCEL_WAIT = 120  # s ``uninstall --cancel`` waits for the account's ci- jobs to end
 RELAY_HEAD = 16 << 10  # the longest request head the relay reads
+RELAY_CONNS = 32  # connections the relay serves at once; more are closed
+RELAY_IDLE = 30.0  # s a connection may take to send its request head
 KEEP = 3  # builds of a project kept: the linked ones and the newest
+UNLINKED = '.ci-unlinked'  # in a build no link holds: its mtime is when that was first seen
+CONDA_DONE = '.ci-installed'  # in <base>/conda once its installer finished
 STAMP = r'[0-9]{8}T[0-9]{6}Z'
 
 
@@ -171,11 +175,19 @@ class Relay:
     relay on 127.0.0.1 that takes only requests carrying the build's ``Proxy-Authorization``
     (``ci`` and ``secret``), drops that header and passes each connection to ``target``, the
     Unix socket the driver's reverse forward listens on (its egress proxy's allowlist
-    applies there, 11.10). It lives in the build's process: nothing listens after it."""
+    applies there, 11.10). It passes only ``CONNECT``: the connection is then a tunnel, and
+    no later request on it carries the header past the check. At most ``RELAY_CONNS``
+    connections at once, each sending its head within ``RELAY_IDLE``: another user of the
+    login host cannot tie it up. It lives in the build's process, and ``close`` ends every
+    connection: nothing listens after it."""
 
     def __init__(self, secret: str, target: str) -> None:
         self.expected = 'Basic ' + base64.b64encode(f'ci:{secret}'.encode()).decode()
         self.target = target
+        self.slots = threading.BoundedSemaphore(RELAY_CONNS)
+        self.live: set[socket.socket] = set()
+        self.lock = threading.Lock()
+        self.closed = False
         self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.srv.bind(('127.0.0.1', 0))
         self.srv.listen(16)
@@ -188,6 +200,20 @@ class Relay:
         except OSError:
             pass
         self.srv.close()
+        with self.lock:
+            self.closed = True
+            for s in self.live:
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def _track(self, s: socket.socket) -> bool:
+        with self.lock:
+            if self.closed:
+                return False
+            self.live.add(s)
+            return True
 
     def _serve(self) -> None:
         while True:
@@ -195,10 +221,26 @@ class Relay:
                 c, _ = self.srv.accept()
             except OSError:
                 return
-            threading.Thread(target=self._handle, args=(c,), daemon=True).start()
+            if not self.slots.acquire(blocking=False):
+                c.close()
+                continue
+            threading.Thread(target=self._slot, args=(c,), daemon=True).start()
+
+    def _slot(self, c: socket.socket) -> None:
+        try:
+            if self._track(c):
+                self._handle(c)
+        except OSError:
+            pass
+        finally:
+            c.close()
+            with self.lock:
+                self.live.discard(c)
+            self.slots.release()
 
     def _handle(self, c: socket.socket) -> None:
         with c:
+            c.settimeout(RELAY_IDLE)
             head = b''
             while b'\r\n\r\n' not in head:
                 chunk = c.recv(4096)
@@ -213,6 +255,11 @@ class Relay:
                 c.sendall(b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="ci"\r\n'
                           b'Content-Length: 0\r\nConnection: close\r\n\r\n')
                 return
+            if not lines[0].startswith(b'CONNECT '):
+                c.sendall(b'HTTP/1.1 405 Method Not Allowed\r\nAllow: CONNECT\r\nContent-Length: 0\r\n'
+                          b'Connection: close\r\n\r\n')
+                return
+            c.settimeout(None)
             kept = [x for x in lines if not x.lower().startswith(b'proxy-authorization:')]
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as u:
                 try:
@@ -220,11 +267,21 @@ class Relay:
                 except OSError:
                     c.sendall(b'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
                     return
-                u.sendall(b'\r\n'.join(kept) + b'\r\n\r\n' + rest)
-                back = threading.Thread(target=_pipe, args=(u, c), daemon=True)
-                back.start()
-                _pipe(c, u)
-                back.join(60)
+                if not self._track(u):
+                    return
+                try:
+                    self._tunnel(c, u, b'\r\n'.join(kept) + b'\r\n\r\n' + rest)
+                finally:
+                    with self.lock:
+                        self.live.discard(u)
+
+    @staticmethod
+    def _tunnel(c: socket.socket, u: socket.socket, first: bytes) -> None:
+        u.sendall(first)
+        back = threading.Thread(target=_pipe, args=(u, c), daemon=True)
+        back.start()
+        _pipe(c, u)
+        back.join(60)
 
 
 def _pipe(src: socket.socket, dst: socket.socket) -> None:
@@ -242,8 +299,12 @@ def _pipe(src: socket.socket, dst: socket.socket) -> None:
         pass
 
 
+def _conda_ok(conda: str) -> bool:
+    return os.access(os.path.join(conda, 'bin', 'conda'), os.X_OK) and os.path.isfile(os.path.join(conda, CONDA_DONE))
+
+
 def conda_state(base: str) -> dict:
-    return {'conda': os.access(os.path.join(base, 'conda', 'bin', 'conda'), os.X_OK)}
+    return {'conda': _conda_ok(os.path.join(base, 'conda'))}
 
 
 def _links(envs: str) -> set[str]:
@@ -251,14 +312,16 @@ def _links(envs: str) -> set[str]:
 
 
 def build(base: str, project: str, stamp: str, steps: list, files: dict, record: dict, variants: list, egress: str,
-          proxy: str = '', secret: str = '', socket_path: str = '', installer: str = '') -> dict:
+          proxy: str = '', secret: str = '', socket_path: str = '', installer: str = '', grace: float = 0) -> dict:
     """Build ``project``'s env as ``<base>/envs/<project>-<stamp>`` by ``steps`` (the
     driver's ``envbuild.steps``, at nice 10), its requirement ``files`` in
     ``<base>/run/req-<stamp>``; then point ``<project>-<variant>`` at it for each variant
-    (one rename each) and remove the project's builds no link holds but the newest. The
-    egress is the relay (``tunnel``), ``proxy`` or none (``direct``); a missing conda is
-    installed from ``installer`` first, offline. A failed step leaves the links as they
-    were."""
+    (one rename each) and remove the project's builds no link holds but the newest, once no
+    link has held them for ``grace`` seconds (a job resolves its env's link when it starts,
+    ``slurmgate.job``, and may run that long). The egress is the relay (``tunnel``),
+    ``proxy`` or none (``direct``); a missing conda is installed from ``installer`` first,
+    offline (a partial install is removed and redone). A failed step leaves the links as
+    they were."""
     envs, run = os.path.join(base, 'envs'), os.path.join(base, 'run')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,39}', project) or not re.fullmatch(STAMP, stamp):
         raise LoginError('project or stamp is malformed')
@@ -285,10 +348,12 @@ def build(base: str, project: str, stamp: str, steps: list, files: dict, record:
             env.update({k: url for k in ('https_proxy', 'http_proxy', 'HTTPS_PROXY', 'HTTP_PROXY')},
                        no_proxy='localhost,127.0.0.1', NO_PROXY='localhost,127.0.0.1')
         conda = os.path.join(base, 'conda')
-        if not os.access(os.path.join(conda, 'bin', 'conda'), os.X_OK):
+        if not _conda_ok(conda):
             if not installer:
                 raise LoginError('no conda and no installer')
+            shutil.rmtree(conda, ignore_errors=True)  # a partial install
             _step(['bash', installer, '-b', '-p', conda], env)
+            open(os.path.join(conda, CONDA_DONE), 'w').close()
         os.makedirs(reqdir, mode=0o700)
         for rel, text in files.items():
             path = os.path.normpath(os.path.join(reqdir, rel))
@@ -305,6 +370,8 @@ def build(base: str, project: str, stamp: str, steps: list, files: dict, record:
                 r = subprocess.run(['git', '-C', os.path.join(d, 'src', name), 'rev-parse', 'HEAD'], env=env,
                                    capture_output=True, text=True, timeout=60)
                 commits[name] = r.stdout.strip()
+                if r.returncode != 0 or not re.fullmatch(r'[0-9a-f]{40}', commits[name]):
+                    raise LoginError(f'{name}: no commit checked out')
             with open(os.path.join(d, 'ci-env.json'), 'w', encoding='utf-8') as f:
                 json.dump({**record, 'stamp': stamp, 'commits': commits}, f, indent=1)
         except BaseException:
@@ -319,11 +386,21 @@ def build(base: str, project: str, stamp: str, steps: list, files: dict, record:
             os.symlink(os.path.basename(d), tmp)
             os.replace(tmp, link)
             links.append(os.path.basename(link))
-        held = _links(envs)
+        held, now = _links(envs), time.time()
         builds = sorted(n for n in os.listdir(envs) if re.fullmatch(re.escape(project) + '-' + STAMP, n))
-        removed = [n for n in builds[:-KEEP] if n not in held]
-        for n in removed:
-            shutil.rmtree(os.path.join(envs, n), ignore_errors=True)
+        removed = []
+        for i, n in enumerate(builds):
+            if n in held:
+                continue
+            mark = os.path.join(envs, n, UNLINKED)
+            try:
+                since = os.stat(mark).st_mtime
+            except FileNotFoundError:
+                open(mark, 'w').close()
+                since = now
+            if i < len(builds) - KEEP and now - since >= grace:
+                shutil.rmtree(os.path.join(envs, n), ignore_errors=True)
+                removed.append(n)
         return {'build': os.path.basename(d), 'links': links, 'removed': removed, 'commits': commits,
                 'relay_port': relay.port if relay else 0}
     finally:

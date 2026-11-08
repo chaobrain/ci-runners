@@ -491,8 +491,9 @@ class Env(Site):
             slurmenv.env(ctx, 'cluster1', 'acct1', 'p', 'owner', refresh=True, tunnel_port=1)
         state = self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1'
         spec = SPEC + '[[upstream]]\nrepository = "chaobrain/brainstate"\nref = "origin/main"\n'
+        at_a = {'build': 'b', 'sha': HEAD, 'commits': {'brainstate': 'a' * 40}}
         (state / 'env-acct1-p.json').write_text(json.dumps({'sha': HEAD, 'spec': spec, 'files': {'requirements.txt': 'x\n'},
-                                                            'commits': {'brainstate': 'a' * 40}}))
+                                                            'variants': {'cpu': at_a, 'cuda13': at_a}}))
         sent = []
         with mock.patch.object(envbuild, 'head_of', return_value='a' * 40), \
                 mock.patch.object(envbuild, '_token', side_effect=AssertionError('a refresh holds no token')):
@@ -505,10 +506,117 @@ class Env(Site):
                                   sent.append((call, args)) or ({'conda': True} if call == 'conda_state' else
                                                                 {'commits': {}, 'builds': {'b': []}, 'links': [], 'removed': []})):
             slurmenv.env(ctx, 'cluster1', 'acct1', 'p', 'owner', refresh=True, tunnel_port=1, opener=no_network)
-        self.assertIn('moved: brainstate', out.getvalue())
+        self.assertIn('moved: brainstate; rebuilding cpu, cuda13', out.getvalue())
         build = sent[-1][1]
         self.assertEqual((build['files'], build['record']['sha']), ({'requirements.txt': 'x\n'}, HEAD))
         self.assertTrue(any(s[:3] == ['git', 'clone', '--quiet'] for s in build['builds'][0]['steps']))
+
+    def refresh(self, kept, head, **kw):
+        """A refresh with ``kept`` variants and every upstream's branch at ``head``: what it
+        says and the builds it sends."""
+        ctx, out = self.ctx()
+        state = self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1'
+        spec = SPEC + '[[upstream]]\nrepository = "chaobrain/brainstate"\nref = "origin/main"\n'
+        (state / 'env-acct1-p.json').write_text(json.dumps({'sha': HEAD, 'spec': spec, 'files': {'requirements.txt': 'x\n'},
+                                                            'variants': kept}))
+        sent = []
+        with mock.patch.object(envbuild, 'head_of', return_value=head), \
+                mock.patch.object(ss, 'login_call', side_effect=lambda site, via, call, args, **_:
+                                  sent.append(args) or ({'conda': True} if call == 'conda_state' else
+                                                        {'commits': {'brainstate': head}, 'builds': {'b2': args['builds'][0]['links']},
+                                                         'links': [], 'removed': []})):
+            slurmenv.env(ctx, 'cluster1', 'acct1', 'p', 'owner', refresh=True, tunnel_port=1, opener=no_network, **kw)
+        return out.getvalue(), [b['links'] for a in sent if 'builds' in a for b in a['builds']]
+
+    def test_refresh_after_a_subset_run_rebuilds_each_variant_that_is_behind(self):
+        a, b = 'a' * 40, 'b' * 40
+        cur = {'build': 'b1', 'sha': HEAD, 'commits': {'brainstate': b}}
+        said, sent = self.refresh({'cpu': cur, 'cuda13': {**cur, 'commits': {'brainstate': a}}}, b)
+        self.assertIn('moved: brainstate; rebuilding cuda13', said)  # cpu was rebuilt alone at b, cuda13 is at a
+        self.assertEqual(sent, [['cuda13']])
+        said, sent = self.refresh({'cpu': cur, 'cuda13': {**cur, 'sha': '1' * 40}}, b)
+        self.assertIn('moved: none; rebuilding cuda13', said)  # built from an older spec
+        said, sent = self.refresh({'cpu': cur}, b)
+        self.assertIn('rebuilding cuda13', said)  # never built
+        said, sent = self.refresh({'cpu': cur, 'cuda13': cur}, b)
+        self.assertIn('up to date', said)
+        self.assertEqual(sent, [])
+        said, sent = self.refresh({'cpu': cur, 'cuda13': {**cur, 'commits': {'brainstate': a}}}, b, variants=['cpu'])
+        self.assertIn('up to date', said)  # only the variant asked for
+
+    def test_a_subset_run_keeps_the_other_variants_builds_in_the_kept_file(self):
+        self.conda()
+        self.assertEqual(self.env()[0], 0)
+        first = self.builds()[0]
+        self.assertEqual(self.env(variants=['cpu'])[0], 0)
+        kept = json.loads((self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'env-acct1-p.json').read_text())
+        second = self.builds()[1]
+        self.assertEqual({v: e['build'] for v, e in kept['variants'].items()}, {'cpu': second, 'cuda13': first})
+        self.assertEqual(kept['variants']['cuda13']['sha'], HEAD)
+
+    def git_steps(self, d, how):
+        """Steps that check an upstream ``u`` out in build ``d``: a fresh commit (``how``, its
+        message) or a clone of ``how``'s."""
+        src = str(self.envs / d / 'src' / 'u')
+        if how.startswith('/'):
+            return [['git', 'clone', '-q', how, src]]
+        return [['git', 'init', '-q', src],
+                ['git', '-C', src, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', how]]
+
+    def test_builds_whose_upstream_commits_differ_fail_and_leave_the_links(self):
+        self.conda()
+        self.env()
+        before, builds = self.links(), self.builds()
+        stamp = '20261108T130000Z'
+        first, second = f'p-{stamp}', f'p-{stamp}-cuda13'
+        with self.assertRaisesRegex(slurmlogin.LoginError, 'upstream moved during the run: u; run it again'):
+            slurmlogin.build(str(self.base), 'p', stamp,
+                             [one(['cpu'], self.git_steps(first, 'one')),
+                              one(['cuda13'], self.git_steps(second, 'two'), variant='cuda13')],
+                             {}, {'upstream_names': ['u']}, 'direct')
+        self.assertEqual((self.links(), self.builds()), (before, builds))
+        r = slurmlogin.build(str(self.base), 'p', stamp,
+                             [one(['cpu'], self.git_steps(first, 'one')),
+                              one(['cuda13'], self.git_steps(second, str(self.envs / first / 'src' / 'u')), variant='cuda13')],
+                             {}, {'upstream_names': ['u']}, 'direct')
+        self.assertEqual(self.links(), {'p-cpu': first, 'p-cuda13': second})  # one commit set: it passes
+        got = json.loads((self.envs / second / 'ci-env.json').read_text())['commits']
+        self.assertEqual(r['commits'], got)
+        self.assertRegex(got['u'], '^[0-9a-f]{40}$')
+
+    def test_a_link_path_that_is_not_a_link_moves_no_link(self):
+        self.conda()
+        self.env()
+        before, builds = self.links(), self.builds()
+        os.unlink(self.envs / 'p-cuda13')
+        stamp = '20261108T130000Z'
+        ran = self.envs / 'ran'
+        (self.envs / 'p-cuda13').mkdir()
+        with self.assertRaisesRegex(slurmlogin.LoginError, 'p-cuda13 is not a link'):
+            slurmlogin.build(str(self.base), 'p', stamp, [one(['cpu', 'cuda13'], [['touch', str(ran)]])], {}, {}, 'direct')
+        self.assertFalse(ran.exists())  # refused before any build
+        (self.envs / 'p-cuda13').rmdir()
+        with self.assertRaisesRegex(slurmlogin.LoginError, 'p-cuda13 is not a link'):
+            slurmlogin.build(str(self.base), 'p', stamp,
+                             [one(['cpu'], [['mkdir', str(self.envs / f'p-{stamp}')]]),
+                              one(['cuda13'], [['mkdir', str(self.envs / f'p-{stamp}-cuda13'), str(self.envs / 'p-cuda13')]],
+                                  variant='cuda13')], {}, {}, 'direct')  # it turns up during the build
+        self.assertEqual((os.readlink(self.envs / 'p-cpu'), self.builds()), (before['p-cpu'], builds))
+
+    def test_a_variant_no_link_holds_keeps_no_build_past_the_grace(self):
+        self.conda()
+        old = time.time() - slurmenv.grace(self.site(), 'acct1') - 60
+        for day in range(1, 6):
+            d = self.envs / f'p-2026010{day}T000000Z-cuda12'  # a variant the account no longer runs
+            d.mkdir()
+            if day != 5:
+                (d / slurmlogin.UNLINKED).touch()
+                os.utime(d / slurmlogin.UNLINKED, (old, old))
+        rc, said = self.env()
+        self.assertEqual(rc, 0, said)
+        self.assertEqual([n for n in self.builds() if n.endswith('-cuda12')], ['p-20260105T000000Z-cuda12'])  # its grace
+        self.assertIn("removed ['p-20260101T000000Z-cuda12', 'p-20260102T000000Z-cuda12', 'p-20260103T000000Z-cuda12', "
+                      "'p-20260104T000000Z-cuda12']", said)
 
 
 def one(links, steps=(), variant=''):

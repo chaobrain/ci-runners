@@ -336,10 +336,12 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
     ``<project>-<stamp>-<variant>``; ``steps``, the driver's ``envbuild.steps``, run at nice
     10; ``install``; ``links``, the variants it serves), its requirement ``files`` in
     ``<base>/run/req-<stamp>``. Only once every build has passed, point each
-    ``<project>-<variant>`` at its build (one rename each): a failed build removes this
-    run's builds and leaves every link as it was. Then remove the project's builds no link
-    holds but the newest ``KEEP`` of each kind, once no link has held them for ``grace``
-    seconds (a job resolves its env's link when it starts, ``slurmgate.job``, and may run
+    ``<project>-<variant>`` at its build (one rename each): a failed build, a later build
+    whose upstream commits differ from the first's (a branch moved during the run), or a
+    link path that is not a link removes this run's builds and leaves every link as it was.
+    Then remove the project's builds no link holds but the newest ``KEEP`` of each kind
+    (none of a kind no link holds, a variant no longer built), once no link has held them
+    for ``grace`` seconds (a job resolves its env's link when it starts, ``slurmgate.job``, and may run
     that long). The egress is the relay (``tunnel``), ``proxy`` or none (``direct``); a
     missing conda is installed from ``installer`` first, offline (a partial install is
     removed and redone)."""
@@ -365,6 +367,8 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
         for d in dirs:
             if os.path.lexists(d):
                 raise LoginError(f'{d} exists')
+        paths = [os.path.join(envs, f'{project}-{v}') for v in served]
+        _all_links(paths)
         url = ''
         if egress == 'tunnel':
             relay = Relay(secret, socket_path)
@@ -404,10 +408,14 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
                     got[name] = r.stdout.strip()
                     if r.returncode != 0 or not re.fullmatch(r'[0-9a-f]{40}', got[name]):
                         raise LoginError(f'{name}: no commit checked out')
-                commits = commits or got
+                if b is not builds[0] and got != commits:
+                    moved = sorted(n for n in got if got[n] != commits.get(n))
+                    raise LoginError(f'upstream moved during the run: {", ".join(moved)}; run it again')
+                commits = got
                 with open(os.path.join(d, 'ci-env.json'), 'w', encoding='utf-8') as f:
                     json.dump({**record, 'stamp': stamp, 'variant': b['variant'], 'install': b.get('install', []),
                                'commits': got}, f, indent=1)
+            _all_links(paths)  # every link checked before any moves
         except BaseException:
             for d in dirs:
                 shutil.rmtree(d, ignore_errors=True)
@@ -416,8 +424,6 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
         for b, d in zip(builds, dirs):
             for v in b['links']:
                 link = os.path.join(envs, f'{project}-{v}')
-                if os.path.lexists(link) and not os.path.islink(link):
-                    raise LoginError(f'{link} is not a link')
                 tmp = f'{link}.new-{stamp}'
                 os.symlink(os.path.basename(d), tmp)
                 os.replace(tmp, link)
@@ -431,6 +437,7 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
         removed = []
         for kind in kinds.values():
             kind.sort()
+            keep = KEEP if any(n in held for n in kind) else 0  # a kind no link holds is not built any more
             for i, n in enumerate(kind):
                 if n in held:
                     continue
@@ -440,7 +447,7 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
                 except FileNotFoundError:
                     open(mark, 'w').close()
                     since = now
-                if i < len(kind) - KEEP and now - since >= grace:
+                if i < len(kind) - keep and now - since >= grace:
                     shutil.rmtree(os.path.join(envs, n), ignore_errors=True)
                     removed.append(n)
         return {'builds': {os.path.basename(d): b['links'] for b, d in zip(builds, dirs)}, 'links': links,
@@ -453,6 +460,12 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
         for path in (socket_path, installer):
             if path and os.path.lexists(path) and os.path.dirname(path) == run:
                 os.unlink(path)
+
+
+def _all_links(paths: list) -> None:
+    for link in paths:
+        if os.path.lexists(link) and not os.path.islink(link):
+            raise LoginError(f'{link} is not a link')
 
 
 def _step(argv: list, env: dict) -> None:

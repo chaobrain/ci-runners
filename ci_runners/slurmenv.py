@@ -29,7 +29,10 @@ sha256 pinned) into ``<root>/ci-runners/conda``, offline, from an installer the 
 downloads once into its cache. Upstreams are cloned anonymously (a private one fails).
 ``--refresh`` rebuilds from the spec the driver kept of the last build
 (``state/slurm/<site>/env-<account>-<project>.json``) only when an upstream's branch moved
-since the first build of that run, without a token; it rebuilds every variant asked for.
+since that variant's build, without a token: the kept file holds each variant's spec
+commit and upstream commits, so a ``--variant`` subset run leaves the others' as they were,
+and a refresh rebuilds every variant asked for (all of the account's, by default) whose
+upstreams moved or whose build is of an older spec; "up to date" holds for each of them.
 """
 from __future__ import annotations
 
@@ -112,17 +115,22 @@ def env(ctx: Ctx, name: str, alias: str, project: str, via: str, *, variants: li
         raise SetupError(f'--variant {sorted(set(variants) - set(own))}: not a variant of {alias}\'s targets {own}')
     proj = registry.load_file(ctx.etc, project, ctx.driver)
     kept_path = os.path.join(slurmpart.state_dir(ctx.data, site.name), f'env-{alias}-{project}.json')
+    kept = slurmpart._read_json(kept_path)
     if refresh:
-        kept = slurmpart._read_json(kept_path)
         if kept is None:
             raise SetupError(f'no build of {project} kept for {alias}: run env without --refresh')
         spec, files, sha = envbuild.parse_spec(kept['spec']), kept['files'], kept['sha']
         genv = envbuild._git_env()
-        moved = [u.name for u in spec.upstream if envbuild.head_of(ctx.run, u, genv) != kept['commits'].get(u.name)]
-        if not moved:
+        heads = {u.name: envbuild.head_of(ctx.run, u, genv) for u in spec.upstream}
+        held = kept.get('variants', {})
+        stale = [v for v in (list(variants) or own) if held.get(v, {}).get('sha') != sha
+                 or held[v].get('commits') != heads]  # one built from an older spec, or never, is stale too
+        if not stale:
             ctx.say(f'{site.name} {alias} {project}: up to date')
             return 0
-        ctx.say(f'{site.name} {alias} {project}: moved: {", ".join(moved)}')
+        moved = sorted({n for v in stale for n in heads if heads[n] != held.get(v, {}).get('commits', {}).get(n)})
+        ctx.say(f'{site.name} {alias} {project}: moved: {", ".join(moved) or "none"}; rebuilding {", ".join(stale)}')
+        variants = stale
     else:
         sha, spec, files = envbuild.fetch(call or github.api, envbuild._token(ctx.etc), proj.repository)
     base = slurmsetup.base_of(site, alias)
@@ -156,8 +164,11 @@ def env(ctx: Ctx, name: str, alias: str, project: str, via: str, *, variants: li
     t0 = time.monotonic()
     r = slurmsetup.login_call(site, via, 'build', args, timeout=4 * 3600, opts=opts, stream=True, **lc)
     os.makedirs(os.path.dirname(kept_path), mode=0o700, exist_ok=True)
+    built = dict((kept or {}).get('variants', {}))  # each variant's own build, kept across subset runs
+    built.update({v: {'build': b, 'sha': sha, 'commits': r['commits']} for b, links in r['builds'].items() for v in links})
     slurmpart._write_json(kept_path, {'sha': sha, 'spec': spec.text, 'files': files, 'stamp': stamp,
-                                      'commits': r['commits'], 'builds': r['builds']})
+                                      'builds': r['builds'],
+                                      'variants': {v: e for v, e in sorted(built.items()) if v in own}})
     ctx.say(f'{site.name} {alias}: ' + '; '.join(f'{", ".join(links)} -> {b}' for b, links in r['builds'].items())
             + f' in {time.monotonic() - t0:.0f} s; removed {r["removed"] or "none"}')
     return 0

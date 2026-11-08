@@ -706,9 +706,12 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
          variants the account's targets run that the spec does not name, and one of its own
          for each `[variant.<name>]` the spec holds (its `install` replaces the base's,
          §4.9), and points each `<project>-<variant>` at its build only once every build
-         has passed; a job resolves that link when it starts. `env --refresh`, a
-         maintainer's command (14.11), compares the upstreams' refs with the kept build's
-         and rebuilds when one moved;
+         has passed, every build holds the first's upstream commits (one branch that moves
+         during the run fails it) and every link path is a link; a job resolves that link
+         when it starts. Old builds no link holds go after the grace, but the newest 3 of
+         each kind a link still holds. `env --refresh`, a maintainer's command (14.11),
+         compares the upstreams' refs with each variant's kept build and rebuilds the
+         variants whose upstreams moved or whose build is of an older spec;
        - `canary`, per target, one job of at most 3 min: the env imports and sees the
          cards, the driver against the variant's floor, the P2P self-test where
          `max_cards` ≥ 2 (a failure sets it to 1), a file round trip, the start latency

@@ -194,6 +194,25 @@ class Pure(unittest.TestCase):
         self.assertEqual(out['next'], 'none')
         self.assertEqual(outcome.hint('unavailable', retry_here=True), outcome.Hint('retry', where='same-host'))
 
+    def test_the_control_socket_fits_a_long_data_root(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            def gate(alias, cm_len):
+                rest = len(sp.state_dir('x', 'cluster1')) - 1 + len('/cm')  # what the data root's length is under
+                data = os.path.join(t, 'd' * (cm_len - len(t) - 1 - rest))
+                g = sp.Gate('/e', data, self.site, alias)
+                self.assertEqual(len(g.cm), cm_len)
+                return g
+            g = gate('acct1', 60)  # ssh's %C (40) and its temporary suffix (17) would make 118 bytes
+            sock = next(a for a in g.ssh_argv() if a.startswith('ControlPath=')).removeprefix('ControlPath=')
+            self.assertEqual(os.path.dirname(sock), g.cm)
+            self.assertRegex(os.path.basename(sock), r'\A[0-9a-f]{12}\Z')  # a name, not a token ssh expands
+            self.assertLess(len(sock) + sp.SSH_TMP, sp.SUN_PATH)
+            self.assertNotEqual(gate('acct2', 60).sock, g.sock)  # one master per account
+            self.assertTrue(gate('acct1', 77).ssh_argv())  # 77 + 13 + 17 = 107: the longest that fits
+            with self.assertRaisesRegex(sp.Unreachable, 'too long for the ssh control socket'):
+                gate('acct1', 78).ssh_argv()
+
     def test_ssh_facts_need_both_the_host_and_the_user(self):
         import subprocess as sp_
         out = {'rc': 0, 'text': b'user labuser\nhostname login7\nport 22\n'}

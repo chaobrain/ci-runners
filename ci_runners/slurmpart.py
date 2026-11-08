@@ -32,6 +32,7 @@ import codecs
 import datetime
 import fcntl
 import glob
+import hashlib
 import json
 import os
 import re
@@ -224,9 +225,16 @@ def budget_refusal(site: slurmsite.Site, account: str, target: str, cards: int, 
 # ------------------------------------------------------------------ the gate, over ssh
 
 
+#: a Unix socket path's limit in bytes (``sun_path``, its NUL included), and what ssh adds
+#: to the ControlPath while it makes the master (``.`` and 16 random characters)
+SUN_PATH, SSH_TMP = 108, 17
+
+
 class Gate:
     """An account's gate over ssh: one master connection per driver, batch mode, the
-    account's key only. ``ssh`` and ``rsync`` are the tools' paths."""
+    account's key only. ``ssh`` and ``rsync`` are the tools' paths. The master's socket is
+    named by a short hash of the alias, not ssh's 40-character ``%C``, so that a data root
+    of a usual length fits a Unix socket path; one too long is refused (Unreachable)."""
 
     def __init__(self, etc: str, data: str, site: slurmsite.Site, alias: str, *, ssh: str = '/usr/bin/ssh',
                  rsync: str = '/usr/bin/rsync', run: Callable = subprocess.run,
@@ -235,11 +243,15 @@ class Gate:
         self.redact = redact  # the error text it raises, redacted before it is cut
         self.key = os.path.join(etc, 'slurm', 'keys', alias)
         self.cm = os.path.join(state_dir(data, site.name), 'cm')
+        self.sock = os.path.join(self.cm, hashlib.sha256(alias.encode()).hexdigest()[:12])
 
     def ssh_argv(self) -> list[str]:
+        if len(os.fsencode(self.sock)) + SSH_TMP >= SUN_PATH:
+            raise Unreachable(f'{self.alias}: the data root is too long for the ssh control socket '
+                              f'({len(os.fsencode(self.sock))} bytes; at most {SUN_PATH - SSH_TMP - 1})')
         os.makedirs(self.cm, mode=0o700, exist_ok=True)
         return [self.ssh, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', self.key, '-o', 'ControlMaster=auto',
-                '-o', f'ControlPath={self.cm}/%C', '-o', 'ControlPersist=60', '-o', 'ConnectTimeout=20',
+                '-o', f'ControlPath={self.sock}', '-o', 'ControlPersist=60', '-o', 'ConnectTimeout=20',
                 '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4']
 
     @property

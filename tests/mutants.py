@@ -196,6 +196,13 @@ MUTANTS = [
     (SST, "        if placeholder == '<node>':  # many", "        if False:  # many", [f'{TSS}.Redact.test_each_kind_of_inventory_has_its_placeholder']),
     (SST, '            if 0 < cut < len(text) and _name(text[cut - 1]) and _name(text[cut]):', '            if False:', [f'{TSS}.Redact.test_a_cut_never_splits_a_value']),
     (SST, '                if cut - start <= RUN_MAX:\n', '                if True:\n', [f'{TSS}.Redact.test_a_cut_never_splits_a_value']),
+    # the ssh control socket fits a long data root
+    (SPT, "        self.sock = os.path.join(self.cm, hashlib.sha256(alias.encode()).hexdigest()[:12])", "        self.sock = os.path.join(self.cm, '%C')", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "hexdigest()[:12])", "hexdigest())", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "hashlib.sha256(alias.encode())", "hashlib.sha256(b'')", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "        if len(os.fsencode(self.sock)) + SSH_TMP >= SUN_PATH:", "        if False:", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "+ SSH_TMP >= SUN_PATH:", "+ SSH_TMP > SUN_PATH:", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "f'ControlPath={self.sock}'", "f'ControlPath={self.cm}/%C'", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
     (SPT, '    if not isinstance(v, list) or not v or not all(', '    if not isinstance(v, list) or not all(', [f'{TSP}.Pending.test_without_the_clusters_node_list_no_part_runs']),
     (SPT, 'not all(isinstance(x, str) and slurmsite.hostlist(x) for x in v):', 'not all(isinstance(x, str) for x in v):', [f'{TSP}.Pending.test_without_the_clusters_node_list_no_part_runs']),
     (SPT, '        return lists  # an answer that does not parse', '        if lists is not None:\n            return lists  # an answer that does not parse', [f'{TSP}.Pending.test_without_the_clusters_node_list_no_part_runs']),

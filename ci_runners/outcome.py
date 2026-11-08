@@ -92,16 +92,19 @@ class Hint:
 
 
 def hint(kind: str, *, attempt: int = 1, retries: int = 1, cool_card: bool = False,
-         host_fault: bool = False) -> Hint:
+         host_fault: bool = False, retry_here: bool = False) -> Hint:
     """``next`` for an outcome (design §4.4). ``attempt`` is 1 for the first run of a
     part; a part is retried at most ``retries`` times (the registry's 0 or 1), so an
     infrastructure end of the last allowed attempt is final, the consumer's verdict.
     ``cool_card`` is whether the host has a cool card for a thermal retry. ``host_fault`` marks an end
-    that a retry does not cure, a failed P2P self-test (decision 12.6): ``none``. Pure."""
+    that a retry does not cure, a failed P2P self-test (decision 12.6): ``none``. ``retry_here``
+    marks an ``unavailable`` end retried on the same pool, a slurm node's failure (14.4). Pure."""
     if kind not in KINDS:
         raise ValueError(f'unknown outcome {kind!r}')
     if kind in FINAL or attempt > retries or host_fault:
         return Hint('none')
+    if kind == 'unavailable' and retry_here:  # a slurm part's node failure: the same target (14.4)
+        return Hint('retry', where='same-host')
     if kind == 'thermal':
         return Hint('retry', where='cool-card') if cool_card else Hint('fallback')
     if kind == 'oom':

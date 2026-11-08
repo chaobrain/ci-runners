@@ -136,9 +136,14 @@ class Requests(Cluster):
         self.refused('no env p-cuda13', target='a40', cards=1)
 
     def test_a_key_twice_and_a_bad_key(self):
+        self.plan({'pend': -1}, {'pend': -1})
         self.submit()
         rc, _, err = self.gate(f'ci-slurm-gate submit {KEY}', json.dumps(request()).encode())
         self.assertEqual((rc, 'has a job already' in err), (2, True), err)
+        self.gate_json(f'ci-slurm-gate cancel {KEY}')  # gone: the key may try again (the next target)
+        self.assertEqual(self.submit(target='a40', cards=1)['job'], 1002)
+        self.assertTrue((self.base / 'work' / KEY / 'job-1001.json').exists())
+        self.assertEqual(self.gate_json(f'ci-slurm-gate status {KEY}')['job'], 1002)
         for key in ('o/r/7-1/../p1-1', '../x/7-1/p1-1', 'o/r/7/p1-1', '/o/r/7-1/p1-1', 'o/r/7-1/p1-1/x'):
             rc, _, err = self.gate(f'ci-slurm-gate submit {key}', json.dumps(request()).encode())
             self.assertEqual(rc, 2, key)
@@ -278,7 +283,7 @@ class Jobs(Cluster):
 
     def test_a_job_runs_its_command_and_its_results_come_back(self):
         cmd = ('echo "out $CI_PROJECT $PROJECT_VAR $CUDA_DEVICE_ORDER"; test ! -e "$HOME/.never"; '
-               'echo r > "$CI_RESULTS_DIR/r.xml"; echo t > "$RUNNER_TEMP/t.txt"; echo "path $PATH"; '
+               'test "$GITHUB_WORKSPACE" = "$PWD"; echo r > "$CI_RESULTS_DIR/r.xml"; echo t > "$RUNNER_TEMP/t.txt"; echo "path $PATH"; '
                'echo "tmp $TMPDIR"; env | grep -c "^FAKE_SLURM=" || true; test -d "$TMPDIR" && pwd')
         j = self.submit(command=cmd)
         st = self.wait_end()

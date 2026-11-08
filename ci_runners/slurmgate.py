@@ -13,7 +13,8 @@ directory ``<base>/work/KEY``):
 - ``stage --server ... . KEY/ws/`` (or ``KEY/tmp/``): ``rsync --server`` into ``work/``;
 - ``fetch --server --sender ... . KEY/tmp/`` (or ``KEY/part/``): ``rsync`` out of ``work/``;
 - ``submit KEY``: a JSON request (``REQUEST``) on stdin; renders the batch script
-  (``render``) and ``sbatch``-es it; prints ``{"job": N}``;
+  (``render``) and ``sbatch``-es it; prints ``{"job": N}``. A key may submit again once
+  its job is gone (the next target of a part);
 - ``status KEY``: the job's state, its node, its end and the cluster supervisor's exit;
 - ``log KEY OFFSET``: the job's log from ``OFFSET``, at most ``LOG_CHUNK`` bytes;
 - ``cancel KEY``: ``scancel`` the part's job;
@@ -73,7 +74,7 @@ VAR = re.compile(r'[A-Z_][A-Z0-9_]{0,63}\Z')
 RUN_URL = re.compile(r'https://github\.com/[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}/actions/runs/[0-9]{1,20}'
                      r'(?:/attempts/[0-9]{1,4})?\Z')
 #: the variables the job sets itself: a request's ``variables`` may not name them
-RESERVED_VARS = frozenset({'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'CONDA_PREFIX',
+RESERVED_VARS = frozenset({'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'CONDA_PREFIX', 'GITHUB_WORKSPACE',
                            'CUDA_VISIBLE_DEVICES', 'CUDA_DEVICE_ORDER', 'RUNNER_TEMP', 'PYTHONPATH', 'PYTHONHOME',
                            'BASH_ENV', 'ENV', 'IFS'})
 RESERVED_PREFIXES = ('CI_', 'SLURM_', 'LD_', 'GITHUB_OUTPUT', 'GITHUB_ENV', 'GITHUB_PATH', 'GITHUB_STATE',
@@ -275,8 +276,12 @@ def submit(base: str, release: str, key: str, data: bytes, run: Callable = subpr
         raise GateError('the request is not JSON') from None
     check_request(req, account, base)
     d = part_dir(base, key, create=True)
-    if os.path.exists(os.path.join(d, 'job.json')):
-        raise GateError(f'{key} has a job already')
+    prev = _read_json(os.path.join(d, 'job.json'))
+    if prev is not None:  # a part tries the next target with the same key: only once its job is gone
+        r = run(['squeue', '-h', '-j', str(prev.get('job')), '-o', '%T'], capture_output=True, text=True, timeout=60)
+        if r.returncode != 0 or (r.stdout or '').strip() in LIVE_STATES or type(prev.get('job')) is not int:
+            raise GateError(f'{key} has a job already')
+        os.replace(os.path.join(d, 'job.json'), os.path.join(d, f'job-{prev["job"]}.json'))
     for sub in ('part', 'record', 'tmp', 'ws'):
         os.makedirs(os.path.join(d, sub, 'results') if sub == 'part' else os.path.join(d, sub), mode=0o700,
                     exist_ok=True)
@@ -504,6 +509,7 @@ def job(d: str) -> int:
         env.update(req['variables'])
         cards = int(req['cards'])
         env.update({'CI_RUNNERS_HOST': req['host'], 'CI_PROJECT': req['project'], 'CI_PART_DIR': f'{d}/part',
+                    'GITHUB_WORKSPACE': f'{d}/ws',
                     'CI_RESULTS_DIR': f'{d}/part/results', 'RUNNER_TEMP': f'{d}/tmp', 'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
                     'CI_CPUS': str(cards * int(t['cpus_per_card']) if 'gpu_model' in t else int(t['cpus'])),
                     'CI_RESUME': '1' if req['resume'] else '0', 'CI_SLURM_JOB': os.environ.get('SLURM_JOB_ID', '')})

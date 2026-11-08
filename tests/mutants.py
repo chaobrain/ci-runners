@@ -416,7 +416,7 @@ MUTANTS = [
     (LCH, 'next=none; retry_on=', 'next=fallback; retry_on=', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, ' && [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]]', '', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, '[ "$1" = --id ] && { id=$2; break; }', '[ "$1" = --id ] && { id=$2; }', [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
-    (LCH, '"$reason" "$next" "$retry_on" > "$art/outcome.json"', '"$reason" "$next" "$retry_on" > /dev/null',
+    (LCH, '"$reason" "$next" "$retry_on" "$run_attempt" > "$art/outcome.json"', '"$reason" "$next" "$retry_on" "$run_attempt" > /dev/null',
      [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, 'exec "$ci_run" "$cmd" "$@"', 'exec "$ci_run" "$@"', [f'{TA}.Launcher.test_the_stamped_release_runs']),
     (APT, ' --attempt-of "$IN_ATTEMPT_OF"', '', [f'{TA}.Actions.test_inputs_reach_their_flags']),
@@ -443,6 +443,18 @@ MUTANTS = [
      [f'{TV}.Artifacts.test_ends_read_the_records_where_the_artifacts_stop',
       f'{TV}.Main.test_a_part_without_artifact_or_record_is_lost']),
     (VRD, "    if len(set(ids)) != len(ids):", "    if False:", [f'{TV}.Artifacts.test_part_ids']),
+    # a retry an earlier run attempt left behind (issue #64)
+    (VRD, "    return {pid: current(attempts) for pid, attempts in out.items()}", "    return out", [f'{TV}.Artifacts.test_a_retry_an_earlier_run_attempt_left_is_dropped']),
+    (VRD, "if n == 1 or run_attempt(a[0]) >= first}", "if n == 1 or run_attempt(a[0]) > first}", [f'{TV}.Artifacts.test_a_retry_an_earlier_run_attempt_left_is_dropped']),
+    (VRD, "if n == 1 or run_attempt(a[0]) >= first}", "if n == 1 or run_attempt(a[0]) >= 0}", [f'{TV}.Artifacts.test_a_retry_an_earlier_run_attempt_left_is_dropped']),
+    (VRD, "    if isinstance(v, int) and not isinstance(v, bool) and v > 0:", "    if False:", [f'{TV}.Artifacts.test_a_first_attempt_without_a_record_still_drops_a_stale_retry']),
+    (VRD, "    if isinstance(v, int) and not isinstance(v, bool) and v > 0:", "    if isinstance(v, int) and v > 0:", [f'{TV}.Artifacts.test_a_first_attempt_without_a_record_still_drops_a_stale_retry']),
+    (PRT, "            'run-attempt': record_run_attempt(record),\n", "", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (PRT, "os.path.dirname(record.rstrip(os.sep))))\n    return int(m.group(1)) if m else 0", "os.path.dirname(record.rstrip(os.sep))))\n    return 1", [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
+    (LCH, "run_attempt=${GITHUB_RUN_ATTEMPT:-0}", "run_attempt=1", [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
+    (LCH, "[[ $run_attempt =~ ^[1-9][0-9]{0,3}$ ]] || run_attempt=0", ":", [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
+    (VRD, "    return int(m.group(1)) if m else 0", "    return 0", [f'{TV}.Artifacts.test_a_retry_an_earlier_run_attempt_left_is_dropped']),
+    (VRD, "RECORD_RUN = re.compile(r'/[0-9]+-([0-9]+)/[^/]+-[0-9]{1,2}\\Z')", "RECORD_RUN = re.compile(r'/([0-9]+)-[0-9]+/[^/]+-[0-9]{1,2}\\Z')", [f'{TV}.Artifacts.test_a_retry_an_earlier_run_attempt_left_is_dropped']),
     (VRD, "        if not token:", "        if False:", [f'{TV}.Main.test_malformed_inputs_post_nothing']),
     # salvage, per host (design §4.5, decision 12.13)
     # the old lookup: the part's newest record across the repository's runs

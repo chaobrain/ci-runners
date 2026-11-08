@@ -34,7 +34,9 @@ id=
 while [ $# -gt 1 ]; do [ "$1" = --id ] && { id=$2; break; }; shift; done  # the first --id: the action passes it before --command
 if [ "$cmd" = part ] && [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] && [ -n "${RUNNER_TEMP:-}" ]; then
   art=$RUNNER_TEMP/ci-runners/$id  # what the part action uploads, as part's own outcome would be
-  mkdir -p "$art" && printf '{"outcome": "unavailable", "reason": "%s", "next": "%s", "retry-on": %s}\n' \
-    "$reason" "$next" "$retry_on" > "$art/outcome.json"
+  run_attempt=${GITHUB_RUN_ATTEMPT:-0}  # no record here: the verdict orders attempts by it (issue #64)
+  [[ $run_attempt =~ ^[1-9][0-9]{0,3}$ ]] || run_attempt=0
+  mkdir -p "$art" && printf '{"outcome": "unavailable", "reason": "%s", "next": "%s", "retry-on": %s, "run-attempt": %s}\n' \
+    "$reason" "$next" "$retry_on" "$run_attempt" > "$art/outcome.json"
 fi
 exit 0

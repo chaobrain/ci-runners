@@ -161,7 +161,7 @@ class Launcher(unittest.TestCase):
         self.stub('hook')
         temp = pathlib.Path(self.tmp.name) / 'runner-temp'
         r = self.launch('part', '--id', 'x', '--command', '--id', '--timeout-minutes', '5', RUNNER_TEMP=str(temp),
-                        CI_RUNNER_CLASS='part', CI_RUNNER_POOL_LABELS='h100-cpu')  # a command that reads '--id' is not the id
+                        CI_RUNNER_CLASS='part', CI_RUNNER_POOL_LABELS='h100-cpu', GITHUB_RUN_ATTEMPT='3')  # a command that reads '--id' is not the id
         self.assertEqual(r.returncode, 0)
         out = self.out.read_text()
         self.assertIn('outcome=unavailable\n', out)
@@ -169,8 +169,10 @@ class Launcher(unittest.TestCase):
         self.assertIn('retry-on=["self-hosted","h100-cpu"]\n', out)  # its own pool's labels
         self.assertNotIn(str(self.home), out + r.stdout)  # no home path reaches the job
         art = json.loads((temp / 'ci-runners' / 'x' / 'outcome.json').read_text())  # what the action uploads
-        self.assertEqual((art['outcome'], art['next'], art['retry-on']),
-                         ('unavailable', 'fallback', ['self-hosted', 'h100-cpu']))
+        self.assertEqual((art['outcome'], art['next'], art['retry-on'], art['run-attempt']),
+                         ('unavailable', 'fallback', ['self-hosted', 'h100-cpu'], 3))  # no record: its run attempt itself
+        self.launch('part', '--id', 'x', RUNNER_TEMP=str(temp), GITHUB_RUN_ATTEMPT='3; x')
+        self.assertEqual(json.loads((temp / 'ci-runners' / 'x' / 'outcome.json').read_text())['run-attempt'], 0)
         self.out.write_text('')
         self.launch('part', '--id', '../x', RUNNER_TEMP=str(temp))  # no pool labels: no fallback; a bad id: no artifact
         self.assertIn('next=none\n', self.out.read_text())

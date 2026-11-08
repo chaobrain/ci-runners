@@ -2,7 +2,8 @@
 
 ``ci-run verdict --context C --sha S --parts "cpu gpu" --artifacts DIR`` reads the
 parts' ``ci-part-<id>-<attempt>`` artifacts (``outcome.json``, ``summary.md``) that the
-action downloaded into ``DIR``. A part's last attempt decides: an attempt whose ``next``
+action downloaded into ``DIR``; an attempt an earlier run attempt left behind is dropped
+(``current``). A part's last attempt decides: an attempt whose ``next``
 asked for a retry is followed by the retry's record. A part whose last attempt left no
 artifact (its runner stopped) is read from its record on this host (``salvage``), else
 it is ``lost``. The verdict is then posted as the ``context`` status of ``S``, and the
@@ -41,6 +42,8 @@ MAX_SALVAGED = 16
 #: attempts per part: the first and one retry (design §4.4)
 MAX_ATTEMPT = 2
 ARTIFACT = re.compile(r'ci-part-([A-Za-z0-9][A-Za-z0-9_.-]{0,63})-([0-9]{1,2})\Z')
+#: a record's run attempt: ``…/<run id>-<run attempt>/<id>-<n>`` at the end of ``record``
+RECORD_RUN = re.compile(r'/[0-9]+-([0-9]+)/[^/]+-[0-9]{1,2}\Z')
 MAX_FILE = 1 << 20
 
 
@@ -107,7 +110,30 @@ def collect(root: str) -> dict[str, dict[int, tuple[dict, str]]]:
         if not isinstance(o, dict) or o.get('outcome') not in KINDS:
             continue
         out.setdefault(m.group(1), {})[int(m.group(2))] = (o, _read(os.path.join(d, 'summary.md')) or '')
-    return out
+    return {pid: current(attempts) for pid, attempts in out.items()}
+
+
+def run_attempt(outcome: Mapping) -> int:
+    """The run attempt (``GITHUB_RUN_ATTEMPT``) an outcome was made in: its
+    ``run-attempt`` (every outcome from ``v1.5.2``, also one without a record), else its
+    ``record`` (``<host>:<repo>/<run id>-<run attempt>/<id>-<n>``); 0 when neither names
+    one. Pure."""
+    v = outcome.get('run-attempt')
+    if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+        return v
+    m = RECORD_RUN.search(str(outcome.get('record', '')))
+    return int(m.group(1)) if m else 0
+
+
+def current(attempts: Mapping[int, tuple[dict, str]]) -> dict[int, tuple[dict, str]]:
+    """A part's attempts without those an earlier run attempt left behind. A run's
+    artifacts outlive its run attempts, and their names carry only the part's attempt:
+    after a GitHub re-run of a part's first attempt, the earlier run attempt's retry
+    would otherwise outrank it (issue #64). So the chain starts at the first attempt,
+    and a later attempt counts only if it was made in that run attempt or a later one.
+    Pure."""
+    first = run_attempt(attempts[1][0]) if 1 in attempts else 0
+    return {n: a for n, a in attempts.items() if n == 1 or run_attempt(a[0]) >= first}
 
 
 def _read(path: str) -> str | None:

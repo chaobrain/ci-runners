@@ -37,6 +37,7 @@ RELAY_IDLE = 30.0  # s a connection may take to send its whole request head
 KEEP = 3  # builds of a project kept: the linked ones and the newest
 UNLINKED = '.ci-unlinked'  # in a build no link holds: its mtime is when that was first seen
 CONDA_DONE = '.ci-installed'  # in <base>/conda once its installer finished
+BUILD_LOCK = '.build.lock'  # in <base>/envs: one build at a time per base, whatever its project
 STAMP = r'[0-9]{8}T[0-9]{6}Z'
 VARIANT = r'[a-z0-9][a-z0-9_.-]{0,30}'  # an env variant (``slurmsite.VARIANT``)
 
@@ -354,7 +355,10 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
     missing conda is installed from ``installer`` first, offline (a partial install is
     removed and redone). The steps run with an empty ``HOME`` of their own in
     ``<base>/run`` and no pip config file: the account's own conda and pip settings (a
-    mirror the egress does not allow, say) do not reach the build."""
+    mirror the egress does not allow, say) do not reach the build. One build runs at a time
+    per base (``BUILD_LOCK``), whatever its project, since builds share conda and its
+    package cache; a ``conda create`` that exits 0 yet leaves no python (a corrupt package
+    it reported) fails the build."""
     envs, run = os.path.join(base, 'envs'), os.path.join(base, 'run')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,39}', project) or not re.fullmatch(STAMP, stamp):
         raise LoginError('project or stamp is malformed')
@@ -370,12 +374,14 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull, 'PIP_NO_INPUT': '1',
            'PIP_CONFIG_FILE': os.devnull, 'PYTHONNOUSERSITE': '1', 'TMPDIR': run}
     lock = open(os.path.join(envs, f'.{project}.lock'), 'a')
+    block = open(os.path.join(envs, BUILD_LOCK), 'a')
     relay = None
     try:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             raise LoginError(f'another build of {project} is running') from None
+        fcntl.flock(block, fcntl.LOCK_EX)  # another project's build: they share conda and its package cache
         for d in dirs:
             if os.path.lexists(d):
                 raise LoginError(f'{d} exists')
@@ -392,14 +398,12 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
             env.update({k: url for k in ('https_proxy', 'http_proxy', 'HTTPS_PROXY', 'HTTP_PROXY')},
                        no_proxy='localhost,127.0.0.1', NO_PROXY='localhost,127.0.0.1')
         conda = os.path.join(base, 'conda')
-        with open(os.path.join(base, '.conda.lock'), 'a') as clock:
-            fcntl.flock(clock, fcntl.LOCK_EX)  # another project's build may be installing it
-            if not _conda_ok(conda):
-                if not installer:
-                    raise LoginError('no conda and no installer')
-                shutil.rmtree(conda, ignore_errors=True)  # a partial install
-                _step(['bash', installer, '-b', '-p', conda], env)
-                open(os.path.join(conda, CONDA_DONE), 'w').close()
+        if not _conda_ok(conda):
+            if not installer:
+                raise LoginError('no conda and no installer')
+            shutil.rmtree(conda, ignore_errors=True)  # a partial install
+            _step(['bash', installer, '-b', '-p', conda], env)
+            open(os.path.join(conda, CONDA_DONE), 'w').close()
         os.makedirs(reqdir, mode=0o700)
         for rel, text in files.items():
             path = os.path.normpath(os.path.join(reqdir, rel))
@@ -414,6 +418,10 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
                 sys.stderr.write(f'# {os.path.basename(d)}: for {", ".join(b["links"])}\n')
                 for argv in b['steps']:
                     _step(['nice', '-n', '10', *argv], env)
+                    if 'create' in argv and '--prefix' in argv:  # conda may report a corrupt package yet exit 0
+                        py = os.path.join(argv[argv.index('--prefix') + 1], 'bin', 'python')
+                        if not os.access(py, os.X_OK):
+                            raise LoginError(f'conda create exited 0 but left no {py}')
                 got = {}
                 for name in record.get('upstream_names', []):
                     r = subprocess.run(['git', '-C', os.path.join(d, 'src', name), 'rev-parse', 'HEAD'], env=env,
@@ -469,6 +477,7 @@ def build(base: str, project: str, stamp: str, builds: list, files: dict, record
         if relay is not None:
             relay.close()
         lock.close()
+        block.close()
         shutil.rmtree(reqdir, ignore_errors=True)
         shutil.rmtree(home, ignore_errors=True)
         for path in (socket_path, installer):

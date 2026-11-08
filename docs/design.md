@@ -673,15 +673,20 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
        on; host lists expanded, and a compressed list in text such as a pending reason's
        `UnavailableNodes:` replaced whole), the login Python, proxy and extra `sbatch`
        arguments. A host or node takes its domain with it, and ANSI escape sequences are
-       removed first. A value of 8 characters or more is replaced wherever it occurs; a
-       shorter one as a whole word only (also after `%2F` or a repr's `\n`), in any case. A
+       removed first. A value of 8 characters or more that holds a non-letter is replaced
+       wherever it occurs; any other as a whole word only (also after `%2F` or a repr's
+       `\n`; a value of letters only not next to `_` either, so `standard` keeps
+       `nonstandard` and `test_standard_normal`), a node name always, in any case. A
        value equal to a target, variant or GPU model name or
        one the deny list would not hold (under 4 characters or a common word; nodes from
        2) is kept. Text is redacted before it is cut. The log is redacted by whole lines,
        a line over 64 KiB never cut through a value, so that no name splits across two
        reads. An account whose ssh config `ssh -G` cannot read, or a cluster none of whose
        login hosts gives its node lists (none cached either), ends the part `unavailable`
-       before a job; an error the driver did not expect ends it `unavailable` (`driver:
+       before a job; so does an answer that is empty or holds a list that does not parse
+       or names over 4096 nodes (unknown, the cache not used). The gate keeps 4000
+       characters of a Slurm command's error text, so that the driver redacts it before its
+       own cut; an error the driver did not expect ends it `unavailable` (`driver:
        <type>`), its traceback only in the record. The record on the driver host keeps
        everything as it was. The files a part fetches back (`part/` into `CI_PART_DIR`,
        `tmp/` into `RUNNER_TEMP`: results, coverage data, the command's own logs) are
@@ -721,7 +726,8 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
          it with (`slurmgate.unsafe_dirs`): the root and its `ci-runners` tree the
          account's own directories, not links, that its group and others may not write,
          and every directory above it up to `/` (as written and as resolved) the
-         account's or root's, writable by others only with the sticky bit (`prepare` in
+         account's or root's, writable by others only with the sticky bit, and a link
+         among them root's or the account's (its owner may repoint it) (`prepare` in
          `apply` refuses such a root too; mode bits only, not ACLs); the egress mode's
          prerequisites;
        - `plan` prints every change (the root's directories, mode 700; the release copied

@@ -517,6 +517,21 @@ class Check(Cluster):
         self.assertEqual((t['h100']['partition_up'], t['cpu']['partition_up']), (False, True))
 
 
+class ErrorText(Cluster):
+    """A Slurm command's error text goes out whole up to ``ERR_KEEP`` characters: the
+    driver redacts it before it cuts it, so the gate must not cut a name in two first."""
+
+    def test_the_gate_keeps_the_error_text_past_the_drivers_cut(self):
+        long = 'x' * 600 + ' zq[01-09].'
+        fail = lambda argv, **kw: subprocess.CompletedProcess(argv, 1, '', long)  # noqa: E731
+        for call in (lambda: sg.submit(str(self.base), str(ROOT), KEY, json.dumps(request()).encode(), run=fail),
+                     lambda: sg.ledger('', fail), lambda: sg.nodes(fail)):
+            with self.assertRaises(sg.GateError) as e:
+                call()
+            self.assertTrue(str(e.exception).endswith(long), str(e.exception)[:40])
+        self.assertGreaterEqual(sg.ERR_KEEP, 2000)
+
+
 class UnsafeDirs(unittest.TestCase):
     """``unsafe_dirs``: what another user could swap under the root (S2 of RUN-9h)."""
 
@@ -562,6 +577,24 @@ class UnsafeDirs(unittest.TestCase):
         self.addCleanup(real.chmod, 0o755)
         self.assertEqual(sg.unsafe_dirs(str(self.top / 'home' / 'alias' / 'root')),
                          {str(real): 'writable', str(self.top / 'home' / 'alias'): 'writable'})  # as written, too
+
+    def test_a_link_above_the_root_that_another_user_owns(self):
+        real = self.top / 'real'
+        (real / 'root').mkdir(parents=True, mode=0o755)
+        real.chmod(0o755)
+        alias = self.top / 'home' / 'alias'
+        alias.symlink_to(real)
+        (self.top / 'home').chmod(0o1777)  # sticky: yet the link's owner may still point it elsewhere
+        self.assertEqual(sg.unsafe_dirs(str(alias / 'root')), {})
+        lstat = os.lstat
+
+        def other(p):
+            st = lstat(p)
+            if os.fspath(p) != str(alias):
+                return st
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, os.getuid() + 1) + tuple(st)[5:])
+        with mock.patch.object(sg.os, 'lstat', other):
+            self.assertEqual(sg.unsafe_dirs(str(alias / 'root')), {str(alias): 'owner'})
 
 
 class Wrapper(Cluster):

@@ -332,11 +332,13 @@ def ledgers(gates: Mapping[str, Gate], cache: str, now: float, month: str) -> tu
 def site_nodes(gates: Mapping[str, Gate], cache: str, now: float) -> list[str] | None:
     """The cluster's node lists (``sinfo``'s ``%N``, through the first gate that answers),
     cached ``NODES_TTL`` s in ``cache``: every node a pending reason may name, for the
-    redactor. The last cached ones, however old, if no gate answers; None if none are."""
+    redactor. The last cached ones, however old, if no gate answers; None if none are,
+    or if the answer is not lists of nodes (empty, or a list that does not parse): then
+    some node could not be redacted."""
     os.makedirs(cache, mode=0o700, exist_ok=True)
     path = os.path.join(cache, 'nodes.json')
     c = _read_json(path) or {}
-    cached = [str(x) for x in c['nodes']] if isinstance(c.get('nodes'), list) else None
+    cached = _node_lists(c.get('nodes'))
     if cached is not None and now - float(c.get('at', 0)) < NODES_TTL:
         return cached
     for g in gates.values():
@@ -344,10 +346,18 @@ def site_nodes(gates: Mapping[str, Gate], cache: str, now: float) -> list[str] |
             got = g.json('nodes').get('nodes')
         except (Unreachable, Refused):
             continue
-        if isinstance(got, list):
-            _write_json(path, {'at': now, 'nodes': [str(x) for x in got]})
-            return [str(x) for x in got]
+        lists = _node_lists(got)
+        if lists is not None:
+            _write_json(path, {'at': now, 'nodes': lists})
+        return lists  # an answer that does not parse: unknown, not the cache
     return cached
+
+
+def _node_lists(v: object) -> list[str] | None:
+    """``v`` if it is a non-empty list of host lists that each expand, else None. Pure."""
+    if not isinstance(v, list) or not v or not all(isinstance(x, str) and slurmsite.hostlist(x) for x in v):
+        return None
+    return list(v)
 
 
 def retired_rows(site: slurmsite.Site, cache: str, month: str) -> dict[str, list[dict]]:

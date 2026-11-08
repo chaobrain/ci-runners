@@ -620,6 +620,16 @@ class Pending(Driver):
         self.hosts({})
         self.execute(id='again', target='cpu')
         self.assertEqual(json.loads(cache.read_text())['nodes'], ['other[1-2]'])  # read again past its TTL
+        for k, bad in enumerate(([], ['zq[1-x]'], ['zq[1-99999]'], ['zq[01-02]', 'zq[1,]'])):
+            c = json.loads(cache.read_text())  # a good cache past its TTL; the gate's answer does not parse
+            c['at'] -= sp.NODES_TTL
+            cache.write_text(json.dumps(c))
+            (self.d / 'slurm' / 'nodes.json').write_text(json.dumps(bad))
+            n = len(self.jobs())
+            code, out = self.execute(id=f'bad{k}', target='cpu')
+            self.assertEqual(out['outcome'], 'unavailable', bad)
+            self.assertIn("the cluster's node list is unknown", out['reason'])
+            self.assertEqual(len(self.jobs()), n)  # before any job
 
     def test_past_the_queue_timeout_no_next_account_is_tried(self):
         self.plan({'pend': -1, 'reason': 'Priority'}, {'pend': -1, 'reason': 'Priority'})

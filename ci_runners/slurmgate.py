@@ -50,6 +50,9 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 
+#: the end of a command's error text the gate passes on: far more than the driver keeps
+#: (``slurmpart.Gate``: 300), so that the driver redacts a name whole before it cuts
+ERR_KEEP = 4000
 VERBS = ('stage', 'fetch', 'submit', 'status', 'log', 'cancel', 'ledger', 'nodes', 'reap', 'check')
 TIME_MARGIN = 5  # min of a job's --time over the part's timeout (14.3; slurmsite.TIME_MARGIN)
 WARN_SECONDS = 120  # the warning TERM before the time limit
@@ -305,7 +308,7 @@ def submit(base: str, release: str, key: str, data: bytes, run: Callable = subpr
     r = run(['sbatch', '--parsable', script], capture_output=True, text=True, timeout=120, cwd=d, env=sbatch_env())
     out = (r.stdout or '').strip().split(';')[0]
     if r.returncode != 0 or not out.isdigit():
-        raise GateError(f'sbatch refused it: {(r.stderr or r.stdout or "").strip()[-300:]}')
+        raise GateError(f'sbatch refused it: {(r.stderr or r.stdout or "").strip()[-ERR_KEEP:]}')
     now = time.time()
     job = {'job': int(out), 'submit_epoch': now, 'target': req['target'], 'cards': req['cards'],
            'deadline': now + (float(req['queue_minutes']) + math.ceil(float(req['minutes'])) + TIME_MARGIN) * 60}
@@ -397,7 +400,7 @@ def ledger(month: str, run: Callable = subprocess.run, now: datetime.datetime | 
     r = run(['sacct', '-n', '-P', '-X', '-S', f'{month}-01T00:00:00', '-E', 'now', '-o', ','.join(SACCT_FIELDS)],
             capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
-        raise GateError(f'sacct failed: {(r.stderr or "").strip()[-200:]}')
+        raise GateError(f'sacct failed: {(r.stderr or "").strip()[-ERR_KEEP:]}')
     return {'month': month, 'jobs': parse_sacct(r.stdout or '')}
 
 
@@ -406,7 +409,7 @@ def nodes(run: Callable = subprocess.run) -> dict:
     redactor replaces, since a pending job's reason may name any of them."""
     r = run(['sinfo', '-h', '-o', '%N'], capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
-        raise GateError(f'sinfo failed: {(r.stderr or "").strip()[-200:]}')
+        raise GateError(f'sinfo failed: {(r.stderr or "").strip()[-ERR_KEEP:]}')
     return {'nodes': sorted({x.strip() for x in (r.stdout or '').splitlines() if x.strip()})}
 
 
@@ -494,9 +497,12 @@ def unsafe_dirs(root: str, tree: str = '') -> dict[str, str]:
             above.add(p)
     for p in sorted(above):
         try:
-            st = os.stat(p)
+            lst, st = os.lstat(p), os.stat(p)
         except OSError:
             out[p] = 'missing'
+            continue
+        if stat.S_ISLNK(lst.st_mode) and lst.st_uid not in (0, me):  # its owner may point it elsewhere
+            out[p] = 'owner'
             continue
         if st.st_uid not in (0, me):
             out[p] = 'owner'

@@ -638,6 +638,12 @@ class BehindNightly(ClassHost):
         self.assertFalse(self.hold.exists())  # gone with the part
         _, out = self.go('part', id='after')
         self.assertEqual(out['outcome'], 'pass', out['reason'])
+        other = subprocess.Popen(['sleep', '30'])  # another writer's record, written while ours ran
+        self.addCleanup(lambda: (other.kill(), other.wait()))
+        mark = f'{{"procs": [[{other.pid}, {round(slots._start_of(other.pid))}]], "record": "x"}}'
+        _, out = self.go('nightly', id='n2', command=f"printf '%s' '{mark}' > \"{self.hold}\"", timeout_minutes=600)
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
+        self.assertEqual(json.loads(self.hold.read_text())['procs'][0][0], other.pid)  # not ours to delete
 
     def nightly(self, gate):
         """A nightly part in its own process (its runner), its command waiting for ``gate``."""
@@ -687,6 +693,79 @@ class BehindNightly(ClassHost):
         finally:
             os.close(fd)
             self.stop(child, gate)
+
+    def later(self, write, delay=0.3):
+        t = threading.Timer(delay, write)
+        t.start()
+        self.addCleanup(t.cancel)
+
+    def test_a_waiting_part_yields_only_behind_a_nightly_ticket(self):
+        """The race the gate cannot see: a nightly part that comes in while a first attempt
+        waits. Behind its ticket the part goes elsewhere; ahead of it, it keeps its turn."""
+        fds = [os.open(p, os.O_WRONLY) for p in (self.slot, self.slot.parent / 's.2.lock')]
+        for fd in fds:
+            fcntl.flock(fd, fcntl.LOCK_EX)  # both slots held: the part waits
+        self.addCleanup(lambda: [os.close(fd) for fd in fds])
+        q = self.slot.parent / 's.queue'
+        q.mkdir()
+
+        def every(seq):
+            (q / f'{seq:012d}.wait').write_text(f'{seq} {os.getpid()} {int(time.time())} /x ci-slot project=q every n\n')
+
+        every(1)  # the nightly's ticket, older than ours; its hold record comes once ours waits
+        self.later(lambda: part.every_hold(str(self.data), [os.getpid()], 'n'))
+        t0 = time.monotonic()
+        _, out = self.go('part', id='behind', queue_timeout_minutes=0.05)
+        self.assertEqual((out['reason'], out['retry-on']), (part.NIGHTLY_BUSY, ['self-hosted', 'hz-cpu']))
+        self.assertLess(time.monotonic() - t0, 2.5)
+        (q / '000000000001.wait').unlink()
+        os.unlink(part.every_path(str(self.data)))
+
+        def younger():  # the nightly comes in after our ticket: we are ahead of it
+            mine = max(int(n[:12]) for n in os.listdir(q) if n.endswith('.wait'))
+            every(mine + 1)
+            part.every_hold(str(self.data), [os.getpid()], 'n')
+        self.later(younger)
+        _, out = self.go('part', id='ahead', queue_timeout_minutes=0.05)
+        self.assertEqual(out['reason'], 'queue timeout: no CI slot')
+
+    def test_a_part_waiting_for_its_card_yields_once_the_nightly_is_ahead(self):
+        """A GPU part waiting for its lease goes elsewhere once a nightly part runs (it holds
+        every card) or waits for the cards with an older lease ticket; else it waits."""
+        leases = self.data / 'ci-runners/state/leases'
+        other = part.Leases(str(leases))
+        self.assertEqual(other.try_take(1, [1], {0: 24000, 1: 24000}, 0), [1])  # card 1 held: the part waits
+        self.addCleanup(other.release)
+        me = [os.getpid(), round(slots._start_of(os.getpid()))]
+
+        def hold(procs):
+            part._write_json(part.every_path(str(self.data)), {'procs': procs, 'record': 'n'})
+        cases = (('running', [me, me], False, part.NIGHTLY_BUSY),
+                 ('waiting, older ticket', [me], True, part.NIGHTLY_BUSY),
+                 ('waiting for slots', [me], False, 'queue timeout: no card fits'))
+        for n, (what, procs, ticket, reason) in enumerate(cases):
+            with self.subTest(what):
+                if ticket:
+                    part._write_json(str(leases / 'queue' / '000000000001.json'),
+                                     {'pid': me[0], 'start': me[1], 'n': 2, 'cards': [0, 1], 'need_mib': 0, 'every': True})
+                self.later(lambda procs=procs: hold(procs))
+                _, out = self.go('gpu', card='1', gpus=1, id=f'g{n}', queue_timeout_minutes=0.05)
+                self.assertEqual(out['reason'], reason)
+                if reason == part.NIGHTLY_BUSY:
+                    self.assertEqual(out['retry-on'], ['self-hosted', 'hz-gpu'])
+                for f in (leases / 'queue' / '000000000001.json', pathlib.Path(part.every_path(str(self.data)))):
+                    if f.exists():
+                        f.unlink()
+
+    def test_a_hold_record_that_cannot_be_written_holds_nothing_back(self):
+        """The record only places other parts: a nightly part whose record cannot be written
+        runs (fail open)."""
+        state = self.data / 'ci-runners/state'
+        state.mkdir(parents=True)
+        os.mkdir(part.every_path(str(self.data)))  # a directory where the record goes: every write fails
+        _, out = self.go('nightly', timeout_minutes=600)
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
+        self.assertTrue(self.ran(out))
 
     def test_first_attempts_go_to_the_peer_at_once_and_a_retry_queues(self):
         gate = pathlib.Path(self.tmp.name, 'gate')

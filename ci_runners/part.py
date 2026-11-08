@@ -593,9 +593,12 @@ def every_path(data: str) -> str:
 def every_hold(data: str, pids: Sequence[int], record: str) -> None:
     """Write the hold record: the processes that keep the hold (the executor, then the
     supervisor too, which outlives a stopped executor), by PID and start, and the part's
-    record."""
-    _write_json(every_path(data), {'procs': [[p, round(slots._start_of(p))] for p in pids],
-                                   'record': record_ref(record), 'since': round(time.time())})
+    record. It only places other parts, so a failed write is ignored (fail open)."""
+    try:
+        _write_json(every_path(data), {'procs': [[p, round(slots._start_of(p))] for p in pids],
+                                       'record': record_ref(record), 'since': round(time.time())})
+    except OSError:
+        pass
 
 
 def every_holder(data: str) -> dict | None:
@@ -996,6 +999,10 @@ class Executor:
                         if slot_fd is None:
                             if self.stopped:
                                 return self._end(record, rec, a, stopped=True)
+                            # a nightly part came in after the gate, and our ticket is behind its (13.6)
+                            if (self.yields(a, cls, proj.retries) and every_holder(str(h['data']))
+                                    and not any(t.every and t.seq > q.seq for t in q.waiting())):
+                                return self._away(record, rec, a, NIGHTLY_BUSY, cls)
                             if time.monotonic() >= deadline:
                                 return self._end(record, rec, a, unavailable='queue timeout: no CI slot')
                             time.sleep(self.poll)
@@ -1038,6 +1045,12 @@ class Executor:
                         break
                     if self.stopped:
                         return self._end(record, rec, a, stopped=True)
+                    if not nightly and self.yields(a, cls, proj.retries):
+                        # a nightly part came in after the gate: it runs, or our lease ticket is behind its (13.6)
+                        held = every_holder(str(h['data']))
+                        if held and (len(held.get('procs') or ()) > 1
+                                     or any(t.every and t.seq < leases.seq for t in leases.tickets())):
+                            return self._away(record, rec, a, NIGHTLY_BUSY, cls)
                     if time.monotonic() >= deadline:
                         return self._end(record, rec, a, unavailable='queue timeout: no card fits')
                     time.sleep(self.poll)
@@ -1123,15 +1136,19 @@ class Executor:
             for fd in {slot_fd, env_fd, *every} - {None}:
                 os.close(fd)
 
+    def yields(self, a: Inputs, cls: str, retries: int) -> bool:
+        """Whether a busy host sends this part elsewhere (decisions 13.2, 13.6): only where
+        it can go there, a class with a peer pool other than ``light`` (and ``nightly``), and
+        a project that allows a retry; never a retry."""
+        return not (a.attempt_of or retries < 1 or cls in ('light', EVERY_SLOT)
+                    or not inventory.peer_labels(self.inv, cls))
+
     def busy(self, a: Inputs, cls: str, retries: int) -> str:
         """Busy-host avoidance (decisions 13.2, 13.6): why this part's first attempt goes
-        to the other host, or empty. Only where it can go there: a class with a peer pool
-        other than ``light`` (and ``nightly``), and a project that allows a retry; never on
-        a retry. A ``nightly`` part that holds or waits for every slot and card sends it
-        away every time; the load rule once per head and part on this host (a marker, then
-        it waits here)."""
-        if (a.attempt_of or retries < 1 or cls in ('light', EVERY_SLOT)
-                or not inventory.peer_labels(self.inv, cls)):
+        to the other host, or empty (see ``yields``). A ``nightly`` part that holds or waits
+        for every slot and card sends it away every time; the load rule once per head and
+        part on this host (a marker, then it waits here)."""
+        if not self.yields(a, cls, retries):
             return ''
         data = str(self.inv.host['data'])
         if every_holder(data):

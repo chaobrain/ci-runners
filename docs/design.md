@@ -543,9 +543,15 @@ from the load record they add.
          with `next` `fallback` and `retry-on` the other host's pool of its class (13.3).
          It applies where busy does (a class with a peer pool, other than `light` and
          `nightly`; a project with a retry budget; never on a retry), every time and with
-         no marker: while it waits its ticket holds back every later one, and once in it
-         holds every slot and card (12.8, §7), so a part sent away saves its whole queue
-         timeout. Generalising to "a hold whose expected end is past
+         no marker: once in, the nightly holds every slot and card (12.8, §7), and while it
+         waits its slot ticket holds back every later slot ticket, so a part sent away
+         saves its whole queue timeout. A `gpu` or `multi` part is sent away too while the
+         nightly still waits for the slots, though a card may be free then: the nightly
+         takes the cards next, and a lease taken in between would hold it back.
+         A first attempt that passed the gate before the record appeared checks again
+         while it waits: a slot part goes elsewhere unless its slot ticket is older than
+         the nightly's, a card part once the nightly runs or holds an older lease ticket
+         than its own. A write of the record that fails is ignored (fail open). Generalising to "a hold whose expected end is past
          the queue timeout" is not done: only the nightly holds a whole host, and its
          timeout (600 min) is no estimate of its end.
        - **A retry queues on a full queue.** The project cap of §7 rule 2 (`max_waiting`

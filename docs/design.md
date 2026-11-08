@@ -1779,6 +1779,11 @@ Rules:
   the account's `~/.local` packages (`PYTHONNOUSERSITE=1`) nor its pip config: the
   account's own conda and pip settings (a package mirror the egress does not allow)
   reach neither (14.9). No input or output changes.
+- **`v1.7.2`** (patch, stamped 2026-11-09; a patch of `v1.7`): a slurm part's driver
+  scope gets the user manager's bus (`XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`; at
+  `v1.7.1` every slurm part ended `lost` before its driver ran); one cluster env build
+  at a time per root, and a `conda create` that exits 0 yet leaves no python fails the
+  build; `ci-run slurm status` lists only held targets. No input or output changes.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

@@ -465,6 +465,47 @@ class Classes(ClassHost):
         for p in (self.slot, self.slot.parent / 's.2.lock'):  # its slot is free again
             self.assertEqual(subprocess.run(['flock', '-n', '-x', str(p), 'true'], timeout=10).returncode, 0)
 
+    def _sh_shared_holder(self, seconds):
+        """A ``host_lock.sh -s`` holder (brainspike's own script, the file the part uses) for
+        ``seconds``, as a review probe or a local run takes it; returns once it holds."""
+        sh = ROOT / 'tests/fixtures/brainspike/host_lock.sh'
+        hold = subprocess.Popen([str(sh), '-s', 'sleep', str(seconds)], start_new_session=True,
+                                env={**os.environ, 'LOCAL_CI_HOST_LOCK': str(self.hl)}, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: (self._kill_group(hold), hold.wait()))
+        shared = self.hl.with_name('h.shared.lock')
+        for _ in range(500):  # its marker: held shared by every normal shared holder
+            if shared.exists() and part.slots._flocked(str(shared)):
+                return hold
+            time.sleep(0.01)
+        self.fail('the host_lock.sh -s holder did not take the lock')
+
+    @staticmethod
+    def _kill_group(proc):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def test_a_compile_part_sees_a_host_lock_sh_shared_holder(self):
+        """Issue 80 (brainspike's #444 flake): a ``compile`` part's ``x`` waits for a
+        ``host_lock.sh -s`` holder, and runs once it has gone. The wait is the part's queue time;
+        ``local_ci.sh`` inside the part prints ``x 0m0s`` in its table whatever the part waited,
+        since its own request is covered by the part's hold."""
+        hold = self._sh_shared_holder(30)
+        code, out = self.go('compile')  # queue timeout 1.2 s: the holder is still in
+        self.assertEqual((code, out['outcome'], out['reason']), (0, 'unavailable', 'queue timeout: no host lock (x)'))
+        self.assertFalse(self.ran(out))
+        self._kill_group(hold)
+        hold.wait()
+        short = self._sh_shared_holder(2)
+        t0 = time.monotonic()
+        code, out = self.go('compile', id='after', queue_timeout_minutes=0.5)
+        self.assertEqual((code, out['outcome']), (0, 'pass'))
+        self.assertTrue(self.ran(out))
+        self.assertGreaterEqual(time.monotonic() - t0, 1.0)  # it waited for the 2 s holder
+        self.assertGreaterEqual(out['queue-seconds'], 1)
+        short.wait(10)
+
     def test_the_supervisor_keeps_the_host_lock_after_the_executor_is_gone(self):
         """The hold lasts as long as the command (§5.5 item 3: released when the scope ends),
         not as long as the executor: a stopped runner does not let a timing part's x go."""

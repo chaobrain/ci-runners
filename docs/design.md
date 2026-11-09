@@ -1817,7 +1817,7 @@ Rules:
   consumer reads as one CPU (issue #99). A part without an inventory `cpus` gets a list
   too. No input or output changes; a consumer that sizes its workers by `CI_CPUS` runs
   more of them on the cluster.
-- **`v1.7.7`** (patch, stamped 2026-11-09; a patch of `v1.7`): each process of a driver
+- **`v1.7.7`** (patch, stamped 2026-11-09; a patch of `v1.7`; `v1` moved to it after the slurm canary at `@v1.7.7`, 2026-11-09, run while the reaper's service started and ended every few seconds on the same host): each process of a driver
   host has an ssh master of its own; at `v1.7.6` one master per account was shared, and
   when the unit that started it ended (the reaper's service, a part's scope) every other
   part's transfer through it broke (issue #103). A transfer that a dropped connection ends

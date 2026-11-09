@@ -1809,7 +1809,7 @@ Rules:
   root of up to about 75 characters fits a Unix socket path (at `v1.7.4` a driver whose
   data root passed about 45 could not reach its gate); a longer one ends the part
   `unavailable` with that reason. No input or output changes.
-- **`v1.7.6`** (patch, stamped 2026-11-09; a patch of `v1.7`): a cluster part's
+- **`v1.7.6`** (patch, stamped 2026-11-09; a patch of `v1.7`; `v1` moved to it after the slurm canary at `@v1.7.6`, 2026-11-09, whose CPU and one-card parts each saw `CI_CPUS` list exactly the CPUs their job asked for): a cluster part's
   `CI_CPUS` is the job's own cpuset on its node, a list such as `0-7`, as the contract
   gives it; at `v1.7.5` and before it was the number of CPUs asked for (`8`), which a
   consumer reads as one CPU (issue #99). A part without an inventory `cpus` gets a list

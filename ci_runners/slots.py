@@ -185,6 +185,26 @@ def alive(pid: int, start: float) -> bool:
     return boot + int(fields[19]) / os.sysconf('SC_CLK_TCK') <= start + 2
 
 
+UNSEEN_MAX = 24 * 3600  # seconds: how long a ticket whose process /proc hides is believed (see ``unseen``)
+
+
+def unseen(pid: int) -> bool:
+    """``pid`` is a process of another account that this account's ``/proc`` hides
+    (``ProtectProc=invisible``, design 12.16): it has no ``/proc/<pid>/stat`` for us, yet
+    signal 0 is refused (EPERM), where a pid that does not exist gives ESRCH. Whether it
+    is a zombie, is stopped or is a later process on a reused pid cannot be told from
+    here. A pid whose ``/proc`` entry we can see is judged by ``alive``, never here."""
+    if os.path.exists(f'/proc/{pid}'):
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _start_of(pid: int) -> float:
     with open(f'/proc/{pid}/stat') as f:
         stat = f.read()
@@ -274,17 +294,28 @@ class SlotQueue:
             parts = text.split(maxsplit=3)
             ok = (len(parts) >= 3 and all(p.isdigit() for p in parts[:3]) and int(parts[0]) == int(m.group(1))
                   and int(parts[1]) > 0)
-            if path != self.ticket and not (ok and alive(int(parts[1]), float(parts[2]))):
+            ours = m.group(2) == 'wait'
+            if path != self.ticket and not (ok and self._live(int(parts[1]), float(parts[2]), ours)):
                 try:
                     os.unlink(path)
                 except OSError:
                     pass
                 continue
             tag = _TAG.search(parts[3]) if len(parts) > 3 else None
-            ours = m.group(2) == 'wait'
             every = ours and len(parts) > 3 and bool(_EVERY.search(parts[3]))
             out.append(Ticket(int(m.group(1)), tag.group(1) if tag and ours else '', every))
         return out
+
+    @staticmethod
+    def _live(pid: int, start: float, ours: bool) -> bool:
+        """Whether the owner of a ticket runs. A ``ci_slot.sh`` ticket belongs to a local
+        account's process, which our ``/proc`` may hide: if signal 0 shows that it exists
+        we keep the ticket (its owner deletes it as it ends, and ``ci_slot.sh``'s own
+        readers delete a dead one), for ``UNSEEN_MAX`` after its start; deleting it would
+        send a live waiter to the back of the queue on every poll of ours."""
+        if alive(pid, start):
+            return True
+        return not ours and time.time() - start <= UNSEEN_MAX and unseen(pid)
 
     def held(self) -> tuple[dict[str, int], int, set[int]]:
         """``(slots held per project, free slots, indexes of free slots)``. A held slot

@@ -34,6 +34,7 @@ import unittest
 from unittest import mock
 
 from ci_runners import locks, slots
+from tests.test_slots import hidden_process
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SRC = pathlib.Path(os.environ.get('CI_RUNNERS_INTEROP_SRC') or ROOT / 'tests' / 'fixtures' / 'brainspike')
@@ -324,6 +325,43 @@ class SlotInterop(unittest.TestCase):
             self.assertEqual(events.count('out'), 10)
             self.assertEqual(peak, 2)
             self.assertEqual([n for n in os.listdir(d / 'slot.queue') if n.endswith(('.ticket', '.wait'))], [])
+
+    def test_a_waiter_the_runner_account_cannot_see_keeps_its_ticket(self):
+        """The runner account's ``/proc`` hides the local account's processes
+        (``ProtectProc=invisible``, 12.16), so its queue reader cannot tell a live
+        ``ci_slot.sh`` waiter from a dead one. It must leave the ticket: deleting it made
+        the waiter take a new one at the back on every poll of ours, so a local run never
+        reached the head (issue 82). The waiter keeps one ticket and takes the slot in turn."""
+        with tempfile.TemporaryDirectory(prefix='ci-slot-') as d:
+            d = pathlib.Path(d)
+            env = dict(os.environ, LOCAL_CI_SLOT_LOCK=str(d / 'slot.lock'), LOCAL_CI_SLOTS='1',
+                       LOCAL_CI_SLOT_POLL='0.1', CI_RUNNERS_PYTHON=PY)
+            held = subprocess.Popen([str(CI_SLOT_SH), 'sleep', '30'], env=env, stderr=subprocess.PIPE, text=True,
+                                    start_new_session=True)
+            self.addCleanup(lambda: (killpg(held.pid), held.wait(), held.stderr.close()))
+            self.assertIn('holding', held.stderr.readline())
+            err = (d / 'waiter.err').open('w')
+            self.addCleanup(err.close)
+            waiter = subprocess.Popen([str(CI_SLOT_SH), 'true'], env=env, stderr=err)
+            self.addCleanup(lambda: (waiter.kill(), waiter.wait()))
+            self.assertTrue(wait_for_glob(d / 'slot.queue', '*.ticket', 10))
+            ticket = next((d / 'slot.queue').glob('*.ticket'))
+            q = slots.SlotQueue(str(d / 'slot.lock'), 1, poll=0.1, default_project='p')
+            with hidden_process(waiter.pid):
+                for _ in range(5):
+                    self.assertEqual(q.waiting(), [slots.Ticket(int(ticket.name[:12]))])
+                    time.sleep(0.15)  # longer than the waiter's poll: it would see a missing ticket and re-queue
+            self.assertTrue(ticket.exists())
+            killpg(held.pid)  # the wrapper and its sleep, which holds the slot
+            self.assertEqual(waiter.wait(30), 0)
+            self.assertNotIn('re-queued', (d / 'waiter.err').read_text())
+
+
+def killpg(pid: int) -> None:
+    try:
+        os.killpg(pid, 9)
+    except ProcessLookupError:
+        pass
 
 
 def wait_for_glob(d: pathlib.Path, pattern: str, timeout: float) -> bool:

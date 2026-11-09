@@ -151,7 +151,7 @@ MUTANTS = [
     (SE, "        stale = [v for v in (list(variants) or own) if held.get(v, {}).get('sha') != sha", "        stale = [v for v in (list(variants) or own) if False", [f'{TSE}.Env.test_refresh_after_a_subset_run_rebuilds_each_variant_that_is_behind']),
     (SE, '        stale = [v for v in (list(variants) or own)', '        stale = [v for v in own', [f'{TSE}.Env.test_refresh_after_a_subset_run_rebuilds_each_variant_that_is_behind']),
     (SE, '        variants = stale', '        pass', [f'{TSE}.Env.test_refresh_after_a_subset_run_rebuilds_each_variant_that_is_behind']),
-    (SE, "    built = dict((kept or {}).get('variants', {}))", '    built = {}', [f'{TSE}.Env.test_a_subset_run_keeps_the_other_variants_builds_in_the_kept_file']),
+    (SE, "    built = dict((kept or {}).get('variants', {}))", '    built = {}', [f'{TSE}.Env.test_a_subset_run_keeps_the_other_variants_builds_in_the_kept_file', f'{TSE}.Env.test_a_subset_run_keeps_a_variant_the_login_host_cannot_read']),
     # RUN-9h: what a part shows on GitHub is redacted; a root others may write is refused; the canary at its --time
     # RUN-9h review: redact, then cut; the cluster's node lists; the directories above the root; the nits
     (SS, "        if isinstance(h, dict) and h.get('max_cards') is not None:", '        if isinstance(h, dict):', [f'{TSU}.Status.test_spend_live_jobs_and_held_targets']),

@@ -1598,6 +1598,9 @@ MUTANTS = [
      [f'{TT}.Classes.test_a_compile_part_holds_x_and_covers_its_commands_requests']),
     (PRT, "                                      timeout=max(0.0, deadline - time.monotonic()))", "                                      timeout=None)",
      [f'{TT}.Classes.test_a_part_waits_for_the_host_lock_within_its_queue_timeout']),
+    # a compile part's x waits for a host_lock.sh -s holder (issue 80)
+    (PRT, "                    hold.acquire(lock)\n", "                    hold.acquire('l')\n",
+     [f'{TT}.Classes.test_a_compile_part_sees_a_host_lock_sh_shared_holder']),
     (PRT, "        rec['lock'] = lock\n", "        rec['lock'] = lock\n        if lock != 'none':  # taken first: before the slots\n"
      "            locks.HostLock(str(h['files']['host_lock']), held='').acquire(lock)\n",
      [f'{TT}.Classes.test_a_part_waiting_for_a_slot_holds_no_host_lock']),

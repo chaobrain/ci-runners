@@ -601,6 +601,17 @@ class Env(Site):
         self.assertEqual({v: e['build'] for v, e in kept['variants'].items()}, {'cpu': second, 'cuda13': first})
         self.assertEqual(kept['variants']['cuda13']['sha'], HEAD)
 
+    def test_a_subset_run_keeps_a_variant_the_login_host_cannot_read(self):
+        self.conda()
+        self.assertEqual(self.env()[0], 0)
+        first = self.builds()[0]
+        (self.envs / first / 'ci-env.json').unlink()  # the login host now reports no variant of this build
+        self.assertEqual(self.env(variants=['cpu'])[0], 0)
+        kept = json.loads((self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'env-acct1-p.json').read_text())
+        second = self.builds()[1]
+        self.assertEqual({v: e['build'] for v, e in kept['variants'].items()}, {'cpu': second, 'cuda13': first})
+        self.assertEqual(kept['variants']['cuda13']['sha'], HEAD)  # from the kept file alone
+
     def test_a_subset_run_from_another_data_dir_keeps_the_other_variants_builds(self):
         self.conda()
         self.assertEqual(self.env()[0], 0)

@@ -228,22 +228,31 @@ def budget_refusal(site: slurmsite.Site, account: str, target: str, cards: int, 
 #: a Unix socket path's limit in bytes (``sun_path``, its NUL included), and what ssh adds
 #: to the ControlPath while it makes the master (``.`` and 16 random characters)
 SUN_PATH, SSH_TMP = 108, 17
+#: a transfer a dropped connection ended: one of rsync's exits for it (socket I/O, protocol
+#: stream, partial transfer, ssh's own) with a dropped connection's words in its error text,
+#: tried again after these waits; a host that does not answer at all is not
+SYNC_TRANSIENT, SYNC_DROPPED, SYNC_WAITS = (frozenset({10, 12, 23, 255}),
+                                            (b'broken pipe', b'connection reset', b'connection closed'), (2.0, 8.0))
 
 
 class Gate:
-    """An account's gate over ssh: one master connection per driver, batch mode, the
-    account's key only. ``ssh`` and ``rsync`` are the tools' paths. The master's socket is
-    named by a short hash of the alias, not ssh's 40-character ``%C``, so that a data root
-    of a usual length fits a Unix socket path; one too long is refused (Unreachable)."""
+    """An account's gate over ssh: one master connection per process, batch mode, the
+    account's key only. ``ssh`` and ``rsync`` are the tools' paths. Each process has a master
+    of its own: a master lives in the cgroup of the process that started it (a part's scope,
+    the reaper's service) and dies with it, so a master shared across processes broke every
+    other part's transfer when its starter ended (issue #103). Its socket is named by a
+    short hash of the alias and the process, not ssh's 40-character ``%C``, so that a data
+    root of a usual length fits a Unix socket path; one too long is refused (Unreachable).
+    A transfer that a dropped connection ends is tried again, twice, after a wait."""
 
     def __init__(self, etc: str, data: str, site: slurmsite.Site, alias: str, *, ssh: str = '/usr/bin/ssh',
                  rsync: str = '/usr/bin/rsync', run: Callable = subprocess.run,
-                 redact: Callable[[str], str] = str) -> None:
-        self.site, self.alias, self.ssh, self.rsync, self.run = site, alias, ssh, rsync, run
+                 redact: Callable[[str], str] = str, sleep: Callable[[float], None] = time.sleep) -> None:
+        self.site, self.alias, self.ssh, self.rsync, self.run, self.sleep = site, alias, ssh, rsync, run, sleep
         self.redact = redact  # the error text it raises, redacted before it is cut
         self.key = os.path.join(etc, 'slurm', 'keys', alias)
         self.cm = os.path.join(state_dir(data, site.name), 'cm')
-        self.sock = os.path.join(self.cm, hashlib.sha256(alias.encode()).hexdigest()[:12])
+        self.sock = os.path.join(self.cm, hashlib.sha256(f'{alias}\0{os.getpid()}'.encode()).hexdigest()[:12])
 
     def ssh_argv(self) -> list[str]:
         if len(os.fsencode(self.sock)) + SSH_TMP >= SUN_PATH:
@@ -303,10 +312,16 @@ class Gate:
         argv = [self.rsync, '-a', *(['--delete'] if delete else []), *(['--safe-links'] if verb == 'fetch' else []), '-e',
                 shlex.join(self.ssh_argv()), f'--rsync-path=ci-slurm-gate {verb}', *(f'--exclude={x}' for x in excludes),
                 src, dst]
-        try:
-            r = self.run(argv, capture_output=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            raise Unreachable(f'{self.alias}: {verb} ran past {timeout:g} s') from None
+        for wait in (*SYNC_WAITS, None):
+            try:
+                r = self.run(argv, capture_output=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                raise Unreachable(f'{self.alias}: {verb} ran past {timeout:g} s') from None
+            err = (r.stderr or b'').lower()
+            dropped = r.returncode in SYNC_TRANSIENT and any(w in err for w in SYNC_DROPPED)
+            if not dropped or wait is None:
+                break
+            self.sleep(wait)
         if r.returncode == 255 or (r.returncode in (12, 35) and b'connection' in (r.stderr or b'').lower()):
             raise Unreachable(f'{self.alias}: {verb}: {self.redact((r.stderr or b"").decode(errors="replace").strip())[-200:]}')
         if r.returncode != 0:

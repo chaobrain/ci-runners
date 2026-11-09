@@ -213,6 +213,36 @@ class Pure(unittest.TestCase):
             with self.assertRaisesRegex(sp.Unreachable, 'too long for the ssh control socket'):
                 gate('acct1', 78).ssh_argv()
 
+    def test_each_process_has_its_own_master(self):
+        """A master dies with the unit of the process that started it (a part's scope, the
+        reaper's service): one shared across processes broke the others' transfers (#103)."""
+        g = sp.Gate('/e', '/d', self.site, 'acct1')
+        self.assertEqual(sp.Gate('/e', '/d', self.site, 'acct1').sock, g.sock)  # one per process and account
+        with mock.patch.object(sp.os, 'getpid', return_value=os.getpid() + 1):
+            self.assertNotEqual(sp.Gate('/e', '/d', self.site, 'acct1').sock, g.sock)  # another process: its own
+
+    def test_a_transfer_a_dropped_connection_ends_is_tried_again(self):
+        import subprocess as sp_
+        for rcs, err, want, runs in (([10, 0], b'rsync: [sender] write error: Broken pipe (32)', None, 2),
+                                     ([255, 12, 0], b'read: Connection reset by peer', None, 3),
+                                     ([23, 0], b'rsync: write failed: Broken pipe (32)', None, 2),
+                                     ([255, 255, 255, 0], b'Connection closed by remote host', sp.Unreachable, 3),
+                                     ([10, 10, 10], b'Broken pipe', sp.Refused, 3),  # twice again, then the end
+                                     ([255, 0], b'ssh: connect to host h port 22: Connection refused', sp.Unreachable, 1),
+                                     ([23, 0], b'rsync: some files vanished', sp.Refused, 1),  # not a dropped connection
+                                     ([3, 0], b'Broken pipe', sp.Refused, 1)):
+            seq, waits = list(rcs), []
+            g = sp.Gate('/e', '/d', self.site, 'acct1', sleep=waits.append,
+                        run=lambda argv, **kw: sp_.CompletedProcess(argv, seq.pop(0), b'', err))
+            g.ssh_argv = lambda: ['ssh']
+            if want is None:
+                g.sync('stage', '/a/', 'h:k/')
+            else:
+                with self.assertRaises(want, msg=rcs):
+                    g.sync('stage', '/a/', 'h:k/')
+            self.assertEqual(len(rcs) - len(seq), runs, rcs)
+            self.assertEqual(waits, list(sp.SYNC_WAITS[:runs - 1]), rcs)
+
     def test_ssh_facts_need_both_the_host_and_the_user(self):
         import subprocess as sp_
         out = {'rc': 0, 'text': b'user labuser\nhostname login7\nport 22\n'}
@@ -305,7 +335,7 @@ class Pure(unittest.TestCase):
         import subprocess as sp_
         red = slurmsite.Redactor(self.site)
         res = {}
-        g = sp.Gate('/e', '/d', self.site, 'acct1', redact=red,
+        g = sp.Gate('/e', '/d', self.site, 'acct1', redact=red, sleep=lambda s: None,
                     run=lambda argv, **kw: sp_.CompletedProcess(argv, res['rc'], b'', res['err']))
         g.ssh_argv = lambda: ['ssh']
         for rc, exc, keep in ((2, sp.Refused, 300), (255, sp.Unreachable, 200)):

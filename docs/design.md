@@ -634,7 +634,9 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
          `queue-timeout-minutes`; past that the part ends `unavailable` (`pending`);
        - **watch**: the part's supervisor, in its systemd scope on the driver host (so a
          stopped runner leaves it running, §4.3), polls the job's state and relays its log
-         by offset over one ssh master connection;
+         by offset over one ssh master connection of its own (each process has its own: a
+         master dies with the unit that started it, issue #103); a transfer that a dropped
+         connection ends is tried again twice, after 2 s and 8 s;
        - **cancel**: the part's TERM cancels the job (`scancel`), and the part ends
          `stopped`;
        - **results**: after the end, `RUNNER_TEMP` and the part's results are synced back,

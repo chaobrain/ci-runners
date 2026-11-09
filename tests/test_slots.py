@@ -1,6 +1,7 @@
 """The fair slot queue (design §7, rules 1, 2 and 4)."""
 from __future__ import annotations
 
+import contextlib
 import os
 import pathlib
 import shutil
@@ -17,6 +18,32 @@ from ci_runners.slots import grants, queue_full
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CAPS = {'myproj': 2, 'brainevent': 1, 'other': 1}
+
+
+@contextlib.contextmanager
+def hidden_process(pid, kill=PermissionError):
+    """Run as the CI account does (design 12.16): ``/proc/<pid>`` does not exist for us,
+    and signal 0 to it is refused (``kill``: the error it raises; None: it succeeds)."""
+    real_exists, real_open, real_kill = os.path.exists, open, os.kill
+
+    def exists(path):
+        return False if str(path) == f'/proc/{pid}' else real_exists(path)
+
+    def hidden_open(path, *a, **k):
+        if str(path).startswith(f'/proc/{pid}/'):
+            raise FileNotFoundError(path)
+        return real_open(path, *a, **k)
+
+    def fake_kill(p, sig):
+        if p == pid and sig == 0:
+            if kill is not None:
+                raise kill(1, 'refused')
+            return
+        return real_kill(p, sig)
+    with (unittest.mock.patch.object(slots.os.path, 'exists', exists),
+          unittest.mock.patch.object(slots, 'open', hidden_open, create=True),
+          unittest.mock.patch.object(slots.os, 'kill', fake_kill)):
+        yield
 
 
 def g(waiting, held=None, free=1, caps=CAPS):
@@ -245,6 +272,62 @@ class Queue(unittest.TestCase):
             self.assertEqual(q.waiting(), [T(8, 'p')])
             self.assertFalse(os.path.exists(dead))
 
+
+    def _hide(self, pid, kill=PermissionError):
+        stack = contextlib.ExitStack()
+        stack.enter_context(hidden_process(pid, kill))
+        self.addCleanup(stack.close)
+
+    def test_a_ci_slot_sh_ticket_of_a_process_we_cannot_see_stays(self):
+        """Issue 82: the CI account's /proc hides the local account's processes. A
+        ``ci_slot.sh`` ticket whose process exists (signal 0 is refused, not "no such
+        process") is kept, so its waiter keeps its place; ours is judged by the same rule
+        only when visible; a process that does not exist, or a ticket past ``UNSEEN_MAX``,
+        goes."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05, default_project='p')
+            self._sh_ticket(q, 1)
+            self._hide(os.getpid())
+            self.assertEqual(q.waiting(), [T(1)])
+            self.assertEqual(q.waiting(), [T(1)])  # and again: nothing was deleted
+            self.assertTrue(os.path.exists(os.path.join(q.queue, '000000000001.ticket')))
+
+    def test_a_hidden_process_that_does_not_exist_or_is_old_does_not_hold_a_place(self):
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05, default_project='p')
+            self._sh_ticket(q, 1)
+            self._hide(os.getpid(), kill=ProcessLookupError)  # ESRCH: it is gone
+            self.assertEqual(q.waiting(), [])
+            self.assertFalse(os.path.exists(os.path.join(q.queue, '000000000001.ticket')))
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05, default_project='p')
+            self._sh_ticket(q, 1)
+            self._hide(os.getpid())
+            later = time.time() + slots.UNSEEN_MAX + 5  # a pid that stayed unverifiable a day
+            with unittest.mock.patch.object(slots.time, 'time', lambda: later):
+                self.assertEqual(q.waiting(), [])
+            self.assertFalse(os.path.exists(os.path.join(q.queue, '000000000001.ticket')))
+
+    def test_only_ci_slot_shs_tickets_are_believed_unseen(self):
+        """A ``.wait`` ticket is made by a process of our account, which we always see: one
+        whose process is not visible is dead."""
+        with tempfile.TemporaryDirectory() as d:
+            q = slots.SlotQueue(os.path.join(d, 's.lock'), 2, poll=0.05, default_project='p')
+            os.makedirs(q.queue)
+            stale = os.path.join(q.queue, '000000000003.wait')
+            with open(stale, 'w') as f:
+                f.write(f'3 {os.getpid()} {int(time.time())} /x ci-slot project=q cmd\n')
+            self._hide(os.getpid())
+            self.assertEqual(q.waiting(), [])
+            self.assertFalse(os.path.exists(stale))
+
+    def test_unseen_needs_a_missing_proc_entry_and_a_refused_signal(self):
+        self.assertFalse(slots.unseen(os.getpid()))  # visible: alive() judges it
+        self.assertFalse(slots.unseen(999999999))  # no such process
+        if os.geteuid() != 0 and os.path.exists('/proc/1'):
+            self.assertFalse(slots.unseen(1))  # another account's, but visible here
+            self._hide(1)
+            self.assertTrue(slots.unseen(1))  # and hidden: ESRCH would be "gone", EPERM "exists"
 
     def test_nothing_is_written_through_a_link_in_the_queue(self):
         """T17: the queue is writable by both accounts and not sticky, so a link planted

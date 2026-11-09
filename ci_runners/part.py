@@ -31,7 +31,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 from ci_runners import gpus as gpus_mod
 from ci_runners import drain as drain_mod
@@ -237,6 +237,19 @@ class MemoryCap:
                 except OSError:
                     pass
         return self.killed
+
+
+def cpu_list(cpus: Iterable[int]) -> str:
+    """A set of CPUs as a cpuset list, the form of the inventory's ``cpus`` and of
+    ``CI_CPUS`` (design §4.3): ``{0, 1, 2, 3, 8, 9}`` is ``0-3,8-9``. Pure."""
+    xs, out, i = sorted(set(cpus)), [], 0
+    while i < len(xs):
+        j = i
+        while j + 1 < len(xs) and xs[j + 1] == xs[j] + 1:
+            j += 1
+        out.append(str(xs[i]) if i == j else f'{xs[i]}-{xs[j]}')
+        i = j + 1
+    return ','.join(out)
 
 
 def command_argv(command: str, *, cpus: str = '', nice: int = 10) -> list[str]:
@@ -1120,7 +1133,7 @@ class Executor:
                 rec['lock_wait_seconds'] = round(hold.waited)
             rec.update(queue_seconds=round(time.monotonic() - t0), cards=cards, slot=slot_path, run_epoch=time.time())
             pin = str((h.get('compile_cpus') if cls == 'compile' else h.get('cpus')) or '')  # design §5.5 item 4
-            cpus = pin or str(len(os.sched_getaffinity(0)))
+            cpus = pin or cpu_list(os.sched_getaffinity(0))  # a list, as the inventory's
             build, env_fd = envuse.hold(proj.env) if proj.env else ('', None)  # the link, resolved once
             if build:
                 rec['env_build'] = os.path.basename(build)  # the one env this part runs in (design 12.11)

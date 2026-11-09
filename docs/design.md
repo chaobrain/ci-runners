@@ -1056,8 +1056,10 @@ ends it `unavailable` and releases what it took.
 The command's environment holds:
 
 - `CI_RUNNERS_HOST` (the role name), `CI_PROJECT`, `CI_PART_DIR` and `CI_RESULTS_DIR`;
-- `CUDA_VISIBLE_DEVICES` (empty for a CPU part) and `CI_CPUS` (the inventory's `cpus`,
-  or `compile_cpus` on `compile`);
+- `CUDA_VISIBLE_DEVICES` (empty for a CPU part) and `CI_CPUS`, a cpuset list such as
+  `0-3,8-9`, never a count: the inventory's `cpus`, or `compile_cpus` on `compile`; where
+  the inventory gives none, and in a cluster part's job on its node, the CPUs the command
+  may run on (its affinity);
 - the slot path, marked as held; on a host with the host lock, its path, and with `lock`
   set, the protocol's nesting variable at the mode held (decision 12.9);
 - `CI_RESUME`;

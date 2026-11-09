@@ -197,6 +197,14 @@ MUTANTS = [
     (SST, '            if 0 < cut < len(text) and _name(text[cut - 1]) and _name(text[cut]):', '            if False:', [f'{TSS}.Redact.test_a_cut_never_splits_a_value']),
     (SST, '                if cut - start <= RUN_MAX:\n', '                if True:\n', [f'{TSS}.Redact.test_a_cut_never_splits_a_value']),
     # the ssh control socket fits a long data root
+    # CI_CPUS is a cpuset list, never a count (issue #99)
+    (SGT, "'CI_CPUS': part.cpu_list(os.sched_getaffinity(0)),", "'CI_CPUS': str(len(os.sched_getaffinity(0))),", ['tests.test_slurmgate.Jobs.test_ci_cpus_lists_the_jobs_own_cpus']),
+    (PRT, "            cpus = pin or cpu_list(os.sched_getaffinity(0))", "            cpus = pin or str(len(os.sched_getaffinity(0)))",
+     ['tests.test_part.Classes.test_ci_cpus_without_a_pin_lists_the_cpus']),
+    (PRT, "        out.append(str(xs[i]) if i == j else f'{xs[i]}-{xs[j]}')", "        out.append(f'{xs[i]}-{xs[j]}')", ['tests.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
+    (PRT, "        while j + 1 < len(xs) and xs[j + 1] == xs[j] + 1:", "        while j + 1 < len(xs):", ['tests.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
+    (PRT, "    xs, out, i = sorted(set(cpus)), [], 0", "    xs, out, i = list(cpus), [], 0", ['tests.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
+    (PRT, "        i = j + 1\n    return ','.join(out)", "        i = j + 1\n    return ' '.join(out)", ['tests.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
     (SPT, "        self.sock = os.path.join(self.cm, hashlib.sha256(alias.encode()).hexdigest()[:12])", "        self.sock = os.path.join(self.cm, '%C')", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
     (SPT, "hexdigest()[:12])", "hexdigest())", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
     (SPT, "hashlib.sha256(alias.encode())", "hashlib.sha256(b'')", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),

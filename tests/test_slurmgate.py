@@ -421,6 +421,23 @@ class Jobs(Cluster):
         st = self.wait_end()
         self.assertEqual((st['state'], st['by']), ('CANCELLED', 'us'))
 
+    def test_ci_cpus_lists_the_jobs_own_cpus(self):
+        """CI_CPUS is the job's cpuset as a list, as on the 3090 runners (consumers §3a), never
+        a count, which a consumer would read as one CPU (issue #99)."""
+        have = sorted(os.sched_getaffinity(0))
+        if len(have) < 3:
+            self.skipTest('needs three CPUs')
+        mine = {have[0], have[1], have[-1]}  # two runs, e.g. 0-1,27
+        os.sched_setaffinity(0, mine)  # the fake sbatch's job inherits it, as a job its allocation
+        try:
+            self.submit(command='echo "cpus $CI_CPUS"')
+            self.assertEqual(self.wait_end()['state'], 'COMPLETED')
+        finally:
+            os.sched_setaffinity(0, have)
+        rc, text, _ = self.gate(f'ci-slurm-gate log {KEY} 0')
+        sep = '-' if have[1] == have[0] + 1 else ','
+        self.assertIn(f'cpus {have[0]}{sep}{have[1]},{have[-1]}\n', text.decode())
+
     def test_a_running_job_cancelled_by_us_or_by_another_user(self):
         self.submit(command='sleep 30')
         end = time.monotonic() + 15

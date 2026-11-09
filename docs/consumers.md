@@ -122,7 +122,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 
 - 只在测试失败时以非零退出；
 - 收到 TERM 时停掉自己的进程树（超时会先发 TERM，30 秒后发 KILL）；
-- 用 `CUDA_VISIBLE_DEVICES` 给的卡（CPU 部件为空），不自己选卡；进程已经用 taskset 绑到 `CI_CPUS` 列出的 CPU，定并行度时以它为准；
+- 用 `CUDA_VISIBLE_DEVICES` 给的卡（CPU 部件为空），不自己选卡；进程已经用 taskset 绑到 `CI_CPUS` 列出的 CPU（cpuset 列表，例如 `0-3,8-9`，不是个数；集群部件是作业在节点上分到的 CPU），定并行度时以它为准；
 - 把 JUnit XML 写进 `$CI_RESULTS_DIR`，结果会出现在 summary 里；
 - 能续跑的话，支持 `CI_RESUME=1`（OOM 之后的重试会带上它）。
 

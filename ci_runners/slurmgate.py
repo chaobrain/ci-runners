@@ -595,7 +595,7 @@ def job(d: str) -> int:
         env.update({'CI_RUNNERS_HOST': req['host'], 'CI_PROJECT': req['project'], 'CI_PART_DIR': f'{d}/part',
                     'GITHUB_WORKSPACE': f'{d}/ws',
                     'CI_RESULTS_DIR': f'{d}/part/results', 'RUNNER_TEMP': f'{d}/tmp', 'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
-                    'CI_CPUS': str(cards * int(t['cpus_per_card']) if 'gpu_model' in t else int(t['cpus'])),
+                    'CI_CPUS': part.cpu_list(os.sched_getaffinity(0)),  # the job's own cpuset, on the node
                     'CI_RESUME': '1' if req['resume'] else '0', 'CI_SLURM_JOB': os.environ.get('SLURM_JOB_ID', '')})
         if not cards:
             env['CUDA_VISIBLE_DEVICES'] = ''

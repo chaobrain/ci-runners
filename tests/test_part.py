@@ -412,6 +412,21 @@ class Classes(ClassHost):
         _, out = self.go('compile', id='nocpus')
         self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'this host has no compile_cpus for compile parts'))
 
+    def test_ci_cpus_without_a_pin_lists_the_cpus(self):
+        """Where the inventory gives no ``cpus``, CI_CPUS lists the CPUs the part may use, as
+        the inventory would; never a count (issue #99)."""
+        have = sorted(os.sched_getaffinity(0))
+        if len(have) < 3:
+            self.skipTest('needs three CPUs')
+        self.inv = inventory.load(self.inv_text.replace('cpus = "1"\n', ''))
+        os.sched_setaffinity(0, {have[0], have[1], have[-1]})
+        try:
+            _, out = self.go('part', command='echo "$CI_CPUS" > "$CI_PART_DIR/env"', id='nopin')
+        finally:
+            os.sched_setaffinity(0, have)
+        sep = '-' if have[1] == have[0] + 1 else ','
+        self.assertEqual((out['outcome'], self.work(out, 'env')), ('pass', f'{have[0]}{sep}{have[1]},{have[-1]}'))
+
     def test_a_compile_part_holds_x_and_covers_its_commands_requests(self):
         """Decision 12.7 and 12.9: a compile part holds the host lock exclusively for its whole
         command; the command's own ``host_lock.sh -s`` is covered, not deadlocked, and the
@@ -1076,6 +1091,13 @@ class Pure(unittest.TestCase):
         self.assertEqual(argv[-1], 'sup')
         self.assertEqual(part.command_argv('c'), ['nice', '-n', '10', 'ionice', '-c', '2', '-n', '7', 'bash', '-c', 'c'])
         self.assertEqual(part.unit_name('a b', 'x', '7-1-1'), 'ci-part-a_b-x-7-1-1.scope')
+
+    def test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it(self):
+        self.assertEqual(part.cpu_list({0, 1, 2, 3, 8, 9}), '0-3,8-9')
+        self.assertEqual(part.cpu_list([9, 8, 3, 2, 1, 0, 2]), '0-3,8-9')  # any order, once each
+        self.assertEqual(part.cpu_list({5}), '5')  # one CPU: never a count
+        self.assertEqual(part.cpu_list({0, 2, 4, 5}), '0,2,4-5')
+        self.assertEqual(part.cpu_list(set()), '')
 
     def test_oom_policy_only_where_systemd_takes_it(self):
         self.assertNotIn('OOMPolicy=continue', part.scope_argv('u.scope', 'p', '4G', ['sup'], oom_policy=False))

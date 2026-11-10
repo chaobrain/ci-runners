@@ -15,6 +15,7 @@
     ci-run hostload sample|status   the load record and the busy rule (decision 13.2)
     ci-run hooks copy      the hooks' copies in the private /tmp (ci-hooks.service; decision 13.5)
     ci-run slurm check|plan|apply|env|canary|status|uninstall ...   a Slurm site's accounts (decision 14.9)
+    ci-run pool status|run ...   the machine registry's live capacity, and a command on a free machine (decision 15.1)
 
 The inventory is ``$CI_RUNNERS_ETC/inventory.toml``, else ``~/data/ci-runners/etc``.
 """
@@ -57,6 +58,9 @@ def main(argv: list[str]) -> int:
         if line:
             print(line)
         return 0
+    if cmd == 'pool':  # the registry is its own file: no inventory needed (an agent's account has none)
+        from ci_runners import pool
+        return pool.main(args, etc_dir())
     if cmd == 'org-sync':
         from ci_runners import orgsync
         return orgsync.cli(args, etc_dir())

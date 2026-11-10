@@ -889,6 +889,43 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    step that shares it) takes effect with the next release, and the lease directory with
    the root step's apply; until the registry names `drain`, `leases` and `max_slots`, pool
    runs behave as in step 1.
+8. **The CI account's registry** (approved by the lead on 2026-11-10, option (a)). brainspike's
+   runner workflow runs `pool status --json` in its plan job, as the runner's CI account,
+   and places by the rows. A host with a problem gets no part. So each 3090 host's CI account
+   needs a registry of its own, with its host (`local`), the other 3090 host and the
+   cluster's targets. A CI account has no unrestricted login anywhere. Its cluster key
+   runs only the gate (14.5), and it has no key to the other host. Step 1's probes need
+   such a login: the cluster's are shell commands (`sinfo`, `sacctmgr`, `squeue`), and a
+   host's is Python source sent on stdin. With `v1.8.0`, a CI account's `pool status`
+   therefore shows the other host `unreachable` and every cluster target `cluster
+   unreachable`. The plan would place nothing there, and the other host would get no part.
+   Decided:
+   - *A cluster through its CI key.* A `slurm` machine may name the site config's `site`
+     and `account` (`etc/slurm/<site>.toml`, 14.6) in place of `ssh` and `gate`. It is
+     then reached the way the parts reach it (`slurmpart.Gate`: the account's key, batch
+     mode, the site's alias). `pool status` calls the gate's new verb `capacity`. The verb
+     takes no argument and changes nothing: it runs the three queries for the partitions
+     of the account's targets and prints their output, one `===` line between each.
+     Such a machine serves `pool status` only, and `pool run` refuses it: the CI account
+     starts no pool run, and people and agents run from their own registry. The verb
+     reaches the cluster with the next release's `ci-run slurm apply` for the account.
+   - *The other host through a forced probe.* Each CI account gets a key to the other
+     host's CI account. Its `authorized_keys` line is `restrict` and forces `ci-run pool
+     probe`. That command takes no argument and reads no stdin. It runs the read-only
+     probe (`pool.probe`: `/proc/locks`, the drain copy, the leases, `nvidia-smi`, the load)
+     of the one `local` machine in the receiving account's own registry, and prints it as
+     JSON. The caller's entry for that host sets `probe = "forced"`, so `pool status`
+     sends no code. `pool run` refuses such an entry.
+   - *Bounds.* Each probe keeps its timeout (a host's 60 s, the cluster's 90 s), and the
+     probes run in parallel, so `pool status` ends within the plan step's 120 s. The new
+     keys (`site`, `account`, `probe`) are inventory-free: the site and account are role
+     names (14.6).
+   - *Options weighed.* The workstation could publish every host's status to each CI
+     account every few minutes, through the org-sync push keys (11.9). That needs no new
+     key, but the plan would read a `start_now` minutes old. Giving a CI account the
+     maintainer's login would break 14.5 and §5.3.
+   Until this lands, neither CI account has a registry, and every plan places on the
+   static pools with its note.
 
 ## Decisions of this spec
 

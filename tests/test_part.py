@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import unittest.mock
 
 from ci_runners import envuse, inventory, part, registry, slots
 from tests.p2p_fake import zeros_release
@@ -880,6 +881,101 @@ class NoHostLock(Host):
         self.assertEqual(pathlib.Path(self.path(out), 'work', 'c').read_text().strip(), 'unset unset')
 
 
+class SharedLeases(Host):
+    """The inventory's ``files.lease_dir``: the leases the CI account shares with the pool
+    runs of other accounts (decision 15.1)."""
+    FREE = {0: 24000, 1: 24000}
+
+    def test_a_gpu_part_leases_in_the_inventorys_lease_dir(self):
+        shared = pathlib.Path(self.tmp.name) / 'leases'
+        self.inv = inventory.load(self.inv_text.replace('slot_queue =', f'lease_dir = "{shared}", slot_queue ='))
+        smi = '0, 24576, 576\n1, 24576, 576\n'
+
+        def run(argv, **kw):
+            if argv[0] == 'nvidia-smi':
+                return subprocess.CompletedProcess(argv, 0, smi, '')
+            return subprocess.run(argv, **kw)
+        other = part.Leases(str(shared), shared=True)  # a pool run holds card 0 there
+        try:
+            self.assertEqual(other.try_take(1, [0], self.FREE, 0), [0])
+            ex = part.Executor(self.inv, str(self.etc), {**self.env, 'CI_RUNNER_CLASS': 'gpu'}, release=str(ROOT),
+                               scope=False, poll=0.1, run=run)
+            _, out = ex.execute(part.Inputs(project='p', id='g', timeout_minutes=1, queue_timeout_minutes=0.02, gpus=1,
+                                            command='true'))
+        finally:
+            other.release()
+        self.assertEqual((out['outcome'], out['gpus']), ('pass', '1'))  # card 0 is the pool run's
+        self.assertTrue((shared / 'card1.0.lock').exists())
+        self.assertFalse((self.data / 'ci-runners/state/leases').exists())
+
+    def test_what_it_creates_the_other_account_can_open(self):
+        old = os.umask(0)  # the default ACL entries' effect: the mode asked for is the mode got
+        try:
+            for shared, want_dir, want_file in ((True, 0o770, 0o660), (False, 0o700, 0o600)):
+                d = pathlib.Path(self.tmp.name) / f'l{int(shared)}'
+                le = part.Leases(str(d), shared=shared)
+                self.assertIsNone(le.try_take(1, [0], {0: 0}, 6000))  # waits: its ticket stays queued
+                self.assertEqual(le.try_take(1, [0], self.FREE, 6000), [0])
+                modes = {p.name: p.stat().st_mode & 0o777 for p in (d / 'queue', d / '.lock', d / 'card0.0.lock',
+                                                                   d / 'queue' / 'seq')}
+                self.assertEqual(modes, {'queue': want_dir, '.lock': want_file, 'card0.0.lock': want_file,
+                                         'seq': want_file}, shared)
+                le.release()
+        finally:
+            os.umask(old)
+
+    def test_no_lease_is_taken_through_a_link(self):
+        """Another account could plant a link in the shared directory: a lock file or the
+        mutex that is a link is refused (O_NOFOLLOW), and its target is never created."""
+        d = pathlib.Path(self.tmp.name) / 'l'
+        le = part.Leases(str(d), shared=True)
+        target = pathlib.Path(self.tmp.name) / 'target'
+        for name in ('.lock', 'card0.0.lock'):
+            (d / name).symlink_to(target)
+            with self.assertRaises(OSError):
+                le.try_take(1, [0], {0: 24000}, 0)
+            self.assertFalse(target.exists())
+            (d / name).unlink()
+        le.release()
+
+    def test_a_ticket_written_with_the_shared_mode(self):
+        old = os.umask(0)
+        try:
+            le = part.Leases(str(pathlib.Path(self.tmp.name) / 'l'), shared=True)
+            self.assertIsNone(le.try_take(1, [0], {0: 0}, 6000))
+            self.assertEqual(os.stat(le.ticket).st_mode & 0o777, 0o660)
+            le.release()
+        finally:
+            os.umask(old)
+
+    def test_a_ticket_of_a_process_proc_hides_is_kept(self):
+        """The CI account's /proc hides the pool runs' processes (decision 12.16): their
+        tickets stay, as the slot queue keeps ci_slot.sh's."""
+        d = pathlib.Path(self.tmp.name) / 'l'
+        le = part.Leases(str(d), shared=True)
+        q = d / 'queue'
+        (q / '000000000007.json').write_text(json.dumps({'pid': 4242, 'start': int(time.time()), 'n': 1, 'cards': [0],
+                                                         'need_mib': 0, 'every': False}))
+        with unittest.mock.patch.object(slots, 'alive', lambda pid, start: False), \
+                unittest.mock.patch.object(slots, 'unseen', lambda pid: pid == 4242):
+            self.assertEqual([t.seq for t in le.tickets()], [7])
+            self.assertIsNone(le.try_take(1, [0], self.FREE, 0))  # behind it, for card 0
+        with unittest.mock.patch.object(slots, 'alive', lambda pid, start: False), \
+                unittest.mock.patch.object(slots, 'unseen', lambda pid: False):
+            le.tickets()
+            self.assertFalse((q / '000000000007.json').exists())  # a dead one goes
+            self.assertTrue(os.path.exists(le.ticket))  # ours stays
+        le.release()
+
+    def test_a_missing_shared_dir_is_not_made_in_a_sticky_one(self):
+        sticky = pathlib.Path(self.tmp.name) / 'tmp'
+        sticky.mkdir()
+        sticky.chmod(0o1777)
+        with self.assertRaises(part.locks.MissingSharedFile):
+            part.Leases(str(sticky / 'leases'), shared=True)
+        part.Leases(str(sticky / 'private'))  # the private one (state/leases) is made anywhere
+
+
 class LeaseQueue(Host):
     """Card leases in ticket order (decision 12.6), on the lease files and tickets."""
     FREE = {0: 24000, 1: 24000}
@@ -1204,6 +1300,27 @@ class Pure(unittest.TestCase):
             ex = json.loads(pathlib.Path(d, 'exit.json').read_text())
             self.assertEqual((ex['rc'], ex['timed_out']), (4, False))
             self.assertEqual(pathlib.Path(d, 'adj').read_text().strip(), '500')
+
+    def test_a_signal_before_the_command_starts_ends_it_once_started(self):
+        """A TERM that reaches the supervisor once its handler is set but before the
+        command's process is known (a pool run stopped as it starts) ends the command as
+        soon as it is started: it does not run to its end."""
+        fault = ('import os, signal, subprocess\n'
+                 'class W(subprocess.Popen):\n'
+                 '    sent = False\n'
+                 '    def __init__(self, *a, **k):\n'
+                 '        if not W.sent:\n'
+                 '            W.sent = True\n'
+                 '            os.kill(os.getpid(), signal.SIGTERM)\n'
+                 '        super().__init__(*a, **k)\n'
+                 'part.subprocess.Popen = W\n')
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run(['python3', '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
+                                f'from ci_runners import part; exec({fault!r}); '
+                                'sys.exit(part.supervise(sys.argv[1], 60, ["sh", "-c", "sleep 5; exit 0"]))',
+                                str(ROOT), d], capture_output=True, text=True, timeout=30)
+            ex = json.loads(pathlib.Path(d, 'exit.json').read_text())
+            self.assertEqual((r.returncode, ex['rc'], ex['signalled']), (128 + 15, -15, True), r.stderr)
 
 
 class Registry(unittest.TestCase):

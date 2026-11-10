@@ -24,10 +24,11 @@ _FILES = re.search(r'slot_lock = "[^"]*"\nslot_queue = "[^"]*"\n', PLAIN).group(
 _POOLS = r'\[hosts\.3090b\.pools\].*\n(?:.*\n){5}'  # the pools table: its header and five pools
 
 
-def shared(text, host_lock='/tmp/h.lock', slot_lock='/tmp/ci.lock', slot_queue='/tmp/ci_slot.queue'):
+def shared(text, host_lock='/tmp/h.lock', slot_lock='/tmp/ci.lock', slot_queue='/tmp/ci_slot.queue', lease_dir=''):
     """The example with local_accounts and its files in /tmp, as a 3090 host has them."""
+    leases = f'lease_dir = "{lease_dir}"\n' if lease_dir else ''
     return text.replace('slots = 2', 'local_accounts = ["user-a"]\nslots = 2', 1).replace(
-        _FILES, f'host_lock = "{host_lock}"\nslot_lock = "{slot_lock}"\nslot_queue = "{slot_queue}"\n', 1)
+        _FILES, f'host_lock = "{host_lock}"\nslot_lock = "{slot_lock}"\nslot_queue = "{slot_queue}"\n{leases}', 1)
 
 
 class Load(unittest.TestCase):
@@ -90,9 +91,11 @@ class Load(unittest.TestCase):
         self.assertEqual(inv.load(shared(PLAIN)).host['files']['slot_queue'], '/tmp/ci_slot.queue')
         for bad in ('/tmp/../etc/shadow', '/etc/shadow', '/tmp/x/../q', '/tmp//q', '/tmp/./q', '/tmp/a/q',
                     H + 'u/q', '/tmp/', '/tmp/.q', '/tmp/a b'):
-            for key in ('host_lock', 'slot_lock', 'slot_queue'):
+            for key in ('host_lock', 'slot_lock', 'slot_queue', 'lease_dir'):
                 with self.assertRaises(inv.InventoryError, msg=(key, bad)):
                     inv.load(shared(PLAIN, **{key: bad}))
+        # the GPU leases shared with the pool runs (decision 15.1): optional, a plain name in /tmp too
+        self.assertEqual(inv.load(shared(PLAIN, lease_dir='/tmp/ci-leases')).host['files']['lease_dir'], '/tmp/ci-leases')
         self.assertEqual(inv.load(PLAIN).host['files']['slot_queue'][:1], '/')  # without them: any absolute path
         self.assertFalse(inv.shared_path('/tmp/a/../b'))
         self.assertTrue(inv.shared_path('/tmp/a.b-c_d'))

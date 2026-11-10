@@ -831,6 +831,64 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    its deadline. The caller's own host is skipped unless asked. Free hosts come first, then
    the billed targets that start it now, cheapest first, then a wait in line on the host
    with the shortest queue.
+6. **Adding a machine** is one script (lead, 2026-11-10, D-0111 amended: "runners with
+   capability labels, the env, its cache warmed, a canary, the numerics check; only then
+   usable"; `ci_runners/pooladd.py`). Hosts only: a cluster's entry stays hand-written and
+   its targets pass 14.10's gates. `ci-run pool add KEY (--ssh ALIAS | --local) ...` probes
+   the host (hostname, cores, memory, the cards' model and MiB, the driver's CUDA major) and
+   appends a validated `[machine.KEY]` entry with `ready = false` (an existing key or host is
+   refused; the file is replaced atomically, mode 600). A machine that is not ready is
+   skipped by `pool run` unless `--on KEY` names it. Then its checks run in order, each but
+   the first a `pool run --on KEY` in the caller's checkout: the env check against the
+   caller's env; a canary (jax imports and sees the entry's cards); the P2P self-test on 2+
+   cards, whose result is the entry's `p2p`; and the registry's top-level `warm` and
+   `numerics` commands, the project's cache warm-up and numerics check. Each result is
+   recorded in `pool-add.json` beside the registry, with a digest of the entry and the
+   commands. `ci-run pool ready KEY` re-runs nothing: once every step passed for the entry
+   as it is, it sets `ready` and `numerics_ok` (and `p2p`). The setup plan of its runners,
+   their registration and the CI account's env build are printed as the next steps, the
+   lead's (never applied by the script).
+7. **Step 2 of task ci-pool-run** makes a host's pool run as safe as a part:
+   - *The supervisor owns the claim.* It is a process of its own, given the slot (or the
+     leases) and the run directory's `alive.lock` by `pass_fds`, in a systemd scope of its
+     own (`ci-part-pool-<project>-<run>.scope`, `MemoryMax` the run's memory) where the
+     user manager answers, else in a session of its own. A host side that is killed leaves
+     the command running with its slot held, never a command without one; a caller that
+     ends (stdin closed, a signal) makes the host side stop the supervisor, which ends the
+     command (its process group is killed `STOP_GRACE` s later). A signal while the
+     supervisor starts waits until its process is known; only the run that holds the
+     directory's `alive.lock` removes it.
+   - *The project's cap.* The registry's `max_slots` per machine is the project's cap on
+     that host's queue, as `registry.slot_caps` gives the parts; a pool run is the queue's
+     default project, so `ci_slot.sh`'s tickets and holders count against it too (the
+     slot's holder record names the supervisor). It lies from 1 to the slot count; without
+     it the cap is the slot count, as before.
+   - *The drain.* `drain.change` also writes a world-readable copy of the state,
+     `<data>/ci-runners/drain.json` (mode 644), since other accounts cannot read `state/`;
+     each part and `ci-run drain status` bring it up to the state (`drain.publish`: a host
+     drained before the copy existed, or an unreadable state, is drained there too).
+     The registry's `drain` names it; `pool status` shows a host it drains as the problem
+     `drained` (unreadable or malformed drains, missing does not), and the host side reads
+     it again before each try for the slot. A drained runner pool drains no pool run.
+   - *A host's cards through the leases.* A GPU pool run takes a host's cards by
+     `part.Leases`, in the parts' ticket order, and no CI slot (as a GPU part). It does so
+     only where the registry names the leases (`leases = { dir, parts }`, `parts` 1 as the
+     parts' leases per card), which must be the
+     inventory's `files.lease_dir`: a directory the CI account shares as the slot queue
+     (root-owned in `/tmp`, default ACL entries, bound into its namespace, §5.3), where
+     both accounts create files mode 660 and directories 770, nothing through a link, and a
+     ticket of a process `/proc` hides is kept as a slot ticket is. Without `leases` a
+     host's cards stay its parts' alone, and a GPU run goes to a cluster target.
+   - *Bounds.* A host that was free in `pool status` is given up after `FREE_NOW_ROUNDS`
+     (3) tries for the next machine; only the host chosen to wait on waits long
+     (`LONG_WAIT_MIN`, 24 h). `--timeout` is at most `MAX_TIMEOUT_MIN` (20 h), so a run
+     ends before its directory is two days old (`STALE_DAYS`), and a directory whose
+     `alive.lock` is held is never removed.
+   - The registry's `drain` and the leases' `dir` are private (`pool.PRIVATE_KEYS`).
+   The CI account's side (the drain copy, `files.lease_dir` for the parts and the root
+   step that shares it) takes effect with the next release, and the lease directory with
+   the root step's apply; until the registry names `drain`, `leases` and `max_slots`, pool
+   runs behave as in step 1.
 
 ## Decisions of this spec
 
@@ -1029,7 +1087,10 @@ and one without it has none. `v1.5` adds, both optional: `peer_labels` (a table 
 runner class to the labels of the other host's pool of that class, 13.3) and `busy` (a
 table of `window_minutes`, `cpu_cores`, `memory_gib`, `gpu_mib` and `lock_minutes`, each
 optional with the defaults of 13.2); and removes `watchdog_log` and `watchdog_notice`
-(13.4), which no host sets. The first path's keys (`ssh`, `trusted`, `remote`,
+(13.4), which no host sets. Decision 15.1 (step 2) adds, optional: `files.lease_dir` (the
+GPU leases' directory, shared with the pool runs of other accounts; with
+`local_accounts` a plain name in `/tmp`, made by the root step as the slot queue). Without
+it the leases stay under `state/leases`. The first path's keys (`ssh`, `trusted`, `remote`,
 `cpu_slowdown`, `proxy`) are accepted and ignored in `v1.3` and `v1.4` (11.12). `setup/inventory.example
 .toml` holds the schema with placeholder values.
 

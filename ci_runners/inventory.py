@@ -125,8 +125,9 @@ def peer_labels(inv: 'Inventory', cls: str) -> list[str] | None:
 ACCOUNT = re.compile(r'[a-z_][a-z0-9_-]{0,31}')
 #: an ed25519 public key, with or without its comment (the comment is replaced)
 PUSH_KEY = re.compile(r'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}(?: [!-~]{1,64})?')
-#: the slot files and the host lock (brainspike's on the 3090 hosts, decision 12.9)
-FILES = frozenset({'slot_lock', 'slot_queue', 'host_lock'})
+#: the slot files and the host lock (brainspike's on the 3090 hosts, decision 12.9), and the
+#: GPU leases' directory where the pool runs of other accounts share them (decision 15.1)
+FILES = frozenset({'slot_lock', 'slot_queue', 'host_lock', 'lease_dir'})
 #: per host: key -> (check, required). Paths are absolute.
 HOST_KEYS = {
     'account': (_str, True),         # the Unix account the runners and parts run as

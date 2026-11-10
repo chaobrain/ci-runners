@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -90,9 +91,9 @@ def boot_id() -> str:
         return ''
 
 
-def _write_json(path: str, obj: object) -> None:
+def _write_json(path: str, obj: object, mode: int = 0o600) -> None:
     tmp = f'{path}.{os.getpid()}.new'
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
     with os.fdopen(fd, 'w') as f:
         json.dump(obj, f, indent=1, sort_keys=True)
         f.write('\n')
@@ -412,6 +413,11 @@ def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0, p2
             return 0
     child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT)
+    if signalled:  # a signal before the command's process was known: end it now
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except OSError:
+            pass
     relay = threading.Thread(target=_relay, args=(child.stdout.fileno(), sys.stdout.fileno()), daemon=True)
     relay.start()
     _write_json(os.path.join(record, 'scope.json'), {'supervisor': os.getpid(), 'child': child.pid})
@@ -471,18 +477,39 @@ class Leases:
     the executor for the part's life. A part waits with a ticket in ``queue/``
     (``<seq>.json``: its pid and start, and what it asks for), and the cards go out in
     ticket order per card (``gpus.lease_grants``, decision 12.6). Tickets, choosing and
-    taking happen under ``.lock``."""
+    taking happen under ``.lock``.
 
-    def __init__(self, directory: str, max_parts: int = 1) -> None:
-        self.dir, self.max_parts = directory, max_parts
+    ``shared``: the directory is the inventory's ``files.lease_dir``, which the CI account
+    shares with the pool runs of other accounts (decision 15.1): root makes it with default
+    ACL entries (as the slot queue), so what is created in it is mode 660 (770 a directory)
+    for those entries to apply, nothing is created or written through a link, and a missing
+    directory is created only outside a sticky one. A ticket of a process this account's
+    ``/proc`` hides is kept as the slot queue keeps one (``slots.unseen``)."""
+
+    def __init__(self, directory: str, max_parts: int = 1, shared: bool = False) -> None:
+        self.dir, self.max_parts, self.shared = directory, max_parts, shared
+        self.mode = 0o660 if shared else 0o600
         self.queue = os.path.join(directory, 'queue')
-        os.makedirs(self.queue, mode=0o700, exist_ok=True)
+        if shared and not os.path.isdir(directory):
+            parent = os.path.dirname(os.path.abspath(directory))
+            if os.path.isdir(parent) and os.stat(parent).st_mode & stat.S_ISVTX:
+                raise locks.MissingSharedFile(2, "shared lease directory missing (the host's tmpfiles.d entry "
+                                              'creates it, root-owned)', directory)
+        os.makedirs(self.queue, mode=0o770 if shared else 0o700, exist_ok=True)
         self.fds: list[int] = []
         self.ticket = ''
         self.seq = 0
 
     def _path(self, card: int, k: int) -> str:
         return os.path.join(self.dir, f'card{card}.{k}.lock')
+
+    def _open(self, path: str) -> int:
+        """A lock file of the leases, for flock: never through a link, never blocking, a regular file only."""
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, self.mode)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise OSError(22, 'not a regular file', path)
+        return fd
 
     def leased(self, cards: Sequence[int]) -> dict[int, int]:
         return {c: sum(slots._flocked(self._path(c, k)) for k in range(self.max_parts)) for c in cards}
@@ -491,17 +518,14 @@ class Leases:
         """Our ticket, after every other one (under ``.lock``)."""
         seqs = [int(m.group(1)) for m in map(_LEASE_TICKET.match, os.listdir(self.queue)) if m]
         try:
-            with open(os.path.join(self.queue, 'seq')) as f:
-                last = int(f.read().strip() or 0)
+            last = int(slots._read(os.path.join(self.queue, 'seq')).strip() or 0)
         except (OSError, ValueError):
             last = 0
         self.seq = max([last, *seqs]) + 1
-        with open(os.path.join(self.queue, f'seq.{os.getpid()}'), 'w') as f:
-            f.write(f'{self.seq}\n')
-        os.replace(os.path.join(self.queue, f'seq.{os.getpid()}'), os.path.join(self.queue, 'seq'))
+        _write_json(os.path.join(self.queue, 'seq'), self.seq, self.mode)
         self.ticket = os.path.join(self.queue, f'{self.seq:012d}.json')
         _write_json(self.ticket, {'pid': os.getpid(), 'start': round(slots._start_of(os.getpid())), 'n': n,
-                                  'cards': list(cards), 'need_mib': need_mib, 'every': every})
+                                  'cards': list(cards), 'need_mib': need_mib, 'every': every}, self.mode)
 
     def tickets(self) -> list[gpus_mod.LeaseTicket]:
         """The live tickets; a dead or malformed one is deleted (ours never is)."""
@@ -515,7 +539,7 @@ class Leases:
             try:
                 ok = (type(t['pid']) is int and t['pid'] > 0 and type(t['n']) is int and t['n'] >= 0
                       and all(type(c) is int for c in t['cards']) and type(t['need_mib']) is int
-                      and type(t['every']) is bool and slots.alive(t['pid'], float(t['start'])))
+                      and type(t['every']) is bool and self._live(t['pid'], float(t['start'])))
             except (KeyError, TypeError, ValueError):
                 ok = False
             if not ok and path != self.ticket:
@@ -528,12 +552,18 @@ class Leases:
                 out.append(gpus_mod.LeaseTicket(int(m.group(1)), t['n'], tuple(t['cards']), t['need_mib'], t['every']))
         return out
 
+    @staticmethod
+    def _live(pid: int, start: float) -> bool:
+        """Whether a ticket's owner runs: ``slots.alive``, or a process of the other account
+        that this account's ``/proc`` hides (``ProtectProc=invisible``), for ``UNSEEN_MAX``."""
+        return slots.alive(pid, start) or (time.time() - start <= slots.UNSEEN_MAX and slots.unseen(pid))
+
     def try_take(self, n: int, cards: Sequence[int], free: Mapping[int, int], need_mib: int,
                  every: bool = False) -> list[int] | None:
         """One round: queue a ticket for ``n`` of ``cards`` on the first, then take the
         cards ``lease_grants`` gives it, if any; ``every`` takes every lease of each card.
         Returns the cards taken, or None (the ticket stays queued until ``release``)."""
-        mutex = os.open(os.path.join(self.dir, '.lock'), os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        mutex = self._open(os.path.join(self.dir, '.lock'))
         try:
             fcntl.flock(mutex, fcntl.LOCK_EX)
             if not self.ticket or not os.path.exists(self.ticket):
@@ -546,7 +576,7 @@ class Leases:
                 return None
             for c in chosen:
                 for k in range(self.max_parts):
-                    fd = os.open(self._path(c, k), os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
+                    fd = self._open(self._path(c, k))
                     try:
                         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except OSError:
@@ -1017,7 +1047,9 @@ class Executor:
             signal.signal(sig, self._on_signal)
         t0 = time.monotonic()
         deadline = t0 + a.queue_timeout_minutes * 60
-        leases = Leases(os.path.join(h['data'], 'ci-runners', 'state', 'leases'))
+        # the inventory's lease_dir, shared with the pool runs of other accounts (decision 15.1), else state/leases
+        lease_dir = str(h['files'].get('lease_dir') or '')
+        leases = Leases(lease_dir or os.path.join(h['data'], 'ci-runners', 'state', 'leases'), shared=bool(lease_dir))
         slot_fd, slot_path, env_fd = None, '', None
         every: list[int] = []  # a nightly part's slots, every one of them (decision 12.8)
         nightly = cls == EVERY_SLOT
@@ -1033,6 +1065,10 @@ class Executor:
             why = self.gate(a, cls, lock)
             if why:
                 return self._end(record, rec, a, unavailable=why)
+            try:  # the pool runs' copy of the drain (15.1), from before it existed or lost
+                drain_mod.publish(str(h['data']))
+            except OSError:
+                pass
             why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # decision 13.1
             if why:
                 return self._away(record, rec, a, why, cls)

@@ -341,6 +341,22 @@ class Env(Site):
         self.assertEqual(kept['builds'], {b[0]: ['cpu'], b[1]: ['cuda13']})
         self.assertIn(f'cpu -> {b[0]}; cuda13 -> {b[1]}', said)
 
+    def test_the_requirement_files_constraints_bind_the_upstreams_install_of_every_build(self):
+        spec = envbuild.parse_spec(SPEC + '[[upstream]]\nrepository = "o/u"\nref = "origin/main"\n'
+                                   '[variant.cuda13]\ninstall = ["jax-cuda13-plugin"]\n')
+        builds = slurmenv.plan_builds(spec, ['cpu', 'cuda13'], project='p', envs='/e', stamp='20261108T120001Z',
+                                      reqdir='/r', conda='c', constraints=['lock.txt'])
+        self.assertEqual([b['variant'] for b in builds], ['', 'cuda13'])
+        for b in builds:
+            self.assertEqual(b['steps'][-1][-4:-1], ['-c', '/r/lock.txt', '-e'])
+        self.conda()
+        self.api.files[HEAD]['requirements.txt'] = '-c lock.txt\nnumpy\n'
+        self.api.files[HEAD]['lock.txt'] = 'numpy==2\n'
+        with mock.patch.object(slurmenv, 'plan_builds', wraps=slurmenv.plan_builds) as plan:
+            rc, said = self.env()
+        self.assertEqual(rc, 0, said)
+        self.assertEqual(plan.call_args.kwargs['constraints'], ['lock.txt'])
+
     def test_a_variants_conda_packages_join_the_base_s_in_its_own_build_only(self):
         self.conda()
         self.api.files[HEAD]['.github/ci-runners.toml'] = (

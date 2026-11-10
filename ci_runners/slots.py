@@ -232,7 +232,7 @@ class SlotQueue:
     """A host's CI slots and their queue (see above)."""
 
     def __init__(self, lock: str, n: int, queue: str | None = None, poll: float = 3.0,
-                 default_project: str = '') -> None:
+                 default_project: str = '', default_cap: int | None = None) -> None:
         if n < 1:
             raise ValueError('the slot count must be positive')
         self.slots = slot_paths(lock, n)
@@ -240,6 +240,8 @@ class SlotQueue:
         self.queue = queue or stem + '.queue'
         self.poll = poll
         self.default = default_project  # the project of ci_slot.sh's tickets and holders (rule 4)
+        # its cap: the slot count (rule 4), or a pool run's cap where it is the run's own project (15.1)
+        self.default_cap = len(self.slots) if default_cap is None else default_cap
         self.seq = 0
         self.ticket = ''
         self.every: list[int] = []  # the slots ``try_take_every`` holds so far
@@ -387,7 +389,7 @@ class SlotQueue:
         per, nfree, _ = self.held()
         if self.default:
             per[self.default] = per.get(self.default, 0) + per.pop('', 0)
-            caps = dict(caps, **{self.default: len(self.slots)})  # its ci_slot.sh waiters apply none (rule 4)
+            caps = dict(caps, **{self.default: self.default_cap})  # its ci_slot.sh waiters apply none (rule 4)
         return grants(self.waiting(), per, caps, nfree, self.default)
 
     def _take(self, project: str, caps: dict[str, int]) -> int | None:

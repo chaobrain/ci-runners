@@ -43,7 +43,7 @@ import shlex
 import subprocess
 import time
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from ci_runners import envbuild, github, registry, slurmpart, slurmsetup
 from ci_runners.slurmsetup import Ctx, SetupError
@@ -84,21 +84,24 @@ def grace(site, alias: str) -> int:
 
 
 def plan_builds(spec: envbuild.Spec, variants: list[str], *, project: str, envs: str, stamp: str, reqdir: str,
-                conda: str) -> list[dict]:
+                conda: str, constraints: Sequence[str] = ()) -> list[dict]:
     """The builds an env run makes: one for the variants the spec does not name (the base),
     and one of its own for each it names (``[variant.<name>]``, whose ``install`` replaces
-    the base's and whose ``conda`` packages join the base's). Pure."""
+    the base's and whose ``conda`` packages join the base's). ``constraints``: the
+    requirement files' ``-c`` files (``envbuild.constraints``), which bind the upstreams'
+    installs too. Pure."""
     out = []
     base = [v for v in variants if v not in spec.variants]
     if base:
         out.append({'variant': '', 'links': base, 'install': list(spec.install),
-                    'steps': envbuild.steps(spec, project=project, envs=envs, stamp=stamp, reqdir=reqdir, conda=conda)})
+                    'steps': envbuild.steps(spec, project=project, envs=envs, stamp=stamp, reqdir=reqdir, conda=conda,
+                                            constraints=constraints)})
     for v in variants:
         if v in spec.variants:
             vs = spec.variant(v)
             out.append({'variant': v, 'links': [v], 'install': list(vs.install),
                         'steps': envbuild.steps(vs, project=project, envs=envs, stamp=stamp, reqdir=reqdir, conda=conda,
-                                                variant=v)})
+                                                variant=v, constraints=constraints)})
     return out
 
 
@@ -137,7 +140,7 @@ def env(ctx: Ctx, name: str, alias: str, project: str, via: str, *, variants: li
     stamp = envbuild._stamp()
     conda = f'{base}/conda/bin/conda'
     builds = plan_builds(spec, list(variants) or own, project=project, envs=f'{base}/envs', stamp=stamp,
-                         reqdir=f'{base}/run/req-{stamp}', conda=conda)
+                         reqdir=f'{base}/run/req-{stamp}', conda=conda, constraints=envbuild.constraints(files))
     lc = dict(ssh=ctx.ssh, run=ctx.run)
     inst = ''
     if not slurmsetup.login_call(site, via, 'conda_state', {'base': base}, **lc)['conda']:

@@ -1928,7 +1928,7 @@ Rules:
   (`kill(pid, 0)` answers EPERM), for 24 h from its start; at `v1.7.7` it deleted every
   such ticket, so each `ci-slot` poll sent a waiting local run to the back of the queue
   (#107). No input or output changes.
-- **`v1.8.0` is additive** (minor, stamped 2026-11-10; decision 15.1, #113 and #115): `ci-run
+- **`v1.8.0` is additive** (minor, stamped 2026-11-10; decision 15.1, #113 and #115; `v1` moved to it after the slurm and 3090 canaries at `@v1.8.0`, 2026-11-10): `ci-run
   pool` (the machine registry, `pool status`, the claim, the env check, `pool run`, `pool add`
   and `pool ready`), run from a person's or an agent's account; no action's input or output
   changes and no label changes. Its notes:

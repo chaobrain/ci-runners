@@ -273,4 +273,11 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 **查看**：`ci-run pool status` 打印一张表，`--json` 输出每行的 `HostState` 字段。主机的空闲 slot 从 `/proc/locks` 读取，不会去占用；集群的数字来自 `sinfo`，再减去本账户运行中作业所占的关联 `GrpTRES`。
 
+**CI 账户的注册表**（design 决定 15.1 第 8 条）：brainspike 的 plan 作业以 runner 的 CI 账户运行 `pool status --json`，所以每台 3090 主机的 CI 账户也有一份 `pool.toml`（模式 600），写本机（`local`）、另一台 3090 主机和集群的各个目标。CI 账户在哪里都没有不受限的登录，所以：
+
+- **集群**：项里不写 `ssh` 和 `gate`，改写站点配置的 `site` 和 `account`（`etc/slurm/<site>.toml` 里的站点名和账户别名）。`pool status` 像部件一样经账户的 CI 密钥（`etc/slurm/keys/<account>`）调用 gate 的只读动词 `capacity`：它对账户各目标的分区跑那三个查询（`sinfo`、`sacctmgr`、`squeue`），中间用 `===` 隔开。这个动词随账户的 `ci-run slurm apply` 到集群上；还没 apply 的账户，或者某个查询失败时，表里的问题是 `the gate refused capacity`（用 `ci-run slurm check <site> <account>` 看原因）。注册表要放在 `<data>/ci-runners/etc` 里：gate 的 ssh 控制连接放在 `<data>/ci-runners/state` 下。
+- **另一台主机**：项里写 `probe = "forced"`。`pool status` 不发送代码，只用 `etc/pool/keys/<项名>`（私钥 600）登录，对方 CI 账户 `authorized_keys` 里这把公钥的那一行是 `restrict`，强制运行 `ci-run pool probe`：不带参数、不读 stdin，打印对方自己注册表里唯一的 `local` 机器的探测结果（JSON）。那一行由对方主机的 setup 计划写：把公钥写进对方 inventory 的 `probe_key`，`plan.sh` 列出这一行（标记 `ci-runners-pool-probe`），批准后 `apply`；删掉 `probe_key` 再 apply（`push_key` 还在时），这一行就没了。`probe_key` 不能和 `push_key` 是同一把钥匙。别名写在 CI 账户的 `~/.ssh/config` 里（`HostName`、`User`、`Port`），对方的主机密钥固定在 `known_hosts` 里。
+- 这两种项只给 `pool status` 用，`pool run` 不会选它们。每个探测有自己的上限（主机 60 秒，集群 90 秒），并行运行，所以整张表在 plan 那一步的 120 秒之内出来。
+- 紧急关闭：以每个 CI 账户运行 `ci-run drain on --pool slurm`，或者把注册表移走（plan 会退回静态池并留一条说明）。
+
 **运行**：`ci-run pool run [--cpu N] [--mem G] [--gpu 型号[:数量]] [--on 机器] -- 命令`。它把调用者的工作树（已跟踪的文件，加上未被忽略的未跟踪文件）送到一台现在就能启动的机器上运行。这台机器先从空闲主机里选，再选按价格从低到高的集群目标；都不行就在队列最短的主机上排队。命令的输出实时回传，退出码就是命令的退出码。主机上的占用就是 CI slot，和 CI part 的是同一套，所以两边不会同时拿到同一个 slot。集群上的占用就是作业本身，走同一个 gate。运行前先比对环境，不一致就拒绝运行（退出码 3）；加 `--env-mismatch warn` 可以照常运行，但会给出警告。调用者退出时，远端命令随之结束，slot 也随之释放。brainspike 用 `scripts/pool.sh` 包了一层。

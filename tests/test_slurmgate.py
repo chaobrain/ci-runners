@@ -6,6 +6,7 @@ import io
 import json
 import os
 import pathlib
+import pwd
 import shutil
 import subprocess
 import sys
@@ -634,6 +635,74 @@ class UnsafeDirs(unittest.TestCase):
             return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, os.getuid() + 1) + tuple(st)[5:])
         with mock.patch.object(sg.os, 'lstat', other):
             self.assertEqual(sg.unsafe_dirs(str(alias / 'root')), {str(alias): 'owner'})
+
+
+class Capacity(Cluster):
+    """``capacity``: pool status's three read-only queries, for the account's partitions only
+    (decision 15.1, item 8)."""
+
+    def answers(self, fail=''):
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            assert kw['timeout'] == sg.CAPACITY_TIMEOUT, kw
+            out = {'sinfo': 'n1|cpu-partition|idle|0/8/0/8|1000|0|(null)|(null)|',
+                   'sacctmgr': 'cpu-partition|cpu=72\nother-partition|cpu=9\n|cpu=1\ngpu-partition-a|gres/gpu=4',
+                   'squeue': ''}[argv[0]]
+            return subprocess.CompletedProcess(argv, 1 if argv[0] == fail else 0, out, 'it broke')
+        return run, seen
+
+    def test_the_three_queries_of_the_accounts_partitions(self):
+        run, seen = self.answers()
+        out = sg.capacity(str(self.base), run).decode()
+        parts = 'cpu-partition,gpu-partition-a,gpu-partition-b'
+        user = pwd.getpwuid(os.getuid()).pw_name
+        self.assertEqual(seen, [['sinfo', '-h', '-N', '-p', parts, '-O', sg.CAPACITY_SINFO],
+                                ['sacctmgr', '-nP', 'show', 'assoc', f'user={user}', 'format=Partition,GrpTRES'],
+                                ['squeue', '-h', '-u', user, '-t', 'RUNNING', '-p', parts, '-o', '%P|%C|%b']])
+        self.assertEqual(out, 'n1|cpu-partition|idle|0/8/0/8|1000|0|(null)|(null)|\n===\n'
+                              'cpu-partition|cpu=72\ngpu-partition-a|gres/gpu=4\n===\n')  # not the other partitions
+        from ci_runners import pool
+        self.assertEqual(len(out.split('===\n')), 3)  # as pool.probe_cluster splits it
+        self.assertLess(3 * sg.CAPACITY_TIMEOUT + 20, pool.CLUSTER_TIMEOUT)  # the three and ssh's connect end first
+        self.assertEqual(pool.parse_assoc(out.split('===\n')[1]), {'cpu-partition': {'cpu': 72},
+                                                                    'gpu-partition-a': {'gpu': 4}})
+
+    def test_the_partitions_any_case_and_the_accounts_own_user(self):
+        account = json.loads((self.base / 'etc' / 'account.json').read_text())
+        account['targets']['cpu']['partition'] = 'CPU-Partition'
+        (self.base / 'etc' / 'account.json').write_text(json.dumps(account))
+        run, seen = self.answers()
+        with mock.patch.dict(os.environ, {'USER': 'not-me', 'LOGNAME': 'not-me'}):
+            out = sg.capacity(str(self.base), run).decode()
+        self.assertIn('cpu-partition|cpu=72\n', out)  # sacctmgr prints it lower case
+        self.assertIn(f'user={pwd.getpwuid(os.getuid()).pw_name}', seen[1])
+        self.assertIn('CPU-Partition,gpu-partition-a', seen[0][4])
+
+    def test_a_failed_query_is_a_refusal(self):
+        for cmd in ('sinfo', 'sacctmgr', 'squeue'):
+            run, _ = self.answers(fail=cmd)
+            with self.assertRaisesRegex(sg.GateError, f'{cmd} failed: it broke'):
+                sg.capacity(str(self.base), run)
+        account = json.loads((self.base / 'etc' / 'account.json').read_text())
+        for t in account['targets'].values():
+            t.pop('partition')
+        (self.base / 'etc' / 'account.json').write_text(json.dumps(account))
+        with self.assertRaisesRegex(sg.GateError, 'no target with a partition'):
+            sg.capacity(str(self.base), self.answers()[0])
+
+    def test_the_verb_through_the_forced_command(self):
+        run, seen = self.answers()
+        out, err = io.BytesIO(), io.StringIO()
+        with mock.patch('sys.stderr', err):
+            rc = sg.main([str(self.base)], env={'SSH_ORIGINAL_COMMAND': 'ci-slurm-gate capacity'}, stdin=io.BytesIO(),
+                         stdout=out, run=run)
+        self.assertEqual(rc, 0, err.getvalue())
+        self.assertTrue(out.getvalue().startswith(b'n1|cpu-partition|'))
+        self.assertEqual(len(seen), 3)
+        rc, _, err = self.gate('ci-slurm-gate capacity extra')
+        self.assertEqual((rc, err.strip()), (2, 'ci-slurm-gate: refused: capacity: wrong arguments'))
 
 
 class Wrapper(Cluster):

@@ -36,6 +36,7 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
     drain = "/abs/<data>/ci-runners/drain.json"   # the CI account's drain copy (optional)
     leases = { dir = "/abs/leases", parts = 1 }   # the cards' leases, shared with the parts (optional)
     labels = { cpu = "hostb-cpu" }       # its runner labels per group (HostState.labels)
+    probe = "forced"                     # ssh: its key is forced to `ci-run pool probe` (status only; optional)
     numerics_ok = true                   # its numerics check passed
     cache = "/abs/compile/cache"         # its compile cache (optional)
     ready = true                         # pool add writes false, pool ready true; no key: ready
@@ -55,6 +56,19 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
     numerics_ok = false
     labels = { cpu = "cluster-cpu" }
     # a GPU target also has: gpu_model, cards (per node), max_cards, gpu_mib, cuda
+    # a CI account names the site config's site and account instead of ssh and gate
+    # (site = "<site>", account = "<account>"): reached through the account's CI key, for
+    # pool status only
+
+**A CI account's registry** (decision 15.1, item 8) is read by its runners' plan jobs. A CI
+account has no unrestricted login: a cluster entry names ``site`` and ``account``, and
+``pool status`` reaches it as the parts do (``slurmpart.Gate``: the account's key
+``etc/slurm/keys/<account>``, batch mode) and calls the gate's read-only verb
+``capacity``; another host's entry sets ``probe = "forced"``, and ``pool status`` sends no
+code there but logs in with ``etc/pool/keys/<key>``, whose ``authorized_keys`` line on that
+host's CI account is ``restrict`` and forces ``ci-run pool probe``: the probe of the one
+``local`` machine of that account's own registry, as JSON. Such entries serve ``pool
+status`` only: ``pool run`` refuses them.
 
 **pool status**: one row per host and per cluster target, with the fields of brainspike's
 ``HostState`` (``labels``, ``problems``, ``queue``, ``gpu_free``, ``multi_gpu``,
@@ -108,6 +122,7 @@ bounded below that).
 CLI::
 
     ci-run pool status [--json]
+    ci-run pool probe                    # the local machine's probe, as JSON (a forced command)
     ci-run pool run [--cpu N] [--mem G] [--gpu MODEL[:COUNT]] [--on KEY] [--here]
                     [--timeout MIN] [--queue-minutes MIN] [--no-wait]
                     [--env-mismatch refuse|warn] [--python PATH] [--dir DIR] -- COMMAND...
@@ -237,6 +252,14 @@ class Machine:
     gate: str = ''
     ready: bool = True  # ``pool add`` writes false, ``pool ready`` true; no key: ready
     targets: Mapping[str, Target] = dataclasses.field(default_factory=dict)
+    site: str = ''  # a cluster through its CI key: the site config's site and account (item 8)
+    account: str = ''
+    probe: str = ''  # 'forced': a host whose key is forced to ``ci-run pool probe`` (item 8)
+
+    @property
+    def status_only(self) -> bool:
+        """Whether the entry serves ``pool status`` only (a CI account's, item 8)."""
+        return bool(self.site) or self.probe == 'forced'
 
     @property
     def base(self) -> str:
@@ -290,7 +313,7 @@ def _labels(t: Mapping, where: str) -> dict[str, str]:
 
 _MACHINE = {'access', 'ssh', 'hostname', 'cpus', 'memory_gib', 'gpus', 'gpu_model', 'gpu_mib', 'cuda', 'p2p', 'billed',
             'price', 'python', 'work', 'slots', 'labels', 'numerics_ok', 'cache', 'gate', 'targets', 'ready',
-            'max_slots', 'drain', 'leases'}
+            'max_slots', 'drain', 'leases', 'site', 'account', 'probe'}
 _TARGET = {'partition', 'cpus', 'memory_gib', 'max_minutes', 'variant', 'price', 'numerics_ok', 'labels', 'gpu_model',
            'cards', 'max_cards', 'gpu_mib', 'cuda'}
 _TOP = {'schema', 'project', 'repository', 'check', 'gpu_need_mib', 'machine', 'warm', 'numerics'}
@@ -326,12 +349,21 @@ def _machine(key: str, t: Mapping) -> Machine:
     access = _get(t, 'access', str, where, required=True)
     if access not in ('ssh', 'local', 'slurm'):
         raise RegistryError(f'{where}: access is ssh, local or slurm')
-    if access in ('ssh', 'slurm') and not _get(t, 'ssh', str, where, ''):
+    site, account = _get(t, 'site', str, where, ''), _get(t, 'account', str, where, '')
+    if (site or account) and (access != 'slurm' or not (_KEY.fullmatch(site) and _KEY.fullmatch(account))
+                              or 'ssh' in t or 'gate' in t):
+        raise RegistryError(f'{where}: site and account name a cluster\'s site config and account, both, '
+                            'instead of ssh and gate')
+    probe_kind = _get(t, 'probe', str, where, '')
+    if probe_kind and (probe_kind != 'forced' or access != 'ssh'):
+        raise RegistryError(f'{where}: probe is "forced", on an ssh machine')
+    if access in ('ssh', 'slurm') and not site and not _get(t, 'ssh', str, where, ''):
         raise RegistryError(f'{where}: an {access} machine needs its ssh alias')
     m = dict(key=key, access=access, ssh=_get(t, 'ssh', str, where, ''), hostname=_get(t, 'hostname', str, where, ''),
              billed=_get(t, 'billed', bool, where, access == 'slurm'), price=float(_get(t, 'price', float, where, 0.0)),
              labels=_labels(t, where), numerics_ok=_get(t, 'numerics_ok', bool, where, False),
-             cache=_abs(t, 'cache', where), ready=_get(t, 'ready', bool, where, True))
+             cache=_abs(t, 'cache', where), ready=_get(t, 'ready', bool, where, True), site=site, account=account,
+             probe=probe_kind)
     if access == 'slurm':
         targets = _get(t, 'targets', dict, where, required=True)
         if not targets:
@@ -339,7 +371,7 @@ def _machine(key: str, t: Mapping) -> Machine:
         bad = [n for n, v in targets.items() if not _KEY.fullmatch(n) or not isinstance(v, dict)]
         if bad:
             raise RegistryError(f'{where}: malformed targets {bad}')
-        m.update(gate=_abs(t, 'gate', where, required=True),
+        m.update(gate=_abs(t, 'gate', where, required=not site),
                  targets={n: _target(n, v, f'{where}.targets.{n}') for n, v in targets.items()})
         return Machine(**m)
     s = _get(t, 'slots', dict, where, required=True)
@@ -513,6 +545,17 @@ def _probe_src() -> str:
     return inspect.getsource(drained) + '\n\n' + inspect.getsource(probe)
 
 
+def local_probe(reg: Registry) -> dict:
+    """``ci-run pool probe``: the probe of the registry's one ``local`` machine, what a
+    forced key's caller reads (item 8). Takes no input."""
+    local = [m for m in reg.machines.values() if m.access == 'local']
+    if len(local) != 1:
+        raise RegistryError(f'pool probe: {len(local)} local machines in the registry, not one')
+    m = local[0]
+    lz = m.leases or LeaseDir('', 1)
+    return probe(m.slots.lock, m.slots.count, m.slots.queue, m.drain, lz.dir, lz.parts, m.gpus)
+
+
 def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> dict:
     """A host's row (``HostState`` fields and ours) from its probe ``p``, or with ``why`` it
     could not be read. ``cpus_free``: the cores the load leaves, 0 while no slot is free (a
@@ -529,9 +572,11 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
     free = int(p.get('slots_free', 0))
     cores = max(0, (m.cpus or int(p.get('cpus', 0))) - math.ceil(float(p.get('load', 0.0))))
     gpu_free = {int(k): int(v) for k, v in p.get('gpu_free', {}).items()}
-    if m.leases:  # a card whose every lease is held is not free, whatever its memory
+    if m.leases or 'cards_leased' in p:  # a card whose every lease is held is not free, whatever its memory
+        # (a forced probe reads the leases its host's own registry names, whatever the caller's entry says)
+        parts = m.leases.parts if m.leases else LEASE_PARTS
         leased = {int(k): int(v) for k, v in p.get('cards_leased', {}).items()}
-        gpu_free = {c: v for c, v in gpu_free.items() if leased.get(c, 0) < m.leases.parts}
+        gpu_free = {c: v for c, v in gpu_free.items() if leased.get(c, 0) < parts}
     row.update(slots_free=free, queue=int(p.get('queue', 0)), cpus_free=cores if free else 0,
                mem_free_gib=int(p.get('mem_free_gib', 0)), gpu_free=gpu_free, scope=bool(p.get('scope')))
     return row
@@ -657,8 +702,25 @@ def target_row(m: Machine, t: Target, nodes: Sequence[Node], assoc: Mapping[str,
 Runner = Callable[..., subprocess.CompletedProcess]
 
 
-def _ssh(alias: str) -> list[str]:
-    return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', alias]
+def _ssh(alias: str, key: str = '') -> list[str]:
+    """ssh to ``alias`` in batch mode; with ``key``, that key only."""
+    only = ['-o', 'IdentitiesOnly=yes', '-i', key] if key else []
+    return ['ssh', '-o', 'BatchMode=yes', *only, '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', alias]
+
+
+#: what ``pool status`` asks of a host whose key is forced to it (the forced line runs it anyway)
+FORCED_PROBE = 'ci-run pool probe'
+HOST_TIMEOUT, CLUSTER_TIMEOUT = 60, 90  # s a host's probe and a cluster's may take; status runs them in parallel
+
+
+def _etc(etc: str) -> str:
+    from ci_runners import cli
+    return etc or cli.etc_dir()
+
+
+def probe_key(etc: str, key: str) -> str:
+    """The key ``pool status`` logs in with to machine ``key`` of ``probe = "forced"``."""
+    return os.path.join(_etc(etc), 'pool', 'keys', key)
 
 
 def _remote(m: Machine, argv: Sequence[str]) -> list[str]:
@@ -666,12 +728,22 @@ def _remote(m: Machine, argv: Sequence[str]) -> list[str]:
     return list(argv) if m.access == 'local' else [*_ssh(m.ssh), shlex.join(argv)]
 
 
-def probe_host(m: Machine, run: Runner = subprocess.run, here: str = '') -> dict:
-    lz = m.leases or LeaseDir('', 1)
-    src = _probe_src() + (f'\nimport json; print(json.dumps(probe({m.slots.lock!r}, {m.slots.count}, {m.slots.queue!r}, '
-                          f'{m.drain!r}, {lz.dir!r}, {lz.parts}, {m.gpus})))\n')
+def probe_host(m: Machine, run: Runner = subprocess.run, here: str = '', etc: str = '') -> dict:
+    """A host's row: its probe's source sent to its python, or with ``probe = "forced"``
+    no code and no stdin, through its key (``probe_key``), whose line forces ``ci-run pool
+    probe`` there."""
+    if m.probe == 'forced':
+        key = probe_key(etc, m.key)
+        if not os.path.isfile(key):
+            return host_row(m, None, f'no key etc/pool/keys/{m.key}', here)
+        argv, kw = [*_ssh(m.ssh, key), FORCED_PROBE], {'stdin': subprocess.DEVNULL}
+    else:
+        lz = m.leases or LeaseDir('', 1)
+        src = _probe_src() + (f'\nimport json; print(json.dumps(probe({m.slots.lock!r}, {m.slots.count}, '
+                              f'{m.slots.queue!r}, {m.drain!r}, {lz.dir!r}, {lz.parts}, {m.gpus})))\n')
+        argv, kw = _remote(m, ['/usr/bin/python3', '-I', '-']), {'input': src}
     try:
-        r = run(_remote(m, ['/usr/bin/python3', '-I', '-']), input=src, capture_output=True, text=True, timeout=60)
+        r = run(argv, capture_output=True, text=True, timeout=HOST_TIMEOUT, **kw)
     except (OSError, subprocess.SubprocessError) as e:
         return host_row(m, None, f'probe failed: {type(e).__name__}', here)
     if r.returncode != 0:
@@ -687,17 +759,47 @@ CLUSTER_PROBE = ('sinfo -h -N -O "NodeHost:|,Partition:|,StateCompact:|,CPUsStat
                  'echo ===; squeue -h -u "$USER" -t RUNNING -o "%P|%C|%b"')
 
 
-def probe_cluster(m: Machine, run: Runner = subprocess.run, cards: int = 1, mem_gib: int = 1) -> list[dict]:
+def capacity(m: Machine, run: Runner = subprocess.run, etc: str = '') -> tuple[str, str]:
+    """A CI account's cluster entry (``site``, ``account``): the gate's ``capacity``
+    answer through the account's CI key, as the parts reach it (``slurmpart.Gate``), or
+    ``('', why)``. The reasons name no host, path or Slurm text: the plan prints them."""
+    from ci_runners import slurmpart, slurmsite
+    etc = _etc(etc)
+    data, tree = os.path.dirname(os.path.dirname(etc)), os.path.dirname(etc)
+    if os.path.basename(etc) != 'etc' or os.path.basename(tree) != 'ci-runners':  # the gate's state is <data>/ci-runners
+        return '', 'the registry is not in <data>/ci-runners/etc'
+    path = slurmsite.site_files(etc).get(m.site)
+    if path is None:
+        return '', f'no site config etc/slurm/{m.site}.toml'
     try:
-        r = run([*_ssh(m.ssh), CLUSTER_PROBE], capture_output=True, text=True, timeout=90)
-        parts = r.stdout.split('===\n') if r.returncode == 0 else []
-    except (OSError, subprocess.SubprocessError):
-        parts = []
+        site = slurmsite.load_file(path)
+        if m.account not in site.accounts:
+            return '', f'no account {m.account} in site {m.site}'
+        g = slurmpart.Gate(etc, data, site, m.account, run=run)
+        return g.call('capacity', timeout=CLUSTER_TIMEOUT).decode(errors='replace'), ''
+    except (slurmsite.SiteError, ValueError):  # ValueError: not UTF-8
+        return '', 'site config: invalid'
+    except slurmpart.Refused:  # a gate without the verb (the account's slurm apply brings it), or a query failed
+        return '', 'the gate refused capacity'
+    except (slurmpart.Unreachable, OSError, subprocess.SubprocessError):
+        return '', 'cluster unreachable'
+
+
+def probe_cluster(m: Machine, run: Runner = subprocess.run, cards: int = 1, mem_gib: int = 1, etc: str = '') -> list[dict]:
+    if m.site:
+        text, why = capacity(m, run, etc)
+    else:
+        try:
+            r = run([*_ssh(m.ssh), CLUSTER_PROBE], capture_output=True, text=True, timeout=CLUSTER_TIMEOUT)
+            text, why = r.stdout if r.returncode == 0 else '', ''
+        except (OSError, subprocess.SubprocessError):
+            text, why = '', ''
+    parts = text.split('===\n')
     if len(parts) != 3:
         rows = []
         for t in m.targets.values():
             row = target_row(m, t, [], {}, {})
-            row.update(problems=['cluster unreachable'], start_now=False)
+            row.update(problems=[why or 'cluster unreachable'], start_now=False)
             rows.append(row)
         return rows
     nodes, assoc, used = parse_sinfo(parts[0]), parse_assoc(parts[1]), parse_squeue(parts[2])
@@ -705,13 +807,15 @@ def probe_cluster(m: Machine, run: Runner = subprocess.run, cards: int = 1, mem_
 
 
 def status(reg: Registry, run: Runner = subprocess.run, here: str | None = None, cards: int = 1,
-           mem_gib: int = 1) -> list[dict]:
-    """``pool status``: every machine's rows, in the registry's order, probed in parallel."""
+           mem_gib: int = 1, etc: str = '') -> list[dict]:
+    """``pool status``: every machine's rows, in the registry's order, probed in parallel,
+    so that it ends within the longest probe's bound (``CLUSTER_TIMEOUT``)."""
     here = socket.gethostname() if here is None else here
     out: dict[str, list[dict]] = {}
 
     def one(m: Machine) -> None:
-        out[m.key] = probe_cluster(m, run, cards, mem_gib) if m.access == 'slurm' else [probe_host(m, run, here)]
+        out[m.key] = (probe_cluster(m, run, cards, mem_gib, etc) if m.access == 'slurm'
+                      else [probe_host(m, run, here, etc)])
     threads = [threading.Thread(target=one, args=(m,)) for m in reg.machines.values()]
     for t in threads:
         t.start()
@@ -813,6 +917,9 @@ def pick(rows: Sequence[Mapping], ask: Ask, reg: Registry, *, here_ok: bool = Fa
         if only and key != only and key.split(':')[0] != only:
             continue
         m = reg.machines[key.split(':')[0]]
+        if m.status_only:
+            skipped.append(f'{key}: a CI account\'s entry, for pool status only')
+            continue
         if r.get('here') and not here_ok:
             skipped.append(f'{key}: the caller\'s own host (--here to allow)')
             continue
@@ -1474,6 +1581,9 @@ def pool_run(reg: Registry, a: RunArgs, *, only: str = '', here_ok: bool = False
         _say(f'--timeout is above 0 and at most {MAX_TIMEOUT_MIN} min (a run\'s directory is removed after '
              f'{STALE_DAYS} days)')
         return EXIT_USAGE
+    if only and only.split(':')[0] in reg.machines and reg.machines[only.split(':')[0]].status_only:
+        _say(f'{only}: a CI account\'s entry, for pool status only')
+        return EXIT_USAGE
     rows = status(reg, run, cards=max(1, a.ask.cards), mem_gib=a.ask.memory_gib) if rows is None else rows
     now, later, skipped = pick(rows, a.ask, reg, here_ok=here_ok, only=only)
     for s in skipped:
@@ -1517,6 +1627,7 @@ def main(argv: Sequence[str], etc: str) -> int:
     sub = ap.add_subparsers(dest='cmd', required=True)
     s = sub.add_parser('status')
     s.add_argument('--json', action='store_true')
+    sub.add_parser('probe', help='the local machine\'s probe, as JSON (a forced command: no argument, no stdin)')
     r = sub.add_parser('run')
     r.add_argument('--cpu', type=int, default=8)
     r.add_argument('--mem', type=int, default=32, help='GiB')
@@ -1537,8 +1648,15 @@ def main(argv: Sequence[str], etc: str) -> int:
     except (OSError, RegistryError) as e:
         print(f'pool: {e}', file=sys.stderr)
         return EXIT_USAGE
+    if a.cmd == 'probe':
+        try:
+            print(json.dumps(local_probe(reg), sort_keys=True))
+        except RegistryError as e:
+            print(f'pool: {e}', file=sys.stderr)
+            return EXIT_USAGE
+        return 0
     if a.cmd == 'status':
-        rows = status(reg)
+        rows = status(reg, etc=etc)
         print(json.dumps(rows, indent=1, sort_keys=True) if a.json else table(rows))
         return 0
     cmd = a.command[1:] if a.command[:1] == ['--'] else a.command

@@ -21,7 +21,10 @@ directory ``<base>/work/KEY``):
 - ``ledger [YYYY-MM]``: the account's jobs of the month, from ``sacct``;
 - ``reap``: cancel a part's job past its deadline; remove part directories after
   ``WORK_DAYS`` days;
-- ``check``: the site's facts this account sees (RUN-9e reads them).
+- ``check``: the site's facts this account sees (RUN-9e reads them);
+- ``capacity``: the three read-only queries of ``pool status`` (decision 15.1, item 8) for
+  the partitions of the account's targets: ``sinfo``'s nodes, the account's associations
+  (``sacctmgr``) and its running jobs (``squeue``), their output one ``===`` line apart.
 
 The batch script (``render``) is the release's only one: the account, the target's
 partition and nodes, the site's GPU request syntax, ``--time`` = the part's timeout +
@@ -40,6 +43,7 @@ import datetime
 import json
 import math
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -53,7 +57,7 @@ from collections.abc import Callable, Mapping, Sequence
 #: the end of a command's error text the gate passes on: far more than the driver keeps
 #: (``slurmpart.Gate``: 300), so that the driver redacts a name whole before it cuts
 ERR_KEEP = 4000
-VERBS = ('stage', 'fetch', 'submit', 'status', 'log', 'cancel', 'ledger', 'nodes', 'reap', 'check')
+VERBS = ('stage', 'fetch', 'submit', 'status', 'log', 'cancel', 'ledger', 'nodes', 'reap', 'check', 'capacity')
 TIME_MARGIN = 5  # min of a job's --time over the part's timeout (14.3; slurmsite.TIME_MARGIN)
 WARN_SECONDS = 120  # the warning TERM before the time limit
 LOG_CHUNK = 1 << 20
@@ -417,6 +421,35 @@ def nodes(run: Callable = subprocess.run) -> dict:
     return {'nodes': sorted({x.strip() for x in (r.stdout or '').splitlines() if x.strip()})}
 
 
+#: ``capacity``'s node query: the columns ``pool.parse_sinfo`` reads
+CAPACITY_SINFO = 'NodeHost:|,Partition:|,StateCompact:|,CPUsState:|,Memory:|,AllocMem:|,Gres:|,GresUsed:|'
+CAPACITY_TIMEOUT = 20  # s a query may take: the three and ssh's connect (20 s) end inside the caller's 90 s
+
+
+def capacity(base: str, run: Callable = subprocess.run) -> bytes:
+    """``pool status``'s three queries for the partitions of the account's targets (decision
+    15.1, item 8): the nodes (``sinfo``), the account's associations there (``sacctmgr``)
+    and its running jobs there (``squeue``), each output a ``===`` line apart. Reads only."""
+    parts = sorted({str(t.get('partition', '')) for t in load_account(base)['targets'].values()} - {''})
+    if not parts:
+        raise GateError('capacity: the account has no target with a partition')
+    user = pwd.getpwuid(os.getuid()).pw_name
+    queries = (['sinfo', '-h', '-N', '-p', ','.join(parts), '-O', CAPACITY_SINFO],
+               ['sacctmgr', '-nP', 'show', 'assoc', f'user={user}', 'format=Partition,GrpTRES'],
+               ['squeue', '-h', '-u', user, '-t', 'RUNNING', '-p', ','.join(parts), '-o', '%P|%C|%b'])
+    outs = []
+    for argv in queries:
+        r = run(argv, capture_output=True, text=True, timeout=CAPACITY_TIMEOUT)
+        if r.returncode != 0:
+            raise GateError(f'{argv[0]} failed: {(r.stderr or "").strip()[-ERR_KEEP:]}')
+        out = r.stdout or ''
+        if argv[0] == 'sacctmgr':  # the account's other partitions are not the caller's business
+            keep = {p.lower() for p in parts}
+            out = ''.join(x for x in out.splitlines(True) if x.partition('|')[0].strip().lower() in keep)
+        outs.append(out if not out or out.endswith('\n') else out + '\n')
+    return '===\n'.join(outs).encode()
+
+
 def reap(base: str, now: float | None = None, run: Callable = subprocess.run) -> dict:
     """Cancel a part's job that is still there past its deadline (``job.json``), and
     remove a part directory nothing changed for ``WORK_DAYS`` days whose job is gone."""
@@ -658,6 +691,9 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
             res = reap(base, run=run)
         elif verb == 'check' and not args:
             res = check(base, release, run)
+        elif verb == 'capacity' and not args:
+            stdout.write(capacity(base, run))
+            return 0
         else:
             raise GateError(f'{verb}: wrong arguments')
     except (GateError, ValueError) as e:

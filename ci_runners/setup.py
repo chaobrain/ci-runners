@@ -16,8 +16,9 @@
 - each runner's ``.env``;
 - the ``systemctl --user`` commands;
 - with ``push_key`` (a 3090 host, decision 12.4), the push key's line in the account's
-  ``~/.ssh/authorized_keys``: ``restrict``, forced to ``org-sync --receive``; other lines
-  are kept;
+  ``~/.ssh/authorized_keys``: ``restrict``, forced to ``org-sync --receive``; with
+  ``probe_key`` (decision 15.1, item 8), the other host's CI account's pool probe key's
+  line: ``restrict``, forced to ``pool probe``; other lines are kept;
 - with ``local_accounts`` (a 3090 host, decision 12.9), the root steps that share the host
   lock and slot files with the local accounts: a ``tmpfiles.d`` file that makes them
   root-owned with ACL entries for every account, and its state. Setup does not run them
@@ -88,6 +89,8 @@ HOOKS_ORDER = 'Requires=ci-hooks.service\nAfter=ci-hooks.service'
 DROPIN = '/etc/systemd/system/user@{uid}.service.d/ci-runners-private.conf'
 #: the comment that marks the push key's line in authorized_keys (decision 12.4)
 PUSH_MARK = 'ci-runners-orgsync-push'
+#: the comment that marks the pool probe key's line (decision 15.1, item 8)
+PROBE_MARK = 'ci-runners-pool-probe'
 #: the egress account's line for a tunnel key (decision 11.10; operations §6)
 EGRESS_LINE = 'restrict,port-forwarding,permitopen="127.0.0.1:{port}",permitlisten="127.0.0.1:9",command="/usr/sbin/nologin" {key}'
 #: etc/tunnel/ssh_config: ``Host egress`` and only where it is (the unit fixes the rest)
@@ -495,19 +498,30 @@ def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None)
     return todo
 
 
-def authorized_keys_text(old: str, key: str, *, etc: str, python: str, base: str) -> str:
+def authorized_keys_text(old: str, key: str, *, etc: str, python: str, base: str, probe_key: str = '') -> str:
     """The account's ``authorized_keys`` with the push key's line (decision 12.4): the key
     may only run ``org-sync --receive`` of the installed release, with nothing else
-    (``restrict``); a line of ours from before is replaced, every other line kept. Pure."""
-    if not inventory.PUSH_KEY.fullmatch(key):
-        raise ValueError('push_key must be an ssh-ed25519 public key')
+    (``restrict``); with ``probe_key``, the other host's pool probe key's line, which may
+    only run ``pool probe`` (decision 15.1, item 8). The lines of ours from before are
+    replaced (a key no longer given loses its line), every other line kept. Pure."""
+    ours = []
+    for name, k, verb, mark in (('push_key', key, 'org-sync --receive', PUSH_MARK),
+                                ('probe_key', probe_key, 'pool probe', PROBE_MARK)):
+        if not k:
+            continue
+        if not inventory.PUSH_KEY.fullmatch(k):
+            raise ValueError(f'{name} must be an ssh-ed25519 public key')
+        kind, b64 = k.split()[:2]
+        ours.append((kind, b64, verb, mark))
+    if len({b64 for _, b64, _, _ in ours}) < len(ours):  # sshd takes a key's first line: one key, one command
+        raise ValueError('probe_key must not be the push_key')
     for v in (etc, python, base):
         if not PATH.fullmatch(v):
             raise ValueError(f'{v!r} must be an absolute path matching {PATH.pattern}')
-    kind, b64 = key.split()[:2]
-    cmd = f'CI_RUNNERS_ETC={etc} CI_RUNNERS_PYTHON={python} exec {base}/releases/hook/bin/ci-run org-sync --receive'
-    keep = [line for line in old.splitlines() if line.split()[-1:] != [PUSH_MARK]]
-    return '\n'.join([*keep, f'restrict,command="{cmd}" {kind} {b64} {PUSH_MARK}']) + '\n'
+    keep = [line for line in old.splitlines() if line.split()[-1:] not in ([PUSH_MARK], [PROBE_MARK])]
+    cmd = f'CI_RUNNERS_ETC={etc} CI_RUNNERS_PYTHON={python} exec {base}/releases/hook/bin/ci-run'
+    return '\n'.join([*keep, *(f'restrict,command="{cmd} {verb}" {kind} {b64} {mark}'
+                               for kind, b64, verb, mark in ours)]) + '\n'
 
 
 def tunnel_public_key(etc: str, run=subprocess.run) -> str:
@@ -673,8 +687,8 @@ def build(etc: str, adopt: bool = False) -> Plan:
                  f'direct: {", ".join(t["direct"]) or "nothing"}')
         plan.add("  the egress account's authorized_keys line for this key (the lead adds it there, decision 12.3):")
         plan.add('    ' + EGRESS_LINE.format(port=t['egress_port'], key=tunnel_public_key(etc)))
-    if h.get('push_key'):
-        plan.add("the org snapshot's push key (decision 12.4):")
+    if h.get('push_key') or h.get('probe_key'):
+        plan.add("the org snapshot's push key (decision 12.4) and the other host's pool probe key (15.1, item 8):")
         ssh_dir = os.path.join(home, '.ssh')
         if not os.path.isdir(ssh_dir):
             plan.add(f'  mkdir  {ssh_dir}/ mode 700', kind='mkdir', path=ssh_dir, mode=0o700)
@@ -688,7 +702,8 @@ def build(etc: str, adopt: bool = False) -> Plan:
                 old = f.read()
         except FileNotFoundError:
             old = ''
-        _file(plan, ak, authorized_keys_text(old, h['push_key'], etc=etc, python=python, base=base), 0o600)
+        _file(plan, ak, authorized_keys_text(old, h.get('push_key', ''), etc=etc, python=python, base=base,
+                                             probe_key=h.get('probe_key', '')), 0o600)
     if h.get('local_accounts'):
         text = tmpfiles_text(h)
         todo = shared_state(h)

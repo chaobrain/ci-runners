@@ -413,6 +413,11 @@ def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0, p2
             return 0
     child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT)
+    if signalled:  # a signal before the command's process was known: end it now
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except OSError:
+            pass
     relay = threading.Thread(target=_relay, args=(child.stdout.fileno(), sys.stdout.fileno()), daemon=True)
     relay.start()
     _write_json(os.path.join(record, 'scope.json'), {'supervisor': os.getpid(), 'child': child.pid})

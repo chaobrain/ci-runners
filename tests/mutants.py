@@ -2347,6 +2347,10 @@ MUTANTS = [
      [f'{TPO}.Claim.test_a_signal_while_the_supervisor_starts_stops_its_command']),
     (PO, "            if sigs['pending'] and not sigs['stopping']:", "            if False:",
      [f'{TPO}.Claim.test_a_signal_while_the_supervisor_starts_stops_its_command']),
+    # a signal before the supervisor's command is known ends it once started (pool run, closed stdin on CI)
+    (PRT, "    if signalled:  # a signal before the command's process was known: end it now",
+     "    if False:  # a signal before the command's process was known: end it now",
+     [f'{TT}.Pure.test_a_signal_before_the_command_starts_ends_it_once_started']),
     (PO, "        if ours and (sup is None or sup.poll() is not None):", "        if ours:",
      [f'{TPO}.Claim.test_a_host_side_that_fails_keeps_the_directory_of_a_running_supervisor']),
     (PO, "f'{sup.pid} {slots_mod._start_of(sup.pid):.0f} {spec[\"project\"]}\\n')",

@@ -1301,6 +1301,27 @@ class Pure(unittest.TestCase):
             self.assertEqual((ex['rc'], ex['timed_out']), (4, False))
             self.assertEqual(pathlib.Path(d, 'adj').read_text().strip(), '500')
 
+    def test_a_signal_before_the_command_starts_ends_it_once_started(self):
+        """A TERM that reaches the supervisor once its handler is set but before the
+        command's process is known (a pool run stopped as it starts) ends the command as
+        soon as it is started: it does not run to its end."""
+        fault = ('import os, signal, subprocess\n'
+                 'class W(subprocess.Popen):\n'
+                 '    sent = False\n'
+                 '    def __init__(self, *a, **k):\n'
+                 '        if not W.sent:\n'
+                 '            W.sent = True\n'
+                 '            os.kill(os.getpid(), signal.SIGTERM)\n'
+                 '        super().__init__(*a, **k)\n'
+                 'part.subprocess.Popen = W\n')
+        with tempfile.TemporaryDirectory() as d:
+            r = subprocess.run(['python3', '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
+                                f'from ci_runners import part; exec({fault!r}); '
+                                'sys.exit(part.supervise(sys.argv[1], 60, ["sh", "-c", "sleep 5; exit 0"]))',
+                                str(ROOT), d], capture_output=True, text=True, timeout=30)
+            ex = json.loads(pathlib.Path(d, 'exit.json').read_text())
+            self.assertEqual((r.returncode, ex['rc'], ex['signalled']), (128 + 15, -15, True), r.stderr)
+
 
 class Registry(unittest.TestCase):
     BASE = {'name': 'p', 'repository': 'o/r', 'context': 'p/ci', 'hosts': {'hb': {'memory_max': '2G'}}}

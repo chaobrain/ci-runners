@@ -1182,6 +1182,31 @@ class Shared(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'writable by it alone'):
             setup.build(str(self.etc))
 
+    def test_the_pool_probe_keys_line(self):
+        """The other host's CI account's key (decision 15.1, item 8): forced to pool probe."""
+        other = KEY[:-5] + 'Zzzzz'
+        old = f'ssh-ed25519 AAAA other-key\nrestrict,command="old" {other} {setup.PROBE_MARK}\n'
+        got = setup.authorized_keys_text(old, KEY, etc='/d/ci-runners/etc', python='/usr/bin/python3',
+                                         base='/d/ci-runners', probe_key=other + ' 3090a').splitlines()
+        cmd = 'CI_RUNNERS_ETC=/d/ci-runners/etc CI_RUNNERS_PYTHON=/usr/bin/python3 exec /d/ci-runners/releases/hook/bin/ci-run'
+        self.assertEqual(got, ['ssh-ed25519 AAAA other-key',
+                               f'restrict,command="{cmd} org-sync --receive" {KEY} {setup.PUSH_MARK}',
+                               f'restrict,command="{cmd} pool probe" {other} {setup.PROBE_MARK}'])
+        gone = setup.authorized_keys_text('\n'.join(got), KEY, etc='/e', python='/p', base='/b').splitlines()
+        self.assertEqual([x.split()[-1] for x in gone], ['other-key', setup.PUSH_MARK])  # a key no longer given: no line
+        with self.assertRaisesRegex(ValueError, 'must not be the push_key'):
+            setup.authorized_keys_text('', KEY, etc='/e', python='/p', base='/b', probe_key=KEY + ' again')
+        with self.assertRaisesRegex(ValueError, 'probe_key must be'):
+            setup.authorized_keys_text('', KEY, etc='/e', python='/p', base='/b', probe_key='ssh-rsa AAAA x')
+        self.inv.write_text(self.inv.read_text().replace('local_accounts = ["localuser"]\n', f'probe_key = "{other}"\n'))
+        text = setup.build(str(self.etc)).text()
+        self.assertIn("the other host's pool probe key", text)
+        self.assertEqual(self.apply(text), 0)
+        ak = (self.home / '.ssh' / 'authorized_keys').read_text().splitlines()
+        self.assertEqual(ak, [f'restrict,command="CI_RUNNERS_ETC={self.etc} CI_RUNNERS_PYTHON={sys.executable} exec '
+                              f'{self.data}/ci-runners/releases/hook/bin/ci-run pool probe" {other} {setup.PROBE_MARK}'])
+        self.assertEqual(setup.build(str(self.etc)).actions, [])
+
     def test_the_egress_accounts_line_for_the_tunnel_key(self):
         self.assertEqual(setup.EGRESS_LINE.format(port=18443, key=KEY),
                          'restrict,port-forwarding,permitopen="127.0.0.1:18443",permitlisten="127.0.0.1:9",'

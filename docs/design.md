@@ -915,7 +915,11 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
      probe (`pool.probe`: `/proc/locks`, the drain copy, the leases, `nvidia-smi`, the load)
      of the one `local` machine in the receiving account's own registry, and prints it as
      JSON. The caller's entry for that host sets `probe = "forced"`, so `pool status`
-     sends no code. `pool run` refuses such an entry.
+     sends no code and no stdin, and logs in with `etc/pool/keys/<key>` only (`<key>` the
+     entry's key). The line is a setup plan's step on the receiving host: its inventory's
+     `probe_key` (the caller's public key) gives the plan a line marked
+     `ci-runners-pool-probe` in the CI account's `authorized_keys`, beside the push key's
+     (12.4); a plan without `probe_key` drops it. `pool run` refuses such an entry.
    - *Bounds.* Each probe keeps its timeout (a host's 60 s, the cluster's 90 s), and the
      probes run in parallel, so `pool status` ends within the plan step's 120 s. The new
      keys (`site`, `account`, `probe`) are inventory-free: the site and account are role
@@ -924,8 +928,10 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
      account every few minutes, through the org-sync push keys (11.9). That needs no new
      key, but the plan would read a `start_now` minutes old. Giving a CI account the
      maintainer's login would break 14.5 and §5.3.
-   Until this lands, neither CI account has a registry, and every plan places on the
-   static pools with its note.
+   Until a CI account has its registry, its plans place on the static pools with their
+   note. The release that brings this (`v1.9.0`) is read by `v1.8` callers' hosts only
+   once their inventories gain `probe_key`, which `v1.8.0` refuses: that waits until `v1`
+   has moved (§9).
 
 ## Decisions of this spec
 
@@ -1119,7 +1125,8 @@ policy's hash, so a change shows.
 `default_project` (the project of a slot ticket without one), `files.host_lock` (the
 host lock; read again, decision 12.9), `local_accounts` (the local accounts that share
 the lock and slot files, 12.9) and `push_key` (the public key of the org snapshot's
-push, an `ssh-ed25519` line, 12.4). A host with `files.host_lock` has the host lock,
+push, an `ssh-ed25519` line, 12.4); decision 15.1 (item 8) adds `probe_key` (the other
+host's CI account's pool probe key, the same form). A host with `files.host_lock` has the host lock,
 and one without it has none. `v1.5` adds, both optional: `peer_labels` (a table from a
 runner class to the labels of the other host's pool of that class, 13.3) and `busy` (a
 table of `window_minutes`, `cpu_cores`, `memory_gib`, `gpu_mib` and `lock_minutes`, each
@@ -1496,6 +1503,7 @@ refreshed from a546b92f (T17):
 | shared lock and slot files (root) | brainspike's host lock (with its `.shared`, `.turnstile` and, from `v1.6.0`, `.probe` files), its slot files and its ticket queue directory become root-owned, with ACL entries (and default ACL entries on the queue) giving the CI account and each of the inventory's `local_accounts` `rw`; a `tmpfiles.d` file (`/etc/tmpfiles.d/ci-runners-shared.conf`) recreates them at boot and excludes them from age cleaning. Their paths do not change (decision 12.9). Root-owned, because brainspike's scripts open them with `O_CREAT` (`exec N>>file`): `fs.protected_regular` lets any account do that on a file in sticky `/tmp` that `/tmp`'s owner, root, owns, and refuses it on a file another account owns. `plan.sh` prints the file's text and checks each step (the file as printed, each account present, each file root-owned, not a link, with its `rw` entries after the mask); the lead writes it as root and runs `systemd-tmpfiles --create` on it while no local job holds the files (under `host_lock.sh -x`, with `ci_slot.sh`'s queue empty). `apply` refuses until every step is done. Setup never runs as root, and nothing root runs reads the inventory. |
 | the CI account's own mount namespace (root; decision 12.16) | a drop-in `/etc/systemd/system/user@<uid>.service.d/ci-runners-private.conf`, mode 644, that `plan.sh` prints from the inventory and checks as it does the `tmpfiles.d` file: `[Service]` with `PrivateTmp=yes`, `ProtectProc=invisible` (lead, 2026-11-07), `TemporaryFileSystem=/dev/shm:mode=1777 /home <the data disk root>` (the parent of `data`, never `/`) and `BindPaths=` the account's `home`, its `data` and each shared file of 12.9. `home`, `data` and the data-disk root must each be their own real path (no link), and the root a mount point, or the plan refuses. The steps, in order: the lead installs it; as the account, `systemctl --user disable --now` every runner (a restart of the user manager starts the enabled ones, and a reboot before the drop-in would start them without it); as root, `systemctl daemon-reload` and `systemctl restart user@<uid>.service`; as the account, `systemctl --user start` the first runner only, for the leak check in a live job (T18). `apply` refuses until the drop-in is in place as printed and the manager runs in the namespace it makes, read from its `/proc/<pid>/mountinfo` by the mounts the paths reach: tmpfs at `/home` and the data-disk root and over `/dev/shm`, a private `/tmp` and `/var/tmp`, `/proc` with `hidepid=invisible`, a bind at each bound path and none of a deleted file (a lock file replaced since the restart would split the lock), and no other mount in `/home`, the data-disk root or `/tmp`; `apply` then enables the runners again. A shared file missing at the manager's start fails it (fail closed: no runner comes up); the files exist from boot (`tmpfiles.d`, sysinit). **Reversal**: stop the runners, remove the drop-in, `daemon-reload`, restart the user manager. Measured on 3090b on 2026-11-07 as the CI account, in a scratch system unit with these settings and then (without the `/home` and data-disk part) in this drop-in, removed again after the test: `/tmp`, `/var/tmp` and `/dev/shm` hold no file of any other account; in the scratch unit `/home` and the data-disk root showed only the account's own, its env ran, and no directory of another account was readable to a depth of two below `/`, `/data`, `/home`, `/mnt`, `/opt` and `/srv`; `ci-lock -s` waits out (status 4 at 3 s) under the local account's `host_lock.sh -x` and passes after it, and the local `host_lock.sh -s` waited 6.1 s under our `-x`; `ci-slot` and `ci_slot.sh` both took slots; a `systemd-run --user --scope` child is in `user@<uid>.service`'s cgroup tree, in the same mount namespace, and with `MemoryMax=64M` an allocation of 300 MB was killed (status 137); both cards were visible; `ci-tunnel` runs in the namespace. |
 | the push key (the account) | inventory `push_key`; the plan writes one line in the CI account's `~/.ssh/authorized_keys` (mode 600, in `~/.ssh` of mode 700): `restrict`, forced to `<data>/ci-runners/releases/hook/bin/ci-run org-sync --receive` with `CI_RUNNERS_ETC` and `CI_RUNNERS_PYTHON` set, marked `ci-runners-orgsync-push` so that a new key replaces it; every other line is kept (decision 12.4) |
+| the pool probe key (the account) | inventory `probe_key`, the other host's CI account's public key; the plan writes a second line in the same file: `restrict`, forced to `<data>/ci-runners/releases/hook/bin/ci-run pool probe` with `CI_RUNNERS_ETC` and `CI_RUNNERS_PYTHON` set, marked `ci-runners-pool-probe`; without `probe_key` the plan drops it (decision 15.1, item 8) |
 | `etc/tunnel/` | as on h100, with this host's own key pair; the plan prints the egress account's line for its public key (below) |
 | directories | §3.2 under `data`; `etc/` mode 700 |
 | runner app | the pinned release, checked by sha256, into 9 runner directories on 3090b and 8 on 3090a (§5.1) |

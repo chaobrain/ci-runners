@@ -7,6 +7,7 @@ import fcntl
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -15,6 +16,7 @@ import textwrap
 import threading
 import time
 import unittest
+import unittest.mock
 
 from ci_runners import pool
 from ci_runners import slots, slurmgate
@@ -1000,6 +1002,258 @@ class PoolRun(unittest.TestCase):
         finally:
             pool.run_host = orig
         self.assertEqual((rc, tried), (75, ['hosta']))
+
+
+# ------------------------------------------------------------------ a CI account's registry (decision 15.1, item 8)
+
+with open(os.path.join(ROOT, 'setup', 'slurm', 'site.example.toml')) as _f:
+    SITE = _f.read()
+CI_REGISTRY = REGISTRY.replace(
+    'access = "slurm"\nssh = "alias-c"\ngate = "/fs/root/ci-runners/releases/hook/bin/ci-slurm-gate"\n',
+    'access = "slurm"\nsite = "cluster1"\naccount = "acct1"\n').replace(
+    'labels = { cpu = "hosta-cpu" }\n', 'labels = { cpu = "hosta-cpu" }\nprobe = "forced"\n')
+CAPACITY = (SINFO.replace('part_c', 'cpu-partition') + '\n===\n' + 'cpu-partition|cpu=72\n' + '===\n'
+            + 'cpu-partition|32|N/A\n')
+
+
+class CIAccount(unittest.TestCase):
+    """A CI account's registry: the cluster through its CI key and the gate's ``capacity``,
+    the other host through a key forced to ``ci-run pool probe``; both for pool status only."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.etc = os.path.join(self.tmp.name, 'ci-runners', 'etc')
+        os.makedirs(os.path.join(self.etc, 'slurm', 'keys'))
+        os.makedirs(os.path.join(self.etc, 'pool', 'keys'))
+        self.site = os.path.join(self.etc, 'slurm', 'cluster1.toml')
+        with open(self.site, 'w') as f:
+            f.write(SITE)
+        os.chmod(self.site, 0o600)
+        self.key = os.path.join(self.etc, 'pool', 'keys', 'hosta')
+        open(self.key, 'w').close()
+        self.reg = pool.load(CI_REGISTRY)
+
+    def test_the_entries_load_and_serve_status_only(self):
+        m, h = self.reg.machines['cl'], self.reg.machines['hosta']
+        self.assertEqual((m.site, m.account, m.ssh, m.gate, h.probe), ('cluster1', 'acct1', '', '', 'forced'))
+        self.assertEqual([k for k, x in self.reg.machines.items() if x.status_only], ['hosta', 'cl'])
+        self.assertFalse(reg().machines['cl'].status_only)
+        rows = [row('hosta'), row('cl:cpu', target='cpu', access='slurm', billed=True), row('hostb')]
+        for only in ('', 'hosta', 'cl'):
+            now, later, skipped = pool.pick(rows, pool.Ask(), self.reg, only=only)
+            self.assertNotIn('hosta', [r['key'] for r in now + later])
+            self.assertNotIn('cl:cpu', [r['key'] for r in now + later])
+        now, _, skipped = pool.pick(rows, pool.Ask(), self.reg)
+        self.assertEqual([r['key'] for r in now], ['hostb'])
+        self.assertIn("hosta: a CI account's entry, for pool status only", skipped)
+        self.assertIn("cl:cpu: a CI account's entry, for pool status only", skipped)
+
+    def test_malformed_entries_are_refused(self):
+        two = 'site = "cluster1"\naccount = "acct1"\n'
+        for bad, why in [(CI_REGISTRY.replace('account = "acct1"\n', ''), 'site and account'),
+                         (CI_REGISTRY.replace('site = "cluster1"\n', ''), 'site and account'),
+                         (CI_REGISTRY.replace(two, two + 'ssh = "alias-c"\n'), 'site and account'),
+                         (CI_REGISTRY.replace(two, two + 'gate = "/g"\n'), 'site and account'),
+                         (CI_REGISTRY.replace('site = "cluster1"', 'site = "Cluster 1"'), 'site and account'),
+                         (CI_REGISTRY.replace('account = "acct1"', 'account = "acct 1"'), 'site and account'),
+                         (CI_REGISTRY.replace('access = "local"\n', 'access = "local"\n' + two), 'site and account'),
+                         (CI_REGISTRY.replace(two, ''), 'ssh alias'),
+                         (CI_REGISTRY.replace(two, 'ssh = "alias-c"\n'), 'gate is missing'),
+                         (CI_REGISTRY.replace('probe = "forced"', 'probe = "source"'), 'probe is'),
+                         (CI_REGISTRY.replace('access = "local"\n', 'access = "local"\nprobe = "forced"\n'), 'probe is')]:
+            with self.subTest(why=why):
+                with self.assertRaisesRegex(pool.RegistryError, why):
+                    pool.load(bad)
+
+    def test_the_forced_probe_sends_no_code_and_no_stdin_through_its_key(self):
+        m = self.reg.machines['hosta']
+        seen = {}
+
+        def run(argv, **kw):
+            seen['argv'], seen['kw'] = argv, kw
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'slots_free': 1, 'load': 0, 'cpus': 16}) + '\n', '')
+        got = pool.probe_host(m, run, etc=self.etc)
+        self.assertEqual((got['slots_free'], got['problems']), (1, []))
+        self.assertEqual(seen['argv'][-2:], ['alias-a', 'ci-run pool probe'])
+        self.assertEqual(seen['argv'][seen['argv'].index('-i') + 1], self.key)
+        self.assertIn('IdentitiesOnly=yes', seen['argv'])
+        self.assertIs(seen['kw']['stdin'], subprocess.DEVNULL)
+        self.assertEqual(seen['kw']['timeout'], pool.HOST_TIMEOUT)
+        self.assertNotIn('input', seen['kw'])
+        self.assertEqual(pool.probe_host(m, lambda a, **k: subprocess.CompletedProcess(a, 255, '', ''),
+                                         etc=self.etc)['problems'], ['unreachable (exit 255)'])
+        os.unlink(self.key)
+        self.assertEqual(pool.probe_host(m, run, etc=self.etc)['problems'], ['no key etc/pool/keys/hosta'])
+
+    def test_the_cluster_through_the_gates_capacity(self):
+        m = self.reg.machines['cl']
+        m = dataclasses.replace(m, targets={'cpu': dataclasses.replace(m.targets['cpu'], partition='cpu-partition')})
+        seen = []
+
+        def run(argv, rc=0, out=CAPACITY, **kw):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, rc, out.encode(), b'secret-host: refused')
+        timeouts = []
+        rows = pool.probe_cluster(m, lambda a, **k: timeouts.append(k['timeout']) or run(a, **k), etc=self.etc)
+        self.assertEqual(timeouts, [pool.CLUSTER_TIMEOUT])
+        self.assertEqual(seen[0][-3:], ['cluster1-acct1', 'ci-slurm-gate', 'capacity'])
+        self.assertEqual(seen[0][seen[0].index('-i') + 1], os.path.join(self.etc, 'slurm', 'keys', 'acct1'))
+        self.assertTrue(seen[0][seen[0].index('-o') + 1].startswith('BatchMode'))
+        self.assertEqual((rows[0]['key'], rows[0]['problems'], rows[0]['start_now'], rows[0]['cpus_free']),
+                         ('cl:cpu', [], True, 40))  # 72 less the account's running 32
+        for rc, out, why in [(255, '', 'cluster unreachable'), (2, '', 'the gate refused capacity'),
+                             (0, 'only one part', 'cluster unreachable')]:
+            got = pool.probe_cluster(m, lambda a, **k: run(a, rc, out), etc=self.etc)
+            self.assertTrue(got[0]['problems'][0].startswith(why), (rc, got[0]['problems']))
+            self.assertFalse(got[0]['start_now'])
+            self.assertNotIn('secret-host', got[0]['problems'][0])
+
+        def slow(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, 90)
+        self.assertEqual(pool.probe_cluster(m, slow, etc=self.etc)[0]['problems'], ['cluster unreachable'])
+
+        def missing(argv, **kw):
+            raise FileNotFoundError('ssh')
+        self.assertEqual(pool.probe_cluster(m, missing, etc=self.etc)[0]['problems'], ['cluster unreachable'])
+        self.assertEqual(pool.probe_cluster(dataclasses.replace(m, account='acct9'), run, etc=self.etc)[0]['problems'],
+                         ['no account acct9 in site cluster1'])
+        self.assertEqual(pool.probe_cluster(dataclasses.replace(m, site='other'), run, etc=self.etc)[0]['problems'],
+                         ['no site config etc/slurm/other.toml'])
+        os.chmod(self.site, 0o644)
+        self.assertEqual(pool.probe_cluster(m, run, etc=self.etc)[0]['problems'], ['site config: invalid'])
+
+    def test_status_probes_every_machine_at_once(self):
+        def run(argv, **kw):
+            time.sleep(0.6)
+            return subprocess.CompletedProcess(argv, 255, b'' if 'ci-slurm-gate' in argv else '', b'')
+        t0 = time.monotonic()
+        rows = pool.status(self.reg, run, here='', etc=self.etc)
+        self.assertLess(time.monotonic() - t0, 1.5)  # three machines of 0.6 s each: at once
+        self.assertEqual([r['key'] for r in rows], ['hosta', 'hostb', 'cl:cpu', 'cl:v100', 'cl:a40'])
+        self.assertEqual(rows[0]['problems'], ['unreachable (exit 255)'])  # the forced probe, through its key
+        self.assertEqual(rows[2]['problems'], ['cluster unreachable'])
+        self.assertEqual((pool.HOST_TIMEOUT, pool.CLUSTER_TIMEOUT), (60, 90))  # inside the plan step's 120 s
+
+    def write_registry(self, text):
+        path = os.path.join(self.etc, 'pool.toml')
+        with open(path, 'w') as f:
+            f.write(text)
+        os.chmod(path, 0o600)
+
+    def local_lock(self):
+        lock = os.path.join(self.tmp.name, 'x.lock')
+        open(lock, 'w').close()
+        self.write_registry(CI_REGISTRY.replace('lock = "/tmp/x.lock", count = 1', f'lock = "{lock}", count = 1'))
+
+    def test_pool_probe_prints_the_local_machines_probe(self):
+        self.local_lock()
+        out = io.StringIO()
+        with unittest.mock.patch('sys.stdout', out):
+            self.assertEqual(pool.main(['probe'], self.etc), 0)
+        p = json.loads(out.getvalue())
+        self.assertEqual((p['slots_free'], p['slots_missing'], p['drained']), (1, 0, False))
+        self.assertNotIn('cards_leased', p)
+        for text in (CI_REGISTRY.replace('access = "local"', 'access = "ssh"\nssh = "b"'),
+                     CI_REGISTRY.replace('access = "ssh"\nssh = "alias-a"', 'access = "local"').replace(
+                         'probe = "forced"\n', '')):
+            self.write_registry(text)
+            err = io.StringIO()
+            with unittest.mock.patch('sys.stderr', err):
+                self.assertEqual(pool.main(['probe'], self.etc), pool.EXIT_USAGE)
+            self.assertIn('local machines in the registry, not one', err.getvalue())
+
+    def test_a_forced_probes_leases_hold_its_cards_whatever_the_callers_entry(self):
+        m = self.reg.machines['hosta']
+        self.assertIsNone(m.leases)
+        got = pool.host_row(m, {'slots_free': 1, 'load': 0, 'gpu_free': {'0': 20000, '1': 20000},
+                                'cards_leased': {'0': 1, '1': 0}})
+        self.assertEqual(got['gpu_free'], {1: 20000})  # card 0's one lease is held there
+
+    def test_the_cluster_entry_needs_the_registry_in_its_data_tree(self):
+        m = self.reg.machines['cl']
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, CAPACITY.encode(), b'')
+        pool.probe_cluster(m, run, etc=self.etc)
+        cp = next(a for a in seen[0] if a.startswith('ControlPath='))
+        self.assertTrue(cp.startswith('ControlPath=' + os.path.join(self.tmp.name, 'ci-runners', 'state', 'slurm',
+                                                                    'cluster1', 'cm')), cp)
+        other = os.path.join(self.tmp.name, 'elsewhere')
+        shutil.copytree(self.etc, other)
+        self.assertEqual(pool.probe_cluster(m, run, etc=other)[0]['problems'],
+                         ['the registry is not in <data>/ci-runners/etc'])
+        with open(self.site, 'wb') as f:
+            f.write(b'\xff\xfe not text')
+        self.assertEqual(pool.probe_cluster(m, run, etc=self.etc)[0]['problems'], ['site config: invalid'])
+
+    def test_the_etc_defaults_to_the_accounts(self):
+        with unittest.mock.patch.dict(os.environ, {'CI_RUNNERS_ETC': self.etc}):
+            self.assertEqual(pool.probe_key('', 'hosta'), self.key)
+        self.assertEqual(pool.probe_key('/e', 'hosta'), '/e/pool/keys/hosta')
+
+    def test_pool_run_refuses_a_ci_accounts_entry(self):
+        err = io.StringIO()
+        with unittest.mock.patch('sys.stderr', err):
+            for only in ('hosta', 'cl', 'cl:cpu'):
+                self.assertEqual(pool.pool_run(self.reg, pool.RunArgs('true', ROOT, pool.Ask()), only=only, rows=[]),
+                                 pool.EXIT_USAGE)
+        self.assertIn("cl:cpu: a CI account's entry, for pool status only", err.getvalue())
+
+    def test_the_ssh_cluster_probe_reads_only_a_good_answer(self):
+        m = reg().machines['cl']
+        bad = pool.probe_cluster(m, lambda a, **k: subprocess.CompletedProcess(a, 1, CAPACITY, ''))
+        self.assertEqual(bad[0]['problems'], ['cluster unreachable'])
+        good = pool.probe_cluster(m, lambda a, **k: subprocess.CompletedProcess(a, 0, CAPACITY, ''))
+        self.assertNotEqual(good[0]['problems'], ['cluster unreachable'])
+
+    def test_pool_probe_reads_the_drain_the_queue_and_the_leases_its_registry_names(self):
+        lock = os.path.join(self.tmp.name, 'x.lock')
+        open(lock, 'w').close()
+        queue = os.path.join(self.tmp.name, 'q')
+        os.mkdir(queue)
+        open(os.path.join(queue, 'a.ticket'), 'w').close()
+        drain = os.path.join(self.tmp.name, 'drain.json')
+        with open(drain, 'w') as f:
+            json.dump({'host': 1, 'pools': {}}, f)
+        leases = os.path.join(self.tmp.name, 'leases')
+        os.mkdir(leases)
+        text = CI_REGISTRY.replace('slots = { lock = "/tmp/x.lock", count = 1 }',
+                                   f'slots = {{ lock = "{lock}", count = 1, queue = "{queue}" }}\n'
+                                   f'drain = "{drain}"\ngpus = 2\ngpu_model = "3090"\n'
+                                   f'leases = {{ dir = "{leases}", parts = 1 }}')
+        fd = os.open(os.path.join(leases, 'card1.0.lock'), os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            p = pool.local_probe(pool.load(text))
+        finally:
+            os.close(fd)
+        self.assertEqual((p['drained'], p['queue'], p['cards_leased']), (True, 1, {0: 0, 1: 1}))
+
+    def test_pool_status_reads_the_etc_it_is_given(self):
+        self.local_lock()
+        seen = {}
+
+        def status(reg_, **kw):
+            seen.update(kw)
+            return []
+        with unittest.mock.patch.object(pool, 'status', status), unittest.mock.patch('sys.stdout', io.StringIO()):
+            self.assertEqual(pool.main(['status', '--json'], self.etc), 0)
+        self.assertEqual(seen, {'etc': self.etc})  # the keys and the site config beside the registry
+
+    def test_the_forced_command_takes_no_argument_and_reads_no_stdin(self):
+        self.local_lock()
+        env = dict(os.environ, CI_RUNNERS_ETC=self.etc, CI_RUNNERS_PYTHON=sys.executable,
+                   SSH_ORIGINAL_COMMAND='ci-run pool run -- rm -rf /')
+        ci_run = os.path.join(ROOT, 'bin', 'ci-run')
+        r = subprocess.run([ci_run, 'pool', 'probe'], input='import os; os._exit(9)\n', capture_output=True, text=True,
+                           env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)['slots_free'], 1)
+        r = subprocess.run([ci_run, 'pool', 'probe', 'x'], capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 2)
 
 
 if __name__ == '__main__':

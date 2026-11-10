@@ -155,6 +155,8 @@ HOST_KEYS = {
                        and all(isinstance(x, str) and ACCOUNT.fullmatch(x) for x in v), False),
     # the org snapshot's push key (decision 12.4): its line in the account's authorized_keys
     'push_key': (lambda v: isinstance(v, str) and bool(PUSH_KEY.fullmatch(v)), False),
+    # the other host's CI account's pool probe key (decision 15.1, item 8): its line, forced to pool probe
+    'probe_key': (lambda v: isinstance(v, str) and bool(PUSH_KEY.fullmatch(v)), False),
     # the other host's pool of each runner class: where a drained or busy part goes (decision 13.3)
     'peer_labels': (lambda v: _peer_labels(v), False),
     # the busy rule's thresholds (decision 13.2); each optional, with the rule's defaults

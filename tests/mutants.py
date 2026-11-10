@@ -2303,7 +2303,7 @@ MUTANTS = [
     (PO, "    if not all(isinstance(k, str) and type(v) in num for k, v in doc['pools'].items()):", "    if False:",
      [f'{TD}.State.test_the_pool_reads_a_state_as_read_does']),
     (PO, "'partition', 'drain', 'dir')", "'partition', 'dir')", [f'{TPO}.Registry.test_step_2s_keys']),
-    (DRN, "        _write(public_path(data), st, 0o644)", "        pass", [f'{TD}.State.test_each_change_writes_the_pool_runs_copy']),
+    (DRN, "        _write(public_path(data), st, 0o644)  # the pool runs' copy", "        pass  # the pool runs' copy", [f'{TD}.State.test_each_change_writes_the_pool_runs_copy']),
     (DRN, "        os.fchmod(f.fileno(), mode)\n", "        pass\n", [f'{TD}.State.test_each_change_writes_the_pool_runs_copy']),
     (PRT, "self.mode = 0o660 if shared else 0o600", "self.mode = 0o600", [f'{TT}.SharedLeases.test_what_it_creates_the_other_account_can_open']),
     (PRT, "mode=0o770 if shared else 0o700, exist_ok=True)", "mode=0o700, exist_ok=True)",

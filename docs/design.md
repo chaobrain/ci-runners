@@ -1999,6 +1999,22 @@ Rules:
   4. No setup change without `files.lease_dir`: a host's plan at `v1.8.0` is `v1.7.8`'s
      (3090b's plan from `main` at the stamp has the same sha256), so the install restarts
      no runner.
+- **`v1.9.0` is additive** (minor, stamped 2026-11-10; decision 15.1 item 8, #118 and #119): `pool status` for a CI
+  account, which has no unrestricted login. A `slurm` entry with `site` and `account` is reached through the
+  account's CI key and the gate's new read-only verb `capacity`; a host entry with `probe = "forced"` through a key
+  forced to the new `ci-run pool probe`; the inventory's optional `probe_key` gives that key its line. No action's
+  input or output changes and no label changes. Its notes:
+  1. **The gate's verb.** `capacity` reaches the cluster with each account's `ci-run slurm apply` of `v1.9.0`
+     (the apply moves the cluster's `releases/hook`, which the CI key's forced line runs). Until then a CI account's
+     cluster rows show `the gate refused capacity`.
+  2. **A host change `v1.8` cannot run.** The inventory's optional `probe_key` is refused by the loader of `v1.8.0`
+     and older, so a host's inventory gains it only after `v1` has moved to `v1.9.0`.
+  3. **The operator step, per 3090 host.** Each CI account gets a key `etc/pool/keys/<the other host's key>` (mode
+     600), an alias for the other host's CI account in its `~/.ssh/config` and that host's key pinned in its
+     `known_hosts`. The other host's inventory then gains `probe_key`, and its plan and apply write the forced line
+     (`authorized_keys` only: no unit changes and no runner restarts). Then each CI account's registry (mode 600).
+  4. No setup change without `probe_key`: a host's plan at `v1.9.0` is `v1.8.0`'s (3090b's and 3090a's plans from
+     the code PR's head have the same sha256 as from `v1.8.0`), so the install restarts no runner.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

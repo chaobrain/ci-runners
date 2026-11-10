@@ -823,6 +823,21 @@ class Shared(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 setup.tmpfiles_text({**self.h, **bad})
 
+    def test_a_lease_dir_is_shared_as_the_queue(self):
+        """Decision 15.1: the inventory's lease_dir is a directory the root step makes as the
+        slot queue (default ACL entries), binds into the CI account's namespace and checks."""
+        s = self.p
+        h = {**self.h, 'files': {**self.h['files'], 'lease_dir': f'{s}-leases'}}
+        self.assertEqual(setup.shared_files(h)[1], [f'{s}-ci.queue', f'{s}-leases'])
+        text = setup.tmpfiles_text(h).splitlines()
+        self.assertIn(f'd {s}-leases 0770 root root -', text)
+        self.assertIn(f'x {s}-leases', text)
+        self.assertTrue(any(line.startswith(f'A+ {s}-leases - - - - u:acct-x:rwx') and 'd:u:localuser:rwx' in line
+                            for line in text))
+        self.assertTrue(setup.private_text(h).rstrip().endswith(f'{s}-ci.queue {s}-leases'))
+        self.assertIn((f'{s}-leases', 'missing'), setup.shared_state(h, uid_of=lambda a: 0, read='/nonexistent'))
+        self.assertEqual(setup.shared_files(self.h)[1], [f'{s}-ci.queue'])  # none named: as before
+
     def test_root_steps_not_done_block_apply(self):
         plan = setup.build(str(self.etc))
         text = plan.text()
@@ -989,7 +1004,7 @@ class Shared(unittest.TestCase):
         and the host's own mounts it shadows."""
         hm, root, home, data = '/ho' + 'me', str(self.data.parent), str(self.home), str(self.data)
         priv = '/tmp/systemd-private-0a1b-user@4242.service-xyz/tmp'
-        files, queue = setup.shared_files(self.h)
+        files, (queue,) = setup.shared_files(self.h)
         return ['22 1 250:2 / / rw - ext4 /dev/x rw',
                 '23 22 0:5 / /proc rw - proc proc rw',
                 '25 22 0:24 / /dev/shm rw - tmpfs tmpfs rw',
@@ -1007,7 +1022,7 @@ class Shared(unittest.TestCase):
 
     def test_the_namespace_matches_the_drop_in_exactly(self):
         hm, root, home, data = '/ho' + 'me', str(self.data.parent), str(self.home), str(self.data)
-        files, queue = setup.shared_files(self.h)
+        files, (queue,) = setup.shared_files(self.h)
         ns = self.namespace()
         SHM = "/dev/shm is the host's (or this plan runs in the namespace)"
 
@@ -1081,7 +1096,7 @@ class Shared(unittest.TestCase):
             self.skipTest('no setfacl')
         me, other = os.getuid(), 65534
         names = {'acct-x': me, 'localuser': other}
-        files, queue = setup.shared_files(self.h)
+        files, (queue,) = setup.shared_files(self.h)
         for f in files:
             pathlib.Path(f).touch()
         os.mkdir(queue)

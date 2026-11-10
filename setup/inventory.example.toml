@@ -54,3 +54,4 @@ compile = { count = 1, labels = ["3090b-compile"] }
 host_lock = "/tmp/brainspike-host.lock"
 slot_lock = "/tmp/brainspike-local-ci.lock"
 slot_queue = "/tmp/brainspike-local-ci.queue"
+# lease_dir = "/tmp/ci-gpu-leases"              # the GPU leases, shared with pool runs (15.1); default state/leases

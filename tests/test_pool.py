@@ -7,6 +7,7 @@ import fcntl
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -182,6 +183,29 @@ def _wait_holding(p):
     assert 'holding' in line, line
 
 
+def _command_alive(pidf, marker):
+    """Whether the ``bash -c`` command whose pid is in ``pidf`` runs: that pid, its command
+    line naming ``marker`` (a path of the test's own), so a reused pid is not it."""
+    try:
+        with open(pidf) as f:
+            pid = int(f.read())
+        with open(f'/proc/{pid}/cmdline', 'rb') as f:
+            return marker.encode() in f.read() and pid
+    except (OSError, ValueError):
+        return False
+
+
+def _end_command(pidf, marker):
+    """Kill the process group of a command a failing run left running (it is a session
+    leader: ``supervise`` starts it in one)."""
+    pid = _command_alive(pidf, marker)
+    if pid:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def _until(cond, timeout=20.0):
     deadline = time.time() + timeout
     while not cond():
@@ -351,23 +375,29 @@ class Claim(unittest.TestCase):
     def test_a_signal_while_the_supervisor_starts_stops_its_command(self):
         """A signal that lands inside the supervisor's Popen (its process made, not yet in
         ``started``) waits until it is known, then stops it: never a command left running
-        without its slot, its directory removed under it."""
-        started, done = os.path.join(self.d, 'started'), os.path.join(self.d, 'done')
-        fault = ('import os, signal, subprocess, ci_runners.pool as P\n'
+        without its slot, its directory removed under it. The fault sends it once the
+        command runs (it writes ``started``), so a run that does not stop it leaves it
+        running whatever the host's load."""
+        started, pidf = os.path.join(self.d, 'started'), os.path.join(self.d, 'cmd.pid')
+        fault = ('import os, signal, subprocess, time, ci_runners.pool as P\n'
                  'class W(subprocess.Popen):\n'
                  '    sent = False\n'
                  '    def __init__(self, *a, **k):\n'
                  '        super().__init__(*a, **k)\n'
                  '        if not W.sent:\n'
                  '            W.sent = True\n'
+                 '            end = time.monotonic() + 60\n'
+                 f'            while not os.path.exists({started!r}) and time.monotonic() < end:\n'
+                 '                time.sleep(0.02)\n'
                  '            os.kill(os.getpid(), signal.SIGTERM)\n'
                  'P.subprocess.Popen = W\n')
-        r, run_dir = self.remote(self.spec(f'touch {started}; sleep 3; touch {done}'), pre=f'exec({fault!r})')
+        r, run_dir = self.remote(self.spec(f'echo $$ > {pidf}; touch {started}; sleep 30'), pre=f'exec({fault!r})')
+        self.addCleanup(_end_command, pidf, started)
         out, err = self.finish(r, timeout=pool.STOP_GRACE + 30)
         self.assertEqual(r.returncode, pool.EXIT_SIGNALLED, err)
-        time.sleep(4)
-        self.assertFalse(os.path.exists(done))  # the command was stopped with its run
-        self.assertEqual(pool.probe(self.lock, 1, '')['slots_free'], 1)
+        self.assertTrue(os.path.exists(started), err)  # the signal came while the command ran
+        self.assertFalse(_command_alive(pidf, started))  # stopped (and reaped) with its run
+        self.assertEqual(pool.probe(self.lock, 1, '')['slots_free'], 1)  # the supervisor is gone
         self.assertFalse(os.path.exists(run_dir))
 
     def fake_systemd(self, rc=None):

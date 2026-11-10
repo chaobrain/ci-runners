@@ -1999,7 +1999,8 @@ Rules:
   4. No setup change without `files.lease_dir`: a host's plan at `v1.8.0` is `v1.7.8`'s
      (3090b's plan from `main` at the stamp has the same sha256), so the install restarts
      no runner.
-- **`v1.9.0` is additive** (minor, stamped 2026-11-10; decision 15.1 item 8, #118 and #119): `pool status` for a CI
+- **`v1.9.0` is additive** (minor, stamped 2026-11-10; decision 15.1 item 8, #118 and #119; `v1` moved to it after
+  the slurm and 3090 canaries at `@v1.9.0`, 2026-11-10): `pool status` for a CI
   account, which has no unrestricted login. A `slurm` entry with `site` and `account` is reached through the
   account's CI key and the gate's new read-only verb `capacity`; a host entry with `probe = "forced"` through a key
   forced to the new `ci-run pool probe`; the inventory's optional `probe_key` gives that key its line. No action's

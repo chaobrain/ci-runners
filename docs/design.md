@@ -855,19 +855,25 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
      user manager answers, else in a session of its own. A host side that is killed leaves
      the command running with its slot held, never a command without one; a caller that
      ends (stdin closed, a signal) makes the host side stop the supervisor, which ends the
-     command (its process group is killed `STOP_GRACE` s later).
+     command (its process group is killed `STOP_GRACE` s later). A signal while the
+     supervisor starts waits until its process is known; only the run that holds the
+     directory's `alive.lock` removes it.
    - *The project's cap.* The registry's `max_slots` per machine is the project's cap on
      that host's queue, as `registry.slot_caps` gives the parts; a pool run is the queue's
-     default project, so `ci_slot.sh`'s tickets and holders count against it too. Without it
-     the cap is the slot count, as before.
+     default project, so `ci_slot.sh`'s tickets and holders count against it too (the
+     slot's holder record names the supervisor). It lies from 1 to the slot count; without
+     it the cap is the slot count, as before.
    - *The drain.* `drain.change` also writes a world-readable copy of the state,
-     `<data>/ci-runners/drain.json` (mode 644), since other accounts cannot read `state/`.
+     `<data>/ci-runners/drain.json` (mode 644), since other accounts cannot read `state/`;
+     each part and `ci-run drain status` bring it up to the state (`drain.publish`: a host
+     drained before the copy existed, or an unreadable state, is drained there too).
      The registry's `drain` names it; `pool status` shows a host it drains as the problem
      `drained` (unreadable or malformed drains, missing does not), and the host side reads
      it again before each try for the slot. A drained runner pool drains no pool run.
    - *A host's cards through the leases.* A GPU pool run takes a host's cards by
      `part.Leases`, in the parts' ticket order, and no CI slot (as a GPU part). It does so
-     only where the registry names the leases (`leases = { dir, parts }`), which must be the
+     only where the registry names the leases (`leases = { dir, parts }`, `parts` 1 as the
+     parts' leases per card), which must be the
      inventory's `files.lease_dir`: a directory the CI account shares as the slot queue
      (root-owned in `/tmp`, default ACL entries, bound into its namespace, §5.3), where
      both accounts create files mode 660 and directories 770, nothing through a link, and a

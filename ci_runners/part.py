@@ -1060,6 +1060,10 @@ class Executor:
             why = self.gate(a, cls, lock)
             if why:
                 return self._end(record, rec, a, unavailable=why)
+            try:  # the pool runs' copy of the drain (15.1), from before it existed or lost
+                drain_mod.publish(str(h['data']))
+            except OSError:
+                pass
             why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # decision 13.1
             if why:
                 return self._away(record, rec, a, why, cls)

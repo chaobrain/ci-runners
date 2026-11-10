@@ -96,6 +96,33 @@ class State(unittest.TestCase):
         drain.change(self.data, False)
         self.assertFalse(pool.drained(public))
 
+    def test_publish_brings_the_copy_up_to_the_state(self):
+        """A host drained before the copy existed (an older release) is drained for the pool
+        runs at the next part or ``drain status``; an unreadable state publishes a drained host."""
+        from ci_runners import pool
+        public = pathlib.Path(drain.public_path(self.data))
+        drain.publish(self.data)  # no state directory: nothing written
+        self.assertFalse(public.exists())
+        drain.change(self.data, True, now=lambda: 100.0)
+        public.unlink()  # drained by a release without the copy
+        self.assertFalse(pool.drained(str(public)))
+        drain.publish(self.data)
+        self.assertTrue(pool.drained(str(public)))
+        self.assertEqual(os.stat(public).st_mode & 0o777, 0o644)
+        pathlib.Path(drain.state_path(self.data)).write_text('{')  # unreadable: drained, the copy kept as it is
+        before = public.stat().st_mtime_ns
+        drain.publish(self.data, now=lambda: 300.0)
+        self.assertEqual(public.stat().st_mtime_ns, before)
+        drain.change(self.data, False)
+        public.write_text('{"host": null, "pools": {}}\n')
+        pathlib.Path(drain.state_path(self.data)).write_text('[]')
+        drain.publish(self.data, now=lambda: 300.0)
+        self.assertEqual(json.loads(public.read_text()), {'host': 300.0, 'pools': {}})
+        pathlib.Path(drain.state_path(self.data)).write_text('{"host": null, "pools": {"cards": 5}}')
+        drain.publish(self.data)
+        self.assertEqual(json.loads(public.read_text()), {'host': None, 'pools': {'cards': 5}})
+        self.assertFalse(pool.drained(str(public)))
+
     def test_the_pool_reads_a_state_as_read_does(self):
         from ci_runners import pool
         path = pathlib.Path(self.data, 'd.json')
@@ -180,8 +207,11 @@ class Gate(Host):
         return pathlib.Path(self.path(out), 'work', 'ran').exists()
 
     def test_a_drained_host_refuses_to_the_peer_pool(self):
+        from ci_runners import pool
         drain.change(str(self.data), True)
+        os.unlink(drain.public_path(str(self.data)))  # drained by a release without the pool runs' copy
         code, out = self.execute(command='touch "$CI_PART_DIR/ran"')
+        self.assertTrue(pool.drained(drain.public_path(str(self.data))))  # the part published it
         self.assertEqual((code, out['outcome'], out['reason'], out['next']), (0, 'unavailable', 'drained: host', 'fallback'))
         self.assertEqual(out['retry-on'], ['self-hosted', 'hz-cpu'])  # the peer's pool, not the registry's fallback
         self.assertFalse(self.ran(out))

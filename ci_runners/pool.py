@@ -200,6 +200,10 @@ class Slots:
     queue: str = ''
 
 
+#: the leases per card a GPU part takes (``part.Leases``' ``max_parts`` there); a registry's must match
+LEASE_PARTS = 1
+
+
 @dataclasses.dataclass(frozen=True)
 class LeaseDir:
     dir: str
@@ -350,9 +354,13 @@ def _machine(key: str, t: Mapping) -> Machine:
         lt = _get(t, 'leases', dict, where)
         _unknown(lt, {'dir', 'parts'}, f'{where}.leases')
         leases = LeaseDir(_abs(lt, 'dir', f'{where}.leases', required=True), _get(lt, 'parts', int, f'{where}.leases', 1))
-        if leases.parts < 1 or not gpus:
-            raise RegistryError(f'{where}.leases: parts must be positive, on a machine with gpus')
-    m.update(max_slots=_get(t, 'max_slots', int, where), drain=_abs(t, 'drain', where), leases=leases)
+        if leases.parts != LEASE_PARTS or not gpus:  # another count would let a run share a card a part holds
+            raise RegistryError(f'{where}.leases: parts must be {LEASE_PARTS} (the parts\' leases per card), '
+                                'on a machine with gpus')
+    max_slots = _get(t, 'max_slots', int, where)
+    if max_slots is not None and not 1 <= max_slots <= slots.count:
+        raise RegistryError(f'{where}.max_slots: from 1 to the slot count ({slots.count})')
+    m.update(max_slots=max_slots, drain=_abs(t, 'drain', where), leases=leases)
     m.update(cpus=_get(t, 'cpus', int, where, required=True), memory_gib=_get(t, 'memory_gib', int, where, required=True),
              gpus=gpus, gpu_model=_get(t, 'gpu_model', str, where, '', required=bool(gpus)),
              gpu_mib=_get(t, 'gpu_mib', int, where, 0), cuda=_get(t, 'cuda', str, where, ''),
@@ -1128,7 +1136,15 @@ def remote(argv: Sequence[str], stdin=None) -> int:
     d, spec = argv[0], json.loads(argv[1])
     stdin = sys.stdin if stdin is None else stdin
 
+    # a signal while the supervisor starts waits until its process is known (``started``); after
+    # the first one that stops the run, the next ones change nothing (the stop is under way)
+    sigs = {'starting': False, 'stopping': False, 'pending': 0}
+
     def stop(signum, _frame):
+        if sigs['starting'] or sigs['stopping']:
+            sigs['pending'] = sigs['pending'] or signum
+            return
+        sigs['stopping'] = True
         raise SystemExit(128 + signum)
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, stop)
@@ -1145,8 +1161,10 @@ def remote(argv: Sequence[str], stdin=None) -> int:
     fds: list[int] = []
     started: list[subprocess.Popen] = []
     record = os.path.join(d, 'record')
+    ours = False  # the run directory is this run's (its ALIVE lock taken): only then removed at the end
     try:
         fds.append(_hold_alive(d))
+        ours = True
         _remove_stale(os.path.dirname(d), d, time.time())
         rounds_max = int(spec.get('rounds') or 0)
         deadline = time.time() + float(spec['queue_seconds'])
@@ -1181,9 +1199,16 @@ def remote(argv: Sequence[str], stdin=None) -> int:
         os.makedirs(record, exist_ok=True)
         unit = ''
         try:
-            unit = _start_supervisor(spec, d, record, env, [*fds, *(leases.fds if leases else [])],
-                                     part.command_argv(spec['command']), started)
+            sigs['starting'] = True
+            try:
+                unit = _start_supervisor(spec, d, record, env, [*fds, *(leases.fds if leases else [])],
+                                         part.command_argv(spec['command']), started)
+            finally:
+                sigs['starting'] = False
             sup = started[-1]
+            if sigs['pending'] and not sigs['stopping']:  # a signal while it started: stop it now
+                sigs['stopping'] = True
+                raise SystemExit(128 + sigs['pending'])
             if q is not None:  # the slot's holder is the supervisor now (its project counts while it runs)
                 try:
                     i = q._index(slot) + 1
@@ -1219,7 +1244,7 @@ def remote(argv: Sequence[str], stdin=None) -> int:
                 os.close(fd)
             except OSError:
                 pass
-        if sup is None or sup.poll() is not None:  # a supervisor still running keeps its directory
+        if ours and (sup is None or sup.poll() is not None):  # a supervisor still running keeps its directory
             subprocess.run(['rm', '-rf', '--one-file-system', d], timeout=600)
 
 

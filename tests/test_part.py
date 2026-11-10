@@ -924,6 +924,20 @@ class SharedLeases(Host):
         finally:
             os.umask(old)
 
+    def test_no_lease_is_taken_through_a_link(self):
+        """Another account could plant a link in the shared directory: a lock file or the
+        mutex that is a link is refused (O_NOFOLLOW), and its target is never created."""
+        d = pathlib.Path(self.tmp.name) / 'l'
+        le = part.Leases(str(d), shared=True)
+        target = pathlib.Path(self.tmp.name) / 'target'
+        for name in ('.lock', 'card0.0.lock'):
+            (d / name).symlink_to(target)
+            with self.assertRaises(OSError):
+                le.try_take(1, [0], {0: 24000}, 0)
+            self.assertFalse(target.exists())
+            (d / name).unlink()
+        le.release()
+
     def test_a_ticket_written_with_the_shared_mode(self):
         old = os.umask(0)
         try:

@@ -1928,6 +1928,32 @@ Rules:
   (`kill(pid, 0)` answers EPERM), for 24 h from its start; at `v1.7.7` it deleted every
   such ticket, so each `ci-slot` poll sent a waiting local run to the back of the queue
   (#107). No input or output changes.
+- **`v1.8.0` is additive** (minor, stamped 2026-11-10; decision 15.1, #113 and #115): `ci-run
+  pool` (the machine registry, `pool status`, the claim, the env check, `pool run`, `pool add`
+  and `pool ready`), run from a person's or an agent's account; no action's input or output
+  changes and no label changes. Its notes:
+  1. **The CI account's side.** `drain.change` and each part write the world-readable drain
+     copy `<data>/ci-runners/drain.json` (mode 644, `drain.publish`); `SlotQueue` takes the
+     default project's cap; `part.supervise` stops a command that a signal reached before
+     its `Popen` returned. These hold from the install (`releases/hook`) for the hook's
+     side, and for every part once `v1` moves.
+  2. **A host change `v1.7` cannot run.** The inventory's optional `files.lease_dir` (the GPU
+     leases shared with the pool runs) is refused by the loader of `v1.7.8` and older, so
+     every `claim`, `part`, `salvage` and `verdict` of a `v1.7` caller would fail on a host
+     whose inventory has it. A host's inventory gains it only after `v1` has moved to
+     `v1.8.0` (consumers pin `@v1`; no caller in the org pins a release tag).
+  3. **The operator step, per 3090 host, drained** (`ci-run drain on`, `drain status`
+     showing no part scope): the inventory gains `files.lease_dir`; the host's plan then
+     adds the directory to the `tmpfiles.d` file and to the private namespace's
+     `BindPaths=` (root steps: the file, `systemd-tmpfiles --create`, the drop-in, the user
+     manager's restart, which restarts every runner), and the apply. A part's GPU leases
+     move from `state/leases` to that directory, so no part may hold a card across the
+     change. Then the registry's `drain`, `leases` and `max_slots` per host, checked with
+     `ci-run pool status` and a small `pool run` through each host. Until the registry names
+     them, pool runs behave as in step 1 of 15.1.
+  4. No setup change without `files.lease_dir`: a host's plan at `v1.8.0` is `v1.7.8`'s
+     (3090b's plan from `main` at the stamp has the same sha256), so the install restarts
+     no runner.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

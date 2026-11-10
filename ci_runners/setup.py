@@ -235,25 +235,27 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
     return '\n'.join(lines) + '\n'
 
 
-def shared_files(h: dict) -> tuple[list[str], str]:
+def shared_files(h: dict) -> tuple[list[str], list[str]]:
     """The files the CI account shares with the local accounts (decision 12.9): the host
     lock with its turnstile, shared marker and probe file (issue #69), when the host has
-    one, and every slot file; and the slot queue directory. Pure."""
+    one, and every slot file; and the directories: the slot queue, and the GPU leases'
+    ``lease_dir`` where the inventory names one (decision 15.1). Pure."""
     lock = h['files'].get('host_lock')
     files = [*locks.paths(lock), locks.probe_path(lock)] if lock else []
     files += slots.slot_paths(h['files']['slot_lock'], h['slots'])
-    return files, h['files']['slot_queue']
+    return files, [h['files']['slot_queue'], *([h['files']['lease_dir']] if h['files'].get('lease_dir') else [])]
 
 
 def tmpfiles_text(h: dict) -> str:
     """The root step's ``tmpfiles.d`` file (§5.3): each shared file root-owned (so that
     ``fs.protected_regular`` lets every account open it with ``O_CREAT``, as brainspike's
     scripts do), with ``rw`` ACL entries for the CI account and each local account; the
-    queue directory with the same entries, recursively, and as default entries, so what
-    either account creates in it the other can use; all of them out of age cleaning. Pure."""
-    files, queue = shared_files(h)
+    queue directory (and the lease directory) with the same entries, recursively, and as
+    default entries, so what either account creates in it the other can use; all of them
+    out of age cleaning. Pure."""
+    files, dirs = shared_files(h)
     accounts = [h['account'], *h['local_accounts']]
-    for x in [*files, queue]:
+    for x in [*files, *dirs]:
         if not inventory.shared_path(x):
             raise ValueError(f'shared file {x!r} must be a plain name directly in /tmp')
     for a in accounts:
@@ -266,8 +268,9 @@ def tmpfiles_text(h: dict) -> str:
            '# with the local accounts, root-owned in /tmp, recreated at boot, never age-cleaned.']
     for f in files:
         out += [f'f {f} 0660 root root -', f'a+ {f} - - - - {rw}']
-    out += [f'd {queue} 0770 root root -', f'A+ {queue} - - - - {rwx},{dflt}']
-    out += [f'x {x}' for x in [*files, queue]]
+    for d in dirs:
+        out += [f'd {d} 0770 root root -', f'A+ {d} - - - - {rwx},{dflt}']
+    out += [f'x {x}' for x in [*files, *dirs]]
     return '\n'.join(out) + '\n'
 
 
@@ -286,14 +289,14 @@ def private_text(h: dict) -> str:
         raise ValueError(f'data must lie below a data-disk root, not directly in /: {data!r}')
     if home == '/home' or root == home or root.startswith(home + '/'):
         raise ValueError('home must not be /home, and the data-disk root (the parent of data) must not be in home')
-    files, queue = shared_files(h)
-    for x in [*files, queue]:
+    files, dirs = shared_files(h)
+    for x in [*files, *dirs]:
         if not inventory.shared_path(x):
             raise ValueError(f'shared file {x!r} must be a plain name directly in /tmp')
     empty = ['/dev/shm:mode=1777', '/home', *([root] if root != '/home' else [])]
     return '\n'.join(['# ci-runners (decision 12.16): the CI account sees no other account\'s files',
                       '[Service]', 'PrivateTmp=yes', 'ProtectProc=invisible', f'TemporaryFileSystem={" ".join(empty)}',
-                      f'BindPaths={" ".join([home, data, *files, queue])}']) + '\n'
+                      f'BindPaths={" ".join([home, data, *files, *dirs])}']) + '\n'
 
 
 #: never a data-disk root, nor below one (decision 12.16): a mount point alone would let /run, /dev or a separate /tmp pass
@@ -410,8 +413,8 @@ def namespace_faults(h: dict, table: str, here: str) -> list[str]:
     reach = reacher(mounts)
 
     root = os.path.dirname(h['data'])
-    files, queue = shared_files(h)
-    binds = [h['home'], h['data'], *files, queue]
+    files, dirs = shared_files(h)
+    binds = [h['home'], h['data'], *files, *dirs]
     bad = [f'no tmpfs at {p}' for p in ('/home', root) if reach(p).get('type') != 'tmpfs' or reach(p)['point'] != p]
     shm, host = reach('/dev/shm'), reacher(parse(here))('/dev/shm')
     if shm.get('type') != 'tmpfs' or shm['point'] != '/dev/shm' or 'dev' not in host or shm['dev'] == host['dev']:
@@ -469,21 +472,22 @@ def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None)
             uids[a] = uid_of(a)
         except KeyError:
             todo.append((a, 'no such account'))
-    files, queue = shared_files(h)
-    for path in [*files, queue]:
+    files, dirs = shared_files(h)
+    for path in [*files, *dirs]:
+        is_dir = path in dirs
         try:
             st = os.lstat(path)
         except OSError:
             todo.append((path, 'missing'))
             continue
-        if not (stat.S_ISDIR if path == queue else stat.S_ISREG)(st.st_mode):
-            todo.append((path, 'not a directory' if path == queue else 'not a regular file'))
+        if not (stat.S_ISDIR if is_dir else stat.S_ISREG)(st.st_mode):
+            todo.append((path, 'not a directory' if is_dir else 'not a regular file'))
             continue
         if st.st_uid != 0:
             todo.append((path, 'not root-owned'))
             continue
-        need, kind = (7, 'rwx') if path == queue else (6, 'rw')  # the queue: x to reach its tickets
-        for default in ((False, True) if path == queue else (False,)):
+        need, kind = (7, 'rwx') if is_dir else (6, 'rw')  # a directory: x to reach its tickets
+        for default in ((False, True) if is_dir else (False,)):
             got = acl_users(path, default) or {}
             short = [a for a, u in uids.items() if got.get(u, 0) & need != need]
             if short:

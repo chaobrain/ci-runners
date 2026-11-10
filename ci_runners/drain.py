@@ -7,6 +7,11 @@ unreadable or malformed one drains the host (fail closed). ``part`` reads it in 
 and again just before the command (``refusal``); ``claim``, ``salvage`` and ``verdict``
 never read it.
 
+Each change also writes a world-readable copy, ``<data>/ci-runners/drain.json`` (mode
+644, ``public_path``), for the pool runs of other accounts, which cannot read ``state/``
+(mode 700): a pool run's registry names it (``drain``, decision 15.1) and a pool run does
+not start on a host it drains.
+
 CLI (as the CI account)::
 
     ci-run drain on [--pool P]     drain the host, or one pool (its inventory key or class)
@@ -34,6 +39,11 @@ def state_path(data: str) -> str:
     return os.path.join(data, 'ci-runners', 'state', 'drain.json')
 
 
+def public_path(data: str) -> str:
+    """The world-readable copy of the state (decision 15.1). Pure."""
+    return os.path.join(data, 'ci-runners', 'drain.json')
+
+
 def parse(text: str) -> dict | None:
     """The state from the file's text, or None if it is malformed. Pure."""
     try:
@@ -55,8 +65,13 @@ def parse(text: str) -> dict | None:
 def read(data: str) -> dict | None:
     """The drain state: ``{'host': None, 'pools': {}}`` when the file is missing, None
     when it cannot be read or is malformed (the caller fails closed)."""
+    return read_path(state_path(data))
+
+
+def read_path(path: str) -> dict | None:
+    """``read`` of the state file at ``path`` (the state or its public copy)."""
     try:
-        fd = os.open(state_path(data), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except FileNotFoundError:
         return {'host': None, 'pools': {}}
     except OSError:
@@ -119,15 +134,43 @@ def change(data: str, on: bool, pool: str = '', now: Callable[[], float] = time.
             st['pools'].pop(pool, None)
         else:
             st = {'host': None, 'pools': {}}
-        tmp = f'{state_path(data)}.{os.getpid()}.new'
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-        with os.fdopen(fd, 'w') as f:
-            json.dump(st, f, sort_keys=True)
-            f.write('\n')
-        os.replace(tmp, state_path(data))
+        _write(state_path(data), st, 0o600)
+        _write(public_path(data), st, 0o644)  # the pool runs' copy (15.1), after the state: never ahead of it
         return st
     finally:
         os.close(lock)
+
+
+def publish(data: str, now: Callable[[], float] = time.time) -> None:
+    """Bring the pool runs' copy (``public_path``) up to the state, under the lock: a host
+    drained before the copy existed (an older release) or a copy lost is drained there too.
+    An unreadable state publishes a drained host (fail closed). Writes only on a difference;
+    nothing without a state directory (nothing drained). Each part calls it before its drain
+    check, and ``ci-run drain status`` does (decision 15.1)."""
+    d = os.path.dirname(state_path(data))
+    if not os.path.isdir(d):
+        return
+    lock = os.open(os.path.join(d, 'drain.lock'), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        st, cur = read(data), read_path(public_path(data))
+        if st is None:  # keep a drained copy as it is, else drain it now
+            st = cur if cur is not None and cur['host'] is not None else {'host': now(), 'pools': {}}
+        if cur != st:
+            _write(public_path(data), st, 0o644)
+    finally:
+        os.close(lock)
+
+
+def _write(path: str, st: dict, mode: int) -> None:
+    """Replace ``path`` with ``st`` by a new file of ``mode`` (whatever the umask) and a rename."""
+    tmp = f'{path}.{os.getpid()}.new'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+    with os.fdopen(fd, 'w') as f:
+        os.fchmod(f.fileno(), mode)
+        json.dump(st, f, sort_keys=True)
+        f.write('\n')
+    os.replace(tmp, path)
 
 
 def _when(t: float) -> str:
@@ -166,6 +209,10 @@ def main(argv: list[str], inv: inventory.Inventory, run: Callable = subprocess.r
         if len(argv) != 1:
             print(usage, file=sys.stderr)
             return 2
+        try:
+            publish(data)
+        except OSError as e:
+            print(f'ci-run drain: the pool runs\' copy not written: {e}', file=sys.stderr)
         sys.stdout.write(status_text(read(data), running_scopes(run)))
         return 0
     rest = argv[1:]

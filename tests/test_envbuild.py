@@ -190,6 +190,14 @@ class Spec(unittest.TestCase):
         with self.assertRaises(SpecError):
             envbuild.nested('dev.txt', '-r ../../outside.txt\n')
 
+    def test_constraints_files_are_the_c_lines_of_the_fetched_files(self):
+        files = {'req/dev.txt': '-r base.txt\n-c lock.txt\n--constraint=../top-lock.txt\nnumpy\n',
+                 'req/base.txt': '-c lock.txt\n-c  other.txt\n', 'req/lock.txt': 'numpy==2\n'}
+        self.assertEqual(envbuild.constraints(files), ['req/lock.txt', 'top-lock.txt', 'req/other.txt'])
+        self.assertEqual(envbuild.constraints({'requirements.txt': '-r a.txt\nnumpy\n'}), [])
+        with self.assertRaises(SpecError):
+            envbuild.constraints({'dev.txt': '-c ../../outside.txt\n'})
+
 
 class Steps(unittest.TestCase):
     def test_the_commands(self):
@@ -205,6 +213,18 @@ class Steps(unittest.TestCase):
                                         'jax[cuda12]==0.4.30'])
         self.assertEqual(cmds[3][-2:], ['-e', f'{d}/src/brainstate'])
         self.assertTrue(all(c[1] == f'{d}/bin/python' for c in cmds[2:]))
+
+    def test_the_constraints_bind_every_upstreams_install_and_none_is_as_before(self):
+        spec = envbuild.parse_spec(RICH + VARIANTS)
+        kw = dict(project='p', envs='/e', stamp='20261106T010203Z', reqdir='/r', conda='conda')
+        for s, v in ((spec, ''), (spec.variant('cuda12'), 'cuda12')):
+            plain = envbuild.steps(s, variant=v, **kw)
+            bound = envbuild.steps(s, variant=v, constraints=['lock.txt', 'c/x.txt'], **kw)
+            self.assertEqual(bound[:-2], plain[:-2])  # conda, clones and the requirements' install: as before
+            for b, p in zip(bound[-2:], plain[-2:]):
+                i = p.index('-e')
+                self.assertEqual(b, [*p[:i], '-c', '/r/lock.txt', '-c', '/r/c/x.txt', *p[i:]])
+            self.assertFalse(any('-c' in c for c in plain[2:]))
 
     def test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table(self):
         base, with_table = envbuild.parse_spec(GOOD), envbuild.parse_spec(GOOD + VARIANTS)
@@ -430,6 +450,17 @@ class Main(Base):
         pips = [cmd for cmd, _ in self.ran if '-m' in cmd and 'pip' in cmd and '-e' not in cmd]
         self.assertEqual(pips[0][-3:], ['pytest-xdist', 'numpy>=1.26,<3', 'jax[cuda12]==0.4.30'])  # the base install
         self.assertRegex(os.readlink(self.envs / 'p'), r'\Ap-[0-9]{8}T[0-9]{6}Z\Z')
+
+    def test_a_build_passes_the_requirement_files_constraints_to_the_upstreams_install(self):
+        self.api = Api({HEAD: {'.github/ci-runners.toml': GOOD,
+                               'requirements-dev.txt': '-c requirements-lock.txt\npytest\n',
+                               'requirements-lock.txt': 'pytest==9.1.1\n'}})
+        code, out = self.main('--conda', '/c/conda')
+        self.assertEqual(code, 0, out)
+        (req,) = [cmd for cmd, _ in self.ran if '-r' in cmd]
+        (up,) = [cmd for cmd, _ in self.ran if '-e' in cmd]
+        lock = os.path.join(os.path.dirname(req[req.index('-r') + 1]), 'requirements-lock.txt')
+        self.assertEqual(up[up.index('-c'):up.index('-e')], ['-c', lock])
 
     def test_a_build_is_linked_when_complete(self):
         code, out = self.main('--conda', '/c/conda')

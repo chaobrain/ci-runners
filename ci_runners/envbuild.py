@@ -31,6 +31,11 @@ is read only by ``ci-run slurm env`` (``Spec.variant``); a build here uses the b
 variant's ``conda`` channels follow the base's and its packages join them, in the same
 solve; it names no channel or package the base names.
 
+The constraints files the requirement files name with ``-c`` (fetched with them) bind the
+upstreams' editable installs too, each passed with ``-c``: an upstream's dependency floor
+cannot move a pinned version, its install fails instead. A spec without one builds as
+before. The cluster's builds (``slurmenv``) take the same steps.
+
 The env is built into a new directory ``<data>/ci-runners/envs/<project>-<stamp>``. Only
 when every step has passed does the link ``<data>/ci-runners/envs/<project>`` move to it
 (one rename), so a running part never sees a half-built env. The two previous builds are
@@ -67,7 +72,7 @@ import sys
 import tempfile
 import tomllib
 import urllib.parse
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 from ci_runners import envuse, github, inventory, registry
 
@@ -91,6 +96,8 @@ VARIANT = re.compile(r'[a-z0-9][a-z0-9_.-]{0,30}')
 VARIANT_KEYS = {'install', 'conda'}
 #: a requirement file's lines that name another file: ``-r f``, ``--requirement f``, ``-c f``
 NESTED = re.compile(r'\s*(?:-r|--requirement|-c|--constraint)[\s=]+(\S+)')
+#: the lines of :data:`NESTED` that name a constraints file
+CONSTRAINT = re.compile(r'\s*(?:-c|--constraint)[\s=]+(\S+)')
 
 
 class SpecError(ValueError):
@@ -270,6 +277,21 @@ def nested(path: str, text: str) -> list[str]:
     return out
 
 
+def constraints(files: dict[str, str]) -> list[str]:
+    """The constraints files the requirement ``files`` (repository path -> text, as
+    fetched) name with ``-c``, relative to the repository root, in order, once each. Pure."""
+    out: list[str] = []
+    for path, text in files.items():
+        base = posixpath.dirname(path)
+        for line in text.splitlines():
+            m = CONSTRAINT.match(line)
+            if m:
+                p = _path(f'{path}: -c', posixpath.normpath(posixpath.join(base, m.group(1))))
+                if p not in out:
+                    out.append(p)
+    return out
+
+
 def build_dir(envs: str, project: str, stamp: str, variant: str = '') -> str:
     """``<project>-<stamp>``, or a variant's own build ``<project>-<stamp>-<variant>``."""
     if not registry.NAME.fullmatch(project) or not STAMP.fullmatch(stamp) or (variant and not VARIANT.fullmatch(variant)):
@@ -278,11 +300,12 @@ def build_dir(envs: str, project: str, stamp: str, variant: str = '') -> str:
 
 
 def steps(spec: Spec, *, project: str, envs: str, stamp: str, reqdir: str, conda: str,
-          scope: tuple[str, ...] = (), variant: str = '') -> list[list[str]]:
+          scope: tuple[str, ...] = (), variant: str = '', constraints: Sequence[str] = ()) -> list[list[str]]:
     """The commands that build the env, in order, into ``build_dir`` (a ``variant``'s own
     where given: the caller passes ``spec.variant(variant)``). ``reqdir`` holds the
     requirement files at their repository paths; ``scope`` prefixes the heavy commands (a
-    memory scope). Pure."""
+    memory scope). ``constraints`` (:func:`constraints` of those files) also bind each
+    upstream's editable install, so an upstream's dependency floor cannot move a pin. Pure."""
     d = build_dir(envs, project, stamp, variant)
     py = os.path.join(d, 'bin', 'python')
     pip = [*scope, py, '-m', 'pip', 'install', '--no-input', '--disable-pip-version-check']
@@ -295,8 +318,9 @@ def steps(spec: Spec, *, project: str, envs: str, stamp: str, reqdir: str, conda
     if spec.requirements or spec.install:
         args = [a for r in spec.requirements for a in ('-r', os.path.join(reqdir, r))]
         out.append([*pip, *args, *spec.install])
+    cons = [a for c in constraints for a in ('-c', os.path.join(reqdir, c))]
     for u in spec.upstream:
-        out.append([*pip, '-e', os.path.join(d, 'src', u.name)])
+        out.append([*pip, *cons, '-e', os.path.join(d, 'src', u.name)])
     return out
 
 
@@ -425,7 +449,8 @@ def _build(proj: registry.Project, spec: Spec, files: dict[str, str], sha: str, 
     stamp = _stamp()
     d, link = build_dir(envs, proj.name, stamp), os.path.join(envs, proj.name)
     with tempfile.TemporaryDirectory(prefix='ci-envbuild-') as reqdir:
-        cmds = steps(spec, project=proj.name, envs=envs, stamp=stamp, reqdir=reqdir, conda=conda, scope=_scope(memory))
+        cmds = steps(spec, project=proj.name, envs=envs, stamp=stamp, reqdir=reqdir, conda=conda, scope=_scope(memory),
+                     constraints=constraints(files))
         print(f'ci-run env build: {proj.repository} at {sha[:12]} into {d}', file=sys.stderr)
         if dry_run:
             for c in cmds:

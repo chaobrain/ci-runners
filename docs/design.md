@@ -889,7 +889,7 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    step that shares it) takes effect with the next release, and the lease directory with
    the root step's apply; until the registry names `drain`, `leases` and `max_slots`, pool
    runs behave as in step 1.
-8. **The CI account's registry** (proposed 2026-11-10; awaiting the lead). brainspike's
+8. **The CI account's registry** (approved by the lead on 2026-11-10, option (a)). brainspike's
    runner workflow runs `pool status --json` in its plan job, as the runner's CI account,
    and places by the rows. A host with a problem gets no part. So each 3090 host's CI account
    needs a registry of its own, with its host (`local`), the other 3090 host and the
@@ -899,7 +899,7 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    host's is Python source sent on stdin. With `v1.8.0`, a CI account's `pool status`
    therefore shows the other host `unreachable` and every cluster target `cluster
    unreachable`. The plan would place nothing there, and the other host would get no part.
-   Proposed:
+   Decided:
    - *A cluster through its CI key.* A `slurm` machine may name the site config's `site`
      and `account` (`etc/slurm/<site>.toml`, 14.6) in place of `ssh` and `gate`. It is
      then reached the way the parts reach it (`slurmpart.Gate`: the account's key, batch

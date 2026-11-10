@@ -68,6 +68,29 @@ class Pure(unittest.TestCase):
         self.assertEqual(sp.row_cost(s, pending), (16.0, True))  # what it asks for, at its whole limit
         self.assertEqual(sp.row_cost(s, dict(pending, State='CANCELLED by 5'))[0], 0.0)  # never ran
 
+    def test_the_cost_per_day_per_target_and_kind(self):
+        s = self.site
+        self.assertEqual(sp.row_target(s, ledger_row()), 'h100')
+        self.assertEqual(sp.row_target(s, ledger_row(Partition='cpu-partition', AllocTRES='cpu=8')), 'cpu')
+        self.assertEqual(sp.row_target(s, ledger_row(Partition='secret-part')), '?')  # no partition name leaks
+        shared = slurmsite.load((SITE + ACCT2).replace('partition = "cpu-partition"', 'partition = "gpu-partition-a"'))
+        self.assertEqual(sp.row_target(shared, ledger_row(Partition='gpu-partition-a')), 'a40')  # it holds cards
+        self.assertEqual(sp.row_target(shared, ledger_row(Partition='gpu-partition-a', AllocTRES='cpu=8')), 'cpu')
+        pending = ledger_row(JobName='ci-r-p-2', State='PENDING', ElapsedRaw='0', AllocTRES='', Start='Unknown',
+                             ReqTRES='cpu=16,gres/gpu=1', TimelimitRaw='30', Submit='2026-11-09T23:00:00')
+        days = sp.daily(s, {
+            'acct1': [ledger_row(JobName='ci-r-p-1'), ledger_row(JobName='ci-r-p-2', ElapsedRaw='1800'),
+                      ledger_row(JobName='mine'), pending],
+            'acct2': [ledger_row(JobName='ci-r-c-1', Partition='cpu-partition', AllocTRES='cpu=8',
+                                 Start='2026-11-09T00:30:00')]})
+        self.assertEqual(days, [
+            {'day': '2026-11-08', 'kind': 'ci', 'target': 'h100', 'jobs': 2, 'live': 0, 'seconds': 5400, 'cost': 48.0},
+            {'day': '2026-11-08', 'kind': 'other', 'target': 'h100', 'jobs': 1, 'live': 0, 'seconds': 3600,
+             'cost': 32.0},
+            {'day': '2026-11-09', 'kind': 'ci', 'target': 'cpu', 'jobs': 1, 'live': 0, 'seconds': 3600, 'cost': 0.48},
+            {'day': '2026-11-09', 'kind': 'ci', 'target': 'h100', 'jobs': 1, 'live': 1, 'seconds': 0, 'cost': 8.0}])
+        self.assertEqual(sp.daily(s, {}), [])
+
     def test_ledgers_are_cached_and_a_silent_accounts_last_rows_still_count(self):
         class G:
             def __init__(self, rows):

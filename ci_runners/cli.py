@@ -14,7 +14,7 @@
     ci-run drain on|off [--pool P] | status   the drain switch (decision 13.1)
     ci-run hostload sample|status   the load record and the busy rule (decision 13.2)
     ci-run hooks copy      the hooks' copies in the private /tmp (ci-hooks.service; decision 13.5)
-    ci-run slurm check|plan|apply|env|canary|status|uninstall ...   a Slurm site's accounts (decision 14.9)
+    ci-run slurm check|plan|apply|env|canary|status|cost|uninstall ...   a Slurm site's accounts (decision 14.9)
     ci-run pool status|run|add|check|ready ...   the machine registry's live capacity, a command on a free
                            machine, and adding a host (decision 15.1)
 

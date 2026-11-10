@@ -189,6 +189,40 @@ def spend(site: slurmsite.Site, jobs: Sequence[Mapping[str, str]], today: str) -
     return month, day
 
 
+def row_target(site: slurmsite.Site, job: Mapping[str, str]) -> str:
+    """The site's target a ``sacct`` row ran on: a target of its partition, a GPU one when
+    it holds cards, else a CPU one (the first by name where several fit); ``?`` for none,
+    so that no partition name leaves the site config. Pure."""
+    cards = _tres(job.get('AllocTRES') or job.get('ReqTRES', ''), 'gres/gpu') > 0
+    fit = sorted(n for n, t in site.targets.items() if t.t['partition'] == job.get('Partition'))
+    return next((n for n in fit if site.targets[n].gpu == cards), fit[0] if fit else '?')
+
+
+def daily(site: slurmsite.Site, rows: Mapping[str, Sequence[Mapping[str, str]]]) -> list[dict]:
+    """The cost per day (``ci-run slurm cost``; a part's own is in its summary): the accounts'
+    ledger rows (``rows``: account -> rows) summed per day, per target and per kind, priced
+    as :func:`row_cost` prices them (a job that may still run at its whole time limit). The
+    day is the job's start, else (still pending) its submission; the kind ``ci`` for the
+    CI's jobs (named ``ci-``), ``other`` for the account's others. Sorted by day, kind,
+    target; each ``{'day', 'kind', 'target', 'jobs', 'live', 'seconds', 'cost'}``. Pure."""
+    out: dict[tuple[str, str, str], dict] = {}
+    for jobs in rows.values():
+        for j in jobs:
+            cost, live = row_cost(site, j)
+            day = next((str(j.get(k, ''))[:10] for k in ('Start', 'Submit')
+                        if re.fullmatch(r'20[0-9]{2}-[0-9]{2}-[0-9]{2}', str(j.get(k, ''))[:10])), '?')
+            kind = 'ci' if str(j.get('JobName', '')).startswith('ci-') else 'other'
+            secs, target = j.get('ElapsedRaw', ''), row_target(site, j)
+            r = out.setdefault((day, kind, target), {
+                'day': day, 'kind': kind, 'target': target, 'jobs': 0, 'live': 0, 'seconds': 0,
+                'cost': 0.0})
+            r['jobs'] += 1
+            r['live'] += live
+            r['seconds'] += int(secs) if str(secs).isdigit() else 0
+            r['cost'] += cost
+    return [dict(v, cost=round(v['cost'], 4)) for _, v in sorted(out.items())]
+
+
 def order(site: slurmsite.Site, target: str, spent: Mapping[str, float], turn: int) -> list[str]:
     """The accounts eligible for ``target`` (not retired, the target among theirs, under
     their monthly cap), least spent this month relative to their weight first; ``turn``

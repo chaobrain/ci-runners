@@ -52,6 +52,17 @@ class Decide(unittest.TestCase):
         v = verdict.decide([End(f'p{i:02d}-' + 'x' * 20, 'red') for i in range(20)])
         self.assertLessEqual(len(v.description), 140)
 
+    def test_the_description_fits_a_status_whatever_the_state(self):
+        # 29 parts that all pass once made a 236-character description: HTTP 422, no status
+        ids = ['plan'] + [f'cpu-{i}' for i in range(10)] + [f'sharding-{i}' for i in range(5)] \
+            + [f'gpu-{i}' for i in range(11)] + ['gpu-multi', 'compile']
+        for outcome, state in (('pass', 'success'), ('red', 'failure'), ('lost', 'error')):
+            v = verdict.decide([End(i, outcome) for i in ids])
+            self.assertEqual(v.state, state)
+            self.assertLessEqual(len(v.description), 140, outcome)
+        self.assertEqual(verdict.decide([End(i, 'pass') for i in ids]).description,
+                         f'passed: all {len(ids)} parts')
+
 
 class Artifacts(unittest.TestCase):
     def setUp(self):

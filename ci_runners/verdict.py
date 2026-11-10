@@ -63,6 +63,10 @@ class Verdict:
     description: str
 
 
+#: GitHub refuses (HTTP 422) a commit status whose description is longer than this
+STATUS_MAX = 140
+
+
 def decide(ends: Iterable[End]) -> Verdict:
     """The head's status from its parts' ends. Pure.
 
@@ -80,12 +84,13 @@ def decide(ends: Iterable[End]) -> Verdict:
     infra = [e for e in ends if e.outcome != 'pass']
     if infra:
         return Verdict('error', _describe('infrastructure', infra))
-    return Verdict('success', f'passed: {", ".join(e.id for e in ends)}')
+    text = f'passed: {", ".join(e.id for e in ends)}'
+    return Verdict('success', text if len(text) <= STATUS_MAX else f'passed: all {len(ends)} parts')
 
 
 def _describe(head: str, ends: list[End]) -> str:
     text = f'{head}: ' + ', '.join(f'{e.id} {e.outcome}' for e in ends)
-    return text if len(text) <= 140 else text[:137] + '...'
+    return text if len(text) <= STATUS_MAX else text[:STATUS_MAX - 3] + '...'
 
 
 def collect(root: str) -> dict[str, dict[int, tuple[dict, str]]]:

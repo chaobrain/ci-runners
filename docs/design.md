@@ -1822,7 +1822,7 @@ Rules:
   when the unit that started it ended (the reaper's service, a part's scope) every other
   part's transfer through it broke (issue #103). A transfer that a dropped connection ends
   is tried again twice. No input or output changes.
-- **`v1.7.8`** (patch, stamped 2026-11-10; a patch of `v1.7`): the slot reader keeps the
+- **`v1.7.8`** (patch, stamped 2026-11-10; a patch of `v1.7`; `v1` moved to it after the slurm canary at `@v1.7.8`, 2026-11-10): the slot reader keeps the
   queue ticket of a local `ci_slot.sh` waiter whose process the CI account's `/proc` hides
   (`kill(pid, 0)` answers EPERM), for 24 h from its start; at `v1.7.7` it deleted every
   such ticket, so each `ci-slot` poll sent a waiting local run to the back of the queue

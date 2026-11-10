@@ -9,6 +9,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -326,6 +327,50 @@ class Status(Site):
         ss.status(ctx, 'cluster1')  # its gate is no longer asked; its cached rows still count
         self.assertIn('acct1: retired; month 16.', out.getvalue())
         self.assertIn('site cluster1: month 16.', out.getvalue())
+
+
+class Cost(Site):
+    def ledger(self, month: str):
+        (self.d / 'slurm' / 'ledger.json').write_text(json.dumps([
+            {'JobID': '9', 'JobName': 'ci-repo-unit-1', 'Partition': 'gpu-partition-b', 'State': 'COMPLETED',
+             'ExitCode': '0:0', 'ElapsedRaw': '3600', 'AllocTRES': 'cpu=16,gres/gpu=1',
+             'Start': f'{month}-02T00:00:00', 'TimelimitRaw': '60'},
+            {'JobID': '10', 'JobName': 'numerics', 'Partition': 'cpu-partition', 'State': 'COMPLETED',
+             'ExitCode': '0:0', 'ElapsedRaw': '600', 'AllocTRES': 'cpu=6', 'Start': f'{month}-03T00:00:00',
+             'TimelimitRaw': '60'}]))
+
+    def test_per_day_ci_jobs_apart(self):
+        self.apply()
+        month = time.strftime('%Y-%m')
+        self.ledger(month)
+        ctx, out = self.ctx()
+        self.assertEqual(ss.cost(ctx, 'cluster1'), 0)
+        text = out.getvalue()
+        self.assertRegex(text, rf'{month}-02 +ci +h100 +1 +0 +60.0 +16.00\n')
+        self.assertRegex(text, rf'{month}-03 +other +cpu +1 +0 +10.0 +0.06\n')
+        self.assertIn(f'site cluster1 {month}, ci jobs: 16.00\nsite cluster1 {month}, other jobs: 0.06', text)
+        self.assertNotIn('partition', text)
+        ctx, out = self.ctx()
+        self.assertEqual(ss.cost(ctx, 'cluster1', as_json=True), 0)
+        doc = json.loads(out.getvalue())
+        self.assertEqual([(d['day'], d['kind'], d['cost']) for d in doc['days']],
+                         [(f'{month}-02', 'ci', 16.0), (f'{month}-03', 'other', 0.06)])
+        self.assertEqual((doc['month'], doc['missing'], doc['cached']), (month, [], []))
+
+    def test_another_month_leaves_this_months_cached_ledger(self):
+        self.apply()
+        self.ledger(time.strftime('%Y-%m'))
+        cache = self.data / 'ci-runners' / 'state' / 'slurm' / 'cluster1' / 'ledger-acct1.json'
+        ctx, _ = self.ctx()
+        ss.cost(ctx, 'cluster1')
+        before = cache.read_text()
+        ctx, out = self.ctx()
+        self.assertEqual(ss.cost(ctx, 'cluster1', '2020-01'), 0)
+        self.assertEqual(cache.read_text(), before)  # the parts' budget falls back on it
+        self.assertNotIn(time.strftime('%Y-%m-02'), out.getvalue())  # sacct's rows up to now: this month's left out
+        self.assertIn('site cluster1 2020-01, ci jobs: 0.00', out.getvalue())
+        with self.assertRaisesRegex(ss.SetupError, 'not YYYY-MM'):
+            ss.cost(self.ctx()[0], 'cluster1', '2026-13')
 
 
 class Uninstall(Site):

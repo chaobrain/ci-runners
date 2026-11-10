@@ -2215,6 +2215,21 @@ MUTANTS = [
      [f'{TPO}.Registry.test_deny_tokens_hold_the_inventory_not_the_labels']),
     (PO, "if time.monotonic() - t0 > a.queue_min * 60:", "if False:",
      [f'{TPO}.ClusterRun.test_a_job_not_started_within_the_bound_is_withdrawn']),
+    (SPT, "if t.t['partition'] == job.get('Partition'))", "if True)",
+     [f'{TSP}.Pure.test_the_cost_per_day_per_target_and_kind']),
+    (SPT, "if site.targets[n].gpu == cards)", "if True)",
+     [f'{TSP}.Pure.test_the_cost_per_day_per_target_and_kind']),
+    (SPT, "for k in ('Start', 'Submit')", "for k in ('Start',)",
+     [f'{TSP}.Pure.test_the_cost_per_day_per_target_and_kind']),
+    (SPT, "kind = 'ci' if str(j.get('JobName', '')).startswith('ci-') else 'other'", "kind = 'ci'",
+     [f'{TSP}.Pure.test_the_cost_per_day_per_target_and_kind']),
+    (SPT, "            r['live'] += live\n", "",
+     [f'{TSP}.Pure.test_the_cost_per_day_per_target_and_kind']),
+    (SS, "        cache = os.path.join(cache, f'cost-{month}')", "        pass",
+     [f'{TSU}.Cost.test_another_month_leaves_this_months_cached_ledger']),
+    (SS, "if d['day'][:7] in (month, '?')]", "]",
+     [f'{TSU}.Cost.test_another_month_leaves_this_months_cached_ledger']),
+    (SS, "    for kind in ('ci', 'other'):", "    for kind in ('ci',):", [f'{TSU}.Cost.test_per_day_ci_jobs_apart']),
 ]
 
 

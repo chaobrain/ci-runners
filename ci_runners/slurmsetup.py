@@ -5,6 +5,7 @@ decision 14.9, operations §10), as the host's CI account::
     ci-run slurm plan      <site> <account>                 every change; changes nothing
     ci-run slurm apply     <site> <account> --plan FILE --via ALIAS
     ci-run slurm status    <site>
+    ci-run slurm cost      <site> [--month YYYY-MM] [--json]
     ci-run slurm env       <site> <account> <project> --via ALIAS [--variant V] [--refresh]   (slurmenv)
     ci-run slurm canary    <site> <account> --project P [--target T] [--import M] [--wait MIN]   (slurmcanary)
     ci-run slurm uninstall <site> <account> --via ALIAS [--cancel]
@@ -33,6 +34,10 @@ ours is installed for them or stays running (14.11).
   never touches ``authorized_keys``: that is the owner's step.
 - ``status``: each account's spend this month and today by the site's prices, its live
   ``ci-`` jobs, its install, and the targets a P2P failure holds at one card.
+- ``cost``: the cost per day of the month (``slurmpart.daily``), per target, the CI's
+  ``ci-`` jobs apart from the account's others, from the same ledgers as ``status``
+  (no cap is applied to it: the CI's cost is reported, not limited); ``--json`` gives
+  the rows.
 - ``uninstall`` refuses while a ``ci-`` job of the account is there (``--cancel`` cancels
   them), removes the ``authorized_keys`` lines that force its gate and the root's
   ``ci-runners`` tree, and marks the account ``retired`` in the site config; its ledger
@@ -434,6 +439,40 @@ def status(ctx: Ctx, name: str) -> int:
     return 0
 
 
+def cost(ctx: Ctx, name: str, month: str = '', as_json: bool = False) -> int:
+    site, _ = ctx.site(name)
+    now = time.time()
+    month = month or datetime.date.fromtimestamp(now).strftime('%Y-%m')
+    if not re.fullmatch(r'20[0-9]{2}-(0[1-9]|1[0-2])', month):
+        raise SetupError(f'the month {month!r} is not YYYY-MM')
+    gates = {a: ctx.gate(site, a) for a, x in site.accounts.items() if not x.retired}
+    cache = slurmpart.state_dir(ctx.data, site.name)
+    if month != datetime.date.fromtimestamp(now).strftime('%Y-%m'):
+        # another month's rows never replace this month's cached ones, which the parts'
+        # budget check falls back on when a login host does not answer
+        cache = os.path.join(cache, f'cost-{month}')
+    rows, silent = slurmpart.ledgers(gates, cache, now, month)
+    rows.update(slurmpart.retired_rows(site, cache, month))
+    # the ledger runs from the month's first day to now: a past month's holds the later ones too
+    days = [d for d in slurmpart.daily(site, rows) if d['day'][:7] in (month, '?')]
+    missing = sorted(set(site.accounts) - set(rows))
+    if as_json:
+        ctx.say(json.dumps({'site': site.name, 'month': month, 'days': days, 'cached': sorted(silent),
+                            'missing': missing}, sort_keys=True))
+        return 0
+    ctx.say(f'{"day":<11} {"kind":<6} {"target":<8} {"jobs":>5} {"live":>5} {"run min":>8} {"cost":>9}')
+    for d in days:
+        ctx.say(f'{d["day"]:<11} {d["kind"]:<6} {d["target"]:<8} {d["jobs"]:>5} {d["live"]:>5} '
+                f'{d["seconds"] / 60:>8.1f} {d["cost"]:>9.2f}')
+    for kind in ('ci', 'other'):
+        ctx.say(f'site {site.name} {month}, {kind} jobs: {sum(d["cost"] for d in days if d["kind"] == kind):.2f}')
+    for a in sorted(silent):
+        ctx.say(f'{a}: cached rows (the login host does not answer)')
+    for a in missing:
+        ctx.say(f'{a}: no ledger (the login host does not answer, nothing cached)')
+    return 0
+
+
 def uninstall(ctx: Ctx, name: str, alias: str, via: str, cancel: bool) -> int:
     """Refuse while a ``ci-`` job of the account is there (unless ``cancel``); retire the
     account in the site config first, so that no part takes it; then the login host's
@@ -478,6 +517,10 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, **kw) -> int:
         if verb == 'uninstall':
             s.add_argument('--cancel', action='store_true')
     sub.add_parser('status').add_argument('site')
+    s = sub.add_parser('cost')
+    s.add_argument('site')
+    s.add_argument('--month', default='', help='YYYY-MM (default: this month)')
+    s.add_argument('--json', action='store_true')
     s = sub.add_parser('env')
     s.add_argument('site')
     s.add_argument('account')
@@ -511,6 +554,8 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, **kw) -> int:
             from ci_runners import slurmenv
             return slurmenv.env(ctx, a.site, a.account, a.project, a.via, variants=a.variant, refresh=a.refresh,
                                 tunnel_port=int((inv.host.get('tunnel') or {}).get('http_port') or 0))
+        if a.verb == 'cost':
+            return cost(ctx, a.site, a.month, a.json)
         return status(ctx, a.site)
     except (SetupError, slurmsite.SiteError, ValueError) as e:
         print(f'ci-run slurm {a.verb}: {e}', file=sys.stderr)

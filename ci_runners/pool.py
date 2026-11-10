@@ -1,6 +1,7 @@
 """``ci-run pool``: every machine is a pool (decision 15.1). This module holds the machine
 registry, the live capacity query (``pool status``), the claim, the env check and ``pool
-run``, which puts a heavy command on a free machine.
+run``, which puts a heavy command on a free machine. Adding a host (``pool add``, its
+checks and ``pool ready``) is ``ci_runners/pooladd.py``.
 
 **The registry** is ``$CI_RUNNERS_ETC/pool.toml`` (``cli.etc_dir``). It is private site
 config, never in the repository: it names hosts, ssh aliases and paths, which is inventory
@@ -14,6 +15,8 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
     repository = "owner/myproj"          # a cluster job's key and comment
     check = ["jax", "numpy"]             # the env check's distributions
     gpu_need_mib = 6000                  # free MiB a card needs
+    warm = "<command>"                   # the compile-cache warm-up pool add's checks run (optional)
+    numerics = "<command>"               # the numerics check pool add's checks run (optional)
 
     [machine.hostb]                      # a host: ssh (or local) access
     access = "ssh"                       # "ssh" or "local"
@@ -32,6 +35,7 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
     labels = { cpu = "hostb-cpu" }       # its runner labels per group (HostState.labels)
     numerics_ok = true                   # its numerics check passed
     cache = "/abs/compile/cache"         # its compile cache (optional)
+    ready = true                         # pool add writes false, pool ready true; no key: ready
 
     [machine.cluster]                    # a Slurm cluster: access through the account's gate
     access = "slurm"
@@ -56,6 +60,9 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
 ``mem_free_gib``, ``here``, ``access``). A host's slots are read from ``/proc/locks``
 without being taken (``slots._flocked``). A cluster target's free cores and cards come from
 ``sinfo``, less what the account's own running jobs hold of its association's ``GrpTRES``.
+
+A machine that is not ``ready`` is skipped by ``pool run``'s plan unless ``--on`` names it
+(``pool add``'s checks run there that way). A cluster's entry is hand-written.
 
 A run that asks for cards goes to a cluster target: a host's cards are leased to its parts
 (``part.Leases``), which a pool run does not take yet.
@@ -87,6 +94,7 @@ CLI::
     ci-run pool run [--cpu N] [--mem G] [--gpu MODEL[:COUNT]] [--on KEY] [--here]
                     [--timeout MIN] [--queue-minutes MIN] [--no-wait]
                     [--env-mismatch refuse|warn] [--python PATH] [--dir DIR] -- COMMAND...
+    ci-run pool add|check|ready KEY ...  # adding a host (ci_runners/pooladd.py)
     python -m ci_runners.pool deny FILE  # hashes of the registry's tokens
 
 Stdlib only.
@@ -187,6 +195,7 @@ class Machine:
     numerics_ok: bool = False
     cache: str = ''
     gate: str = ''
+    ready: bool = True  # ``pool add`` writes false, ``pool ready`` true; no key: ready
     targets: Mapping[str, Target] = dataclasses.field(default_factory=dict)
 
     @property
@@ -202,6 +211,8 @@ class Registry:
     check: tuple[str, ...]
     machines: Mapping[str, Machine]
     gpu_need_mib: int = 6000
+    warm: str = ''  # the project's compile-cache warm-up command (``pool add``'s checks)
+    numerics: str = ''  # the project's numerics check command (``pool add``'s checks)
 
 
 def _get(t: Mapping, k: str, kind: type | tuple, where: str, default: object = None, required: bool = False):
@@ -238,10 +249,10 @@ def _labels(t: Mapping, where: str) -> dict[str, str]:
 
 
 _MACHINE = {'access', 'ssh', 'hostname', 'cpus', 'memory_gib', 'gpus', 'gpu_model', 'gpu_mib', 'cuda', 'p2p', 'billed',
-            'price', 'python', 'work', 'slots', 'labels', 'numerics_ok', 'cache', 'gate', 'targets'}
+            'price', 'python', 'work', 'slots', 'labels', 'numerics_ok', 'cache', 'gate', 'targets', 'ready'}
 _TARGET = {'partition', 'cpus', 'memory_gib', 'max_minutes', 'variant', 'price', 'numerics_ok', 'labels', 'gpu_model',
            'cards', 'max_cards', 'gpu_mib', 'cuda'}
-_TOP = {'schema', 'project', 'repository', 'check', 'gpu_need_mib', 'machine'}
+_TOP = {'schema', 'project', 'repository', 'check', 'gpu_need_mib', 'machine', 'warm', 'numerics'}
 
 
 def _unknown(t: Mapping, known: set[str], where: str) -> None:
@@ -279,7 +290,7 @@ def _machine(key: str, t: Mapping) -> Machine:
     m = dict(key=key, access=access, ssh=_get(t, 'ssh', str, where, ''), hostname=_get(t, 'hostname', str, where, ''),
              billed=_get(t, 'billed', bool, where, access == 'slurm'), price=float(_get(t, 'price', float, where, 0.0)),
              labels=_labels(t, where), numerics_ok=_get(t, 'numerics_ok', bool, where, False),
-             cache=_abs(t, 'cache', where))
+             cache=_abs(t, 'cache', where), ready=_get(t, 'ready', bool, where, True))
     if access == 'slurm':
         targets = _get(t, 'targets', dict, where, required=True)
         if not targets:
@@ -320,7 +331,8 @@ def load(text: str) -> Registry:
     machines = _get(doc, 'machine', dict, 'pool.toml', {})
     return Registry(_get(doc, 'project', str, 'pool.toml', required=True),
                     _get(doc, 'repository', str, 'pool.toml', required=True), tuple(check),
-                    {k: _machine(k, v) for k, v in machines.items()}, _get(doc, 'gpu_need_mib', int, 'pool.toml', 6000))
+                    {k: _machine(k, v) for k, v in machines.items()}, _get(doc, 'gpu_need_mib', int, 'pool.toml', 6000),
+                    _get(doc, 'warm', str, 'pool.toml', ''), _get(doc, 'numerics', str, 'pool.toml', ''))
 
 
 def load_file(path: str) -> Registry:
@@ -692,8 +704,8 @@ def pick(rows: Sequence[Mapping], ask: Ask, reg: Registry, *, here_ok: bool = Fa
     order a run tries them, free hosts first (fewest cores in use), then the billed
     cluster targets that start it now (cheapest first); the hosts it could wait on for a
     slot (shortest queue first); and why each other row was skipped. The caller's own host
-    is skipped unless ``here_ok``; ``only`` keeps the rows of one machine or target.
-    Pure."""
+    is skipped unless ``here_ok``, and a machine that is not ``ready`` (``pool add``) unless
+    ``only`` names it; ``only`` keeps the rows of one machine or target. Pure."""
     now, later, skipped = [], [], []
     for r in rows:
         key = r['key']
@@ -702,6 +714,9 @@ def pick(rows: Sequence[Mapping], ask: Ask, reg: Registry, *, here_ok: bool = Fa
         m = reg.machines[key.split(':')[0]]
         if r.get('here') and not here_ok:
             skipped.append(f'{key}: the caller\'s own host (--here to allow)')
+            continue
+        if not m.ready and only not in (key, m.key):
+            skipped.append(f'{key}: not ready (pool add\'s checks; --on {m.key} runs there)')
             continue
         why = fits(r, ask, m, reg.gpu_need_mib)
         if why:
@@ -1198,6 +1213,9 @@ def pool_run(reg: Registry, a: RunArgs, *, only: str = '', here_ok: bool = False
 
 
 def main(argv: Sequence[str], etc: str) -> int:
+    if list(argv[:1]) in (['add'], ['check'], ['ready']):  # adding a machine: ci_runners/pooladd.py
+        from ci_runners import pooladd
+        return pooladd.main(list(argv), etc)
     import argparse
     ap = argparse.ArgumentParser(prog='ci-run pool')
     sub = ap.add_subparsers(dest='cmd', required=True)

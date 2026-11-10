@@ -95,6 +95,8 @@ THL = 'tests.test_hostload'
 HC = 'ci_runners/hookcopy.py'
 PO = 'ci_runners/pool.py'
 TPO = 'tests.test_pool'
+PA = 'ci_runners/pooladd.py'
+TPA = 'tests.test_pooladd'
 THC = 'tests.test_hookcopy'
 
 #: (file, snippet, replacement, tests that kill it)
@@ -2215,6 +2217,52 @@ MUTANTS = [
      [f'{TPO}.Registry.test_deny_tokens_hold_the_inventory_not_the_labels']),
     (PO, "if time.monotonic() - t0 > a.queue_min * 60:", "if False:",
      [f'{TPO}.ClusterRun.test_a_job_not_started_within_the_bound_is_withdrawn']),
+    # adding a machine (decision 15.1, item 6): pool add, its checks, pool ready
+    (PO, "        if not m.ready and only not in (key, m.key):", "        if False:",
+     [f'{TPA}.Registry.test_a_machine_not_ready_is_skipped_unless_on_names_it']),
+    (PO, "        if not m.ready and only not in (key, m.key):", "        if not m.ready:",
+     [f'{TPA}.Registry.test_a_machine_not_ready_is_skipped_unless_on_names_it']),
+    (PO, "ready=_get(t, 'ready', bool, where, True))", "ready=True)",
+     [f'{TPA}.Registry.test_ready_warm_and_numerics_parse_and_ready_is_the_default']),
+    (PO, "    if list(argv[:1]) in (['add'], ['check'], ['ready']):", "    if False:",
+     [f'{TPA}.Registry.test_pool_main_hands_add_check_and_ready_to_pooladd']),
+    (PA, "        if len(models) > 1:", "        if False:", [f'{TPA}.Probe.test_the_entry_from_a_probe']),
+    (PA, "'rtx', 'tesla', 'quadro'", "'rtx', 'quadro'", [f'{TPA}.Probe.test_gpu_model_names']),
+    (PA, "words[0].split('-')[0])", "words[0])", [f'{TPA}.Probe.test_gpu_model_names']),
+    (PA, "    if not (os.path.isfile(python) and os.access(python, os.X_OK)):", "    if False:",
+     [f'{TPA}.Probe.test_the_probe_runs_on_the_machine_and_says_what_is_missing']),
+    (PA, "for i in range(2, count + 1)] if not os.path.exists(p)]", "for i in range(2, count)] if not os.path.exists(p)]",
+     [f'{TPA}.Probe.test_the_probe_runs_on_the_machine_and_says_what_is_missing']),
+    (PA, "    if key in reg.machines:\n        raise AddError(f'machine {key}",
+     "    if False:\n        raise AddError(f'machine {key}", [f'{TPA}.Add.test_an_existing_key_or_host_is_refused']),
+    (PA, "    if same:", "    if False:", [f'{TPA}.Add.test_an_existing_key_or_host_is_refused']),
+    (PA, "os.fchmod(fd, 0o600)", "os.fchmod(fd, 0o620)", [f'{TPA}.Add.test_the_entry_is_appended_validated_and_written_600']),
+    (PA, "            write_atomic(path, new)\n", "            pass\n",
+     [f'{TPA}.Add.test_the_entry_is_appended_validated_and_written_600']),
+    (PA, "        if dry_run:\n            print(render(key, e), end='')", "        if False:\n            print(render(key, e), end='')",
+     [f'{TPA}.Add.test_a_dry_run_writes_nothing']),
+    (PA, "        if why and n in BLOCKING:", "        if False:",
+     [f'{TPA}.Checks.test_an_env_difference_fails_first_and_stops_them']),
+    (PA, "BLOCKING = ('env', 'canary', 'warm', 'numerics')", "BLOCKING = STEPS",
+     [f'{TPA}.Checks.test_a_failed_canary_stops_them_a_failed_p2p_does_not']),
+    (PA, "    return [s for s in STEPS if s != 'p2p' or m.gpus >= 2]", "    return list(STEPS)",
+     [f'{TPA}.Checks.test_a_one_card_or_cpu_machine_has_no_p2p_step']),
+    (PA, "        elif not st.get('ok') and s in BLOCKING:", "        elif False:",
+     [f'{TPA}.Checks.test_ready_only_after_every_step_passed']),
+    (PA, "    if rec.get('digest') != digest(reg, key):", "    if False:",
+     [f'{TPA}.Checks.test_an_entry_edited_after_its_checks_is_not_ready']),
+    (PA, "        p2p = bool(rec['steps'].get('p2p', {}).get('ok'))", "        p2p = True",
+     [f'{TPA}.Checks.test_ready_only_after_every_step_passed']),
+    (PA, "    return pool_run(reg, a, only=key, here_ok=True,", "    return pool_run(reg, a, only=key, here_ok=False,",
+     [f'{TPA}.Checks.test_the_checks_run_in_order_on_the_machine_and_are_recorded']),
+    (PA, "machines={key: reg.machines[key]})", "machines=reg.machines)",
+     [f'{TPA}.Checks.test_the_checks_run_in_order_on_the_machine_and_are_recorded']),
+    (PA, "','.join(str(i) for i in range(m.gpus))}", "','.join(str(i) for i in range(1))}",
+     [f'{TPA}.Checks.test_the_checks_run_in_order_on_the_machine_and_are_recorded']),
+    (PA, "    out = [f'the registry names no {s} command (its top-level {s!r})' for s in ('warm', 'numerics')\n           if not getattr(reg, s)]",
+     "    out = []", [f'{TPA}.Checks.test_without_the_registrys_commands_nothing_is_ready']),
+    (PA, "if not re.match(r'\\s*(ready|numerics_ok|p2p)\\s*=', x)]", "if True]",
+     [f'{TPA}.Checks.test_ready_text_edits_that_entry_only']),
 ]
 
 

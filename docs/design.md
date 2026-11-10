@@ -831,6 +831,23 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    its deadline. The caller's own host is skipped unless asked. Free hosts come first, then
    the billed targets that start it now, cheapest first, then a wait in line on the host
    with the shortest queue.
+6. **Adding a machine** is one script (lead, 2026-11-10, D-0111 amended: "runners with
+   capability labels, the env, its cache warmed, a canary, the numerics check; only then
+   usable"; `ci_runners/pooladd.py`). Hosts only: a cluster's entry stays hand-written and
+   its targets pass 14.10's gates. `ci-run pool add KEY (--ssh ALIAS | --local) ...` probes
+   the host (hostname, cores, memory, the cards' model and MiB, the driver's CUDA major) and
+   appends a validated `[machine.KEY]` entry with `ready = false` (an existing key or host is
+   refused; the file is replaced atomically, mode 600). A machine that is not ready is
+   skipped by `pool run` unless `--on KEY` names it. Then its checks run in order, each but
+   the first a `pool run --on KEY` in the caller's checkout: the env check against the
+   caller's env; a canary (jax imports and sees the entry's cards); the P2P self-test on 2+
+   cards, whose result is the entry's `p2p`; and the registry's top-level `warm` and
+   `numerics` commands, the project's cache warm-up and numerics check. Each result is
+   recorded in `pool-add.json` beside the registry, with a digest of the entry and the
+   commands. `ci-run pool ready KEY` re-runs nothing: once every step passed for the entry
+   as it is, it sets `ready` and `numerics_ok` (and `p2p`). The setup plan of its runners,
+   their registration and the CI account's env build are printed as the next steps, the
+   lead's (never applied by the script).
 
 ## Decisions of this spec
 

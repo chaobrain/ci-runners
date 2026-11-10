@@ -29,6 +29,9 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
     python = "/abs/env/bin/python"       # the env a command runs in
     work = "/abs/dir"                    # where a run stages its tree (removed at its end)
     slots = { lock = "/abs/x.lock", count = 2 }   # the host's CI slots (and queue = DIR)
+    max_slots = 1                        # the project's cap on that queue (optional; none: the slot count)
+    drain = "/abs/<data>/ci-runners/drain.json"   # the CI account's drain copy (optional)
+    leases = { dir = "/abs/leases", parts = 1 }   # the cards' leases, shared with the parts (optional)
     labels = { cpu = "hostb-cpu" }       # its runner labels per group (HostState.labels)
     numerics_ok = true                   # its numerics check passed
     cache = "/abs/compile/cache"         # its compile cache (optional)
@@ -57,13 +60,20 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
 without being taken (``slots._flocked``). A cluster target's free cores and cards come from
 ``sinfo``, less what the account's own running jobs hold of its association's ``GrpTRES``.
 
-A run that asks for cards goes to a cluster target: a host's cards are leased to its parts
-(``part.Leases``), which a pool run does not take yet.
+A run that asks for cards takes them on a host by the parts' leases (``part.Leases``, in
+their ticket order, in the directory the inventory's ``files.lease_dir`` shares with the
+CI account), where the registry names it (``leases``); it then takes no CI slot, as a GPU
+part takes none. Without ``leases`` a host's cards are its parts' alone, and a GPU run goes
+to a cluster target. A host whose ``drain`` file drains it (the CI account's world-readable
+copy of its drain state; unreadable or malformed drains it, missing does not) shows the
+problem ``drained`` and starts no pool run.
 
 **The claim**: a host's capacity is a slot of its CI slot queue, the same ``SlotQueue``
 (and files) that the parts' ``ci-slot`` and brainspike's ``ci_slot.sh`` take, first come
-first served. A run waits in line for it, or with ``--no-wait`` says so (exit 75). It
-never overbooks. On a cluster the job itself is the claim. It is submitted through the
+first served, within the project's ``max_slots`` there. A run waits in line for it on the
+one host it chose to wait on, or with ``--no-wait`` says so (exit 75); a host that looked
+free but fills before the take is given up after ``FREE_NOW_ROUNDS`` tries, for the next
+machine. It never overbooks. On a cluster the job itself is the claim. It is submitted through the
 account's ``ci-slurm-gate``, the one the parts use (the same batch script, supervisor and
 env), and withdrawn if it has not started within ``--queue-minutes``.
 
@@ -76,10 +86,17 @@ only where both sides are editable installs.
 not ignored, as they are on disk, with a small git repository of its HEAD and merge base,
 ``git_dir``) and the release's ``ci_runners`` on the machine, takes
 the claim, and runs the command there under the parts' supervisor (``part.supervise``: its
-own session, the timeout, the memory cap). It streams the output and exits with the
-command's code. If the caller ends (a signal, a crash, a closed connection), the remote
-side sees its stdin close and ends the command, which releases the slot. A cluster job is
-cancelled through the gate, or the gate's reaper ends it at its deadline.
+own session, the timeout, the memory cap). The supervisor is a process of its own that
+holds the slot (and the leases) for the command's life, in a systemd scope of its own
+(``MemoryMax`` the run's memory) where the user manager can be reached, else in a session
+of its own: a host side that is killed leaves the command running with its slot held,
+never a running command without one. It streams the output and exits with the command's
+code. If the caller ends (a signal, a crash, a closed connection), the remote side sees its
+stdin close and stops the supervisor, which ends the command and releases the slot. A
+cluster job is cancelled through the gate, or the gate's reaper ends it at its deadline.
+A run's directory is removed at its end; one left behind is removed after ``STALE_DAYS``
+unless its run still holds its ``alive.lock`` (``--timeout`` and the wait in line are
+bounded below that).
 
 CLI::
 
@@ -100,6 +117,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import stat
@@ -125,9 +143,18 @@ FORWARD = re.compile(r'(JAX_|XLA_|BRAINSPIKE_|PYTEST_|OMP_|MKL_|OPENBLAS_|TF_CPP
 #: what a run's stage directory on a host is called (a stale one is removed after STALE_DAYS)
 RUN_PREFIX = 'pool-'
 STALE_DAYS = 2
+#: a lock file in a run's directory, flocked by the host side and the supervisor for the run's life
+ALIVE = 'alive.lock'
 #: s between a cluster job's status reads, and the bounds of a run
 POLL = 5.0
 DEFAULT_TIMEOUT_MIN = 60
+#: a run's longest --timeout and wait in line on a host: together below STALE_DAYS
+MAX_TIMEOUT_MIN = 20 * 60
+LONG_WAIT_MIN = 24 * 60
+#: the tries of a host that was free in pool status before a run gives it up for the next machine
+FREE_NOW_ROUNDS = 3
+#: s the supervisor has to end the command after a stop, before its process group is killed
+STOP_GRACE = 30
 DEFAULT_QUEUE_MIN = 2  # a cluster job that has not started by then is withdrawn (D-0111: 1 min for the plan)
 #: the distributions the env check reads when the registry names none
 DEFAULT_CHECK = ('jax', 'jaxlib', 'numpy', 'scipy')
@@ -166,6 +193,12 @@ class Slots:
 
 
 @dataclasses.dataclass(frozen=True)
+class LeaseDir:
+    dir: str
+    parts: int = 1  # leases per card (the parts' max_parts)
+
+
+@dataclasses.dataclass(frozen=True)
 class Machine:
     key: str
     access: str  # ssh, local or slurm
@@ -183,6 +216,9 @@ class Machine:
     python: str = ''
     work: str = ''
     slots: Slots | None = None
+    max_slots: int | None = None  # the project's cap on the host's slot queue (None: the slot count)
+    drain: str = ''  # the CI account's world-readable drain state
+    leases: LeaseDir | None = None  # the cards' leases, shared with the parts
     labels: Mapping[str, str] = dataclasses.field(default_factory=dict)
     numerics_ok: bool = False
     cache: str = ''
@@ -238,7 +274,8 @@ def _labels(t: Mapping, where: str) -> dict[str, str]:
 
 
 _MACHINE = {'access', 'ssh', 'hostname', 'cpus', 'memory_gib', 'gpus', 'gpu_model', 'gpu_mib', 'cuda', 'p2p', 'billed',
-            'price', 'python', 'work', 'slots', 'labels', 'numerics_ok', 'cache', 'gate', 'targets'}
+            'price', 'python', 'work', 'slots', 'labels', 'numerics_ok', 'cache', 'gate', 'targets', 'max_slots',
+            'drain', 'leases'}
 _TARGET = {'partition', 'cpus', 'memory_gib', 'max_minutes', 'variant', 'price', 'numerics_ok', 'labels', 'gpu_model',
            'cards', 'max_cards', 'gpu_mib', 'cuda'}
 _TOP = {'schema', 'project', 'repository', 'check', 'gpu_need_mib', 'machine'}
@@ -297,6 +334,14 @@ def _machine(key: str, t: Mapping) -> Machine:
     if slots.count < 1:
         raise RegistryError(f'{where}.slots: count must be positive')
     gpus = _get(t, 'gpus', int, where, 0)
+    leases = None
+    if 'leases' in t:
+        lt = _get(t, 'leases', dict, where)
+        _unknown(lt, {'dir', 'parts'}, f'{where}.leases')
+        leases = LeaseDir(_abs(lt, 'dir', f'{where}.leases', required=True), _get(lt, 'parts', int, f'{where}.leases', 1))
+        if leases.parts < 1 or not gpus:
+            raise RegistryError(f'{where}.leases: parts must be positive, on a machine with gpus')
+    m.update(max_slots=_get(t, 'max_slots', int, where), drain=_abs(t, 'drain', where), leases=leases)
     m.update(cpus=_get(t, 'cpus', int, where, required=True), memory_gib=_get(t, 'memory_gib', int, where, required=True),
              gpus=gpus, gpu_model=_get(t, 'gpu_model', str, where, '', required=bool(gpus)),
              gpu_mib=_get(t, 'gpu_mib', int, where, 0), cuda=_get(t, 'cuda', str, where, ''),
@@ -334,8 +379,8 @@ def load_file(path: str) -> Registry:
 
 #: the keys whose values are inventory (``deny``); the rest are capabilities and role names. The
 #: slot files are not: they are the shared files brainspike's scripts name (a home-directory
-#: path among them is still the lint's)
-PRIVATE_KEYS = ('ssh', 'hostname', 'python', 'work', 'gate', 'cache', 'partition')
+#: path among them is still the lint's). ``drain`` and the leases' ``dir`` are the CI account's
+PRIVATE_KEYS = ('ssh', 'hostname', 'python', 'work', 'gate', 'cache', 'partition', 'drain', 'dir')
 
 
 def deny_tokens(doc: Mapping) -> set[str]:
@@ -357,10 +402,45 @@ def deny_tokens(doc: Mapping) -> set[str]:
 # ------------------------------------------------------------------ pool status
 
 
-def probe(lock: str, count: int, queue: str) -> dict:
+def drained(path: str) -> bool:
+    """Whether the drain state at ``path`` (the CI account's world-readable copy,
+    ``drain.public_path``) drains the host, as ``drain.read_path`` and ``drain.parse`` read
+    it: a missing file does not, an unreadable or malformed one does (fail closed). A
+    drained pool of runners does not drain the pool runs. Self-contained (its source runs on
+    the host, in ``probe``). Stdlib."""
+    import json
+    import os
+    import stat
+    if not path:
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        with os.fdopen(fd, 'rb') as f:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_size > 1 << 16:
+                return True
+            doc = json.loads(f.read(1 << 16).decode('utf-8', 'replace'))
+    except (OSError, ValueError):
+        return True
+    num = (int, float)
+    if not isinstance(doc, dict) or set(doc) != {'host', 'pools'} or not isinstance(doc['pools'], dict):
+        return True
+    if not all(isinstance(k, str) and type(v) in num for k, v in doc['pools'].items()):
+        return True
+    return doc['host'] is not None  # a number: drained since then; anything else is malformed
+
+
+def probe(lock: str, count: int, queue: str, drain: str = '', leases: str = '', parts: int = 1, gpus: int = 0) -> dict:
     """What a host's row needs, read on the host without taking anything: its free CI slots
     (``/proc/locks``, as ``slots._flocked``), the tickets waiting, the load, the available
-    memory and the cards' free MiB. Self-contained (its source runs on the host). Stdlib."""
+    memory, the cards' free MiB, whether ``drain`` drains it, and with ``leases`` (the
+    leases' directory, ``parts`` a card) the leases held per card. Self-contained (its
+    source and ``drained``'s run on the host). Stdlib."""
     import os
     import subprocess
 
@@ -399,14 +479,18 @@ def probe(lock: str, count: int, queue: str) -> dict:
             if r.returncode == 0 else {}
     except (OSError, subprocess.SubprocessError, ValueError):
         out['gpu_free'] = {}
-    rt = os.environ.get('XDG_RUNTIME_DIR', '')
-    out['scope'] = bool(rt) and os.path.exists(os.path.join(rt, 'bus'))  # systemd-run --user works
+    rt = os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}'
+    out['scope'] = os.path.exists(os.path.join(rt, 'bus'))  # systemd-run --user works
+    out['drained'] = drained(drain)
+    if leases:
+        out['cards_leased'] = {c: sum(1 for k in range(parts) if flocked(os.path.join(leases, f'card{c}.{k}.lock')))
+                               for c in range(gpus)}
     return out
 
 
 def _probe_src() -> str:
     import inspect
-    return inspect.getsource(probe)
+    return inspect.getsource(drained) + '\n\n' + inspect.getsource(probe)
 
 
 def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> dict:
@@ -419,12 +503,17 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
         row['problems'] = [why or 'not read']
         return row
     if p.get('slots_missing'):
-        row['problems'] = [f'{p["slots_missing"]} slot lock file(s) missing']
+        row['problems'].append(f'{p["slots_missing"]} slot lock file(s) missing')
+    if p.get('drained'):
+        row['problems'].append('drained')
     free = int(p.get('slots_free', 0))
     cores = max(0, (m.cpus or int(p.get('cpus', 0))) - math.ceil(float(p.get('load', 0.0))))
+    gpu_free = {int(k): int(v) for k, v in p.get('gpu_free', {}).items()}
+    if m.leases:  # a card whose every lease is held is not free, whatever its memory
+        leased = {int(k): int(v) for k, v in p.get('cards_leased', {}).items()}
+        gpu_free = {c: v for c, v in gpu_free.items() if leased.get(c, 0) < m.leases.parts}
     row.update(slots_free=free, queue=int(p.get('queue', 0)), cpus_free=cores if free else 0,
-               mem_free_gib=int(p.get('mem_free_gib', 0)), gpu_free={int(k): int(v) for k, v in p.get('gpu_free', {}).items()},
-               scope=bool(p.get('scope')))
+               mem_free_gib=int(p.get('mem_free_gib', 0)), gpu_free=gpu_free, scope=bool(p.get('scope')))
     return row
 
 
@@ -558,7 +647,9 @@ def _remote(m: Machine, argv: Sequence[str]) -> list[str]:
 
 
 def probe_host(m: Machine, run: Runner = subprocess.run, here: str = '') -> dict:
-    src = _probe_src() + f'\nimport json; print(json.dumps(probe({m.slots.lock!r}, {m.slots.count}, {m.slots.queue!r})))\n'
+    lz = m.leases or LeaseDir('', 1)
+    src = _probe_src() + (f'\nimport json; print(json.dumps(probe({m.slots.lock!r}, {m.slots.count}, {m.slots.queue!r}, '
+                          f'{m.drain!r}, {lz.dir!r}, {lz.parts}, {m.gpus})))\n')
     try:
         r = run(_remote(m, ['/usr/bin/python3', '-I', '-']), input=src, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as e:
@@ -652,7 +743,7 @@ def fits(row: Mapping, ask: Ask, m: Machine, need_mib: int) -> str:
         model = row['gpu_model']
         if not model:
             return 'no cards'
-        if not row['target']:  # a host's cards go by the parts' leases, which a pool run does not take yet
+        if not row['target'] and not m.leases:  # a host's cards go by the parts' leases, shared or not
             return 'a host\'s cards are leased to its parts (a GPU pool run goes to a cluster target)'
         if ask.gpu_model and model != ask.gpu_model:
             return f'cards {model}, not {ask.gpu_model}'
@@ -678,13 +769,15 @@ def fits(row: Mapping, ask: Ask, m: Machine, need_mib: int) -> str:
 
 
 def free_now(row: Mapping, ask: Ask, need_mib: int) -> bool:
-    """Whether the row can start ``ask`` now (a free slot or a job that starts now, the
-    cores and the cards). Pure."""
+    """Whether the row can start ``ask`` now: a job that starts now, or on a host the memory
+    and a free slot and the cores, or (a GPU run) the cards with a free lease. Pure."""
     if row['target']:
         return bool(row['start_now']) and (not ask.cards or len(row['gpu_free']) >= ask.cards)
-    if row['slots_free'] < 1 or row['cpus_free'] < ask.cpus or row['mem_free_gib'] < ask.memory_gib:
+    if row['mem_free_gib'] < ask.memory_gib:
         return False
-    return not ask.cards or sum(1 for v in row['gpu_free'].values() if v >= need_mib) >= ask.cards
+    if ask.cards:  # its cards' leases instead of a CI slot, as a GPU part (design §7)
+        return sum(1 for v in row['gpu_free'].values() if v >= need_mib) >= ask.cards
+    return row['slots_free'] >= 1 and row['cpus_free'] >= ask.cpus
 
 
 def pick(rows: Sequence[Mapping], ask: Ask, reg: Registry, *, here_ok: bool = False, only: str = '') -> tuple[list[dict], list[dict], list[str]]:
@@ -841,6 +934,9 @@ def _say(msg: str) -> None:
 
 
 def _remove_stale(work: str, keep: str, now: float) -> None:
+    """Remove the run directories in ``work`` older than ``STALE_DAYS`` whose run is gone:
+    none holds its ``ALIVE`` lock (a host side or a supervisor that outlived it would)."""
+    from ci_runners import slots as slots_mod
     try:
         names = os.listdir(work)
     except OSError:
@@ -849,23 +945,175 @@ def _remove_stale(work: str, keep: str, now: float) -> None:
         p = os.path.join(work, n)
         if n.startswith(RUN_PREFIX) and p != keep:
             try:
-                if now - os.lstat(p).st_mtime > STALE_DAYS * 86400:
+                if now - os.lstat(p).st_mtime > STALE_DAYS * 86400 and not slots_mod._flocked(os.path.join(p, ALIVE)):
                     subprocess.run(['rm', '-rf', '--one-file-system', p], timeout=600)
             except (OSError, subprocess.SubprocessError):
                 pass
 
 
+def _hold_alive(d: str) -> int:
+    """Flock the run directory's ``ALIVE`` file, for the host side and then its supervisor."""
+    import fcntl
+    fd = os.open(os.path.join(d, ALIVE), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return fd
+
+
+def _user_bus(env: Mapping[str, str]) -> str:
+    """The user manager's runtime directory if ``systemd-run --user`` can reach it, else ''."""
+    rt = env.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}'
+    return rt if os.path.exists(os.path.join(rt, 'bus')) else ''
+
+
+def _take_slot(spec: Mapping, q, rounds_max: int, deadline: float) -> int | None:
+    """Wait in line for a slot of ``q``, within the project's ``max_slots`` (``q``'s
+    ``default_cap``: the run's project is the queue's default one, whose ``ci_slot.sh``
+    tickets and holders count as its own): the slot's fd, or None once the host is drained,
+    after ``rounds_max`` tries (0: no bound) or at ``deadline``. The drain is read again
+    before each try."""
+    project = spec['project']
+    q.take_ticket(project, 'pool run: ' + spec['command'][:200])
+    shown, rounds = None, 0
+    while True:
+        if drained(spec.get('drain', '')):
+            _say('this host is drained')
+            return None
+        fd = q.try_take(project, {})
+        rounds += 1
+        if fd is not None:
+            return fd
+        if rounds_max and rounds >= rounds_max:
+            _say('no CI slot free on this host now')
+            return None
+        if time.time() >= deadline:
+            _say('no CI slot within the queue bound')
+            return None
+        ahead = sum(1 for t in q.waiting() if t.seq < q.seq)
+        if ahead != shown:
+            _say(f'waiting in line for a CI slot: {ahead} ahead')
+            shown = ahead
+        time.sleep(q.poll)
+
+
+def _take_cards(spec: Mapping, leases, rounds_max: int, deadline: float) -> list[int] | None:
+    """Wait for ``cards`` of the host's cards by the parts' leases, in their ticket order:
+    the cards taken (their leases in ``leases.fds``), or None as ``_take_slot``."""
+    from ci_runners import part
+    n, need, cards = int(spec['cards']), int(spec.get('need_mib', 0)), list(range(int(spec['gpus'])))
+    shown, rounds = False, 0
+    while True:
+        if drained(spec.get('drain', '')):
+            _say('this host is drained')
+            return None
+        got = leases.try_take(n, cards, part.smi_free(), need)
+        rounds += 1
+        if got is not None:
+            return got
+        if rounds_max and rounds >= rounds_max:
+            _say(f'no {n} card(s) with a free lease and {need} MiB free on this host now')
+            return None
+        if time.time() >= deadline:
+            _say('no card within the queue bound')
+            return None
+        if not shown:
+            _say(f'waiting in line for {n} card(s)')
+            shown = True
+        time.sleep(float(spec.get('poll', 3)))
+
+
+#: the supervisor as a process of its own: ``part.supervise`` of the run's ``ci_runners``
+SUPERVISOR = ('import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.part import supervise; '
+              'sys.exit(supervise(sys.argv[1], float(sys.argv[2]), sys.argv[4:], int(sys.argv[3])))')
+
+
+def _start_supervisor(spec: Mapping, d: str, record: str, env: Mapping[str, str], fds: Sequence[int],
+                      inner: Sequence[str], started: list) -> str:
+    """Start the supervisor holding ``fds`` (the slot or the leases, and ``ALIVE``), in a
+    scope of its own where the user manager can be reached (``spec['scope']`` false: never),
+    else in a session of its own. Its process goes to ``started`` as soon as it runs (the
+    last one is the supervisor); returns the scope's unit, or ''. Its stdin is /dev/null;
+    its output is ours."""
+    from ci_runners import part
+    pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sup = [sys.executable, '-I', '-c', SUPERVISOR, pkg, record, str(float(spec['timeout_seconds'])),
+           str(int(spec['memory_gib']) << 30), *inner]
+    env = dict(env)
+    rt = _user_bus(os.environ) if spec.get('scope', True) else ''
+    exe = shutil.which('systemd-run') if rt else None
+    if exe:
+        env['XDG_RUNTIME_DIR'] = rt
+        unit = part.unit_name('pool', spec['project'], os.path.basename(d))
+        try:
+            v = subprocess.run(['systemctl', '--version'], capture_output=True, text=True, timeout=30).stdout or ''
+        except (OSError, subprocess.SubprocessError):
+            v = ''
+        argv = part.scope_argv(unit, spec['project'], f'{int(spec["memory_gib"])}G', sup,
+                               part.systemd_major(v) >= part.OOM_POLICY_SYSTEMD)
+        argv[0] = exe
+        p = subprocess.Popen(argv, env=env, pass_fds=tuple(fds), stdin=subprocess.DEVNULL, start_new_session=True)
+        started.append(p)
+        if not _failed_to_start(p, record):
+            return unit
+        _say(f'no systemd scope (systemd-run exit {p.returncode}); the supervisor runs in a session of its own')
+    started.append(subprocess.Popen(sup, env=env, pass_fds=tuple(fds), stdin=subprocess.DEVNULL, start_new_session=True))
+    return ''
+
+
+def _failed_to_start(p: subprocess.Popen, record: str) -> bool:
+    """Whether ``p`` (``systemd-run`` of the supervisor) ended before the supervisor started
+    the command (it writes ``scope.json`` first): it could not make the scope."""
+    while not os.path.exists(os.path.join(record, 'scope.json')):
+        if p.poll() is not None:
+            return not os.path.exists(os.path.join(record, 'scope.json'))
+        time.sleep(0.05)
+    return False
+
+
+def _stop_supervisor(p: subprocess.Popen, record: str, unit: str) -> None:
+    """The caller is gone: TERM the supervisor, which TERMs the command's process group and
+    records its end; after ``STOP_GRACE`` s kill that group (checked as the supervisor's
+    child) and stop the scope."""
+    try:
+        os.kill(p.pid, signal.SIGTERM)
+    except OSError:
+        pass
+    try:
+        p.wait(timeout=STOP_GRACE)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    child = _read(os.path.join(record, 'scope.json')).get('child')
+    try:
+        with open(f'/proc/{child}/stat') as f:
+            ours = int(f.read().rsplit(')', 1)[1].split()[1]) == p.pid
+    except (OSError, ValueError, IndexError, TypeError):
+        ours = False
+    if ours:
+        try:
+            os.killpg(child, signal.SIGKILL)
+        except OSError:
+            pass
+    if unit:
+        subprocess.run(['systemctl', '--user', 'stop', unit], capture_output=True, timeout=120)
+    try:
+        p.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+
+
 def remote(argv: Sequence[str], stdin=None) -> int:
     """The host side of a run (``argv``: the run directory and the spec as JSON), started
-    in ``<dir>/ws`` by ``run_host``. It takes a slot of the host's queue (waiting in line,
-    or with ``no_wait`` giving up after one round, exit 75), then runs the command under
-    ``part.supervise``. A closed stdin (the caller is gone) or a signal ends the command;
-    the slot is released when this process ends. The run directory is removed at the end."""
+    in ``<dir>/ws`` by ``run_host``. It takes a slot of the host's queue, or with ``cards``
+    the cards' leases (waiting in line, or giving up after ``rounds`` tries: NOT_STARTED,
+    as on a drained host), then starts the supervisor (``_start_supervisor``), which holds
+    them for the command's life. A closed stdin (the caller is gone) or a signal stops the
+    supervisor, which ends the command. The run directory is removed at the end."""
     from ci_runners import part, slots as slots_mod
     d, spec = argv[0], json.loads(argv[1])
     stdin = sys.stdin if stdin is None else stdin
 
-    def stop(signum, _frame):  # until the supervisor runs, which installs its own
+    def stop(signum, _frame):
         raise SystemExit(128 + signum)
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, stop)
@@ -878,75 +1126,86 @@ def remote(argv: Sequence[str], stdin=None) -> int:
             pass
         os.kill(os.getpid(), signal.SIGTERM)
     threading.Thread(target=watch, daemon=True).start()
-    q = None
+    q, leases, sup, slot = None, None, None, None
+    fds: list[int] = []
+    started: list[subprocess.Popen] = []
+    record = os.path.join(d, 'record')
     try:
+        fds.append(_hold_alive(d))
         _remove_stale(os.path.dirname(d), d, time.time())
-        q = slots_mod.SlotQueue(spec['lock'], int(spec['count']), spec.get('queue') or None, float(spec.get('poll', 3)),
-                                default_project=spec['project'])
-        q.take_ticket(spec['project'], 'pool run: ' + spec['command'][:200])
-        fd, shown, rounds = None, None, 0
+        rounds_max = int(spec.get('rounds') or 0)
         deadline = time.time() + float(spec['queue_seconds'])
-        while fd is None:
-            fd = q.try_take(spec['project'], {})
-            rounds += 1
-            if fd is not None:
-                break
-            if spec.get('no_wait') and rounds >= 2:
-                _say('no CI slot free on this host (--no-wait)')
+        visible = ''
+        if int(spec.get('cards', 0)):
+            if not spec.get('leases'):
+                _say('this host leases no cards to pool runs')
                 return NOT_STARTED
-            if time.time() >= deadline:
-                _say('no CI slot within the queue bound')
+            leases = part.Leases(spec['leases'], int(spec.get('lease_parts', 1)), shared=True)
+            got = _take_cards(spec, leases, rounds_max, deadline)
+            if got is None:
                 return NOT_STARTED
-            ahead = sum(1 for t in q.waiting() if t.seq < q.seq)
-            if ahead != shown:
-                _say(f'waiting in line for a CI slot: {ahead} ahead')
-                shown = ahead
-            time.sleep(q.poll)
-        _say(f"holding CI slot {q._index(fd) + 1} of {spec['count']}")
+            visible = ','.join(str(c) for c in sorted(got))
+            _say(f'holding card(s) {visible}')
+        else:
+            q = slots_mod.SlotQueue(spec['lock'], int(spec['count']), spec.get('queue') or None,
+                                    float(spec.get('poll', 3)), default_project=spec['project'],
+                                    default_cap=spec.get('max_slots'))
+            slot = _take_slot(spec, q, rounds_max, deadline)
+            if slot is None:
+                return NOT_STARTED
+            fds.append(slot)
+            _say(f"holding CI slot {q._index(slot) + 1} of {spec['count']}")
         env = {k: v for k, v in os.environ.items() if k in ('HOME', 'USER', 'LOGNAME', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS')}
         envd = os.path.dirname(os.path.dirname(spec['python']))
         tmp = os.path.join(d, 'tmp')
         os.makedirs(tmp, mode=0o700, exist_ok=True)
         env.update({'PATH': f'{envd}/bin:/usr/local/bin:/usr/bin:/bin', 'CONDA_PREFIX': envd, 'LANG': 'C.UTF-8',
                     'TMPDIR': tmp, 'CI_PROJECT': spec['project'], 'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
-                    'CUDA_VISIBLE_DEVICES': _cards(spec), 'CI_POOL_RUN': '1', 'PYTHONNOUSERSITE': '1'})
+                    'CUDA_VISIBLE_DEVICES': visible, 'CI_POOL_RUN': '1', 'PYTHONNOUSERSITE': '1'})
         env.update(spec.get('variables', {}))
-        os.environ.clear()
-        os.environ.update(env)
-        record = os.path.join(d, 'record')
         os.makedirs(record, exist_ok=True)
-        argv_cmd = part.command_argv(spec['command'])
-        cap = int(spec['memory_gib']) << 30
-        rc = part.supervise(record, float(spec['timeout_seconds']), argv_cmd, cap)
-        return _exit_code(_read(os.path.join(record, 'exit.json')), rc)
+        unit = ''
+        try:
+            unit = _start_supervisor(spec, d, record, env, [*fds, *(leases.fds if leases else [])],
+                                     part.command_argv(spec['command']), started)
+            sup = started[-1]
+            if q is not None:  # the slot's holder is the supervisor now (its project counts while it runs)
+                try:
+                    i = q._index(slot) + 1
+                    slots_mod._replace(os.path.join(q.queue, f'holder.{i}'),
+                                       f'{sup.pid} {slots_mod._start_of(sup.pid):.0f} {spec["project"]}\n')
+                except OSError:
+                    pass
+            rc = sup.wait()
+        except SystemExit:
+            if not started:
+                raise
+            sup = started[-1]
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                signal.signal(sig, signal.SIG_IGN)
+            _stop_supervisor(sup, record, unit)
+            rc = EXIT_SIGNALLED
+        return _exit_code(_read(os.path.join(record, 'exit.json')), rc if rc >= 0 else 128 - rc)
     except SystemExit as e:
         return int(e.code) if isinstance(e.code, int) else EXIT_FAILED
     except Exception as e:  # the host side failed, not the command
         _say(f'failed: {type(e).__name__}: {e}')
         return EXIT_FAILED
     finally:
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):  # the caller going now ends nothing more
+            signal.signal(sig, signal.SIG_IGN)
+        sup = started[-1] if started else None
         if q is not None and q.ticket and os.path.exists(q.ticket):
             os.unlink(q.ticket)
-        subprocess.run(['rm', '-rf', '--one-file-system', d], timeout=600)
-
-
-def _cards(spec: Mapping) -> str:
-    """The cards a run on a host uses: none for a CPU run, else the ``cards`` with the most
-    free memory (at least ``need_mib``) by ``nvidia-smi`` now."""
-    n = int(spec.get('cards', 0))
-    if not n:
-        return ''
-    try:
-        r = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,noheader,nounits'],
-                           capture_output=True, text=True, timeout=30)
-        free = sorted(((int(b), int(a)) for a, b in (x.split(',') for x in r.stdout.split('\n') if x.strip())),
-                      reverse=True)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        free = []
-    ok = [i for f, i in free if f >= int(spec.get('need_mib', 0))][:n]
-    if len(ok) < n:
-        raise SystemExit(NOT_STARTED)
-    return ','.join(str(i) for i in sorted(ok))
+        if leases is not None:
+            leases.release()
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if sup is None or sup.poll() is not None:  # a supervisor still running keeps its directory
+            subprocess.run(['rm', '-rf', '--one-file-system', d], timeout=600)
 
 
 def _read(path: str) -> dict:
@@ -1010,9 +1269,21 @@ def _env_ok(reg: Registry, a: RunArgs, prefix: Sequence[str], python: str, run: 
     return False
 
 
+def host_spec(reg: Registry, m: Machine, a: RunArgs, wait: bool) -> dict:
+    """What ``remote`` is told of a run on host ``m`` (``run_host``'s ``wait``). Pure."""
+    return {'lock': m.slots.lock, 'count': m.slots.count, 'queue': m.slots.queue, 'project': reg.project,
+            'command': a.command, 'python': m.python, 'memory_gib': a.ask.memory_gib, 'cards': a.ask.cards,
+            'need_mib': reg.gpu_need_mib, 'timeout_seconds': a.timeout_min * 60,
+            'rounds': 0 if wait else FREE_NOW_ROUNDS, 'queue_seconds': LONG_WAIT_MIN * 60 if wait else 120,
+            'max_slots': m.max_slots, 'drain': m.drain, 'leases': m.leases.dir if m.leases else '',
+            'lease_parts': m.leases.parts if m.leases else 1, 'gpus': m.gpus, 'variables': dict(a.variables)}
+
+
 def run_host(reg: Registry, m: Machine, a: RunArgs, files: Sequence[str], run: Runner = subprocess.run,
-             popen: Callable = subprocess.Popen, run_id: str = '') -> int:
-    """Stage the tree on host ``m`` and run there (``remote``): returns the command's code."""
+             popen: Callable = subprocess.Popen, run_id: str = '', wait: bool = True) -> int:
+    """Stage the tree on host ``m`` and run there (``remote``): returns the command's code.
+    ``wait``: wait in line for the slot (or the cards) up to ``LONG_WAIT_MIN``; else give
+    the host up after ``FREE_NOW_ROUNDS`` tries (NOT_STARTED)."""
     prefix = [] if m.access == 'local' else _ssh(m.ssh)
     if not _env_ok(reg, a, prefix, m.python, run):
         return EXIT_ENV
@@ -1025,11 +1296,7 @@ def run_host(reg: Registry, m: Machine, a: RunArgs, files: Sequence[str], run: R
     if r.returncode != 0:
         _say(f'{m.key}: staging failed: {(r.stderr or b"").decode(errors="replace").strip()[-300:]}')
         return NOT_STARTED
-    spec = {'lock': m.slots.lock, 'count': m.slots.count, 'queue': m.slots.queue, 'project': reg.project,
-            'command': a.command, 'python': m.python, 'memory_gib': a.ask.memory_gib, 'cards': a.ask.cards,
-            'need_mib': reg.gpu_need_mib, 'timeout_seconds': a.timeout_min * 60, 'no_wait': a.no_wait,
-            'queue_seconds': a.queue_min * 60 if a.no_wait else max(a.queue_min, 24 * 60) * 60,
-            'variables': dict(a.variables)}
+    spec = host_spec(reg, m, a, wait)
     launch = ('import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.pool import remote; '
               'sys.exit(remote(sys.argv[1:]))')
     argv = ['sh', '-c', 'cd "$1/ws" && shift && exec "$@"', 'sh', d, '/usr/bin/python3', '-I', '-c', launch,
@@ -1163,6 +1430,10 @@ def _status(g: OwnerGate, key: str, sleep: Callable[[float], None], tries: int =
 def pool_run(reg: Registry, a: RunArgs, *, only: str = '', here_ok: bool = False, run: Runner = subprocess.run,
              popen: Callable = subprocess.Popen, rows: Sequence[Mapping] | None = None) -> int:
     """``pool run``: pick a machine by ``pool status`` and run there."""
+    if not 0 < a.timeout_min <= MAX_TIMEOUT_MIN:
+        _say(f'--timeout is above 0 and at most {MAX_TIMEOUT_MIN} min (a run\'s directory is removed after '
+             f'{STALE_DAYS} days)')
+        return EXIT_USAGE
     rows = status(reg, run, cards=max(1, a.ask.cards), mem_gib=a.ask.memory_gib) if rows is None else rows
     now, later, skipped = pick(rows, a.ask, reg, here_ok=here_ok, only=only)
     for s in skipped:
@@ -1176,7 +1447,7 @@ def pool_run(reg: Registry, a: RunArgs, *, only: str = '', here_ok: bool = False
         _say(f'on {key} (free now)')
         try:
             rc = (run_cluster(reg, m, m.targets[r['target']], a, files, run) if r['target']
-                  else run_host(reg, m, a, files, run, popen))
+                  else run_host(reg, m, a, files, run, popen, wait=False))
         except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as e:
             _say(f'{key}: failed: {e}')
             rc = NOT_STARTED
@@ -1187,7 +1458,7 @@ def pool_run(reg: Registry, a: RunArgs, *, only: str = '', here_ok: bool = False
         r = later[0]
         m = reg.machines[r['key']]
         _say(f'no machine free now; waiting in line on {r["key"]} (queue {r["queue"]})')
-        rc = run_host(reg, m, a, files, run, popen)
+        rc = run_host(reg, m, a, files, run, popen, wait=True)
         return EXIT_NO_ROOM if rc == NOT_STARTED else rc
     _say('no machine can start it now' + (f' (tried {", ".join(tried)})' if tried else '')
          + ('; --no-wait' if later else ''))

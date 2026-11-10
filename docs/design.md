@@ -831,6 +831,41 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    its deadline. The caller's own host is skipped unless asked. Free hosts come first, then
    the billed targets that start it now, cheapest first, then a wait in line on the host
    with the shortest queue.
+6. **Step 2 of task ci-pool-run** makes a host's pool run as safe as a part:
+   - *The supervisor owns the claim.* It is a process of its own, given the slot (or the
+     leases) and the run directory's `alive.lock` by `pass_fds`, in a systemd scope of its
+     own (`ci-part-pool-<project>-<run>.scope`, `MemoryMax` the run's memory) where the
+     user manager answers, else in a session of its own. A host side that is killed leaves
+     the command running with its slot held, never a command without one; a caller that
+     ends (stdin closed, a signal) makes the host side stop the supervisor, which ends the
+     command (its process group is killed `STOP_GRACE` s later).
+   - *The project's cap.* The registry's `max_slots` per machine is the project's cap on
+     that host's queue, as `registry.slot_caps` gives the parts; a pool run is the queue's
+     default project, so `ci_slot.sh`'s tickets and holders count against it too. Without it
+     the cap is the slot count, as before.
+   - *The drain.* `drain.change` also writes a world-readable copy of the state,
+     `<data>/ci-runners/drain.json` (mode 644), since other accounts cannot read `state/`.
+     The registry's `drain` names it; `pool status` shows a host it drains as the problem
+     `drained` (unreadable or malformed drains, missing does not), and the host side reads
+     it again before each try for the slot. A drained runner pool drains no pool run.
+   - *A host's cards through the leases.* A GPU pool run takes a host's cards by
+     `part.Leases`, in the parts' ticket order, and no CI slot (as a GPU part). It does so
+     only where the registry names the leases (`leases = { dir, parts }`), which must be the
+     inventory's `files.lease_dir`: a directory the CI account shares as the slot queue
+     (root-owned in `/tmp`, default ACL entries, bound into its namespace, §5.3), where
+     both accounts create files mode 660 and directories 770, nothing through a link, and a
+     ticket of a process `/proc` hides is kept as a slot ticket is. Without `leases` a
+     host's cards stay its parts' alone, and a GPU run goes to a cluster target.
+   - *Bounds.* A host that was free in `pool status` is given up after `FREE_NOW_ROUNDS`
+     (3) tries for the next machine; only the host chosen to wait on waits long
+     (`LONG_WAIT_MIN`, 24 h). `--timeout` is at most `MAX_TIMEOUT_MIN` (20 h), so a run
+     ends before its directory is two days old (`STALE_DAYS`), and a directory whose
+     `alive.lock` is held is never removed.
+   - The registry's `drain` and the leases' `dir` are private (`pool.PRIVATE_KEYS`).
+   The CI account's side (the drain copy, `files.lease_dir` for the parts and the root
+   step that shares it) takes effect with the next release, and the lease directory with
+   the root step's apply; until the registry names `drain`, `leases` and `max_slots`, pool
+   runs behave as in step 1.
 
 ## Decisions of this spec
 
@@ -1029,7 +1064,10 @@ and one without it has none. `v1.5` adds, both optional: `peer_labels` (a table 
 runner class to the labels of the other host's pool of that class, 13.3) and `busy` (a
 table of `window_minutes`, `cpu_cores`, `memory_gib`, `gpu_mib` and `lock_minutes`, each
 optional with the defaults of 13.2); and removes `watchdog_log` and `watchdog_notice`
-(13.4), which no host sets. The first path's keys (`ssh`, `trusted`, `remote`,
+(13.4), which no host sets. Decision 15.1 (step 2) adds, optional: `files.lease_dir` (the
+GPU leases' directory, shared with the pool runs of other accounts; with
+`local_accounts` a plain name in `/tmp`, made by the root step as the slot queue). Without
+it the leases stay under `state/leases`. The first path's keys (`ssh`, `trusted`, `remote`,
 `cpu_slowdown`, `proxy`) are accepted and ignored in `v1.3` and `v1.4` (11.12). `setup/inventory.example
 .toml` holds the schema with placeholder values.
 

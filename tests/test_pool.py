@@ -2,6 +2,7 @@
 (decision 15.1; tasks ci-cluster-pool, ci-pool-run)."""
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import io
 import json
@@ -115,6 +116,31 @@ class Registry(unittest.TestCase):
                 with self.assertRaisesRegex(pool.RegistryError, why):
                     pool.load(bad)
 
+    def test_step_2s_keys(self):
+        """The project's cap, the drain copy and the shared leases (decision 15.1, step 2)."""
+        text = REGISTRY.replace('slots = { lock = "/tmp/x.lock", count = 2 }\n',
+                                'slots = { lock = "/tmp/x.lock", count = 2 }\nmax_slots = 1\n'
+                                'drain = "/data/ci-runners/drain.json"\nleases = { dir = "/tmp/leases", parts = 2 }\n')
+        m = pool.load(text).machines['hosta']
+        self.assertEqual((m.max_slots, m.drain, m.leases), (1, '/data/ci-runners/drain.json', pool.LeaseDir('/tmp/leases', 2)))
+        b = reg().machines['hostb']
+        self.assertEqual((b.max_slots, b.drain, b.leases), (None, '', None))  # none: as step 1
+        for bad, why in [(text.replace('parts = 2', 'parts = 0'), 'parts must be positive'),
+                         (text.replace('dir = "/tmp/leases"', 'dir = "leases"'), 'absolute'),
+                         (text.replace('parts = 2', 'parts = 2, x = 1'), 'unknown keys'),
+                         (text.replace('drain = "/data', 'drain = "data'), 'absolute'),
+                         (text.replace('gpus = 2\n', 'gpus = 0\n', 1), 'on a machine with gpus')]:
+            with self.subTest(why):
+                with self.assertRaisesRegex(pool.RegistryError, why):
+                    pool.load(bad)
+        spec = pool.host_spec(pool.load(text), m, pool.RunArgs('true', ROOT, pool.Ask(cards=1)), wait=True)
+        self.assertEqual({k: spec[k] for k in ('max_slots', 'drain', 'leases', 'lease_parts', 'gpus', 'cards')},
+                         {'max_slots': 1, 'drain': m.drain, 'leases': '/tmp/leases', 'lease_parts': 2, 'gpus': 2, 'cards': 1})
+        import tomllib
+        toks = pool.deny_tokens(tomllib.loads(text))
+        self.assertIn('data/ci-runners/drain.json', toks)
+        self.assertIn('tmp/leases', toks)
+
     def test_a_registry_others_may_write_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, 'pool.toml')
@@ -153,6 +179,15 @@ def _wait_holding(p):
     assert 'holding' in line, line
 
 
+def _until(cond, timeout=20.0):
+    deadline = time.time() + timeout
+    while not cond():
+        if time.time() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
 class Claim(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -164,21 +199,22 @@ class Claim(unittest.TestCase):
 
     def spec(self, cmd, **kw):
         s = {'lock': self.lock, 'count': 1, 'queue': '', 'project': 'proj', 'command': cmd, 'python': sys.executable,
-             'memory_gib': 4, 'cards': 0, 'need_mib': 0, 'timeout_seconds': 60, 'no_wait': False,
-             'queue_seconds': 30, 'poll': 0.1}
+             'memory_gib': 4, 'cards': 0, 'need_mib': 0, 'timeout_seconds': 60, 'rounds': 0,
+             'queue_seconds': 30, 'poll': 0.1, 'scope': False}
         s.update(kw)
         return s
 
-    def remote(self, spec):
-        """``pool.remote`` in a child process (it clears its environment), its run directory
-        under ``self.d``; its stdin stays open, as ``run_host``'s ssh keeps it."""
+    def remote(self, spec, env=None):
+        """``pool.remote`` in a child process, its run directory under ``self.d``; its stdin
+        stays open, as ``run_host``'s ssh keeps it."""
         run_dir = tempfile.mkdtemp(prefix='pool-', dir=self.d)
         os.makedirs(os.path.join(run_dir, 'ws'))
         code = ('import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.pool import remote; '
                 'sys.exit(remote(sys.argv[1:]))')
         out, err = (open(os.path.join(self.d, f'{n}.{os.path.basename(run_dir)}'), 'w+') for n in ('out', 'err'))
         p = subprocess.Popen([sys.executable, '-I', '-c', code, ROOT, run_dir, json.dumps(spec)],
-                             cwd=os.path.join(run_dir, 'ws'), stdin=subprocess.PIPE, stdout=out, stderr=err, text=True)
+                             cwd=os.path.join(run_dir, 'ws'), stdin=subprocess.PIPE, stdout=out, stderr=err, text=True,
+                             env=env)
         p.files = (out, err)
         return p, run_dir
 
@@ -201,7 +237,7 @@ class Claim(unittest.TestCase):
             _wait_holding(part)
             p = pool.probe(self.lock, 1, '')
             self.assertEqual(p['slots_free'], 0)
-            r, run_dir = self.remote(self.spec(f'touch {marker}', no_wait=True))
+            r, run_dir = self.remote(self.spec(f'touch {marker}', rounds=2))
             out, err = self.finish(r)
             self.assertEqual(r.returncode, pool.NOT_STARTED, err)
             self.assertIn('no CI slot free', err)
@@ -263,6 +299,130 @@ class Claim(unittest.TestCase):
         self.finish(r)
         self.assertEqual(r.returncode, pool.EXIT_TIMEOUT)
 
+    def test_a_killed_host_side_leaves_the_slot_held_until_the_command_ends(self):
+        """The supervisor is a process of its own that holds the slot: a host side killed
+        mid-command (SIGKILL: no handler, no finally) never leaves a running command
+        without its slot, which would let another run overbook the host."""
+        started, go, done = (os.path.join(self.d, n) for n in ('started', 'go', 'done'))
+        r, run_dir = self.remote(self.spec(f'touch {started}; while [ ! -e {go} ]; do sleep 0.1; done; touch {done}'))
+        alive = os.path.join(run_dir, pool.ALIVE)
+        try:
+            self.assertTrue(_until(lambda: os.path.exists(started)))
+            r.kill()
+            r.wait()
+            time.sleep(0.5)
+            self.assertEqual(pool.probe(self.lock, 1, '')['slots_free'], 0)  # the supervisor holds it
+            self.assertTrue(slots._flocked(alive))  # and its run directory counts as alive
+            self.assertFalse(os.path.exists(done))
+        finally:
+            open(go, 'w').close()
+            self.finish(r)
+        self.assertTrue(_until(lambda: pool.probe(self.lock, 1, '')['slots_free'] == 1))  # freed at the command's end
+        self.assertTrue(os.path.exists(done))
+        self.assertFalse(slots._flocked(alive))
+
+    def fake_systemd(self, rc=None):
+        """An environment whose user manager answers (a runtime directory with a bus) and
+        whose ``systemd-run`` is a fake: it logs its arguments to ``<itself>.log``, then
+        runs the command after its options (holding what it was passed), or exits ``rc``."""
+        b, rt = os.path.join(self.d, 'bin'), os.path.join(self.d, 'rt')
+        os.makedirs(b)
+        os.makedirs(rt)
+        open(os.path.join(rt, 'bus'), 'w').close()
+        body = (f'exit {rc}' if rc is not None else
+                'while [ $# -gt 0 ]; do case "$1" in -p) shift 2;; -*) shift;; *) break;; esac; done\nexec "$@"')
+        exe = os.path.join(b, 'systemd-run')
+        with open(exe, 'w') as f:
+            f.write(f'#!/bin/sh\nprintf "%s\\n" "$@" > "$0.log"\n{body}\n')
+        os.chmod(exe, 0o755)
+        return {**os.environ, 'PATH': f'{b}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': rt}, exe + '.log'
+
+    def test_the_supervisor_runs_in_a_scope_where_the_user_manager_answers(self):
+        env, log = self.fake_systemd()
+        r, run_dir = self.remote(self.spec(f'echo ran; [ -e {self.lock} ]', scope=True), env=env)
+        out, err = self.finish(r)
+        self.assertEqual((r.returncode, out.strip()), (0, 'ran'), err)
+        with open(log) as f:
+            args = f.read().splitlines()
+        self.assertEqual(args[:3], ['--user', '--scope', '--quiet'])
+        self.assertIn(f'--unit=ci-part-pool-proj-{os.path.basename(run_dir)}.scope', args)
+        self.assertIn('MemoryMax=4G', args)  # the run's memory
+        self.assertIn('ci_runners.part import supervise', ' '.join(args))
+
+    def test_without_a_scope_the_supervisor_runs_in_a_session_of_its_own(self):
+        env, log = self.fake_systemd(rc=1)
+        r, _ = self.remote(self.spec('echo ran', scope=True), env=env)
+        out, err = self.finish(r)
+        self.assertEqual((r.returncode, out.strip()), (0, 'ran'), err)
+        self.assertIn('no systemd scope (systemd-run exit 1)', err)
+        self.assertTrue(os.path.exists(log))
+
+    def test_the_project_at_its_cap_keeps_a_pool_run_waiting_though_a_slot_is_free(self):
+        open(os.path.join(self.d, 'slot.2.lock'), 'w').close()
+        marker = os.path.join(self.d, 'ran')
+        part = _python_holding(self.lock, 2, ['sleep', '30'], project='proj')  # the project's own part
+        try:
+            _wait_holding(part)
+            self.assertEqual(pool.probe(self.lock, 2, '')['slots_free'], 1)
+            r, _ = self.remote(self.spec(f'touch {marker}', count=2, max_slots=1, rounds=3))
+            out, err = self.finish(r)
+            self.assertEqual(r.returncode, pool.NOT_STARTED, err)
+            self.assertIn('no CI slot free on this host now', err)
+            self.assertFalse(os.path.exists(marker))
+            r, _ = self.remote(self.spec(f'touch {marker}', count=2, max_slots=2, rounds=3))
+            out, err = self.finish(r)
+            self.assertEqual(r.returncode, 0, err)
+            self.assertTrue(os.path.exists(marker))
+        finally:
+            part.kill()
+            part.wait()
+
+    def test_a_drained_host_starts_no_pool_run(self):
+        state, marker = os.path.join(self.d, 'drain.json'), os.path.join(self.d, 'ran')
+        with open(state, 'w') as f:
+            f.write('{"host": 100.0, "pools": {}}')
+        r, run_dir = self.remote(self.spec(f'touch {marker}', drain=state))
+        out, err = self.finish(r)
+        self.assertEqual(r.returncode, pool.NOT_STARTED, err)
+        self.assertIn('this host is drained', err)
+        self.assertFalse(os.path.exists(marker))
+        self.assertFalse(os.path.exists(run_dir))
+        with open(state, 'w') as f:
+            f.write('{"host": null, "pools": {"cards": 1.0}}')  # a pool of runners only
+        r, _ = self.remote(self.spec(f'touch {marker}', drain=state))
+        self.finish(r)
+        self.assertEqual(r.returncode, 0)
+
+    def test_a_gpu_run_takes_its_cards_by_the_parts_leases(self):
+        """A GPU pool run takes a card the parts' leases give it (no CI slot), holds the
+        lease for the command's life, and gives the host up when no card is to be had."""
+        from ci_runners import part as part_mod
+        b, leases = os.path.join(self.d, 'smi'), os.path.join(self.d, 'leases')
+        os.makedirs(b)
+        with open(os.path.join(b, 'nvidia-smi'), 'w') as f:
+            f.write('#!/bin/sh\necho "0, 24576, 576"\necho "1, 24576, 576"\n')
+        os.chmod(os.path.join(b, 'nvidia-smi'), 0o755)
+        env = {**os.environ, 'PATH': f'{b}:{os.environ["PATH"]}'}
+        held = part_mod.Leases(leases, shared=True)  # a part holds card 0
+        self.assertEqual(held.try_take(1, [0], {0: 24000}, 0), [0])
+        go = os.path.join(self.d, 'go')
+        try:
+            spec = self.spec(f'echo "[$CUDA_VISIBLE_DEVICES]"; while [ ! -e {go} ]; do sleep 0.1; done', cards=1,
+                             need_mib=6000, leases=leases, lease_parts=1, gpus=2)
+            r, _ = self.remote(spec, env=env)
+            self.assertTrue(_until(lambda: slots._flocked(os.path.join(leases, 'card1.0.lock'))))
+            self.assertEqual(pool.probe(self.lock, 1, '')['slots_free'], 1)  # no CI slot taken
+            r2, _ = self.remote(dict(spec, rounds=2), env=env)  # both cards leased now
+            out2, err2 = self.finish(r2)
+            self.assertEqual(r2.returncode, pool.NOT_STARTED, err2)
+            open(go, 'w').close()
+            out, err = self.finish(r)
+            self.assertEqual((r.returncode, out.strip()), (0, '[1]'), err)
+            self.assertFalse(slots._flocked(os.path.join(leases, 'card1.0.lock')))
+        finally:
+            open(go, 'w').close()
+            held.release()
+
 
 class Probe(unittest.TestCase):
     def test_free_slots_are_read_without_taking_them(self):
@@ -293,6 +453,28 @@ class Probe(unittest.TestCase):
         self.assertEqual(busy['cpus_free'], 0)  # no slot: no cores to place on
         self.assertEqual(pool.host_row(m, None, 'unreachable (exit 255)')['problems'], ['unreachable (exit 255)'])
 
+    def test_a_drained_host_and_leased_cards(self):
+        with tempfile.TemporaryDirectory() as d:
+            lock, state, leases = os.path.join(d, 's.lock'), os.path.join(d, 'drain.json'), os.path.join(d, 'leases')
+            open(lock, 'w').close()
+            os.makedirs(leases)
+            self.assertFalse(pool.probe(lock, 1, '', state)['drained'])  # missing: not drained
+            with open(state, 'w') as f:
+                f.write('{"host": 1.0, "pools": {}}')
+            fd = os.open(os.path.join(leases, 'card1.0.lock'), os.O_WRONLY | os.O_CREAT)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                p = pool.probe(lock, 1, '', state, leases, 1, 2)
+            finally:
+                os.close(fd)
+            self.assertEqual((p['drained'], p['cards_leased']), (True, {0: 0, 1: 1}))
+        m = dataclasses.replace(reg().machines['hosta'], leases=pool.LeaseDir('/tmp/l', 1))
+        row = pool.host_row(m, {'slots_free': 1, 'load': 0, 'cpus': 16, 'drained': True, 'gpu_free': {'0': 20000, '1': 20000},
+                                'cards_leased': {'0': 0, '1': 1}})
+        self.assertEqual(row['problems'], ['drained'])
+        self.assertEqual(row['gpu_free'], {0: 20000})  # card 1's one lease is held
+        self.assertIn('drained', pool.fits(row, pool.Ask(), m, 0))
+
     def test_probe_host_runs_the_probe_through_ssh(self):
         m = reg().machines['hosta']
         seen = {}
@@ -302,7 +484,7 @@ class Probe(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, json.dumps({'slots_free': 2, 'load': 0, 'cpus': 16}) + '\n', '')
         row = pool.probe_host(m, run)
         self.assertEqual(seen['argv'][-2:], ['alias-a', '/usr/bin/python3 -I -'])
-        self.assertIn("probe('/tmp/x.lock', 2, '')", seen['input'])
+        self.assertIn("probe('/tmp/x.lock', 2, '', '', '', 1, 2)", seen['input'])
         self.assertEqual(row['slots_free'], 2)
         self.assertEqual(pool.probe_host(m, lambda a, **k: subprocess.CompletedProcess(a, 255, '', ''))['problems'],
                          ['unreachable (exit 255)'])
@@ -393,6 +575,18 @@ class Pick(unittest.TestCase):
         self.assertEqual(self.keys(rows, pool.Ask(cards=1, gpu_model='a4'))[0], [])  # a model, not a prefix
         _, _, skipped = self.keys(rows, pool.Ask(cards=0))
         self.assertIn('cl:v100: a GPU target, and no card asked', skipped)
+
+    def test_a_hosts_cards_by_its_leases_where_the_registry_shares_them(self):
+        r = reg()
+        r = dataclasses.replace(r, machines={**r.machines, 'hosta': dataclasses.replace(
+            r.machines['hosta'], leases=pool.LeaseDir('/tmp/l', 1))})
+        rows = [row('hosta', gpu_model='3090', multi_gpu=True, slots_free=0, cpus_free=0, gpu_free={1: 20000}),
+                row('cl:v100', billed=True, price=1.6, target='v100', gpu_model='v100', multi_gpu=True,
+                    gpu_free={0: 32768, 1: 32768})]
+        now, later, _ = pool.pick(rows, pool.Ask(cards=1), r)
+        self.assertEqual([x['key'] for x in now], ['hosta', 'cl:v100'])  # free, though its CI slots are full
+        now, later, _ = pool.pick(rows, pool.Ask(cards=2), r)
+        self.assertEqual(([x['key'] for x in now], [x['key'] for x in later]), (['cl:v100'], ['hosta']))
 
     def test_sizes_beyond_a_machine_are_skipped(self):
         _, _, skipped = self.keys([row('hosta')], pool.Ask(cpus=64))
@@ -632,6 +826,59 @@ class ClusterRun(unittest.TestCase):
         cmd = g._cmd(['status', 'owner/proj/1-1/pool-1-1'])
         self.assertEqual(cmd, "SSH_ORIGINAL_COMMAND='ci-slurm-gate status owner/proj/1-1/pool-1-1' exec "
                               "/fs/root/ci-runners/releases/hook/bin/ci-slurm-gate")
+
+
+class Bounds(unittest.TestCase):
+    def setUp(self):  # a checkout to stage (the mutants' copies of this tree have no .git)
+        self.root = tempfile.mkdtemp()
+        subprocess.run(['git', 'init', '-q', self.root], check=True)
+        open(os.path.join(self.root, 'x.py'), 'w').close()
+
+    def tearDown(self):
+        subprocess.run(['rm', '-rf', self.root])
+
+    def test_a_free_now_host_is_given_up_soon_the_chosen_one_waited_on(self):
+        r, a = reg(), pool.RunArgs('true', self.root, pool.Ask())
+        m = r.machines['hosta']
+        quick, long = pool.host_spec(r, m, a, wait=False), pool.host_spec(r, m, a, wait=True)
+        self.assertEqual((quick['rounds'], long['rounds']), (pool.FREE_NOW_ROUNDS, 0))
+        self.assertEqual(long['queue_seconds'], pool.LONG_WAIT_MIN * 60)
+        rows = [row('hosta', cpus_free=12), row('hostb', slots_free=0, cpus_free=0)]
+        calls = []
+        orig = pool.run_host
+        pool.run_host = lambda reg_, m, *x, wait, **k: calls.append((m.key, wait)) or pool.NOT_STARTED
+        try:
+            rc = pool.pool_run(r, a, rows=rows)
+        finally:
+            pool.run_host = orig
+        self.assertEqual((rc, calls), (pool.EXIT_NO_ROOM, [('hosta', False), ('hostb', True)]))
+
+    def test_a_run_ends_before_its_directory_counts_as_stale(self):
+        self.assertLess(pool.MAX_TIMEOUT_MIN + pool.LONG_WAIT_MIN + 60, pool.STALE_DAYS * 24 * 60)
+        orig = pool.run_host
+        pool.run_host = lambda *x, **k: 0
+        try:
+            for minutes, rc in ((pool.MAX_TIMEOUT_MIN + 1, pool.EXIT_USAGE), (0, pool.EXIT_USAGE),
+                                (pool.MAX_TIMEOUT_MIN, 0)):
+                a = pool.RunArgs('true', self.root, pool.Ask(), timeout_min=minutes)
+                self.assertEqual(pool.pool_run(reg(), a, rows=[row('hosta')]), rc, minutes)
+        finally:
+            pool.run_host = orig
+
+    def test_a_stale_directory_is_removed_unless_its_run_is_alive(self):
+        with tempfile.TemporaryDirectory() as work:
+            old = time.time() - (pool.STALE_DAYS * 86400 + 60)
+            dirs = {n: os.path.join(work, n) for n in ('pool-gone', 'pool-alive', 'pool-new', 'other')}
+            for p in dirs.values():
+                os.makedirs(p)
+            fd = pool._hold_alive(dirs['pool-alive'])  # a supervisor that outlived its host side
+            for n in ('pool-gone', 'pool-alive', 'other'):
+                os.utime(dirs[n], (old, old))
+            try:
+                pool._remove_stale(work, '', time.time())
+            finally:
+                os.close(fd)
+            self.assertEqual(sorted(os.listdir(work)), ['other', 'pool-alive', 'pool-new'])
 
 
 class PoolRun(unittest.TestCase):

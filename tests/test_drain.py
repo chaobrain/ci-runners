@@ -76,6 +76,45 @@ class State(unittest.TestCase):
             self.assertEqual(path.read_text(), '{', (on, pool))
         self.assertEqual(drain.change(self.data, False), {'host': None, 'pools': {}})  # off rewrites it
 
+    def test_each_change_writes_the_pool_runs_copy(self):
+        """Decision 15.1: other accounts cannot read state/ (mode 700); each change writes a
+        world-readable copy, which the pool's ``drained`` reads as ``read`` does."""
+        from ci_runners import pool
+        public = drain.public_path(self.data)
+        self.assertFalse(pool.drained(public))  # missing: not drained
+        old = os.umask(0o077)
+        try:
+            drain.change(self.data, True, 'cards', now=lambda: 100.0)
+            self.assertEqual(os.stat(public).st_mode & 0o777, 0o644)
+            self.assertFalse(pool.drained(public))  # a drained pool of runners drains no pool run
+            drain.change(self.data, True, now=lambda: 200.0)
+        finally:
+            os.umask(old)
+        with open(public) as f:
+            self.assertEqual(json.load(f), drain.read(self.data))
+        self.assertTrue(pool.drained(public))
+        drain.change(self.data, False)
+        self.assertFalse(pool.drained(public))
+
+    def test_the_pool_reads_a_state_as_read_does(self):
+        from ci_runners import pool
+        path = pathlib.Path(self.data, 'd.json')
+        for text in ('', '{', '[]', '{"host": null}', '{"host": "x", "pools": {}}', '{"host": true, "pools": {}}',
+                     '{"host": null, "pools": {"a": "b"}}', '{"host": null, "pools": [], "x": 1}',
+                     '{"host": null, "pools": {}}', '{"host": 5, "pools": {}}', '{"host": null, "pools": {"a": 1}}'):
+            path.write_text(text)
+            st = drain.read_path(str(path))
+            self.assertEqual(pool.drained(str(path)), st is None or st['host'] is not None, text)
+        path.chmod(0)
+        if os.geteuid() != 0:
+            self.assertTrue(pool.drained(str(path)))  # unreadable: drained
+        path.unlink()
+        os.mkfifo(path)
+        self.assertTrue(pool.drained(str(path)))  # never blocks
+        path.unlink()
+        path.symlink_to('/dev/null')
+        self.assertTrue(pool.drained(str(path)))
+
     def test_a_pool_by_key_or_class(self):
         self.assertEqual((drain.pool_key(self.host, 'cards'), drain.pool_key(self.host, 'gpu')), ('cards', 'cards'))
         with self.assertRaisesRegex(ValueError, 'no pool or class'):

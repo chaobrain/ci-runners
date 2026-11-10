@@ -266,3 +266,11 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 - `unavailable: p2p …`：这个目标的双卡互拷读回错误数据，告诉站点管理员；它的 `max_cards` 已降为 1。
 - 驱动主机宕机时作业会一直跑到 `--time`；reaper 会在 GitHub 作业消失后用 gate 的 `reap` 取消它。
 - 不要在登录节点上手工 `scancel` 别的作业，只动名字以 `ci-` 开头、属于自己账户的作业。
+
+## 11. 设备池：`pool status` 与 `pool run`（design 决定 15.1）
+
+**注册表**：`$CI_RUNNERS_ETC/pool.toml`（默认 `~/data/ci-runners/etc/pool.toml`，权限 600），格式见 `ci_runners/pool.py` 的模块说明。它和清单一样是私有配置，不进仓库：写好后运行 `python -m ci_runners.pool deny <pool.toml>`，把新的哈希合进 `tests/deny.sha256`。每台机器一项，写明访问方式（`ssh`/`local`/`slurm`）、核数、内存、卡、环境、工作目录和 CI slot 文件。集群写登录账户的 ssh 别名和 `ci-slurm-gate` 的路径，每个目标一行。
+
+**查看**：`ci-run pool status` 打印一张表，`--json` 输出每行的 `HostState` 字段。主机的空闲 slot 从 `/proc/locks` 读取，不会去占用；集群的数字来自 `sinfo`，再减去本账户运行中作业所占的关联 `GrpTRES`。
+
+**运行**：`ci-run pool run [--cpu N] [--mem G] [--gpu 型号[:数量]] [--on 机器] -- 命令`。它把调用者的工作树（已跟踪的文件，加上未被忽略的未跟踪文件）送到一台现在就能启动的机器上运行。这台机器先从空闲主机里选，再选按价格从低到高的集群目标；都不行就在队列最短的主机上排队。命令的输出实时回传，退出码就是命令的退出码。主机上的占用就是 CI slot，和 CI part 的是同一套，所以两边不会同时拿到同一个 slot。集群上的占用就是作业本身，走同一个 gate。运行前先比对环境，不一致就拒绝运行（退出码 3）；加 `--env-mismatch warn` 可以照常运行，但会给出警告。调用者退出时，远端命令随之结束，slot 也随之释放。brainspike 用 `scripts/pool.sh` 包了一层。

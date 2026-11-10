@@ -1,0 +1,1252 @@
+"""``ci-run pool``: every machine is a pool (decision 15.1). This module holds the machine
+registry, the live capacity query (``pool status``), the claim, the env check and ``pool
+run``, which puts a heavy command on a free machine.
+
+**The registry** is ``$CI_RUNNERS_ETC/pool.toml`` (``cli.etc_dir``). It is private site
+config, never in the repository: it names hosts, ssh aliases and paths, which is inventory
+(design §3.3); ``python -m ci_runners.pool deny FILE`` prints their hashes for
+``tests/deny.sha256``. Each ``[machine.<key>]`` entry describes one machine:
+
+.. code-block:: toml
+
+    schema = 1
+    project = "myproj"                   # the env's project and the slot queue's
+    repository = "owner/myproj"          # a cluster job's key and comment
+    check = ["jax", "numpy"]             # the env check's distributions
+    gpu_need_mib = 6000                  # free MiB a card needs
+
+    [machine.hostb]                      # a host: ssh (or local) access
+    access = "ssh"                       # "ssh" or "local"
+    ssh = "<alias>"                      # ssh: the alias
+    hostname = "<hostname>"              # what `hostname` prints there: the caller's own host
+    cpus = 28
+    memory_gib = 125
+    gpus = 2                             # cards; 0 for none
+    gpu_model = "3090"
+    gpu_mib = 24576                      # MiB per card
+    cuda = "cuda13"
+    p2p = true                           # its P2P self-test passed
+    python = "/abs/env/bin/python"       # the env a command runs in
+    work = "/abs/dir"                    # where a run stages its tree (removed at its end)
+    slots = { lock = "/abs/x.lock", count = 2 }   # the host's CI slots (and queue = DIR)
+    labels = { cpu = "hostb-cpu" }       # its runner labels per group (HostState.labels)
+    numerics_ok = true                   # its numerics check passed
+    cache = "/abs/compile/cache"         # its compile cache (optional)
+
+    [machine.cluster]                    # a Slurm cluster: access through the account's gate
+    access = "slurm"
+    ssh = "<alias>"                      # the account owner's login
+    gate = "/abs/<root>/ci-runners/releases/hook/bin/ci-slurm-gate"
+    billed = true
+    [machine.cluster.targets.cpu]        # one row per target, keyed <machine>:<target>
+    partition = "<partition>"
+    cpus = 32                            # cores a job takes
+    memory_gib = 1900
+    max_minutes = 90
+    variant = "cpu"                      # the env's variant (envs/<project>-<variant>)
+    price = 0.05                         # yuan per core-hour (per card-hour on a GPU target)
+    numerics_ok = false
+    labels = { cpu = "cluster-cpu" }
+    # a GPU target also has: gpu_model, cards (per node), max_cards, gpu_mib, cuda
+
+**pool status**: one row per host and per cluster target, with the fields of brainspike's
+``HostState`` (``labels``, ``problems``, ``queue``, ``gpu_free``, ``multi_gpu``,
+``gpu_model``, ``cuda``, ``cpus_free``, ``billed``, ``price``, ``target``,
+``numerics_ok``, ``start_now``) and a few of its own (``slots_free``, ``slots``,
+``mem_free_gib``, ``here``, ``access``). A host's slots are read from ``/proc/locks``
+without being taken (``slots._flocked``). A cluster target's free cores and cards come from
+``sinfo``, less what the account's own running jobs hold of its association's ``GrpTRES``.
+
+A run that asks for cards goes to a cluster target: a host's cards are leased to its parts
+(``part.Leases``), which a pool run does not take yet.
+
+**The claim**: a host's capacity is a slot of its CI slot queue, the same ``SlotQueue``
+(and files) that the parts' ``ci-slot`` and brainspike's ``ci_slot.sh`` take, first come
+first served. A run waits in line for it, or with ``--no-wait`` says so (exit 75). It
+never overbooks. On a cluster the job itself is the claim. It is submitted through the
+account's ``ci-slurm-gate``, the one the parts use (the same batch script, supervisor and
+env), and withdrawn if it has not started within ``--queue-minutes``.
+
+**The env check**: before a run, the target env's versions of the registry's ``check``
+distributions (plus the commit of an editable install) are compared with the caller's.
+A difference refuses the run (exit 3) unless ``--env-mismatch warn``. Commits are compared
+only where both sides are editable installs.
+
+**pool run** stages the caller's tree (the tracked files and the untracked ones that are
+not ignored, as they are on disk, with a small git repository of its HEAD and merge base,
+``git_dir``) and the release's ``ci_runners`` on the machine, takes
+the claim, and runs the command there under the parts' supervisor (``part.supervise``: its
+own session, the timeout, the memory cap). It streams the output and exits with the
+command's code. If the caller ends (a signal, a crash, a closed connection), the remote
+side sees its stdin close and ends the command, which releases the slot. A cluster job is
+cancelled through the gate, or the gate's reaper ends it at its deadline.
+
+CLI::
+
+    ci-run pool status [--json]
+    ci-run pool run [--cpu N] [--mem G] [--gpu MODEL[:COUNT]] [--on KEY] [--here]
+                    [--timeout MIN] [--queue-minutes MIN] [--no-wait]
+                    [--env-mismatch refuse|warn] [--python PATH] [--dir DIR] -- COMMAND...
+    python -m ci_runners.pool deny FILE  # hashes of the registry's tokens
+
+Stdlib only.
+"""
+from __future__ import annotations
+
+import dataclasses
+import io
+import json
+import math
+import os
+import re
+import shlex
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+import tomllib
+from collections.abc import Callable, Iterable, Mapping, Sequence
+
+SCHEMA = 1
+#: exit codes of pool run itself (any other is the command's)
+EXIT_USAGE, EXIT_ENV, EXIT_NO_ROOM, EXIT_FAILED = 2, 3, 75, 70
+#: what a host side or a cluster try returns when it could not start the command: never a
+#: command's code (``pool_run`` then tries the next machine and ends EXIT_NO_ROOM)
+NOT_STARTED = 211
+#: the command's ends that are not an exit code (``exit.json``)
+EXIT_TIMEOUT, EXIT_OOM, EXIT_SIGNALLED = 124, 137, 143
+#: the caller's variables a run keeps: those that change what a test computes or how it runs
+FORWARD = re.compile(r'(JAX_|XLA_|BRAINSPIKE_|PYTEST_|OMP_|MKL_|OPENBLAS_|TF_CPP_).*|CI_TEST_TIMEOUT')
+#: what a run's stage directory on a host is called (a stale one is removed after STALE_DAYS)
+RUN_PREFIX = 'pool-'
+STALE_DAYS = 2
+#: s between a cluster job's status reads, and the bounds of a run
+POLL = 5.0
+DEFAULT_TIMEOUT_MIN = 60
+DEFAULT_QUEUE_MIN = 2  # a cluster job that has not started by then is withdrawn (D-0111: 1 min for the plan)
+#: the distributions the env check reads when the registry names none
+DEFAULT_CHECK = ('jax', 'jaxlib', 'numpy', 'scipy')
+
+_KEY = re.compile(r'[a-z0-9][a-z0-9_-]{0,39}\Z')
+_GPU = re.compile(r'([a-z0-9]+)(?::([1-9][0-9]?))?\Z')
+
+
+class RegistryError(Exception):
+    """The registry is malformed or of an unknown schema."""
+
+
+@dataclasses.dataclass(frozen=True)
+class Target:
+    name: str
+    partition: str
+    cpus: int
+    memory_gib: int
+    max_minutes: int
+    variant: str
+    price: float = 0.0
+    numerics_ok: bool = False
+    labels: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    gpu_model: str = ''
+    cards: int = 0  # per node
+    max_cards: int = 0
+    gpu_mib: int = 0
+    cuda: str = ''
+
+
+@dataclasses.dataclass(frozen=True)
+class Slots:
+    lock: str
+    count: int
+    queue: str = ''
+
+
+@dataclasses.dataclass(frozen=True)
+class Machine:
+    key: str
+    access: str  # ssh, local or slurm
+    ssh: str = ''
+    hostname: str = ''
+    cpus: int = 0
+    memory_gib: int = 0
+    gpus: int = 0
+    gpu_model: str = ''
+    gpu_mib: int = 0
+    cuda: str = ''
+    p2p: bool = False
+    billed: bool = False
+    price: float = 0.0
+    python: str = ''
+    work: str = ''
+    slots: Slots | None = None
+    labels: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    numerics_ok: bool = False
+    cache: str = ''
+    gate: str = ''
+    targets: Mapping[str, Target] = dataclasses.field(default_factory=dict)
+
+    @property
+    def base(self) -> str:
+        """A cluster account's ``<root>/ci-runners`` (the gate is ``<base>/releases/<tag>/bin/ci-slurm-gate``)."""
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(self.gate))))
+
+
+@dataclasses.dataclass(frozen=True)
+class Registry:
+    project: str
+    repository: str
+    check: tuple[str, ...]
+    machines: Mapping[str, Machine]
+    gpu_need_mib: int = 6000
+
+
+def _get(t: Mapping, k: str, kind: type | tuple, where: str, default: object = None, required: bool = False):
+    if k not in t:
+        if required:
+            raise RegistryError(f'{where}: {k} is missing')
+        return default
+    v = t[k]
+    if kind is int and (type(v) is not int or v < 0):
+        raise RegistryError(f'{where}: {k} must be a non-negative integer')
+    if kind is float and (type(v) not in (int, float) or v < 0):
+        raise RegistryError(f'{where}: {k} must be a non-negative number')
+    if kind is bool and type(v) is not bool:
+        raise RegistryError(f'{where}: {k} must be true or false')
+    if kind is str and not isinstance(v, str):
+        raise RegistryError(f'{where}: {k} must be a string')
+    if kind is dict and not isinstance(v, dict):
+        raise RegistryError(f'{where}: {k} must be a table')
+    return v
+
+
+def _abs(t: Mapping, k: str, where: str, required: bool = False) -> str:
+    v = _get(t, k, str, where, '', required)
+    if v and not os.path.isabs(v):
+        raise RegistryError(f'{where}: {k} must be an absolute path')
+    return v
+
+
+def _labels(t: Mapping, where: str) -> dict[str, str]:
+    v = _get(t, 'labels', dict, where, {})
+    if not all(isinstance(x, str) for x in v.values()):
+        raise RegistryError(f'{where}: labels must map a group to a label')
+    return dict(v)
+
+
+_MACHINE = {'access', 'ssh', 'hostname', 'cpus', 'memory_gib', 'gpus', 'gpu_model', 'gpu_mib', 'cuda', 'p2p', 'billed',
+            'price', 'python', 'work', 'slots', 'labels', 'numerics_ok', 'cache', 'gate', 'targets'}
+_TARGET = {'partition', 'cpus', 'memory_gib', 'max_minutes', 'variant', 'price', 'numerics_ok', 'labels', 'gpu_model',
+           'cards', 'max_cards', 'gpu_mib', 'cuda'}
+_TOP = {'schema', 'project', 'repository', 'check', 'gpu_need_mib', 'machine'}
+
+
+def _unknown(t: Mapping, known: set[str], where: str) -> None:
+    extra = sorted(set(t) - known)
+    if extra:
+        raise RegistryError(f'{where}: unknown keys {extra}')
+
+
+def _target(name: str, t: Mapping, where: str) -> Target:
+    _unknown(t, _TARGET, where)
+    gpu = _get(t, 'gpu_model', str, where, '')
+    tg = Target(name, _get(t, 'partition', str, where, required=True), _get(t, 'cpus', int, where, required=True),
+                _get(t, 'memory_gib', int, where, required=True), _get(t, 'max_minutes', int, where, required=True),
+                _get(t, 'variant', str, where, required=True), float(_get(t, 'price', float, where, 0.0)),
+                _get(t, 'numerics_ok', bool, where, False), _labels(t, where), gpu,
+                _get(t, 'cards', int, where, 0, required=bool(gpu)), _get(t, 'max_cards', int, where, 0, required=bool(gpu)),
+                _get(t, 'gpu_mib', int, where, 0), _get(t, 'cuda', str, where, ''))
+    if not tg.cpus or not tg.max_minutes:
+        raise RegistryError(f'{where}: cpus and max_minutes must be positive')
+    return tg
+
+
+def _machine(key: str, t: Mapping) -> Machine:
+    where = f'machine.{key}'
+    if not _KEY.fullmatch(key):
+        raise RegistryError(f'{where}: a key is [a-z0-9][a-z0-9_-]*')
+    if not isinstance(t, dict):
+        raise RegistryError(f'{where}: must be a table')
+    _unknown(t, _MACHINE, where)
+    access = _get(t, 'access', str, where, required=True)
+    if access not in ('ssh', 'local', 'slurm'):
+        raise RegistryError(f'{where}: access is ssh, local or slurm')
+    if access in ('ssh', 'slurm') and not _get(t, 'ssh', str, where, ''):
+        raise RegistryError(f'{where}: an {access} machine needs its ssh alias')
+    m = dict(key=key, access=access, ssh=_get(t, 'ssh', str, where, ''), hostname=_get(t, 'hostname', str, where, ''),
+             billed=_get(t, 'billed', bool, where, access == 'slurm'), price=float(_get(t, 'price', float, where, 0.0)),
+             labels=_labels(t, where), numerics_ok=_get(t, 'numerics_ok', bool, where, False),
+             cache=_abs(t, 'cache', where))
+    if access == 'slurm':
+        targets = _get(t, 'targets', dict, where, required=True)
+        if not targets:
+            raise RegistryError(f'{where}: a cluster needs a target')
+        bad = [n for n, v in targets.items() if not _KEY.fullmatch(n) or not isinstance(v, dict)]
+        if bad:
+            raise RegistryError(f'{where}: malformed targets {bad}')
+        m.update(gate=_abs(t, 'gate', where, required=True),
+                 targets={n: _target(n, v, f'{where}.targets.{n}') for n, v in targets.items()})
+        return Machine(**m)
+    s = _get(t, 'slots', dict, where, required=True)
+    _unknown(s, {'lock', 'count', 'queue'}, f'{where}.slots')
+    slots = Slots(_abs(s, 'lock', f'{where}.slots', required=True), _get(s, 'count', int, f'{where}.slots', required=True),
+                  _abs(s, 'queue', f'{where}.slots'))
+    if slots.count < 1:
+        raise RegistryError(f'{where}.slots: count must be positive')
+    gpus = _get(t, 'gpus', int, where, 0)
+    m.update(cpus=_get(t, 'cpus', int, where, required=True), memory_gib=_get(t, 'memory_gib', int, where, required=True),
+             gpus=gpus, gpu_model=_get(t, 'gpu_model', str, where, '', required=bool(gpus)),
+             gpu_mib=_get(t, 'gpu_mib', int, where, 0), cuda=_get(t, 'cuda', str, where, ''),
+             p2p=_get(t, 'p2p', bool, where, False), python=_abs(t, 'python', where, required=True),
+             work=_abs(t, 'work', where, required=True), slots=slots)
+    return Machine(**m)
+
+
+def load(text: str) -> Registry:
+    """Parse and validate ``pool.toml``. Raises RegistryError. Pure."""
+    try:
+        doc = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise RegistryError(f'not TOML: {e}') from None
+    if doc.get('schema') != SCHEMA:
+        raise RegistryError(f'unknown schema {doc.get("schema")!r} (this release reads {SCHEMA})')
+    _unknown(doc, _TOP, 'pool.toml')
+    check = _get(doc, 'check', list, 'pool.toml', list(DEFAULT_CHECK))
+    if not all(isinstance(x, str) and x for x in check):
+        raise RegistryError('pool.toml: check lists distribution names')
+    machines = _get(doc, 'machine', dict, 'pool.toml', {})
+    return Registry(_get(doc, 'project', str, 'pool.toml', required=True),
+                    _get(doc, 'repository', str, 'pool.toml', required=True), tuple(check),
+                    {k: _machine(k, v) for k, v in machines.items()}, _get(doc, 'gpu_need_mib', int, 'pool.toml', 6000))
+
+
+def load_file(path: str) -> Registry:
+    """Load the registry at ``path``; one that others than its owner may write is refused."""
+    st = os.stat(path)
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RegistryError(f'{path}: writable by others (chmod 600)')
+    with open(path, encoding='utf-8') as f:
+        return load(f.read())
+
+
+#: the keys whose values are inventory (``deny``); the rest are capabilities and role names. The
+#: slot files are not: they are the shared files brainspike's scripts name (a home-directory
+#: path among them is still the lint's)
+PRIVATE_KEYS = ('ssh', 'hostname', 'python', 'work', 'gate', 'cache', 'partition')
+
+
+def deny_tokens(doc: Mapping) -> set[str]:
+    """The registry's tokens the repository must not hold: the values of PRIVATE_KEYS, split
+    as the inventory lint splits them (``inventory.deny_tokens``). Pure."""
+    from ci_runners import inventory
+    vals: list[str] = []
+
+    def walk(t):
+        for k, v in t.items():
+            if isinstance(v, dict):
+                walk(v)
+            elif k in PRIVATE_KEYS and isinstance(v, str):
+                vals.append(v)
+    walk(doc)
+    return inventory.deny_tokens({'values': vals})
+
+
+# ------------------------------------------------------------------ pool status
+
+
+def probe(lock: str, count: int, queue: str) -> dict:
+    """What a host's row needs, read on the host without taking anything: its free CI slots
+    (``/proc/locks``, as ``slots._flocked``), the tickets waiting, the load, the available
+    memory and the cards' free MiB. Self-contained (its source runs on the host). Stdlib."""
+    import os
+    import subprocess
+
+    def flocked(path):
+        try:
+            st = os.stat(path)
+            with open('/proc/locks') as f:
+                for line in f:
+                    p = line.split()
+                    if len(p) >= 6 and p[1] == 'FLOCK':
+                        maj, mnr, ino = p[5].split(':')
+                        if int(ino) == st.st_ino and os.makedev(int(maj, 16), int(mnr, 16)) == st.st_dev:
+                            return True
+        except (OSError, ValueError, IndexError):
+            pass
+        return False
+    stem = lock[:-len('.lock')] if lock.endswith('.lock') else lock
+    paths = [lock] + [f'{stem}.{i}.lock' for i in range(2, count + 1)]
+    out = {'slots_free': sum(1 for p in paths if os.path.exists(p) and not flocked(p)),
+           'slots_missing': sum(1 for p in paths if not os.path.exists(p))}
+    try:
+        out['queue'] = sum(1 for n in os.listdir(queue or stem + '.queue') if n.endswith('.ticket'))
+    except OSError:
+        out['queue'] = 0
+    with open('/proc/loadavg') as f:
+        out['load'] = float(f.read().split()[0])
+    out['cpus'] = os.cpu_count() or 0
+    with open('/proc/meminfo') as f:
+        for line in f:
+            if line.startswith('MemAvailable:'):
+                out['mem_free_gib'] = int(line.split()[1]) // (1 << 20)
+    try:
+        r = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,noheader,nounits'],
+                           capture_output=True, text=True, timeout=30)
+        out['gpu_free'] = {int(a): int(b) for a, b in (x.split(',') for x in r.stdout.split('\n') if x.strip())} \
+            if r.returncode == 0 else {}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        out['gpu_free'] = {}
+    rt = os.environ.get('XDG_RUNTIME_DIR', '')
+    out['scope'] = bool(rt) and os.path.exists(os.path.join(rt, 'bus'))  # systemd-run --user works
+    return out
+
+
+def _probe_src() -> str:
+    import inspect
+    return inspect.getsource(probe)
+
+
+def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> dict:
+    """A host's row (``HostState`` fields and ours) from its probe ``p``, or with ``why`` it
+    could not be read. ``cpus_free``: the cores the load leaves, 0 while no slot is free (a
+    run would wait in line). Pure."""
+    row = _base_row(m.key, m, here)
+    row.update(gpu_model=m.gpu_model, cuda=m.cuda, multi_gpu=m.p2p, price=m.price, slots=m.slots.count if m.slots else 0)
+    if p is None:
+        row['problems'] = [why or 'not read']
+        return row
+    if p.get('slots_missing'):
+        row['problems'] = [f'{p["slots_missing"]} slot lock file(s) missing']
+    free = int(p.get('slots_free', 0))
+    cores = max(0, (m.cpus or int(p.get('cpus', 0))) - math.ceil(float(p.get('load', 0.0))))
+    row.update(slots_free=free, queue=int(p.get('queue', 0)), cpus_free=cores if free else 0,
+               mem_free_gib=int(p.get('mem_free_gib', 0)), gpu_free={int(k): int(v) for k, v in p.get('gpu_free', {}).items()},
+               scope=bool(p.get('scope')))
+    return row
+
+
+def _base_row(key: str, m: Machine, here: str) -> dict:
+    return {'key': key, 'name': key, 'access': m.access, 'labels': dict(m.labels), 'problems': [], 'queue': 0,
+            'gpu_free': {}, 'multi_gpu': False, 'gpu_model': '', 'cuda': '', 'cpus_free': 0, 'billed': m.billed,
+            'price': m.price, 'target': '', 'numerics_ok': m.numerics_ok, 'start_now': True, 'slots_free': 0,
+            'slots': 0, 'mem_free_gib': 0, 'here': bool(here) and m.hostname == here}
+
+
+@dataclasses.dataclass(frozen=True)
+class Node:
+    name: str
+    partition: str
+    state: str
+    cpus_idle: int
+    mem_free_mib: int
+    cards_free: int
+
+
+def _gres_count(gres: str) -> int:
+    n = 0
+    for part in gres.split(','):
+        part = part.split('(')[0]
+        if part.startswith('gpu'):
+            tail = part.rsplit(':', 1)[-1]
+            n += int(tail) if tail.isdigit() else 0
+    return n
+
+
+def parse_sinfo(text: str) -> list[Node]:
+    """``sinfo -h -N -O NodeHost:|,Partition:|,StateCompact:|,CPUsState:|,Memory:|,AllocMem:|,Gres:|,GresUsed:|``.
+    A line that does not parse is dropped. Pure."""
+    out = []
+    for line in text.splitlines():
+        f = line.split('|')
+        if len(f) < 8:
+            continue
+        try:
+            _, idle, _, _ = (int(x) for x in f[3].split('/'))
+            mem_free = int(f[4]) - int(f[5])
+        except ValueError:
+            continue
+        out.append(Node(f[0].strip(), f[1].strip().rstrip('*'), f[2].strip(), idle, mem_free,
+                        max(0, _gres_count(f[6]) - _gres_count(f[7]))))
+    return out
+
+
+def parse_assoc(text: str) -> dict[str, dict[str, int]]:
+    """``sacctmgr -nP show assoc user=$USER format=Partition,GrpTRES``: each partition's
+    (lower case) group limits, ``cpu`` and ``gpu`` (any ``gres/gpu*``). Pure."""
+    out: dict[str, dict[str, int]] = {}
+    for line in text.splitlines():
+        part, _, tres = line.partition('|')
+        lim: dict[str, int] = {}
+        typed = 0
+        for kv in tres.split(','):
+            k, _, v = kv.partition('=')
+            if not v.isdigit():
+                continue
+            if k == 'cpu':
+                lim['cpu'] = int(v)
+            elif k == 'gres/gpu':  # the untyped total wins over the typed ones
+                lim['gpu'] = int(v)
+            elif k.startswith('gres/gpu:'):
+                typed += int(v)
+        if typed and 'gpu' not in lim:
+            lim['gpu'] = typed
+        if part.strip():
+            out[part.strip().lower()] = lim
+    return out
+
+
+def parse_squeue(text: str) -> dict[str, dict[str, int]]:
+    """``squeue -h -u $USER -t RUNNING -o %P|%C|%b``: cores and cards the account's
+    running jobs hold, per partition (lower case). Pure."""
+    out: dict[str, dict[str, int]] = {}
+    for line in text.splitlines():
+        f = line.split('|')
+        if len(f) < 3 or not f[1].isdigit():
+            continue
+        d = out.setdefault(f[0].strip().lower(), {'cpu': 0, 'gpu': 0})
+        d['cpu'] += int(f[1])
+        d['gpu'] += _gres_count(f[2].replace('gres/', '').replace('gres:', ''))
+    return out
+
+
+def target_row(m: Machine, t: Target, nodes: Sequence[Node], assoc: Mapping[str, Mapping[str, int]],
+               used: Mapping[str, Mapping[str, int]], cards: int = 1, mem_gib: int = 1) -> dict:
+    """A cluster target's row: its best node's idle cores and free cards (an ``idle`` or
+    ``mix`` node of its partition), less what the account's running jobs hold of its
+    association's ``GrpTRES``; ``start_now`` if a job of the target (``cards`` cards on a
+    GPU target) would start now. Pure."""
+    row = _base_row(f'{m.key}:{t.name}', m, '')
+    row.update(target=t.name, gpu_model=t.gpu_model, cuda=t.cuda or t.variant, price=t.price,
+               numerics_ok=t.numerics_ok, labels=dict(t.labels), multi_gpu=t.max_cards >= 2)
+    part = t.partition.lower()
+    lim, u = assoc.get(part, {}), used.get(part, {})
+    room_cpu = lim['cpu'] - u.get('cpu', 0) if 'cpu' in lim else None
+    room_gpu = lim['gpu'] - u.get('gpu', 0) if 'gpu' in lim else None
+    mine = [n for n in nodes if n.partition.lower() == part and n.state.rstrip('*~#!%$@^-') in ('idle', 'mix')]
+    need_cpu = t.cpus if not t.gpu_model else 1
+    need_cards = min(cards, t.max_cards) if t.gpu_model else 0
+    best = max(mine, key=lambda n: (n.cards_free, n.cpus_idle), default=None)
+    cpus = best.cpus_idle if best else 0
+    free_cards = best.cards_free if (best and t.gpu_model) else 0
+    if room_cpu is not None:
+        cpus = min(cpus, max(0, room_cpu))
+    if room_gpu is not None:
+        free_cards = min(free_cards, max(0, room_gpu))
+    fits = [n for n in mine if n.cpus_idle >= need_cpu and n.mem_free_mib >= min(t.memory_gib, max(1, mem_gib)) * 1024
+            and n.cards_free >= need_cards]
+    start = bool(fits) and (room_cpu is None or room_cpu >= need_cpu) and (room_gpu is None or room_gpu >= need_cards)
+    row.update(cpus_free=cpus, gpu_free={i: t.gpu_mib for i in range(free_cards)}, start_now=start,
+               slots_free=1 if start else 0)
+    if not mine:
+        row['problems'] = [f'no usable node in its partition']
+    return row
+
+
+Runner = Callable[..., subprocess.CompletedProcess]
+
+
+def _ssh(alias: str) -> list[str]:
+    return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', alias]
+
+
+def _remote(m: Machine, argv: Sequence[str]) -> list[str]:
+    """``argv`` run on ``m``: through ssh as one quoted command line, or here for a local machine."""
+    return list(argv) if m.access == 'local' else [*_ssh(m.ssh), shlex.join(argv)]
+
+
+def probe_host(m: Machine, run: Runner = subprocess.run, here: str = '') -> dict:
+    src = _probe_src() + f'\nimport json; print(json.dumps(probe({m.slots.lock!r}, {m.slots.count}, {m.slots.queue!r})))\n'
+    try:
+        r = run(_remote(m, ['/usr/bin/python3', '-I', '-']), input=src, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return host_row(m, None, f'probe failed: {type(e).__name__}', here)
+    if r.returncode != 0:
+        return host_row(m, None, f'unreachable (exit {r.returncode})', here)
+    try:
+        return host_row(m, json.loads(r.stdout.strip().splitlines()[-1]), here=here)
+    except (ValueError, IndexError):
+        return host_row(m, None, 'probe answer not JSON', here)
+
+
+CLUSTER_PROBE = ('sinfo -h -N -O "NodeHost:|,Partition:|,StateCompact:|,CPUsState:|,Memory:|,AllocMem:|,Gres:|,GresUsed:|"; '
+                 'echo ===; sacctmgr -nP show assoc user="$USER" format=Partition,GrpTRES; '
+                 'echo ===; squeue -h -u "$USER" -t RUNNING -o "%P|%C|%b"')
+
+
+def probe_cluster(m: Machine, run: Runner = subprocess.run, cards: int = 1, mem_gib: int = 1) -> list[dict]:
+    try:
+        r = run([*_ssh(m.ssh), CLUSTER_PROBE], capture_output=True, text=True, timeout=90)
+        parts = r.stdout.split('===\n') if r.returncode == 0 else []
+    except (OSError, subprocess.SubprocessError):
+        parts = []
+    if len(parts) != 3:
+        rows = []
+        for t in m.targets.values():
+            row = target_row(m, t, [], {}, {})
+            row.update(problems=['cluster unreachable'], start_now=False)
+            rows.append(row)
+        return rows
+    nodes, assoc, used = parse_sinfo(parts[0]), parse_assoc(parts[1]), parse_squeue(parts[2])
+    return [target_row(m, t, nodes, assoc, used, cards, mem_gib) for t in m.targets.values()]
+
+
+def status(reg: Registry, run: Runner = subprocess.run, here: str | None = None, cards: int = 1,
+           mem_gib: int = 1) -> list[dict]:
+    """``pool status``: every machine's rows, in the registry's order, probed in parallel."""
+    here = socket.gethostname() if here is None else here
+    out: dict[str, list[dict]] = {}
+
+    def one(m: Machine) -> None:
+        out[m.key] = probe_cluster(m, run, cards, mem_gib) if m.access == 'slurm' else [probe_host(m, run, here)]
+    threads = [threading.Thread(target=one, args=(m,)) for m in reg.machines.values()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return [row for k in reg.machines for row in out.get(k, [])]
+
+
+def table(rows: Sequence[Mapping]) -> str:
+    """``pool status`` for people. Pure."""
+    head = ('machine', 'slots', 'queue', 'cores', 'mem GiB', 'cards free', 'model', 'billed', 'start', 'numerics', 'problems')
+    lines = [head]
+    for r in rows:
+        cards = ','.join(f'{i}:{v // 1024}G' for i, v in sorted(r['gpu_free'].items())) if r['gpu_free'] else '-'
+        slots = f'{r["slots_free"]}/{r["slots"]}' if r['access'] != 'slurm' else '-'
+        lines.append((r['key'] + (' (here)' if r.get('here') else ''), slots, str(r['queue']), str(r['cpus_free']),
+                      str(r['mem_free_gib']) if r['access'] != 'slurm' else '-', cards, r['gpu_model'] or '-',
+                      f'{r["price"]:g}/h' if r['billed'] else 'free', 'now' if r['start_now'] else 'no',
+                      'ok' if r['numerics_ok'] else 'not passed', '; '.join(r['problems']) or '-'))
+    w = [max(len(x[i]) for x in lines) for i in range(len(head))]
+    return '\n'.join('  '.join(c.ljust(w[i]) for i, c in enumerate(x)).rstrip() for x in lines)
+
+
+# ------------------------------------------------------------------ picking a machine
+
+
+@dataclasses.dataclass(frozen=True)
+class Ask:
+    """What a pool run asks of a machine: cores, memory, cards (of a model, if named)."""
+    cpus: int = 1
+    memory_gib: int = 8
+    cards: int = 0
+    gpu_model: str = ''
+
+
+def parse_gpu(s: str) -> tuple[str, int]:
+    """``MODEL[:COUNT]`` (``any`` for any model) -> (model or '', count). Pure."""
+    m = _GPU.fullmatch(s.lower())
+    if not m:
+        raise ValueError(f'--gpu {s!r}: MODEL[:COUNT]')
+    return ('' if m[1] == 'any' else m[1]), int(m[2] or 1)
+
+
+def fits(row: Mapping, ask: Ask, m: Machine, need_mib: int) -> str:
+    """Why the row's machine cannot run ``ask`` at all ('' if it can, now or later). Pure."""
+    if row['problems']:
+        return '; '.join(row['problems'])
+    if ask.cards:
+        model = row['gpu_model']
+        if not model:
+            return 'no cards'
+        if not row['target']:  # a host's cards go by the parts' leases, which a pool run does not take yet
+            return 'a host\'s cards are leased to its parts (a GPU pool run goes to a cluster target)'
+        if ask.gpu_model and model != ask.gpu_model:
+            return f'cards {model}, not {ask.gpu_model}'
+        total = m.targets[row['target']].max_cards if row['target'] else m.gpus
+        if total < ask.cards:
+            return f'{total} card(s), {ask.cards} asked'
+        if ask.cards >= 2 and not row['multi_gpu']:
+            return 'no P2P self-test passed for two cards'
+    elif row['target'] and m.targets[row['target']].gpu_model:
+        return 'a GPU target, and no card asked'
+    if row['target']:
+        t = m.targets[row['target']]
+        if ask.memory_gib > t.memory_gib:
+            return f'{t.memory_gib} GiB a node, {ask.memory_gib} asked'
+        if not t.gpu_model and ask.cpus > t.cpus:
+            return f'{t.cpus} cores a job, {ask.cpus} asked'
+    else:
+        if ask.cpus > m.cpus:
+            return f'{m.cpus} cores, {ask.cpus} asked'
+        if ask.memory_gib > m.memory_gib:
+            return f'{m.memory_gib} GiB, {ask.memory_gib} asked'
+    return ''
+
+
+def free_now(row: Mapping, ask: Ask, need_mib: int) -> bool:
+    """Whether the row can start ``ask`` now (a free slot or a job that starts now, the
+    cores and the cards). Pure."""
+    if row['target']:
+        return bool(row['start_now']) and (not ask.cards or len(row['gpu_free']) >= ask.cards)
+    if row['slots_free'] < 1 or row['cpus_free'] < ask.cpus or row['mem_free_gib'] < ask.memory_gib:
+        return False
+    return not ask.cards or sum(1 for v in row['gpu_free'].values() if v >= need_mib) >= ask.cards
+
+
+def pick(rows: Sequence[Mapping], ask: Ask, reg: Registry, *, here_ok: bool = False, only: str = '') -> tuple[list[dict], list[dict], list[str]]:
+    """``(free now, wait in line, skipped)``: the rows that can run ``ask`` now in the
+    order a run tries them, free hosts first (fewest cores in use), then the billed
+    cluster targets that start it now (cheapest first); the hosts it could wait on for a
+    slot (shortest queue first); and why each other row was skipped. The caller's own host
+    is skipped unless ``here_ok``; ``only`` keeps the rows of one machine or target.
+    Pure."""
+    now, later, skipped = [], [], []
+    for r in rows:
+        key = r['key']
+        if only and key != only and key.split(':')[0] != only:
+            continue
+        m = reg.machines[key.split(':')[0]]
+        if r.get('here') and not here_ok:
+            skipped.append(f'{key}: the caller\'s own host (--here to allow)')
+            continue
+        why = fits(r, ask, m, reg.gpu_need_mib)
+        if why:
+            skipped.append(f'{key}: {why}')
+        elif free_now(r, ask, reg.gpu_need_mib):
+            now.append(dict(r))
+        elif not r['target']:
+            later.append(dict(r))
+        else:
+            skipped.append(f'{key}: cannot start it now')
+    now.sort(key=lambda r: (r['billed'], r['price'] if r['billed'] else 0, -r['cpus_free']))
+    later.sort(key=lambda r: (r['queue'], -r['slots']))
+    return now, later, skipped
+
+
+# ------------------------------------------------------------------ the env check
+
+FINGERPRINT = r'''
+import importlib.metadata as m, json, subprocess, sys
+out = {}
+for d in json.loads(sys.argv[1]):
+    try:
+        dist = m.distribution(d)
+    except m.PackageNotFoundError:
+        out[d] = None
+        continue
+    v, du = dist.version, dist.read_text('direct_url.json')
+    if du and '"dir_info"' in du:
+        url = json.loads(du).get('url', '')
+        path = url[7:] if url.startswith('file://') else ''
+        r = subprocess.run(['git', '-C', path, 'rev-parse', 'HEAD'], capture_output=True, text=True) if path else None
+        v += '@' + (r.stdout.strip()[:12] if r is not None and r.returncode == 0 else 'editable')
+    out[d] = v
+print(json.dumps(out))
+'''
+
+
+def fingerprint(argv_prefix: Sequence[str], python: str, dists: Sequence[str], run: Runner = subprocess.run) -> dict:
+    """The versions of ``dists`` in the env of ``python`` (``argv_prefix``: how to reach its
+    machine, ``[]`` for here); an editable install's version carries its commit."""
+    cmd = [python, '-I', '-c', FINGERPRINT, json.dumps(list(dists))]
+    argv = [*argv_prefix, shlex.join(cmd)] if argv_prefix else cmd
+    r = run(argv, capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError(f'the env check could not run {python}: {(r.stderr or "").strip()[-300:]}')
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+def env_diff(mine: Mapping[str, str | None], theirs: Mapping[str, str | None]) -> list[str]:
+    """The differences between two fingerprints: a version, a missing distribution, or the
+    commit of an install that is editable on both sides. Pure."""
+    out = []
+    for d in sorted(set(mine) | set(theirs)):
+        a, b = mine.get(d), theirs.get(d)
+        if a is None or b is None:
+            if a != b:
+                out.append(f'{d}: {a or "missing"} here, {b or "missing"} there')
+            continue
+        va, _, ca = a.partition('@')
+        vb, _, cb = b.partition('@')
+        if va != vb or (ca and cb and ca != cb):
+            out.append(f'{d}: {a} here, {b} there')
+    return out
+
+
+# ------------------------------------------------------------------ staging the caller's tree
+
+
+def tree_files(root: str, run: Runner = subprocess.run) -> list[str]:
+    """The files a run stages: tracked, and untracked but not ignored, as git lists them."""
+    r = run(['git', '-C', root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], capture_output=True,
+            timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError(f'{root}: not a git checkout')
+    return sorted({p for p in r.stdout.decode().split('\0') if p and os.path.lexists(os.path.join(root, p))})
+
+
+def git_dir(root: str, dest: str, base: str = 'origin/main', run: Runner = subprocess.run) -> str:
+    """A small git repository for the staged tree, so that commands which read git (``git
+    ls-files``, ``git merge-base origin/main HEAD``, a diff against it) see what they see in
+    ``root``. It holds HEAD, fetched shallow down to its merge base with ``base``, and
+    ``refs/remotes/<base>`` at that merge base: the same merge base, so the same diffs. Its
+    index is built here: HEAD, plus the files added to the index but not committed. Returns
+    its path (``dest/.git``), or '' where ``root`` has no HEAD. A branch without the merge
+    base gets HEAD alone, and ``base`` at HEAD."""
+    def git(*a, cwd=root, **kw):
+        return run(['git', '-C', cwd, *a], capture_output=True, text=True, timeout=600, **kw)
+    head = git('rev-parse', 'HEAD').stdout.strip()
+    if not head:
+        return ''
+    mb = git('merge-base', base, 'HEAD').stdout.strip() or head
+    depth = int(git('rev-list', '--count', f'{mb}..{head}').stdout.strip() or 0) + 1
+    gd = os.path.join(dest, '.git')
+    for argv in (['init', '-q', dest], ['-C', dest, 'fetch', '-q', '--no-tags', f'--depth={depth}', f'file://{root}', head],
+                 ['-C', dest, 'update-ref', 'refs/heads/pool', head], ['-C', dest, 'symbolic-ref', 'HEAD', 'refs/heads/pool'],
+                 ['-C', dest, 'update-ref', f'refs/remotes/{base}', mb]):
+        r = run(['git', *argv], capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            raise RuntimeError(f'git {argv[2] if argv[0] == "-C" else argv[0]}: {r.stderr.strip()[-300:]}')
+    env = {**os.environ, 'GIT_DIR': gd, 'GIT_WORK_TREE': root}
+    run(['git', 'read-tree', 'HEAD'], env=env, capture_output=True, timeout=600)
+    added = git('diff', '--cached', '--name-only', '--diff-filter=A', '-z', 'HEAD').stdout.split('\0')
+    added = [p for p in added if p]
+    if added:
+        run(['git', 'add', '--', *added], env=env, capture_output=True, timeout=600)
+    return gd
+
+
+def bundle(root: str, files: Iterable[str], pkg: str | None = None, git: str = '') -> bytes:
+    """A tar of ``files`` under ``ws/``, with ``git`` (:func:`git_dir`) as ``ws/.git`` and,
+    with ``pkg``, the ``ci_runners`` package under ``pkg/ci_runners/`` (what the host side
+    runs). Links stay links."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode='w') as tar:
+        for p in files:
+            tar.add(os.path.join(root, p), arcname=f'ws/{p}', recursive=False)
+        if git:
+            tar.add(git, arcname='ws/.git')
+        if pkg:
+            for n in sorted(os.listdir(pkg)):
+                if n.endswith('.py'):
+                    tar.add(os.path.join(pkg, n), arcname=f'pkg/ci_runners/{n}', recursive=False)
+    return buf.getvalue()
+
+
+def head_of(root: str) -> str:
+    r = subprocess.run(['git', '-C', root, 'rev-parse', '--short=12', 'HEAD'], capture_output=True, text=True)
+    d = subprocess.run(['git', '-C', root, 'status', '--porcelain', '--untracked-files=no'], capture_output=True, text=True)
+    return r.stdout.strip() + (' + local changes' if d.stdout.strip() else '')
+
+
+# ------------------------------------------------------------------ the host side
+
+
+def _say(msg: str) -> None:
+    print(f'pool: {msg}', file=sys.stderr, flush=True)
+
+
+def _remove_stale(work: str, keep: str, now: float) -> None:
+    try:
+        names = os.listdir(work)
+    except OSError:
+        return
+    for n in names:
+        p = os.path.join(work, n)
+        if n.startswith(RUN_PREFIX) and p != keep:
+            try:
+                if now - os.lstat(p).st_mtime > STALE_DAYS * 86400:
+                    subprocess.run(['rm', '-rf', '--one-file-system', p], timeout=600)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+
+def remote(argv: Sequence[str], stdin=None) -> int:
+    """The host side of a run (``argv``: the run directory and the spec as JSON), started
+    in ``<dir>/ws`` by ``run_host``. It takes a slot of the host's queue (waiting in line,
+    or with ``no_wait`` giving up after one round, exit 75), then runs the command under
+    ``part.supervise``. A closed stdin (the caller is gone) or a signal ends the command;
+    the slot is released when this process ends. The run directory is removed at the end."""
+    from ci_runners import part, slots as slots_mod
+    d, spec = argv[0], json.loads(argv[1])
+    stdin = sys.stdin if stdin is None else stdin
+
+    def stop(signum, _frame):  # until the supervisor runs, which installs its own
+        raise SystemExit(128 + signum)
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, stop)
+
+    def watch():  # EOF on stdin: the caller (or its ssh) is gone
+        try:
+            while stdin.read(4096):
+                pass
+        except (OSError, ValueError):
+            pass
+        os.kill(os.getpid(), signal.SIGTERM)
+    threading.Thread(target=watch, daemon=True).start()
+    q = None
+    try:
+        _remove_stale(os.path.dirname(d), d, time.time())
+        q = slots_mod.SlotQueue(spec['lock'], int(spec['count']), spec.get('queue') or None, float(spec.get('poll', 3)),
+                                default_project=spec['project'])
+        q.take_ticket(spec['project'], 'pool run: ' + spec['command'][:200])
+        fd, shown, rounds = None, None, 0
+        deadline = time.time() + float(spec['queue_seconds'])
+        while fd is None:
+            fd = q.try_take(spec['project'], {})
+            rounds += 1
+            if fd is not None:
+                break
+            if spec.get('no_wait') and rounds >= 2:
+                _say('no CI slot free on this host (--no-wait)')
+                return NOT_STARTED
+            if time.time() >= deadline:
+                _say('no CI slot within the queue bound')
+                return NOT_STARTED
+            ahead = sum(1 for t in q.waiting() if t.seq < q.seq)
+            if ahead != shown:
+                _say(f'waiting in line for a CI slot: {ahead} ahead')
+                shown = ahead
+            time.sleep(q.poll)
+        _say(f"holding CI slot {q._index(fd) + 1} of {spec['count']}")
+        env = {k: v for k, v in os.environ.items() if k in ('HOME', 'USER', 'LOGNAME', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS')}
+        envd = os.path.dirname(os.path.dirname(spec['python']))
+        tmp = os.path.join(d, 'tmp')
+        os.makedirs(tmp, mode=0o700, exist_ok=True)
+        env.update({'PATH': f'{envd}/bin:/usr/local/bin:/usr/bin:/bin', 'CONDA_PREFIX': envd, 'LANG': 'C.UTF-8',
+                    'TMPDIR': tmp, 'CI_PROJECT': spec['project'], 'CUDA_DEVICE_ORDER': 'PCI_BUS_ID',
+                    'CUDA_VISIBLE_DEVICES': _cards(spec), 'CI_POOL_RUN': '1', 'PYTHONNOUSERSITE': '1'})
+        env.update(spec.get('variables', {}))
+        os.environ.clear()
+        os.environ.update(env)
+        record = os.path.join(d, 'record')
+        os.makedirs(record, exist_ok=True)
+        argv_cmd = part.command_argv(spec['command'])
+        cap = int(spec['memory_gib']) << 30
+        rc = part.supervise(record, float(spec['timeout_seconds']), argv_cmd, cap)
+        return _exit_code(_read(os.path.join(record, 'exit.json')), rc)
+    except SystemExit as e:
+        return int(e.code) if isinstance(e.code, int) else EXIT_FAILED
+    except Exception as e:  # the host side failed, not the command
+        _say(f'failed: {type(e).__name__}: {e}')
+        return EXIT_FAILED
+    finally:
+        if q is not None and q.ticket and os.path.exists(q.ticket):
+            os.unlink(q.ticket)
+        subprocess.run(['rm', '-rf', '--one-file-system', d], timeout=600)
+
+
+def _cards(spec: Mapping) -> str:
+    """The cards a run on a host uses: none for a CPU run, else the ``cards`` with the most
+    free memory (at least ``need_mib``) by ``nvidia-smi`` now."""
+    n = int(spec.get('cards', 0))
+    if not n:
+        return ''
+    try:
+        r = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,noheader,nounits'],
+                           capture_output=True, text=True, timeout=30)
+        free = sorted(((int(b), int(a)) for a, b in (x.split(',') for x in r.stdout.split('\n') if x.strip())),
+                      reverse=True)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        free = []
+    ok = [i for f, i in free if f >= int(spec.get('need_mib', 0))][:n]
+    if len(ok) < n:
+        raise SystemExit(NOT_STARTED)
+    return ','.join(str(i) for i in sorted(ok))
+
+
+def _read(path: str) -> dict:
+    try:
+        with open(path, encoding='utf-8') as f:
+            v = json.load(f)
+        return v if isinstance(v, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _exit_code(ex: Mapping, fallback: int = 1) -> int:
+    """A command's exit code from the supervisor's ``exit.json``. Pure."""
+    if ex.get('timed_out'):
+        return EXIT_TIMEOUT
+    if ex.get('oom_kills'):
+        return EXIT_OOM
+    rc = ex.get('rc')
+    if type(rc) is int:
+        return rc if rc >= 0 else 128 - rc
+    return EXIT_SIGNALLED if ex.get('signalled') else fallback
+
+
+# ------------------------------------------------------------------ the caller's side
+
+
+@dataclasses.dataclass
+class RunArgs:
+    command: str
+    root: str
+    ask: Ask
+    timeout_min: float = DEFAULT_TIMEOUT_MIN
+    queue_min: float = DEFAULT_QUEUE_MIN
+    no_wait: bool = False
+    env_mismatch: str = 'refuse'
+    python: str = ''
+    variables: Mapping[str, str] = dataclasses.field(default_factory=dict)
+
+
+def forwarded(env: Mapping[str, str]) -> dict[str, str]:
+    """The caller's variables a run keeps (:data:`FORWARD`). Pure."""
+    return {k: v for k, v in env.items() if FORWARD.fullmatch(k)}
+
+
+def _env_ok(reg: Registry, a: RunArgs, prefix: Sequence[str], python: str, run: Runner) -> bool:
+    try:
+        mine = fingerprint([], a.python or sys.executable, reg.check, run)
+        theirs = fingerprint(prefix, python, reg.check, run)
+    except (RuntimeError, ValueError, IndexError, OSError, subprocess.SubprocessError) as e:
+        _say(f'env check failed: {e}')
+        return a.env_mismatch == 'warn'
+    diff = env_diff(mine, theirs)
+    if not diff:
+        _say(f'env check passed ({len(reg.check)} distributions)')
+        return True
+    _say('the env there differs from yours:\n  ' + '\n  '.join(diff))
+    if a.env_mismatch == 'warn':
+        _say('running anyway (--env-mismatch warn): the result may not be what your env gives')
+        return True
+    _say('refused (--env-mismatch warn runs anyway); bring the two envs to the same versions')
+    return False
+
+
+def run_host(reg: Registry, m: Machine, a: RunArgs, files: Sequence[str], run: Runner = subprocess.run,
+             popen: Callable = subprocess.Popen, run_id: str = '') -> int:
+    """Stage the tree on host ``m`` and run there (``remote``): returns the command's code."""
+    prefix = [] if m.access == 'local' else _ssh(m.ssh)
+    if not _env_ok(reg, a, prefix, m.python, run):
+        return EXIT_ENV
+    d = os.path.join(m.work, run_id or f'{RUN_PREFIX}{int(time.time())}-{os.getpid()}')
+    pkg = os.path.dirname(os.path.abspath(__file__))
+    with tempfile.TemporaryDirectory(prefix='pool-git-') as g:
+        data = bundle(a.root, files, pkg, git_dir(a.root, g))
+    r = run(_remote(m, ['sh', '-c', 'umask 077 && mkdir -p "$1" && tar -x -C "$1"', 'sh', d]), input=data,
+            capture_output=True, timeout=600)
+    if r.returncode != 0:
+        _say(f'{m.key}: staging failed: {(r.stderr or b"").decode(errors="replace").strip()[-300:]}')
+        return NOT_STARTED
+    spec = {'lock': m.slots.lock, 'count': m.slots.count, 'queue': m.slots.queue, 'project': reg.project,
+            'command': a.command, 'python': m.python, 'memory_gib': a.ask.memory_gib, 'cards': a.ask.cards,
+            'need_mib': reg.gpu_need_mib, 'timeout_seconds': a.timeout_min * 60, 'no_wait': a.no_wait,
+            'queue_seconds': a.queue_min * 60 if a.no_wait else max(a.queue_min, 24 * 60) * 60,
+            'variables': dict(a.variables)}
+    launch = ('import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.pool import remote; '
+              'sys.exit(remote(sys.argv[1:]))')
+    argv = ['sh', '-c', 'cd "$1/ws" && shift && exec "$@"', 'sh', d, '/usr/bin/python3', '-I', '-c', launch,
+            f'{d}/pkg', d, json.dumps(spec)]
+    p = popen(_remote(m, argv), stdin=subprocess.PIPE)  # stdin stays open: its close tells the host we are gone
+    try:
+        rc = p.wait()
+        if rc == 255 and m.access == 'ssh':
+            _say(f'{m.key}: ssh failed (exit 255)')
+            return EXIT_FAILED
+        return rc
+    except BaseException:
+        p.terminate()  # ssh ends; the host side sees its stdin close and ends the command
+        try:
+            p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            p.kill()
+        raise
+
+
+class OwnerGate:
+    """A cluster account's ``ci-slurm-gate`` reached through the account owner's login: the
+    verbs the parts' driver uses (``slurmpart.Gate``), with the verb passed the way the
+    CI key's forced command passes it (``SSH_ORIGINAL_COMMAND``)."""
+
+    def __init__(self, m: Machine, run: Runner = subprocess.run) -> None:
+        self.m, self.run = m, run
+
+    def _cmd(self, words: Sequence[str]) -> str:
+        return f'SSH_ORIGINAL_COMMAND={shlex.quote(shlex.join(["ci-slurm-gate", *words]))} exec {shlex.quote(self.m.gate)}'
+
+    def call(self, verb: str, *args: str, data: bytes = b'', timeout: float = 120) -> bytes:
+        r = self.run([*_ssh(self.m.ssh), self._cmd([verb, *args])], input=data, capture_output=True, timeout=timeout)
+        if r.returncode != 0:
+            why = (r.stderr or b'').decode(errors='replace').strip().removeprefix('ci-slurm-gate: refused: ')
+            raise RuntimeError(f'gate {verb}: {why[-300:] or f"exit {r.returncode}"}')
+        return r.stdout or b''
+
+    def json(self, verb: str, *args: str, data: bytes = b'', timeout: float = 120) -> dict:
+        return json.loads(self.call(verb, *args, data=data, timeout=timeout))
+
+    def stage(self, src: str, key: str) -> None:
+        shim = f'sh -c \'SSH_ORIGINAL_COMMAND="ci-slurm-gate stage $*" exec {self.m.gate}\' x'
+        r = self.run(['rsync', '-a', '--delete', '-e', shlex.join(_ssh(self.m.ssh)[:-1]), f'--rsync-path={shim}',
+                      src.rstrip('/') + '/', f'{self.m.ssh}:{key}/ws/'], capture_output=True, timeout=1800)
+        if r.returncode != 0:
+            raise RuntimeError(f'stage: rsync exit {r.returncode}: {(r.stderr or b"").decode(errors="replace")[-300:]}')
+
+
+def run_key(repository: str, now: float, pid: int) -> str:
+    """A pool run's key below the gate's ``work/`` (``slurmgate.KEY``): the repository, a
+    run number from the clock and an id of its own. Pure."""
+    return f'{repository.lower()}/{int(now * 1000)}-1/pool-{pid}-1'
+
+
+def run_cluster(reg: Registry, m: Machine, t: Target, a: RunArgs, files: Sequence[str], run: Runner = subprocess.run,
+                sleep: Callable[[float], None] = time.sleep, out=None) -> int:
+    """Run on cluster target ``t``: stage through the gate, submit, relay the log, and return
+    the command's code; NOT_STARTED if the job did not start within ``queue_min``. The job is
+    cancelled on any way out before its end."""
+    out = sys.stdout.buffer if out is None else out
+    python = os.path.join(m.base, 'envs', f'{reg.project}-{t.variant}', 'bin', 'python')
+    if not _env_ok(reg, a, _ssh(m.ssh), python, run):
+        return EXIT_ENV
+    if a.timeout_min > t.max_minutes:
+        _say(f'{m.key}:{t.name}: at most {t.max_minutes} min a job; --timeout {a.timeout_min:g} asked')
+        return EXIT_USAGE
+    g = OwnerGate(m, run)
+    key = run_key(reg.repository, time.time(), os.getpid())
+    with tempfile.TemporaryDirectory(prefix='pool-') as tmp:
+        with tempfile.TemporaryDirectory(prefix='pool-git-') as gtmp, \
+                tarfile.open(fileobj=io.BytesIO(bundle(a.root, files, git=git_dir(a.root, gtmp)))) as tar:
+            tar.extractall(tmp, filter='tar')
+        g.stage(os.path.join(tmp, 'ws'), key)
+    req = {'project': reg.project, 'target': t.name, 'cards': a.ask.cards if t.gpu_model else 0,
+           'minutes': a.timeout_min, 'queue_minutes': a.queue_min, 'memory': f'{a.ask.memory_gib}G',
+           'command': a.command, 'variables': dict(a.variables),
+           'run_url': f'https://github.com/{reg.repository}/actions/runs/0',  # a pool run has no run
+           'host': 'pool', 'resume': False}
+    ended, offset, started, job = False, 0, None, '?'
+    t0 = time.monotonic()
+    try:  # from the submit on: a submit that ran sbatch and then failed still leaves a job to cancel
+        job = g.json('submit', key, data=json.dumps(req).encode())['job']
+        _say(f'{m.key}:{t.name}: job {job} submitted')
+        while True:
+            st = _status(g, key, sleep)
+            state = str(st.get('state', 'UNKNOWN'))
+            if state == 'PENDING':
+                if time.monotonic() - t0 > a.queue_min * 60:
+                    _say(f'{m.key}:{t.name}: not started within {a.queue_min:g} min ({st.get("reason") or "pending"}); withdrawn')
+                    return NOT_STARTED
+            elif started is None:
+                started = time.monotonic()
+                _say(f'{m.key}:{t.name}: running on its node')
+            if int(st.get('log_size') or 0) > offset:
+                chunk = g.call('log', key, str(offset))
+                out.write(chunk)
+                out.flush()
+                offset += len(chunk)
+                if offset < int(st.get('log_size') or 0):
+                    continue
+            if state not in ('PENDING', 'CONFIGURING', 'RUNNING', 'COMPLETING', 'UNKNOWN') or st.get('exit'):
+                ended = True
+                ex = st.get('exit') or {}
+                if not ex:
+                    _say(f'{m.key}:{t.name}: job ended {state} without an exit record')
+                    return 1
+                return _exit_code(ex)
+            sleep(POLL)
+    finally:
+        if not ended:
+            try:
+                g.json('cancel', key)
+                _say(f'{m.key}:{t.name}: job {job} cancelled')
+            except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as e:
+                _say(f'{m.key}:{t.name}: cancel failed ({e}); the gate\'s reaper ends it at its deadline')
+
+
+def _status(g: OwnerGate, key: str, sleep: Callable[[float], None], tries: int = 3) -> dict:
+    """The job's status, a failed read tried again (``tries`` in all) before it fails the run."""
+    for i in range(tries):
+        try:
+            return g.json('status', key)
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError):
+            if i == tries - 1:
+                raise
+            sleep(POLL)
+    raise AssertionError('unreachable')
+
+
+def pool_run(reg: Registry, a: RunArgs, *, only: str = '', here_ok: bool = False, run: Runner = subprocess.run,
+             popen: Callable = subprocess.Popen, rows: Sequence[Mapping] | None = None) -> int:
+    """``pool run``: pick a machine by ``pool status`` and run there."""
+    rows = status(reg, run, cards=max(1, a.ask.cards), mem_gib=a.ask.memory_gib) if rows is None else rows
+    now, later, skipped = pick(rows, a.ask, reg, here_ok=here_ok, only=only)
+    for s in skipped:
+        _say(f'skipped {s}')
+    files = tree_files(a.root, run)
+    _say(f'staging {len(files)} files of {head_of(a.root)}')
+    tried = []
+    for r in now:
+        key = r['key']
+        m = reg.machines[key.split(':')[0]]
+        _say(f'on {key} (free now)')
+        try:
+            rc = (run_cluster(reg, m, m.targets[r['target']], a, files, run) if r['target']
+                  else run_host(reg, m, a, files, run, popen))
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as e:
+            _say(f'{key}: failed: {e}')
+            rc = NOT_STARTED
+        if rc != NOT_STARTED:
+            return rc
+        tried.append(key)
+    if later and not a.no_wait:
+        r = later[0]
+        m = reg.machines[r['key']]
+        _say(f'no machine free now; waiting in line on {r["key"]} (queue {r["queue"]})')
+        rc = run_host(reg, m, a, files, run, popen)
+        return EXIT_NO_ROOM if rc == NOT_STARTED else rc
+    _say('no machine can start it now' + (f' (tried {", ".join(tried)})' if tried else '')
+         + ('; --no-wait' if later else ''))
+    return EXIT_NO_ROOM
+
+
+# ------------------------------------------------------------------ CLI
+
+
+def main(argv: Sequence[str], etc: str) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog='ci-run pool')
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    s = sub.add_parser('status')
+    s.add_argument('--json', action='store_true')
+    r = sub.add_parser('run')
+    r.add_argument('--cpu', type=int, default=8)
+    r.add_argument('--mem', type=int, default=32, help='GiB')
+    r.add_argument('--gpu', default='', help='MODEL[:COUNT], MODEL "any" for any')
+    r.add_argument('--on', default='', help='a machine or <machine>:<target> only')
+    r.add_argument('--here', action='store_true', help='the caller\'s own host may run it too')
+    r.add_argument('--timeout', type=float, default=DEFAULT_TIMEOUT_MIN, help='min')
+    r.add_argument('--queue-minutes', type=float, default=DEFAULT_QUEUE_MIN)
+    r.add_argument('--no-wait', action='store_true')
+    r.add_argument('--env-mismatch', choices=('refuse', 'warn'), default='refuse')
+    r.add_argument('--python', default='', help='your env\'s python (default: the one running this)')
+    r.add_argument('--dir', default='.', help='the checkout to stage (default: .)')
+    r.add_argument('command', nargs=argparse.REMAINDER)
+    a = ap.parse_args(list(argv))
+    path = os.path.join(etc, 'pool.toml')
+    try:
+        reg = load_file(path)
+    except (OSError, RegistryError) as e:
+        print(f'pool: {e}', file=sys.stderr)
+        return EXIT_USAGE
+    if a.cmd == 'status':
+        rows = status(reg)
+        print(json.dumps(rows, indent=1, sort_keys=True) if a.json else table(rows))
+        return 0
+    cmd = a.command[1:] if a.command[:1] == ['--'] else a.command
+    if not cmd:
+        ap.error('a command is required after --')
+    try:
+        model, cards = parse_gpu(a.gpu) if a.gpu else ('', 0)
+    except ValueError as e:
+        ap.error(str(e))
+    root = subprocess.run(['git', '-C', a.dir, 'rev-parse', '--show-toplevel'], capture_output=True, text=True).stdout.strip()
+    if not root:
+        ap.error(f'{a.dir}: not a git checkout')
+    ra = RunArgs(shlex.join(cmd) if len(cmd) > 1 else cmd[0], root, Ask(a.cpu, a.mem, cards, model), a.timeout,
+                 a.queue_minutes, a.no_wait, a.env_mismatch, a.python, forwarded(os.environ))
+    return pool_run(reg, ra, only=a.on, here_ok=a.here)
+
+
+if __name__ == '__main__':
+    if sys.argv[1:2] == ['deny'] and len(sys.argv) == 3:
+        with open(sys.argv[2], 'rb') as f:
+            from ci_runners import inventory
+            print('\n'.join(sorted(inventory.hash_token(t) for t in deny_tokens(tomllib.load(f)))))
+        sys.exit(0)
+    print(__doc__.split('CLI::', 1)[1], file=sys.stderr)
+    sys.exit(EXIT_USAGE)

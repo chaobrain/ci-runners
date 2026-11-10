@@ -792,6 +792,46 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
         read whatever the account holds (T19). The exit path for T19 is a dedicated cluster
         account per site, from the site's admins, with a hard spending cap.
 
+## Lead decisions (2026-11-10): every machine is a pool (decision 15.1)
+
+Approved by the lead on 2026-11-10 (brainspike's D-0111, amended): CI is built as a device
+pool. Parts and people ask for capabilities, never a host. Built here (`ci_runners/pool.py`, `ci-run pool`):
+
+1. **The machine registry** is `etc/pool.toml`, one `[machine.<key>]` per machine: its access (`ssh`,
+   `local`, or `slurm` through the account's gate), its cores, memory, cards, card model,
+   CUDA variant and P2P result, free or billed and its price, its runner labels, its env, its
+   work directory, its CI slot files, its compile cache and whether its numerics check
+   passed. A cluster has one row per target (partition, cores a job takes, memory, minutes,
+   env variant, cards, price). The registry is private site config like the inventory
+   (§3.3): `python -m ci_runners.pool deny FILE` hashes its names for `tests/deny.sha256`. It
+   is refused if others than its owner may write it.
+2. **`pool status`** is one live table, and `--json` rows with the fields of brainspike's
+   `HostState`, for people, agents and the plan. A host's free slots are read from
+   `/proc/locks` without being taken. Its cores are the load's complement, 0 while no slot is
+   free, and its cards' free MiB comes from `nvidia-smi`. A cluster target's figures come
+   from `sinfo` (an `idle` or `mix` node of its partition with the cores, memory and cards),
+   less what the account's running jobs hold of its association's `GrpTRES`, and give
+   `start_now`.
+3. **The claim** on a host is a slot of the host's CI slot queue (§7), the same files and
+   `SlotQueue` that a part's `ci-slot` and brainspike's `ci_slot.sh` take. So a pool run and a
+   part never hold one slot, and a run waits in line in arrival order or, with `--no-wait`,
+   says so (exit 75). On a cluster the job itself is the claim, submitted through the
+   account's `ci-slurm-gate` (14.5). It is the parts' batch script, supervisor and env, and
+   the job is cancelled if it has not started within the run's queue bound.
+4. **The env check**: before a run, the versions of the registry's `check` distributions
+   in the machine's env (plus the commit of an editable install) are compared with the
+   caller's. A difference refuses the run (exit 3) unless the caller passes
+   `--env-mismatch warn`. The one locked dependency list that every env follows is the
+   next step (task ci-pool-run, step 2).
+5. **`pool run`** stages the caller's tree (the tracked files and the untracked ones not
+   ignored) and this release's `ci_runners` and runs the command under `part.supervise`
+   (its own session, the timeout, the memory cap). It streams the output and returns the
+   command's code. A caller that ends closes the remote side's stdin, which ends the
+   command and frees the slot; a cluster job is cancelled, or the gate's reaper ends it at
+   its deadline. The caller's own host is skipped unless asked. Free hosts come first, then
+   the billed targets that start it now, cheapest first, then a wait in line on the host
+   with the shortest queue.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the

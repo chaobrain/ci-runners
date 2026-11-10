@@ -93,6 +93,8 @@ TSG = 'tests.test_slurmgate'
 TSS = 'tests.test_slurmsite'
 THL = 'tests.test_hostload'
 HC = 'ci_runners/hookcopy.py'
+PO = 'ci_runners/pool.py'
+TPO = 'tests.test_pool'
 THC = 'tests.test_hookcopy'
 
 #: (file, snippet, replacement, tests that kill it)
@@ -2192,6 +2194,27 @@ MUTANTS = [
      [f'{TI}.Scan.test_a_hosts_uid_or_disk_numbers']),
     (INV, "FAKE_MAJORS = frozenset({0, *range(240, 255)})", "FAKE_MAJORS = frozenset(range(0, 300))",
      [f'{TI}.Scan.test_a_hosts_uid_or_disk_numbers']),
+    # the device pool (decision 15.1): the registry, pool status, the claim, the env check, pool run
+    (PO, "if len(p) >= 6 and p[1] == 'FLOCK':", "if len(p) >= 6 and p[1] == 'POSIX':",
+     [f'{TPO}.Probe.test_free_slots_are_read_without_taking_them']),
+    (PO, "if spec.get('no_wait') and rounds >= 2:", "if False:",
+     [f'{TPO}.Claim.test_a_ci_part_holding_the_one_slot_keeps_a_pool_run_out']),
+    (PO, "        os.kill(os.getpid(), signal.SIGTERM)\n    threading", "        pass\n    threading",
+     [f'{TPO}.Claim.test_a_closed_stdin_ends_the_command_and_frees_the_slot']),
+    (PO, "if va != vb or (ca and cb and ca != cb):", "if va != vb:", [f'{TPO}.EnvCheck.test_diff']),
+    (PO, "room_cpu = lim['cpu'] - u.get('cpu', 0) if", "room_cpu = lim['cpu'] if",
+     [f'{TPO}.Cluster.test_target_rows_start_now_within_the_association']),
+    (PO, "if r.get('here') and not here_ok:", "if False:",
+     [f'{TPO}.Pick.test_the_callers_own_host_is_skipped_unless_asked']),
+    (PO, "now.sort(key=lambda r: (r['billed'],", "now.sort(key=lambda r: (not r['billed'],",
+     [f'{TPO}.Pick.test_free_hosts_first_then_the_cheapest_target_that_starts_now']),
+    (PO, "        if not ended:\n", "        if False:\n", [f'{TPO}.ClusterRun.test_an_interrupted_run_cancels_its_job']),
+    (PO, "if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):", "if False:",
+     [f'{TPO}.Registry.test_a_registry_others_may_write_is_refused']),
+    (PO, "'gate', 'cache', 'partition')", "'gate', 'cache')",
+     [f'{TPO}.Registry.test_deny_tokens_hold_the_inventory_not_the_labels']),
+    (PO, "if time.monotonic() - t0 > a.queue_min * 60:", "if False:",
+     [f'{TPO}.ClusterRun.test_a_job_not_started_within_the_bound_is_withdrawn']),
 ]
 
 

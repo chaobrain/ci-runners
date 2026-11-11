@@ -75,7 +75,7 @@ status`` only: ``pool run`` refuses them.
 ``HostState`` (``labels``, ``problems``, ``queue``, ``gpu_free``, ``multi_gpu``,
 ``gpu_model``, ``cuda``, ``cpus_free``, ``billed``, ``price``, ``target``,
 ``numerics_ok``, ``start_now``) and a few of its own (``slots_free``, ``slots``,
-``mem_free_gib``, ``here``, ``access``). A host's slots are read from ``/proc/locks``
+``mem_free_gib``, ``here``, ``access``, ``runners_online``, ``runners``, ``jobs_free``). A host's slots are read from ``/proc/locks``
 without being taken (``slots._flocked``). A cluster target's free cores and cards come from
 ``sinfo``, less what the account's own running jobs hold of its association's ``GrpTRES``.
 Decision 15.7 adds two, for brainspike's placement: the ``local`` machine's row has

@@ -2821,6 +2821,7 @@ MUTANTS = [
     (PO, "leases=leases, runners=_abs(t, 'runners', where))", "leases=leases)", [f'{TPO}.Registry.test_the_runners_key']),
     # decision 15.7: a host row's runners per label, a target row's jobs_free
     (PO, "            out[label] = out.get(label, 0) + 1", "            out[label] = 1", [f'{TPO}.CIAccount.test_a_host_row_counts_its_runners_per_label']),
+    (PO, "        for label in set(labels):", "        for label in labels:", [f'{TPO}.CIAccount.test_a_host_row_counts_its_runners_per_label']),
     (PO, "    except (OSError, ValueError):  # InventoryError", "    except OSError:  # InventoryError", [f'{TPO}.CIAccount.test_a_host_row_counts_its_runners_per_label']),
     (PO, "    if labels is not None:\n        p['runner_labels'] = labels", "    if False:\n        p['runner_labels'] = labels",
      [f'{TPO}.CIAccount.test_a_host_row_counts_its_runners_per_label']),

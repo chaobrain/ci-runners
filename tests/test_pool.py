@@ -1184,7 +1184,8 @@ CAPACITY = (SINFO.replace('part_c', 'cpu-partition') + '\n===\n' + 'cpu-partitio
 
 def inventory_text(this, slurm=8):
     """A host's inventory (decision 15.7): a pool with the default labels, two with their
-    own, a per-card pool, and a slurm pool that also carries the label both hosts share."""
+    own, a per-card pool (which also names card 0's label: its runner carries it once), and
+    a slurm pool that also carries the label both hosts share."""
     return textwrap.dedent(f'''\
         schema = 1
         this = "{this}"
@@ -1201,13 +1202,13 @@ def inventory_text(this, slurm=8):
         [hosts.{this}.pools]
         light = 2
         part = {{ count = 3, labels = ["{this}-cpu"] }}
-        cards = {{ per_card = true, class = "gpu", labels = ["{this}-gpu"] }}
+        cards = {{ per_card = true, class = "gpu", labels = ["{this}-gpu", "{this}-gpu0"] }}
         slurm = {{ count = {slurm}, labels = ["{this}-slurm", "shared-slurm"] }}
         ''')
 
 
 def runners_of(this, slurm=8):
-    return {'light': 2, this: 2, f'{this}-cpu': 3, f'{this}-gpu': 2, f'{this}-gpu0': 1, f'{this}-gpu3': 1,
+    return {'light': 2, this: 2, f'{this}-cpu': 3, f'{this}-gpu': 2, f'{this}-gpu0': 2, f'{this}-gpu3': 1,
             f'{this}-slurm': slurm, 'shared-slurm': slurm}
 
 

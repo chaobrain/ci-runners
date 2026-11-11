@@ -1070,7 +1070,8 @@ placing parts on the host, whose jobs queued.
    `<runners>/<name>/bin/Runner.Listener`, or its `run-helper.sh` (which outlives the
    listener's self-update). The row gets `runners`, that count, and the problem
    `no runner online` when it is 0, so brainspike's plan places no part on the host and
-   its other host takes them. A forced probe counts what the receiving account's own
+   its other host takes them. A pool run ignores the problem: it takes a slot, not a
+   runner. A forced probe counts what the receiving account's own
    registry names, as with the leases (15.1, item 8). Where `/proc` hides other accounts'
    processes (`hidepid`) and the directory is not the caller's, the count is unknown and
    no problem is raised (fail open: as before this decision). A process is not GitHub's

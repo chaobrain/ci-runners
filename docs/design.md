@@ -1027,6 +1027,44 @@ quiet one needs a clock that is not GitHub's.
   12.2 rules out. (C) No timer, only the gate's event wakes and a dispatch by hand: costs
   nothing, but leaves a quiet stalled evening without a night.
 
+## Lead decision (draft, 2026-11-11): a cancel its run outlives is retried (decision 15.4, issue #110)
+
+Draft for the lead. On 2026-11-10 at about 01:05 UTC the 3090 hosts' runners briefly lost
+their connection to GitHub (`ECONNRESET`, "lost communication with the server"). GitHub
+cancelled the running jobs one by one, each runner sent its part the signal, and the parts
+ended `stopped`. `stopped` asks for no retry, so the verdicts of chaobrain/brainspike#496
+and #497 were `error` (infrastructure: `cpu stopped`, `gpu-multi stopped`) and both heads
+waited for a person to dispatch them again. brainspike's CI contract §4.2 retries an
+infrastructure end once and keeps `stopped` for a cancel by a newer push.
+
+1. **Who cancelled is not known where the part ends.** A newer run of the job's concurrency
+   group, a person's cancel and GitHub's own cancel of one job (its runner lost the
+   connection, or the job ran past its `timeout-minutes`) all reach the executor as the
+   runner's signal: before the command (the executor ends `stopped` itself) or during it
+   (the job-completed hook stops the scope, and the record's exit is `signalled`). The run
+   knows: an owner's cancel cancels the whole run (GitHub cancels runs, never one job), and
+   a cancelled run starts no later job that checks `!cancelled()`. GitHub's own cancel of a
+   job leaves its run going (brainspike run 42730362031: its parts' jobs `cancelled` at
+   01:05, its `!cancelled()` salvage jobs ran at 01:37).
+2. **So `stopped` asks for a retry**, once, on the part's own pool (`next: retry`, as
+   `lost`), and the consumer's graph decides: its retry job, like its verdict, is skipped
+   on a cancelled run (§4.8 rules 4 and 5). An owner's cancel retries nothing; a cancel the
+   run outlives runs the part once more. A second `stopped` is final (attempt 2 of at most
+   2), and the verdict is `error`, as for any second infrastructure end. The outcome keeps
+   its name and precedence: it says what the executor saw, a cancel.
+3. **Nothing else changes:** no action's input or output, no label, no outcome kind. A
+   consumer whose retry job has no `!cancelled()` retries a cancelled run's parts (rule 4
+   now says so). It takes effect with the next release, once the hosts install it and `v1`
+   moves (§9; the lead).
+- *Options weighed.* (B) The readers, `salvage` and the verdict, report a signalled record
+  as `lost`, since they run only on a run that goes on (rule 5): the name fits, but a part
+  cancelled before its command keeps the executor's own `stopped`, which a consumer reads
+  in the cancelled job itself (brainspike's retry), so half the cases stay unretried. (C)
+  The executor asks GitHub whether its run was cancelled: a token on the host, and an API
+  call at the moment the connection is what failed. (D) Only the consumer's sweeper
+  dispatches the head again: every part runs again, much later, and that is the consumer's
+  (brainspike's CI contract §5.2), not the outcome's.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -1358,7 +1396,7 @@ nonzero exit with an OOM kill is `oom`, not `red`.
 | unavailable (`drained`, `busy`) | the drain (decision 13.1), the shared state missing for the CI account (15.2), or a busy host on a first attempt (13.2), or a `nightly` part's hold of the host on a first attempt (13.6) | fallback: once, on the other host's pool of the class (13.3); `none` for a drained part of a class with no such pool |
 | unavailable (`p2p`) | the P2P self-test of a `multi` part failed, errored or ran over its bound (decision 12.6) | none: a host fault, which the verdict reports as error |
 | lost | the job ended without outputs: the runner stopped (`systemctl show` timestamps after the part's start), or the tunnel dropped the job's connection | the verdict salvages the record (§4.5) |
-| stopped | cancelled (concurrency group, TERM) | none |
+| stopped | cancelled: the job's signal, before or during the command (a newer run of the concurrency group, a person's cancel, or GitHub's own cancel of the job: a runner that lost its connection, the job's `timeout-minutes`) | retry once on the same pool; a cancelled run runs no retry (§4.8 rule 4), so only a cancel its run outlives is retried (decision 15.4) |
 
 A part is retried at most once (the registry may set 0). A second infrastructure end
 is an error in the verdict.
@@ -1425,7 +1463,9 @@ hosts, a coverage job). These rules are the consumer's:
 4. **Retries.** A part whose `next` is `retry` or `fallback` runs again at most once, with
    `attempt-of` its first record and `resume` as the hint says, on the labels `retry-on`
    names or on a pool the consumer chooses (another host's, for a `fallback`). A retry on
-   another host names the first host's record in `attempt-of` (decision 13.3).
+   another host names the first host's record in `attempt-of` (decision 13.3). The retry
+   job is skipped on a cancelled run (`!cancelled()`), so a `stopped` part is retried only
+   when GitHub cancelled its job alone and the run went on (decision 15.4).
 5. **The verdict** runs last, on the light pool of one host that ran parts, after a
    `salvage` job on every other host that did (§4.5), unless the run was cancelled (a
    newer head's run posts instead). It reads the parts' `ci-part-<id>-<attempt>`

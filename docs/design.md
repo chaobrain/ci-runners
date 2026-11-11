@@ -2726,7 +2726,8 @@ Rules:
      on 3090b (`passed: compile, cpu, gpu, multi-a, multi-b, oom, slow`); the red head was red on compile, cpu,
      gpu, multi-a and multi-b.
 - **`v1.15.0`** (minor, stamped 2026-11-11; decision 15.10, #170; brainspike's task ci-compile-split, D-0121, the
-  coordinator under the lead's delegation): a
+  coordinator under the lead's delegation; `v1` moved to it after the 3090 canary at `@v1.15.0`, green and red,
+  2026-11-11): a
   `compile` part holds its CPU set's lock exclusively and the host lock shared, and takes no CI slot; its command's
   lock is the CPU lock, under the cover `x`. A compile part needs the inventory's `cpus`, disjoint from
   `compile_cpus`. Every service unit has `CPUAffinity=` from `cpus`. No action's input or output, label, outcome
@@ -2735,6 +2736,11 @@ Rules:
      reads as before (it pins the CPU and GPU parts there); a `v1.15.0` compile part refuses an overlapping `cpus`.
   2. **Setup.** A host's plan adds one `CPUAffinity=` line to each service unit; the runners take it at their
      restart, after their pools drain. On 3090a and h100 `cpus` is every CPU, so their apply can wait.
+  3. **The canary** (`canary-3090-v1150`): the CPU part on `3090b-cpu` held the host lock `s` and waited for a mark
+     the compile part wrote while it ran, so the compile part started beside it (queue 0 s, lock wait 0 s); the
+     compile part's lock was `4-15.lock` held `x`, the host lock `s`, its affinity 4–15; the CPU part's 0–3,16–27,
+     and the light runner's (claim) 0–3,16–27 after the restart. Green on every part; the red head was red on
+     compile, cpu, gpu, multi-a and multi-b.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

@@ -1040,9 +1040,9 @@ quiet one needs a clock that is not GitHub's.
   12.2 rules out. (C) No timer, only the gate's event wakes and a dispatch by hand: costs
   nothing, but leaves a quiet stalled evening without a night.
 
-## Lead decision (draft, 2026-11-11): a cancel its run outlives is retried (decision 15.4, issue #110)
+## Lead decision (2026-11-11): a cancel its run outlives is retried (decision 15.4, issue #110)
 
-Draft for the lead. On 2026-11-10 at about 01:05 UTC the 3090 hosts' runners briefly lost
+Approved by the lead on 2026-11-11 (#138); built in #140. On 2026-11-10 at about 01:05 UTC the 3090 hosts' runners briefly lost
 their connection to GitHub (`ECONNRESET`, "lost communication with the server"). GitHub
 cancelled the running jobs one by one, each runner sent its part the signal, and the parts
 ended `stopped`. `stopped` asks for no retry, so the verdicts of chaobrain/brainspike#496
@@ -2273,6 +2273,16 @@ Rules:
      stale ACL entries of a uid in no account, which the new warning listed, were removed), so the install restarts
      no runner. The hosted unit tests run
      on one Python, the hosts' 3.12 (#128).
+- **`v1.10.1`** (patch, stamped 2026-11-11; #136 and #140, lead-approved, #110 and #124): a part `stopped`
+  by a cancel that its run outlives (GitHub's own cancel of one job, e.g. a runner that lost its connection) asks
+  for one retry on its own pool (`next: retry`, decision 15.4); a second `stopped` is final, and a cancelled run
+  runs no retry (§4.8 rule 4). A shared path that refuses the CI account after the part's gate (issue #124) still
+  fails the part, but its owner, mode and ACL entries go to the host's `logs/shared-<date>.log`, and the error
+  gains a note that names no path, account or uid. No action's input or output changes, no label, outcome kind,
+  inventory key, setup, slurm or egress code changes. Its notes:
+  1. **When it holds.** Both changes are in the part and the readers (`salvage`, the verdict), so they hold for a
+     consumer's parts once `v1` moves.
+  2. No setup change: a host's plan at `v1.10.1` is `v1.10.0`'s, so the install restarts no runner.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

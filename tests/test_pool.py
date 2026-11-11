@@ -1319,6 +1319,26 @@ class CIAccount(unittest.TestCase):
         os.unlink(self.key)
         self.assertEqual(pool.probe_host(m, run, etc=self.etc)['problems'], ['no key etc/pool/keys/hosta'])
 
+    def test_a_shared_account_names_its_aliases_in_its_own_ssh_config(self):
+        """etc/pool/ssh_config, where it is a file, is the forced probe's ssh configuration (15.8)."""
+        m = self.reg.machines['hosta']
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'slots_free': 1, 'load': 0, 'cpus': 16}) + '\n', '')
+        pool.probe_host(m, run, etc=self.etc)
+        self.assertNotIn('-F', seen[-1])  # none there: the account's own
+        cfg = os.path.join(self.etc, 'pool', 'ssh_config')
+        os.mkdir(cfg)
+        pool.probe_host(m, run, etc=self.etc)
+        self.assertNotIn('-F', seen[-1])  # not a file
+        os.rmdir(cfg)
+        open(cfg, 'w').close()
+        pool.probe_host(m, run, etc=self.etc)
+        self.assertEqual(seen[-1][seen[-1].index('-F') + 1], cfg)
+        self.assertEqual(seen[-1][-2:], ['alias-a', 'ci-run pool probe'])
+
     def test_the_cluster_through_the_gates_capacity(self):
         m = self.reg.machines['cl']
         m = dataclasses.replace(m, targets={'cpu': dataclasses.replace(m.targets['cpu'], partition='cpu-partition')})

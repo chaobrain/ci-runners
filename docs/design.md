@@ -1342,7 +1342,9 @@ amend 12.2 and §5.1.
    lines are written into the shared account's `authorized_keys`, every other line kept:
    the one file outside our subtree that setup writes there, approved by the lead. A
    co-user who takes h100's probe keys can run `pool probe` on a 3090 CI account and read
-   its status row, nothing else.
+   its status row, nothing else. The shared account's `~/.ssh` is not ours either, so its forced probes read
+   their aliases and pinned host keys from `etc/pool/ssh_config` (`ssh -F`), where that file
+   exists; elsewhere the account's own `~/.ssh/config`, as before.
 5. **No cluster key on the shared account.** A cluster key runs the gate, which submits
    billed jobs, and any co-user could take it. So h100's registry names no cluster: a plan
    job that runs on h100 reads no cluster target and places on the free hosts only. A
@@ -1372,9 +1374,9 @@ amend 12.2 and §5.1.
    which is 3.10 on h100 and has no `tomllib`: an entry's optional `host_python` (an
    absolute path, inventory like `python`; `pool add --host-python`) names the interpreter
    there, 3.11 or later, the system's by default.
-10. **Rollout.** Items 4, 7 and 9's `host_python` ship in `v1.13.0`; all are additive (a single
-    `probe_key`, a build without `--kept` and an entry without `host_python` behave as before),
-    so it is a minor release. Each host
+10. **Rollout.** Items 4 (with `etc/pool/ssh_config`), 7 and 9's `host_python` ship in `v1.13.0`;
+    all are additive (a single `probe_key`, no `etc/pool/ssh_config`, a build without `--kept`
+    and an entry without `host_python` behave as before), so it is a minor release. Each host
     installs it; the 3090 hosts' plans raise the light pools, with the light pool drained
     around the runners' restart; h100 is planned, applied and registered as a new host
     (§10), then its env, the canary and the registry's checks.

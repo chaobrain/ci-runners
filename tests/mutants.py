@@ -2475,10 +2475,10 @@ MUTANTS = [
      [f'{TPO}.CIAccount.test_the_forced_probe_sends_no_code_and_no_stdin_through_its_key']),
     (PO, "        if not os.path.isfile(key):\n            return host_row", "        if False:\n            return host_row",
      [f'{TPO}.CIAccount.test_the_forced_probe_sends_no_code_and_no_stdin_through_its_key']),
-    (PO, "        argv, kw = [*_ssh(m.ssh, key), FORCED_PROBE], {'stdin': subprocess.DEVNULL}",
-     "        argv, kw = [*_ssh(m.ssh, key), FORCED_PROBE], {}",
+    (PO, "        argv, kw = [*_ssh(m.ssh, key, probe_config(etc)), FORCED_PROBE], {'stdin': subprocess.DEVNULL}",
+     "        argv, kw = [*_ssh(m.ssh, key, probe_config(etc)), FORCED_PROBE], {}",
      [f'{TPO}.CIAccount.test_the_forced_probe_sends_no_code_and_no_stdin_through_its_key']),
-    (PO, "        argv, kw = [*_ssh(m.ssh, key), FORCED_PROBE], {'stdin'", "        argv, kw = [*_ssh(m.ssh), FORCED_PROBE], {'stdin'",
+    (PO, "        argv, kw = [*_ssh(m.ssh, key, probe_config(etc)), FORCED_PROBE], {'stdin'", "        argv, kw = [*_ssh(m.ssh, '', probe_config(etc)), FORCED_PROBE], {'stdin'",
      [f'{TPO}.CIAccount.test_the_forced_probe_sends_no_code_and_no_stdin_through_its_key']),
     (PO, "        r = run(argv, capture_output=True, text=True, timeout=HOST_TIMEOUT, **kw)",
      "        r = run(argv, capture_output=True, text=True, timeout=600, **kw)",
@@ -2905,6 +2905,11 @@ MUTANTS = [
     (PA, "'cache': cache}, run,\n                  host_python)", "'cache': cache}, run)", [f'{TPA}.Checks.test_the_cli_adds_checks_and_makes_ready']),
     (PA, "cache=cache, host_python=host_python)", "cache=cache)", [f'{TPA}.Checks.test_the_cli_adds_checks_and_makes_ready']),
     (PA, "host_python=a.host_python, dry_run=a.dry_run,", "dry_run=a.dry_run,", [f'{TPA}.Checks.test_the_cli_adds_checks_and_makes_ready']),
+    # the forced probes' own ssh configuration on a shared account (decision 15.8, item 4)
+    (PO, "    only += ['-F', config] if config else []\n", "", [f'{TPO}.CIAccount.test_a_shared_account_names_its_aliases_in_its_own_ssh_config']),
+    (PO, "    return path if os.path.isfile(path) else ''", "    return path if os.path.exists(path) else ''", [f'{TPO}.CIAccount.test_a_shared_account_names_its_aliases_in_its_own_ssh_config']),
+    (PO, "    return path if os.path.isfile(path) else ''", "    return ''", [f'{TPO}.CIAccount.test_a_shared_account_names_its_aliases_in_its_own_ssh_config']),
+    (PO, "[*_ssh(m.ssh, key, probe_config(etc)), FORCED_PROBE]", "[*_ssh(m.ssh, key), FORCED_PROBE]", [f'{TPO}.CIAccount.test_a_shared_account_names_its_aliases_in_its_own_ssh_config']),
 ]
 
 

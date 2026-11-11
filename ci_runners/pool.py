@@ -818,9 +818,11 @@ def target_row(m: Machine, t: Target, nodes: Sequence[Node], assoc: Mapping[str,
 Runner = Callable[..., subprocess.CompletedProcess]
 
 
-def _ssh(alias: str, key: str = '') -> list[str]:
-    """ssh to ``alias`` in batch mode; with ``key``, that key only."""
+def _ssh(alias: str, key: str = '', config: str = '') -> list[str]:
+    """ssh to ``alias`` in batch mode; with ``key``, that key only; with ``config``, that
+    file for the account's ssh configuration."""
     only = ['-o', 'IdentitiesOnly=yes', '-i', key] if key else []
+    only += ['-F', config] if config else []
     return ['ssh', '-o', 'BatchMode=yes', *only, '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', alias]
 
 
@@ -839,6 +841,13 @@ def probe_key(etc: str, key: str) -> str:
     return os.path.join(_etc(etc), 'pool', 'keys', key)
 
 
+def probe_config(etc: str) -> str:
+    """``etc/pool/ssh_config`` where it is a file, else '': the forced probes' aliases and
+    pinned host keys on a shared account, whose ``~/.ssh`` is not ours (decision 15.8)."""
+    path = os.path.join(_etc(etc), 'pool', 'ssh_config')
+    return path if os.path.isfile(path) else ''
+
+
 def _remote(m: Machine, argv: Sequence[str]) -> list[str]:
     """``argv`` run on ``m``: through ssh as one quoted command line, or here for a local machine."""
     return list(argv) if m.access == 'local' else [*_ssh(m.ssh), shlex.join(argv)]
@@ -852,7 +861,7 @@ def probe_host(m: Machine, run: Runner = subprocess.run, here: str = '', etc: st
         key = probe_key(etc, m.key)
         if not os.path.isfile(key):
             return host_row(m, None, f'no key etc/pool/keys/{m.key}', here)
-        argv, kw = [*_ssh(m.ssh, key), FORCED_PROBE], {'stdin': subprocess.DEVNULL}
+        argv, kw = [*_ssh(m.ssh, key, probe_config(etc)), FORCED_PROBE], {'stdin': subprocess.DEVNULL}
     else:
         lz = m.leases or LeaseDir('', 1)
         src = _probe_src() + (f'\nimport json; print(json.dumps(probe({m.slots.lock!r}, {m.slots.count}, '

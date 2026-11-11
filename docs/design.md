@@ -933,6 +933,50 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    once their inventories gain `probe_key`, which `v1.8.0` refuses: that waits until `v1`
    has moved (§9).
 
+## Proposed (2026-11-11): the shared state at job time (decision 15.2, issue #125)
+
+A draft for the lead. On 2026-11-11 a host's CI account was renumbered; the shared files
+kept named-user ACL entries for its old uid, and every part that took a GPU lease there
+failed in 0.1 s inside `part.Leases` (`Permission denied` on the lease directory's
+`queue`), retries included. `setup`'s plan would have shown it, but runs only when someone
+runs it.
+
+1. **Where.** In the part's gate (§4.3), on a host whose inventory has `local_accounts`:
+   every job that uses the shared state is a part, and the part already holds the
+   inventory and the drain. The job-started hook does not change (§6.3): it decides on
+   the job, never on the host's state.
+2. **The check.** For the part's own uid (`os.getuid()`, never a uid from a file) on
+   each shared path of `setup.shared_files`: the host lock's files, the slot files, the
+   slot queue, the lease directory, its `queue` and the lock files the parts left in it
+   (`setup.lease_files`; the `queue` may be missing until the first part makes it): the
+   path of its kind and not a link, and a named-user access entry
+   for the uid with `rw` (`rwx` on a directory) after the mask, and on a directory a
+   default entry with `rwx`. The ACLs are read by xattr (`setup.acl_users`): no
+   subprocess, no network, under 10 ms. Named-user entries whose uid has no account
+   (stale, the mark of a renumbering) are reported only when the uid's own access is
+   missing too; `setup`'s plan prints them as a warning that does not block `apply`.
+3. **A miss** drains the host (as `ci-run drain on`: `state/drain.json` and its public
+   copy, decision 13.1 and 15.1, so pool runs do not start there either) and ends the
+   part `unavailable` (`drained: shared state`), with `next` and `retry-on` the other
+   host's pool of its class (13.3), as for any drained part. The parts after it are
+   refused by the drain itself. The printed reason names no path, account or uid
+   (§3.3, T9); the details go to the host only, one JSON line per miss in
+   `logs/shared-<UTC date>.log` (which the reaper drops after 14 days, as the hook
+   logs): each path, the account and its uid, what is missing, the stale uids, and the
+   fix: the root step (`systemd-tmpfiles --create` on the `tmpfiles.d` file, while no
+   local job holds the files) or the ACL, then `ci-run drain off`.
+4. Only a proven miss drains. A check that cannot run (an unexpected error) ends the part
+   `unavailable` (`shared state unknown`) without draining. Nothing undrains by itself:
+   the operator runs `ci-run drain off` once the plan shows the root steps done.
+- *Options weighed.* (a) The hook refuses the job and drains (the issue's first form):
+  a refusal fails the job outright with no retry, and refuses `claim`, `salvage` and
+  `verdict` on that host too, which need no shared file (13.1 never refuses them), so a
+  run's records there would be lost; and the hook, the boundary of D4, would read the
+  inventory and write state. (b) The hook drains and accepts: the parts then end
+  `drained` as in this text, but the hook gains the inventory and a write, and an error
+  in the check refuses every job (§6.3: any error refuses). The gate does the same with
+  neither.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -1195,7 +1239,8 @@ A CPU part (`gpus: 0`) takes one of the host's CI slots; a GPU part takes its ca
 lease, which is its slot (§7).
 
 Before it takes anything, the part passes its gate, in this order: low disk; its `gpus`
-and `lock` against its class's row (§4.8); the drain (decision 13.1); busy (13.2 and
+and `lock` against its class's row (§4.8); the shared state (15.2, which drains the host
+on a miss); the drain (decision 13.1); busy (13.2 and
 13.6, a first attempt only). The health gate (§5.5) comes before the leases. Once it holds its
 slot and leases, it reads the drain again before the command. A refusal at any of these
 ends it `unavailable` and releases what it took.
@@ -1255,7 +1300,7 @@ nonzero exit with an OOM kill is `oom`, not `red`.
 | thermal | our own early stop (§5.5) | retry once on a cool card |
 | reboot | boot id differs from the one recorded at start | retry once on the same host |
 | unavailable | before the command: the health gate, no card fits, the queue timeout, the project's queue full, low disk, `gpus` or `lock` the class does not accept (§4.8), an unknown inventory schema, a malformed registry entry | fallback: once, on a cool card or the same pool |
-| unavailable (`drained`, `busy`) | the drain (decision 13.1), or a busy host on a first attempt (13.2), or a `nightly` part's hold of the host on a first attempt (13.6) | fallback: once, on the other host's pool of the class (13.3); `none` for a drained part of a class with no such pool |
+| unavailable (`drained`, `busy`) | the drain (decision 13.1), the shared state missing for the CI account (15.2), or a busy host on a first attempt (13.2), or a `nightly` part's hold of the host on a first attempt (13.6) | fallback: once, on the other host's pool of the class (13.3); `none` for a drained part of a class with no such pool |
 | unavailable (`p2p`) | the P2P self-test of a `multi` part failed, errored or ran over its bound (decision 12.6) | none: a host fault, which the verdict reports as error |
 | lost | the job ended without outputs: the runner stopped (`systemctl show` timestamps after the part's start), or the tunnel dropped the job's connection | the verdict salvages the record (§4.5) |
 | stopped | cancelled (concurrency group, TERM) | none |
@@ -1471,7 +1516,7 @@ cgroup v1 with systemd 249 (11.11).
 | `ci-tunnel.service` | `ssh -F etc/tunnel/ssh_config -N -L 127.0.0.1:<http port>:127.0.0.1:<egress port>` to the egress account (decision 11.10): batch mode, the egress host's key pinned in `etc/tunnel/known_hosts`, `ExitOnForwardFailure`, keep-alive every 30 s (a dead link ends after 90 s); `Restart=always` after 10 s |
 | `etc/tunnel/` | the key pair, `ssh_config` and `known_hosts`, placed by the lead before the plan; `plan.sh` refuses without them, with the key or the directory readable by others, with a link in place of a file, or with an `ssh_config` that sets anything but `Host egress`, its `HostName`, `User` and `Port` (the unit fixes every other option, among them the key, the pinned host key with no global or DNS source, and no agent, gateway port or local command). A changed tunnel table changes the tunnel's unit, and the plan then restarts it. The runner app is fetched only once the tunnel's port answers (ssh binds it after authenticating). |
 | `ci-orgsync.{service,timer}` | not on h100 (decision 11.9): the workstation pushes the snapshot |
-| `ci-reaper.timer` | every 10 min: stops part scopes whose job is gone (a scope outlives a stopped runner), removes stale work directories, the part records of runs with nothing changed for 14 days, daily hook logs (`logs/hook-<date>.log`) over 14 days, stale tickets and leases |
+| `ci-reaper.timer` | every 10 min: stops part scopes whose job is gone (a scope outlives a stopped runner), removes stale work directories, the part records of runs with nothing changed for 14 days, daily hook and shared-state logs (`logs/hook-<date>.log`, `logs/shared-<date>.log`, 15.2) over 14 days, stale tickets and leases |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 512G of 2 TB) and `ci-<project>.slice`; not enforced under cgroup v1, where the slots and each part's own cap bound memory (decision 11.11) |
 | slot files | under `state/` (inventory `files`) |
 | unit names | every unit file starts with `ci-` (`ci.slice` included); `uninstall.sh` stops and removes only the units an `apply` recorded in `state/setup.json`; `plan.sh` refuses if a unit of that name exists and no earlier `apply` wrote it (another user of the account may have one). `plan.sh ROLE --adopt` instead lists each such unit as `adopt` and plans it as usual (a regular file of this account only), for units an older release wrote without a record; the lead approves the adoption with the plan, and `apply.sh` takes `--adopt` too. A unit an earlier apply recorded that the plan no longer holds is listed as `remove`, and `apply` stops, disables and deletes it. Never on a shared account without checking each listed file. The unit directory exists (mode 700) and is the account's: setup never changes its mode. |
@@ -1551,6 +1596,8 @@ thermal) went with 13.4. The text is in the design at `v1.4.1`.
 On 3090b and 3090a the executor of §4.3 adds:
 
 1. **Gate** (§4.3), before anything is taken:
+   - **Shared state** (decision 15.2): the CI account's own access to every shared file
+     and directory; a miss drains the host and ends the part `drained: shared state`.
    - **Drain** (decision 13.1): a drained host or pool ends the part `unavailable`, with
      `retry-on` the other host's pool of its class (13.3). Read again once the slot and
      leases are held.

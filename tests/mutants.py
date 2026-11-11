@@ -47,6 +47,10 @@ ORS = 'ci_runners/orgsync.py'
 OPS = 'setup/workstation/orgsync-push.sh'
 NBS = 'setup/workstation/nightly-backstop.sh'
 NBT = 'setup/workstation/ci-nightly-backstop.timer'
+RWP = 'ci_runners/runnerwatch.py'
+RWS = 'setup/workstation/runner-watch.sh'
+RWT = 'setup/workstation/ci-runner-watch.timer'
+RWU = 'setup/workstation/ci-runner-watch.service'
 BRG = 'ci_runners/bridge.py'
 LCH = 'actions/lib/ci-run.sh'
 APT = 'actions/part/action.yml'
@@ -75,6 +79,7 @@ TM = 'tests.test_thermal'
 TZ = 'tests.test_orgsync'
 TBR = 'tests.test_bridge'
 TNB = 'tests.test_backstop'
+TRW = 'tests.test_runnerwatch'
 P2P = 'ci_runners/p2p.py'
 T2 = 'tests.test_p2p'
 TX = 'tests.test_interop'
@@ -2655,6 +2660,92 @@ MUTANTS = [
     (NBT, 'OnCalendar=*-*-* 21,22:00,15,30,45:00 UTC', 'OnCalendar=*-*-* 21,22:00,15,30,45:00',
      [f'{TNB}.Units.test_the_timer_ticks_every_quarter_hour_inside_the_window']),
     (NBT, 'AccuracySec=1s\n', '', [f'{TNB}.Units.test_the_timer_ticks_every_quarter_hour_inside_the_window']),
+    # the runner watch (decision 15.5)
+    (RWP, "if any(w == h or w.startswith(h + '-') for w in words)", 'if any(w.startswith(h) for w in words)',
+     [f'{TRW}.Watch.test_runners_belong_to_a_host_by_name_or_label_the_longer_match_first']),
+    (RWP, 'and (best is None or len(h) > len(best))', 'and best is None',
+     [f'{TRW}.Watch.test_runners_belong_to_a_host_by_name_or_label_the_longer_match_first']),
+    (RWP, '        if len(rows) < PAGE:\n', '        if True:\n',
+     [f'{TRW}.Watch.test_a_full_last_page_is_an_error_not_a_partial_list']),
+    (RWP, "    raise WatchError(f'the runners: more than {PAGES * PAGE}')", '    return out',
+     [f'{TRW}.Watch.test_a_full_last_page_is_an_error_not_a_partial_list']),
+    (RWP, 'if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):', 'if not isinstance(rows, list):',
+     [f'{TRW}.Watch.test_a_failed_read_writes_nothing']),
+    (RWP, "out += [i for i in got if 'pull_request' not in i]", 'out += got',
+     [f'{TRW}.Watch.test_an_open_issue_with_the_title_is_adopted_and_pull_requests_are_not']),
+    (RWP, "consecutive = prev['offline'] > 0 and 0 < now - prev['last'] <= GAP", "consecutive = prev['offline'] > 0",
+     [f'{TRW}.Watch.test_a_gap_of_more_than_40_min_starts_the_count_again']),
+    (RWP, 'GAP = 40 * 60', 'GAP = 60 * 60',
+     [f'{TRW}.Watch.test_a_gap_of_more_than_40_min_starts_the_count_again']),
+    (RWP, 'if count < 2 or alerted:', 'if count < 1 or alerted:',
+     [f'{TRW}.Watch.test_two_consecutive_checks_open_one_issue_and_no_more']),
+    (RWP, 'if count < 2 or alerted:', 'if count < 2:',
+     [f'{TRW}.Watch.test_an_issue_a_person_closed_is_not_reopened_during_the_outage']),
+    (RWP, '            alerted = True\n            print(f\'{head}; {"would adopt"', '            print(f\'{head}; {"would adopt"',
+     [f'{TRW}.Watch.test_an_open_issue_with_the_title_is_adopted_and_pull_requests_are_not']),
+    (RWP, "                alerted = True\n                print(f'{head}; opened", "                print(f'{head}; opened",
+     [f'{TRW}.Watch.test_an_issue_a_person_closed_is_not_reopened_during_the_outage']),
+    (RWP, "new[h] = {'offline': 0, 'last': now, 'alerted': False}", "new[h] = {'offline': 0, 'last': now, 'alerted': prev['alerted']}",
+     [f'{TRW}.Watch.test_back_online_comments_and_closes_and_a_new_outage_alerts_again']),
+    (RWP, "                    call('PATCH', f'{base}/repos/{repo}/issues/{n}', token,\n                         {'state': 'closed', 'state_reason': 'completed'}, tries=1)\n", '',
+     [f'{TRW}.Watch.test_back_online_comments_and_closes_and_a_new_outage_alerts_again']),
+    (RWP, "opening_body(h, by_host[h], prev['last'], now)}, tries=1)", "opening_body(h, by_host[h], prev['last'], now)})",
+     [f'{TRW}.Watch.test_issue_writes_are_not_retried_within_a_run']),
+    (RWP, '        return status\n    try:\n        write_state', '    try:\n        write_state',
+     [f'{TRW}.Watch.test_report_only_prints_and_writes_nothing']),
+    (RWP, '        elif report_only:\n', '        elif False:\n',
+     [f'{TRW}.Watch.test_report_only_prints_and_writes_nothing']),
+    (RWP, '                if report_only:\n', '                if False:\n',
+     [f'{TRW}.Watch.test_report_only_prints_and_writes_nothing']),
+    (RWP, 'os.O_TRUNC, 0o600)', 'os.O_TRUNC, 0o644)',
+     [f'{TRW}.Watch.test_the_state_is_private_and_a_bad_one_starts_again']),
+    (RWP, "isinstance(s.get('offline'), int) and ", '',
+     [f'{TRW}.Watch.test_the_state_is_private_and_a_bad_one_starts_again']),
+    (RWP, 'if not raw or len(raw) > MAX_TOKEN or not raw.isascii() or any(c.isspace() for c in raw):', 'if not raw:',
+     [f'{TRW}.Watch.test_bad_arguments_and_no_login_call_nothing']),
+    (RWP, 'bad = [h for h in a.hosts if not HOST.match(h)]', 'bad = []',
+     [f'{TRW}.Watch.test_bad_arguments_and_no_login_call_nothing']),
+    (RWP, ' or len(set(a.hosts)) != len(a.hosts)', '',
+     [f'{TRW}.Watch.test_bad_arguments_and_no_login_call_nothing']),
+    (RWP, ' or not os.path.isabs(a.state)', '',
+     [f'{TRW}.Watch.test_bad_arguments_and_no_login_call_nothing']),
+    (RWP, 'if not ORG.match(a.org) or bad', 'if bad',
+     [f'{TRW}.Watch.test_bad_arguments_and_no_login_call_nothing']),
+    (RWP, '    except (github.ApiError, WatchError) as e:', '    except WatchError as e:',
+     [f'{TRW}.Watch.test_a_failed_read_writes_nothing']),
+    (RWP, "opening the issue failed: {e}', file=sys.stderr)\n                status = 1", "opening the issue failed: {e}', file=sys.stderr)\n                status = 0",
+     [f'{TRW}.Watch.test_a_failed_issue_call_is_retried_at_the_next_tick_and_other_hosts_go_on']),
+    (RWP, "online = sum(1 for r in by_host[h] if r.get('status') == 'online')", "online = sum(1 for r in by_host[h] if not r.get('busy'))",
+     [f'{TRW}.Watch.test_a_busy_runner_is_online_and_one_online_runner_is_enough',
+      f'{TRW}.Watch.test_two_consecutive_checks_open_one_issue_and_no_more']),
+    (RWS, 'unset GITHUB_TOKEN GITHUB_REPOSITORY', 'unset GITHUB_REPOSITORY',
+     [f'{TRW}.Script.test_ci_run_of_the_release_runs_under_the_wrapper_with_the_login']),
+    (RWS, 'GH_TOKEN=$token exec', 'exec',
+     [f'{TRW}.Script.test_ci_run_of_the_release_runs_under_the_wrapper_with_the_login']),
+    (RWS, 'exec "$wrap" "$root/bin/ci-run"', 'exec "$root/bin/ci-run"',
+     [f'{TRW}.Script.test_ci_run_of_the_release_runs_under_the_wrapper_with_the_login']),
+    (RWS, '  report=(--report-only)\n', '  report=()\n',
+     [f'{TRW}.Script.test_report_only_is_passed_on_and_the_status_is_ci_runs']),
+    (RWS, '[ $# -ge 4 ] ||', '[ $# -ge 3 ] ||',
+     [f'{TRW}.Script.test_bad_arguments_read_no_login_and_run_nothing']),
+    (RWS, '  [[ $a =~ ^/[A-Za-z0-9._/-]*$ ]] ||', '  [[ $a =~ ^[A-Za-z0-9._/-]*$ ]] ||',
+     [f'{TRW}.Script.test_bad_arguments_read_no_login_and_run_nothing']),
+    (RWS, '  [[ $a =~ ^/[A-Za-z0-9._/-]*$ ]] ||', '  [[ $a =~ ^/ ]] ||',
+     [f'{TRW}.Script.test_bad_arguments_read_no_login_and_run_nothing']),
+    (RWS, '[[ $org =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] ||', 'true ||',
+     [f'{TRW}.Script.test_bad_arguments_read_no_login_and_run_nothing']),
+    (RWS, '  [[ $h =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||', '  [[ $h =~ ^[A-Za-z0-9._-]*$ ]] ||',
+     [f'{TRW}.Script.test_bad_arguments_read_no_login_and_run_nothing']),
+    (RWS, '[ -f "$wrap" ] && [ -x "$wrap" ] ||', '[ -e "$wrap" ] ||',
+     [f'{TRW}.Script.test_bad_arguments_read_no_login_and_run_nothing']),
+    (RWS, '[ -n "$token" ] ||', 'true ||',
+     [f'{TRW}.Script.test_no_login_runs_nothing']),
+    (RWT, 'OnCalendar=*-*-* *:00,15,30,45:00 UTC', 'OnCalendar=*-*-* *:00,15,30,45:00',
+     [f'{TRW}.Units.test_the_timer_ticks_every_quarter_hour_in_utc']),
+    (RWT, 'AccuracySec=1s\n', '',
+     [f'{TRW}.Units.test_the_timer_ticks_every_quarter_hour_in_utc']),
+    (RWU, 'UMask=0077\n', '',
+     [f'{TRW}.Units.test_the_service_runs_the_script_with_its_placeholders_and_a_private_state']),
 ]
 
 

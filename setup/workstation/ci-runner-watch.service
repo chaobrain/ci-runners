@@ -1,0 +1,22 @@
+# The runner watch (design decision 15.5): a user unit of the maintainer's account on 3090b,
+# not of a CI account. Placeholders: @RELEASE@, the release directory (setup/install.sh with
+# CI_RUNNERS_ETC under a directory of the maintainer's); @NET_WRAP@, the host's proxy wrapper;
+# @ORG@, the org; @HOSTS@, the hosts to watch, one word each. The counts are kept in the unit's
+# state directory (%S, ~/.local/state for a user unit). Copy to ~/.config/systemd/user/, fill in,
+# then enable ci-runner-watch.timer. The unit runs without a login session, so it needs linger
+# for the maintainer's account, gh's login (admin:org and repo) in its config file, not in a
+# keyring locked without a session, and gh on the user manager's PATH. Rehearse under the user
+# manager, not a login shell: `systemd-run --user --wait --pipe <release>/setup/workstation/
+# runner-watch.sh --report-only <state file> <wrapper> <org> <host>...`. A failed run changes
+# nothing, and the next tick tries again: check `journalctl --user -u ci-runner-watch`.
+[Unit]
+Description=ci-runners: an issue when a host has no runner online
+
+[Service]
+Type=oneshot
+StateDirectory=ci-runners
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=@RELEASE@/setup/workstation/runner-watch.sh %S/ci-runners/runner-watch.json @NET_WRAP@ @ORG@ @HOSTS@
+NoNewPrivileges=yes
+TimeoutStartSec=5min

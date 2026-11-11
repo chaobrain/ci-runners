@@ -1073,6 +1073,13 @@ class Shared(unittest.TestCase):
             self.assertIn(f'\nbase={self.data}/ci-runners\n', hook)
             argv = [a['argv'] for a in setup.build(str(self.etc)).actions if a['kind'] == 'run']
             self.assertNotIn(reload, argv)  # the hooks unchanged: no copy again
+            units = self.units / 'ci-runner@.service'
+            kept = units.read_text()
+            units.write_text(kept + '# changed\n')  # a unit to write, the hooks unchanged: still no copy again
+            argv = [a['argv'] for a in setup.build(str(self.etc)).actions if a['kind'] == 'run']
+            self.assertIn(start, argv)
+            self.assertNotIn(reload, argv)
+            units.write_text(kept)
             (self.data / 'ci-runners' / 'hooks' / 'job-started.sh').write_text('#!/bin/sh\nexit 1\n')
             argv = [a['argv'] for a in setup.build(str(self.etc)).actions if a['kind'] == 'run']
             self.assertIn(reload, argv)

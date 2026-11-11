@@ -77,7 +77,7 @@ def queue_full(waiting: int, max_waiting: int) -> bool:
 # ------------------------------------------------------------------ the queue on disk
 #
 # The files are brainspike's ``ci_slot.sh``'s (D5): slot 1 is ``<lock>``, slot i >= 2
-# is ``<stem>.<i>.lock``; the queue directory holds ``seq``, ``seq.lock`` and its
+# is ``<stem>.<i>.lock``; the queue directory holds ``seq``, ``seq.lock``, ``take.lock`` and its
 # tickets ``<seq, 12 digits>.ticket``: ``<seq> <pid> <start epoch> <cwd> <command>``.
 #
 # ``ci_slot.sh`` serves its tickets first come, first served: only the lowest live
@@ -94,6 +94,11 @@ def queue_full(waiting: int, max_waiting: int) -> bool:
 # creates in it the other can read, replace and delete. A slot file is opened as the
 # host lock's are (``locks.open_lock``); a missing queue directory is created only
 # outside a sticky directory.
+
+# The queue's lock files, opened in place (not written new and renamed), so they keep the
+# ACL entries they were made with; the part's gate checks them (decision 15.2, issue #124).
+SEQ_LOCK, TAKE_LOCK = 'seq.lock', 'take.lock'
+QUEUE_LOCKS = (SEQ_LOCK, TAKE_LOCK)
 
 _TICKET = re.compile(r'([0-9]{12})\.(ticket|wait)\Z')
 _TAG = re.compile(r'ci-slot project=([A-Za-z0-9_.-]+)(?:\s|\Z)')
@@ -253,7 +258,7 @@ class SlotQueue:
         ``every`` marks a ticket that waits for every slot (``ci-slot project=<p> every
         <command>``)."""
         self._make_queue()
-        fd = _queue_lock(os.path.join(self.queue, 'seq.lock'))
+        fd = _queue_lock(os.path.join(self.queue, SEQ_LOCK))
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             try:
@@ -350,7 +355,7 @@ class SlotQueue:
         no project, and a project could then pass its cap."""
         if not os.path.exists(self.ticket):  # deleted while we were stopped: re-queue
             self.take_ticket(project, 'requeued')
-        lk = _queue_lock(os.path.join(self.queue, 'take.lock'))
+        lk = _queue_lock(os.path.join(self.queue, TAKE_LOCK))
         try:
             fcntl.flock(lk, fcntl.LOCK_EX)
             return self._take(project, caps)
@@ -365,7 +370,7 @@ class SlotQueue:
         it holds so far stay held (``self.every``) and its ticket stays queued."""
         if not os.path.exists(self.ticket):  # deleted while we were stopped: re-queue
             self.take_ticket(project, 'requeued', every=True)
-        lk = _queue_lock(os.path.join(self.queue, 'take.lock'))
+        lk = _queue_lock(os.path.join(self.queue, TAKE_LOCK))
         try:
             fcntl.flock(lk, fcntl.LOCK_EX)
             for _ in range(self._grants(caps).count(self.seq)):

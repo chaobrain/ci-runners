@@ -419,6 +419,31 @@ class SharedState(Host):
         self.assertEqual(out['outcome'], 'pass')
         self.assertTrue(self.ran(out))
 
+    def test_a_stale_slot_queue_lock_drains_the_host(self):
+        """Issue #124: the slot queue's ``seq.lock``, a local account's, kept the account's
+        old uid only: the part ends drained at the gate, before its slot ticket, and the
+        host's log names the file; once mended (and undrained) the part runs."""
+        self.make((self.me, self.OTHER))
+        seq = f'{self.p}-ci.queue/seq.lock'
+        pathlib.Path(seq).touch()
+        self.acl('-b', seq)  # made before the renumbering: not the queue's entries of today
+        self.acl('-m', f'u:{self.OLD}:rw,u:{self.OTHER}:rw,m::rw', seq)
+        os.chmod(seq, 0o060)  # its owner (this test's account) refused too, as the CI account was
+        _, out = self.execute(command='touch "$CI_PART_DIR/ran"')
+        self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'drained: shared state'))
+        self.assertFalse(self.ran(out))
+        self.assertNotIn('seq.lock', json.dumps(out))
+        (line,) = self.logged()
+        self.assertEqual(line['missing'], [[seq, f'no rw ACL entry for uid {self.me}']])
+        self.assertIn([seq, f'ACL entry for uid {self.OLD}, which has no account (a renumbered account?)'],
+                      line['stale'])
+        self.acl('-m', f'u:{self.me}:rw', seq)
+        os.chmod(seq, 0o660)  # the test's account owns it: its entry is the owner's, not the named one
+        drain.change(str(self.data), False)
+        _, out = self.execute(id='after', command='touch "$CI_PART_DIR/ran"')
+        self.assertEqual(out['outcome'], 'pass')
+        self.assertTrue(self.ran(out))
+
     def test_a_stale_entry_beside_the_accounts_own_is_no_miss(self):
         self.make((self.OLD, self.me, self.OTHER))
         _, out = self.execute(command='touch "$CI_PART_DIR/ran"')

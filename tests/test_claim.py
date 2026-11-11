@@ -26,6 +26,7 @@ class Decide(unittest.TestCase):
     def test_green_by_the_runners_skips(self):
         self.assertEqual(run([S('success', BOT)]), (False, 'green'))
         self.assertEqual(run([S('success', 'GitHub-Actions[bot]')]), (False, 'green'))  # logins ignore case
+        self.assertFalse(claim.decide([S('success', BOT)], bot='GitHub-Actions[bot]').run)  # on both sides
 
     def test_a_runner_red_pending_or_error_runs(self):
         self.assertEqual(run([S('failure', BOT)]), (True, 'failure by the runners'))

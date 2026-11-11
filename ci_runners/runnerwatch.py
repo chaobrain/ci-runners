@@ -8,7 +8,8 @@ or one of its labels is, or starts with ``HOST-`` (the longer where two match); 
 online when GitHub says so, busy or idle.
 
 FILE keeps, per host, the number of consecutive checks that found no runner online and the
-time of the last check; a check more than ``GAP`` after it starts the count again. At the
+time of the last check; a check more than ``GAP`` after it starts the count again, and one
+less than ``SOON`` after it (a start by hand) does not count again. At the
 second consecutive check with none online, the watch opens ``No runner of <host> online``
 in ``<ORG>/ci-runners``, or adopts an open issue with that title: at most one per outage.
 The first check that finds a runner of the host online comments on every open issue with
@@ -33,6 +34,7 @@ from ci_runners import github
 API = 'https://api.github.com'
 PAGE, PAGES = 100, 10
 GAP = 40 * 60  # seconds: one missed quarter-hour tick still counts as consecutive, two do not
+SOON = 5 * 60  # seconds: a check sooner after the last (a start by hand) does not count again
 REPO = 'ci-runners'
 HOST = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*\Z')
 ORG = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]*\Z')
@@ -172,8 +174,13 @@ def check(call: Callable, org: str, token: str, hosts: list[str], state: dict, n
             if not mine:
                 print(head, file=out)
             continue
-        consecutive = prev['offline'] > 0 and 0 < now - prev['last'] <= GAP
-        count = prev['offline'] + 1 if consecutive else 1
+        last = now
+        if prev['offline'] > 0 and 0 <= now - prev['last'] < SOON:
+            count, last = prev['offline'], prev['last']  # the same check again: neither counts nor moves
+        elif prev['offline'] > 0 and now - prev['last'] <= GAP:
+            count = prev['offline'] + 1
+        else:
+            count = 1
         alerted = prev['alerted']
         head += f'; none at {count} consecutive check{"s" if count > 1 else ""}'
         if count < 2 or alerted:
@@ -192,7 +199,7 @@ def check(call: Callable, org: str, token: str, hosts: list[str], state: dict, n
             except github.ApiError as e:
                 print(f'{head}; opening the issue failed: {e}', file=sys.stderr)
                 status = 1
-        new[h] = {'offline': count, 'last': now, 'alerted': alerted}
+        new[h] = {'offline': count, 'last': last, 'alerted': alerted}
     if other:
         print(f'runner-watch: {other} runner{"s" if other > 1 else ""} of no listed host', file=out)
     return new, status

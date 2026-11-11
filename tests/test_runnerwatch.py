@@ -193,6 +193,32 @@ class Watch(unittest.TestCase):
         self.assertIn('none at 3 consecutive checks; alerted\n', out)
         self.assertEqual(len(self.hub.writes()), 1)
 
+    def test_a_check_by_hand_soon_after_a_tick_does_not_count_again(self):
+        self.down('hosta')
+        self.run_watch(T0)
+        rc, out = self.run_watch(T0 + 30)
+        self.assertIn('none at 1 consecutive check\n', out)
+        self.assertEqual(self.saved()['hosta'], {'offline': 1, 'last': T0, 'alerted': False})
+        rc, out = self.run_watch(T0 + Q)  # the next tick: 15 min after the first check
+        self.assertIn('none at 2 consecutive checks; opened #101', out)
+        rc, out = self.run_watch(T0 + Q + 30)  # once opened, a check by hand changes nothing
+        self.assertEqual(len(self.hub.writes()), 1)
+
+    def test_a_failed_close_is_retried_at_the_next_tick(self):
+        self.down('hosta')
+        self.run_watch(T0)
+        self.run_watch(T0 + Q)
+        self.up('hosta-gpu0')
+        self.hub.fail = {'PATCH'}
+        rc, out = self.run_watch(T0 + 2 * Q)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.hub.issues[0]['state'], 'open')
+        self.hub.fail = set()
+        rc, out = self.run_watch(T0 + 3 * Q)
+        self.assertEqual(rc, 0)
+        self.assertIn('closed #101', out)
+        self.assertEqual(self.hub.issues[0]['state'], 'closed')
+
     def test_a_gap_of_more_than_40_min_starts_the_count_again(self):
         self.assertEqual(runnerwatch.GAP, 40 * 60)
         self.down('hosta')
@@ -410,7 +436,7 @@ class Units(unittest.TestCase):
         st = dict(unit('ci-runner-watch.service'))
         self.assertEqual(st['ExecStart'], '@RELEASE@/setup/workstation/runner-watch.sh '
                                           '%S/ci-runners/runner-watch.json @NET_WRAP@ @ORG@ @HOSTS@')
-        self.assertEqual((st['Type'], st['NoNewPrivileges'], st['TimeoutStartSec']), ('oneshot', 'yes', '5min'))
+        self.assertEqual((st['Type'], st['NoNewPrivileges'], st['TimeoutStartSec']), ('oneshot', 'yes', '10min'))
         self.assertEqual((st['StateDirectory'], st['StateDirectoryMode'], st['UMask']), ('ci-runners', '0700', '0077'))
         self.assertTrue(os.access(SCRIPT, os.X_OK))
 

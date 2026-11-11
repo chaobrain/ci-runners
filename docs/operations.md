@@ -305,7 +305,7 @@ brainspike 的 nightly 靠 GitHub 的 `schedule` 触发，merge gate 的事件�
 
 - 单元：`setup/workstation/ci-runner-watch.{service,timer}`，脚本 `setup/workstation/runner-watch.sh [--report-only] STATE NET_WRAP ORG HOST...`，它在代理包装下运行 release 自己的 `ci-run runner-watch`。
 - 提醒：某台主机连续两次检查（间隔不超过 40 分钟）都没有在线的 runner，就在 `<org>/ci-runners` 开一个标题固定的 issue `No runner of <host> online`；已经有同名的 open issue 就沿用它，不重复开。一次故障只开一次：故障期间有人手动关掉，监视器不会再开。之后第一次检查看到那台主机有在线的 runner，就给每个同名的 open issue 评论并关闭。
-- 状态：每台主机连续离线的次数和上次检查的时间，存在单元的状态目录里（`~/.local/state/ci-runners/runner-watch.json`，权限 600）。读 runner 失败时什么都不写，下一次再试。
+- 状态：每台主机连续离线的次数和上次检查的时间，存在单元的状态目录里（`%S/ci-runners/runner-watch.json`，systemd 255 上是 `~/.local/state`，权限 600）。离上次检查不到 5 分钟的检查（比如手动启动）不再计数。读 runner 失败时什么都不写，下一次再试；写 issue 只试一次，失败了下一次再试。
 - 登录：和 §12 一样，每次运行时用 `gh auth token` 读，只放在 `ci-run` 的环境变量 `GH_TOKEN` 里。需要 `admin:org`（读 runner）和 `repo`（写 issue）。没有新令牌。
 - 局限：监视器跑在 3090b 上，所以 3090b 整台宕机、或者它的网络或维护者账户出了问题时，它报告不了 3090b 自己；其他原因（CI 账户的 user manager、隧道、和 GitHub 的连接）都会报告。
 - 安装（由 lead 执行，定时器属于高影响操作）：

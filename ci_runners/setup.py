@@ -84,9 +84,9 @@ TUNNEL_FILES = ('id_ed25519', 'ssh_config', 'known_hosts')
 #: the root step's file (decision 12.9, §5.3): the shared lock and slot files, recreated at boot
 TMPFILES = '/etc/tmpfiles.d/ci-runners-shared.conf'
 #: the runner unit's order after the hooks' copies (decision 13.5): wanted, not required, so
-#: that a failed copy fails the runner's start, which its restart policy retries (15.4)
+#: that a failed copy fails the runner's start, which its restart policy retries (15.5)
 HOOKS_ORDER = 'Wants=ci-hooks.service\nAfter=ci-hooks.service'
-#: where logind marks an account's linger (decision 15.4)
+#: where logind marks an account's linger (decision 15.5)
 LINGER_DIR = '/var/lib/systemd/linger'
 #: the root step's drop-in (decision 12.16, §5.3): the CI account's user manager in its own mount namespace
 DROPIN = '/etc/systemd/system/user@{uid}.service.d/ci-runners-private.conf'
@@ -144,7 +144,7 @@ HOOK_BASE = 'base=$(/usr/bin/dirname "$(/usr/bin/dirname "$(/usr/bin/readlink -f
 
 def hooks_check() -> str:
     """The runner unit's checks: ``ci-hooks.service`` is active, so the copy succeeded in
-    this user manager's private ``/tmp`` (decision 15.4: fail closed without ``Requires=``),
+    this user manager's private ``/tmp`` (decision 15.5: fail closed without ``Requires=``),
     and both hook copies are executable files (13.5). A runner does not start without them,
     and its restart policy tries again. Pure."""
     return '\n'.join(['ExecStartPre=/usr/bin/systemctl --user is-active --quiet ci-hooks.service'] +
@@ -153,13 +153,13 @@ def hooks_check() -> str:
 
 def linger_on(account: str) -> bool:
     """Whether logind keeps the account's user manager running without a login, and starts
-    it at boot (decision 15.4)."""
+    it at boot (decision 15.5)."""
     return os.path.exists(os.path.join(LINGER_DIR, account))
 
 
 def wanted(h: dict, names: list[str]) -> list[tuple[str, str]]:
     """Each unit the plan enables, with the target that wants it: the timers, the hooks'
-    copy, the tunnel and the runners ``names`` (decision 15.4). Pure."""
+    copy, the tunnel and the runners ``names`` (decision 15.5). Pure."""
     out = [(t, 'timers.target') for t in timers(h)]
     out += [('ci-hooks.service', 'default.target')] if hookcopy.used(h) else []
     out += [('ci-tunnel.service', 'default.target')] if 'tunnel' in h else []
@@ -168,7 +168,7 @@ def wanted(h: dict, names: list[str]) -> list[tuple[str, str]]:
 
 def runners_now(inv: inventory.Inventory) -> str:
     """The plan's line on standard error: how many of the inventory's runners have a live
-    process now, and the names of those without (decision 15.4). Not part of the plan."""
+    process now, and the names of those without (decision 15.5). Not part of the plan."""
     from ci_runners import pool
     names = [n for n, _, _, _ in _runners(inv)]
     alive = pool.runners_alive(os.path.join(inv.host['data'], 'actions-runner'))
@@ -714,7 +714,7 @@ class Plan:
         self.lines: list[str] = []
         self.actions: list[dict] = []
         self.blocked = ''  # why apply must refuse this plan (a root step not done), or ''
-        self.note = ''  # what plan.sh prints on standard error, outside the plan's text (decision 15.4)
+        self.note = ''  # what plan.sh prints on standard error, outside the plan's text (decision 15.5)
 
     def add(self, line: str, **action) -> None:
         self.lines.append(line)
@@ -877,7 +877,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
         _file(plan, ak, authorized_keys_text(old, h.get('push_key', ''), etc=etc, python=python, base=base,
                                              probe_key=h.get('probe_key', '')), 0o600)
     on = linger_on(h['account'])
-    plan.add('linger (decision 15.4): the lead runs it as root, before apply; setup cannot:')
+    plan.add('linger (decision 15.5): the lead runs it as root, before apply; setup cannot:')
     plan.add(f'  {"done " if on else "to do"}  run    loginctl enable-linger {h["account"]}  (the user manager runs '
              'without a login and starts at boot)')
     if not on:
@@ -932,7 +932,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
             else:
                 plan.add(f'  forget {path} (already gone)', kind='remove', path=path)
     rs = _runners(inv)
-    # every unit the plan enables is wanted by its target, on every host (decision 15.4): a
+    # every unit the plan enables is wanted by its target, on every host (decision 15.5): a
     # missing link (a 3090 host's root step disables the runners, 12.16) plans the enable again
     missing = [u for u, target in wanted(h, [n for n, _, _, _ in rs])
                if not os.path.lexists(os.path.join(unit_dir, f'{target}.wants', u))]

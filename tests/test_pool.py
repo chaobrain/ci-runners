@@ -148,7 +148,7 @@ class Registry(unittest.TestCase):
         self.assertIn('tmp/leases', toks)
 
     def test_the_runners_key(self):
-        """A host's ``runners`` (decision 15.4): absolute, private, and passed to the probe of a
+        """A host's ``runners`` (decision 15.5): absolute, private, and passed to the probe of a
         local machine (what a forced probe's caller reads)."""
         text = REGISTRY.replace('slots = { lock = "/tmp/x.lock", count = 2 }\n',
                                 'slots = { lock = "/tmp/x.lock", count = 2 }\nrunners = "/data/ci/actions-runner"\n')
@@ -600,7 +600,7 @@ class Probe(unittest.TestCase):
         return proc
 
     def test_the_runners_with_a_live_process(self):
-        """Decision 15.4: a runner is alive with its listener (argv[0]) or its run-helper.sh
+        """Decision 15.5: a runner is alive with its listener (argv[0]) or its run-helper.sh
         (argv[1], after its shell), right under the runners' directory; nothing else counts."""
         with tempfile.TemporaryDirectory() as d:
             root = os.path.join(d, 'actions-runner')
@@ -633,7 +633,7 @@ class Probe(unittest.TestCase):
 
     def test_a_proc_that_hides_other_accounts_processes(self):
         """With hidepid, only the account that owns the runners' directory can count them;
-        anyone else gets None (not known), never 0 (decision 15.4: no false alarm)."""
+        anyone else gets None (not known), never 0 (decision 15.5: no false alarm)."""
         with tempfile.TemporaryDirectory() as d:
             root = os.path.join(d, 'actions-runner')
             os.makedirs(root)

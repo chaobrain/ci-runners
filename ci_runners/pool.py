@@ -90,7 +90,7 @@ to a cluster target. A host whose ``drain`` file drains it (the CI account's wor
 copy of its drain state; unreadable or malformed drains it, missing does not) shows the
 problem ``drained`` and starts no pool run. A host whose entry names ``runners`` (the CI
 account's ``<data>/actions-runner``) gets ``runners``, how many of them have a live process,
-and with none the problem ``no runner online`` (decision 15.4): brainspike's plan places no
+and with none the problem ``no runner online`` (decision 15.5): brainspike's plan places no
 part there, while a pool run, which takes a slot and no runner, ignores it.
 
 **The claim**: a host's capacity is a slot of its CI slot queue, the same ``SlotQueue``
@@ -250,7 +250,7 @@ class Machine:
     max_slots: int | None = None  # the project's cap on the host's slot queue (None: the slot count)
     drain: str = ''  # the CI account's world-readable drain state
     leases: LeaseDir | None = None  # the cards' leases, shared with the parts
-    runners: str = ''  # the CI account's runner directories (decision 15.4)
+    runners: str = ''  # the CI account's runner directories (decision 15.5)
     labels: Mapping[str, str] = dataclasses.field(default_factory=dict)
     numerics_ok: bool = False
     cache: str = ''
@@ -493,7 +493,7 @@ def drained(path: str) -> bool:
 
 
 #: the problem of a host none of whose runners has a live process: its parts would wait in
-#: GitHub's queue, so brainspike's plan places none there; a pool run needs no runner (15.4)
+#: GitHub's queue, so brainspike's plan places none there; a pool run needs no runner (15.5)
 NO_RUNNER = 'no runner online'
 
 
@@ -502,7 +502,7 @@ def runners_alive(root: str, proc: str = '/proc') -> 'set[str] | None':
     process, read from each process's ``cmdline`` without taking anything: a listener
     (``argv[0]`` ``<root>/<name>/bin/Runner.Listener``) or its helper (``argv[1]``
     ``<root>/<name>/run-helper.sh``, after its shell), which outlives the listener's
-    self-update (decision 15.4). ``root`` counts as written and as its real path (the
+    self-update (decision 15.5). ``root`` counts as written and as its real path (the
     runner's scripts start from their physical directory), and where its owner is known
     only that account's processes count. None when it cannot be known: ``proc`` hides
     other accounts' processes (``hidepid``) and ``root`` is not the caller's.
@@ -549,7 +549,7 @@ def probe(lock: str, count: int, queue: str, drain: str = '', leases: str = '', 
     (``/proc/locks``, as ``slots._flocked``), the tickets waiting, the load, the available
     memory, the cards' free MiB, whether ``drain`` drains it, with ``leases`` (the
     leases' directory, ``parts`` a card) the leases held per card, and with ``runners``
-    how many of the CI account's runners have a live process (decision 15.4). Self-contained
+    how many of the CI account's runners have a live process (decision 15.5). Self-contained
     (its source, ``drained``'s and ``runners_alive``'s run on the host). Stdlib."""
     import os
     import subprocess
@@ -630,7 +630,7 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
         row['problems'].append(f'{p["slots_missing"]} slot lock file(s) missing')
     if p.get('drained'):
         row['problems'].append('drained')
-    if p.get('runners') is not None:  # a forced probe counts what its host's own registry names (decision 15.4)
+    if p.get('runners') is not None:  # a forced probe counts what its host's own registry names (decision 15.5)
         row['runners'] = int(p['runners'])
         if not row['runners']:
             row['problems'].append(NO_RUNNER)

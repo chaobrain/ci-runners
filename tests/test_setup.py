@@ -546,7 +546,7 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
         self.assertEqual([c.kwargs.get('adopt') for c in a.call_args_list], [True, False])
 
     def test_linger_is_a_root_step_apply_waits_for(self):
-        """Decision 15.4: the plan shows linger for the account as a root step, on every host;
+        """Decision 15.5: the plan shows linger for the account as a root step, on every host;
         apply refuses while it is off, and goes ahead once logind marks it."""
         self.unpacked = []
         linger = pathlib.Path(self.tmp.name) / 'linger'
@@ -567,7 +567,7 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
             self.assertEqual(self.apply(plan.text()), 0)
 
     def test_a_unit_no_longer_enabled_is_enabled_again(self):
-        """Decision 15.4: on every host (this one has no local accounts), each unit the plan
+        """Decision 15.5: on every host (this one has no local accounts), each unit the plan
         enables keeps its link in its target's .wants; a missing one, and nothing else
         changed, plans the enable again."""
         self.unpacked = []
@@ -591,7 +591,7 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
                 self.assertEqual(setup.build(str(self.etc)).actions, [])
 
     def test_the_plan_prints_the_runners_now_outside_its_text(self):
-        """Decision 15.4: how many of the inventory's runners have a live process, on standard
+        """Decision 15.5: how many of the inventory's runners have a live process, on standard
         error: a state that changes would otherwise make apply refuse the approved plan."""
         names = ['hx-light-1', 'hx-part-1', 'hx-gpu0', 'hx-gpu3']
         root = str(self.data / 'actions-runner')
@@ -677,7 +677,7 @@ direct = ["localhost", "127.0.0.1", "::1"]
             os.chmod(self.tun / name, 0o600)
 
     def test_the_tunnel_no_longer_enabled_is_enabled_again(self):
-        """Decision 15.4: a missing tunnel link alone plans its enable --now again."""
+        """Decision 15.5: a missing tunnel link alone plans its enable --now again."""
         self.unpacked = []
         self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
         self.assertEqual(setup.build(str(self.etc)).actions, [])
@@ -1020,7 +1020,7 @@ class Shared(unittest.TestCase):
             self.assertIn(enable, self.ran)
 
     def test_the_hooks_copy_no_longer_enabled_is_enabled_again(self):
-        """Decision 15.4: the hooks' copy is wanted by default.target as the runners are."""
+        """Decision 15.5: the hooks' copy is wanted by default.target as the runners are."""
         with mock.patch.object(setup, 'shared_state', lambda h: []), \
                 mock.patch.object(setup, 'account_uid', lambda a: 4242), \
                 mock.patch.object(setup, 'private_state', lambda h, uid: []):
@@ -1054,12 +1054,12 @@ class Shared(unittest.TestCase):
             self.assertIn(f'ExecReload={self.data}/ci-runners/releases/hook/bin/ci-run hooks copy\n', hooks)
             self.assertIn('RemainAfterExit=yes\n', hooks)
             for line in ('Restart=on-failure\n', 'RestartSec=30\n', '[Unit]\nDescription=ci-runners: copy the hooks into '
-                         "the account's private /tmp\nStartLimitIntervalSec=0\n"):  # it retries, never gives up (15.4)
+                         "the account's private /tmp\nStartLimitIntervalSec=0\n"):  # it retries, never gives up (15.5)
                 self.assertIn(line, hooks)
             runner = (self.units / 'ci-runner@.service').read_text()
             self.assertIn('[Unit]\nDescription=ci-runners: GitHub Actions runner %i\nStartLimitIntervalSec=0\n'
                           'Wants=ci-hooks.service\nAfter=ci-hooks.service\n', runner)
-            self.assertNotIn('Requires=', runner)  # a failed copy fails the start, which Restart= retries (15.4)
+            self.assertNotIn('Requires=', runner)  # a failed copy fails the start, which Restart= retries (15.5)
             pre = [x for x in runner.splitlines() if x.startswith('ExecStartPre=')]
             self.assertEqual(pre[0], 'ExecStartPre=/usr/bin/systemctl --user is-active --quiet ci-hooks.service')
             self.assertEqual(len(pre), 1 + len(hookcopy.NAMES))  # then each copy's check (13.5)

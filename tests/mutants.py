@@ -2655,7 +2655,7 @@ MUTANTS = [
     (NBT, 'OnCalendar=*-*-* 21,22:00,15,30,45:00 UTC', 'OnCalendar=*-*-* 21,22:00,15,30,45:00',
      [f'{TNB}.Units.test_the_timer_ticks_every_quarter_hour_inside_the_window']),
     (NBT, 'AccuracySec=1s\n', '', [f'{TNB}.Units.test_the_timer_ticks_every_quarter_hour_inside_the_window']),
-    # the runners come back by themselves; a host with no runner online (decision 15.4)
+    # the runners come back by themselves; a host with no runner online (decision 15.5)
     ('setup/units/ci-runner@.service', "StartLimitIntervalSec=0\n", "", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
     ('setup/units/ci-hooks.service', "StartLimitIntervalSec=0\n", "", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
     ('setup/units/ci-hooks.service', "Restart=on-failure\n", "", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),

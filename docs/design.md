@@ -2350,7 +2350,8 @@ Rules:
      stale ACL entries of a uid in no account, which the new warning listed, were removed), so the install restarts
      no runner. The hosted unit tests run
      on one Python, the hosts' 3.12 (#128).
-- **`v1.10.1`** (patch, stamped 2026-11-11; #136 and #140, lead-approved, #110 and #124): a part `stopped`
+- **`v1.10.1`** (patch, stamped 2026-11-11; #136 and #140, lead-approved, #110 and #124; `v1` moved to it after the
+  3090 canary at `@v1.10.1`, 2026-11-11): a part `stopped`
   by a cancel that its run outlives (GitHub's own cancel of one job, e.g. a runner that lost its connection) asks
   for one retry on its own pool (`next: retry`, decision 15.4); a second `stopped` is final, and a cancelled run
   runs no retry (§4.8 rule 4). A shared path that refuses the CI account after the part's gate (issue #124) still

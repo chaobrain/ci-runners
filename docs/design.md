@@ -2361,6 +2361,28 @@ Rules:
   1. **When it holds.** Both changes are in the part and the readers (`salvage`, the verdict), so they hold for a
      consumer's parts once `v1` moves.
   2. No setup change: a host's plan at `v1.10.1` is `v1.10.0`'s, so the install restarts no runner.
+- **`v1.11.0`** (minor, stamped 2026-11-11; decision 15.5, #134: #135 and #137; with decision 15.6, #142: #143 and
+  #146, and decision 15.2's amendment, #124: #141 and #145; all lead-approved): the runners come back by themselves.
+  The runner unit wants (no longer requires) the hooks' copy and checks it in `ExecStartPre`; `ci-hooks.service`
+  retries a failed copy every 30 s; both units set `StartLimitIntervalSec=0`. `setup`'s plan checks the CI account's
+  linger (a root step) and each enabled unit's `.wants` link on every host, and prints the runners alive now on
+  standard error. A registry's host entry may name `runners`, and `pool status` reports `no runner online` for a host
+  with none alive. The runner watch (`ci-run runner-watch`, `setup/workstation/ci-runner-watch.{service,timer}`)
+  opens an issue when a host has had no runner online at GitHub for two checks. The shared-state checks (plan and
+  job time) cover the slot queue's `seq.lock` and `take.lock`. No action's input or output changes, no label,
+  outcome kind, inventory key, slurm or egress code changes. Its notes:
+  1. **When each side runs it.** The units take effect at each user manager's next start after the host's `apply`
+     (which restarts nothing). `pool status` and the forced probe run `releases/hook`, so the `runners` row holds
+     from the install once the registry names it; the queue locks' job-time check holds for a consumer's parts once
+     `v1` moves. The runner watch runs only once the lead enables its timer.
+  2. **The registry's `runners` after the install.** Releases before `v1.11.0` refuse the key (`unknown keys`), so
+     each CI account's registry gains it on its `local` entry only once both 3090 hosts' `releases/hook` is
+     `v1.11.0`; a host whose hook goes back to an older release loses the key first.
+  3. **The plan.** On each 3090 host the plan from this release rewrites `ci-runner@.service` and
+     `ci-hooks.service`, runs `daemon-reload` and `enable` (`--now` only for units already active), and restarts
+     nothing; linger is on (`done`) on both. Its plan differs from `v1.10.1`'s, so the lead approves it and applies.
+  4. **No host drains at the move.** Each 3090 host's `setup.own_access` as its CI account, with the queue locks,
+     shows no miss (3090b and 3090a at `6241cdd`: 0 misses).
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

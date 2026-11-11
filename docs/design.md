@@ -1067,8 +1067,10 @@ placing parts on the host, whose jobs queued.
    registry may name `runners`, the CI account's `<data>/actions-runner` (private, as
    `drain`). The probe counts the runners with a live process there, read from
    `/proc/<pid>/cmdline` without taking anything: a `Runner.Listener` whose `argv[0]` is
-   `<runners>/<name>/bin/Runner.Listener`, or its `run-helper.sh` (which outlives the
-   listener's self-update). The row gets `runners`, that count, and the problem
+   `<runners>/<name>/bin/Runner.Listener`, or its helper, whose `argv[1]` (after its shell)
+   is `<runners>/<name>/run-helper.sh` (it outlives the listener's self-update); the path
+   as written or as its real path (the runner's scripts start from their physical
+   directory), and only processes of the directory's owner where it is known. The row gets `runners`, that count, and the problem
    `no runner online` when it is 0, so brainspike's plan places no part on the host and
    its other host takes them. A pool run ignores the problem: it takes a slot, not a
    runner. A forced probe counts what the receiving account's own

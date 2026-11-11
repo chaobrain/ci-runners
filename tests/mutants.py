@@ -1095,7 +1095,20 @@ MUTANTS = [
      [f'{TV}.Artifacts.test_what_is_not_an_artifact_is_skipped']),
     (VRD, "if not isinstance(o, dict) or o.get('outcome') not in KINDS:", "if not isinstance(o, dict):",
      [f'{TV}.Artifacts.test_what_is_not_an_artifact_is_skipped']),
-    (VRD, " and last < MAX_ATTEMPT:", ":", [f'{TV}.Artifacts.test_next_attempt']),
+    # every attempt after the last artifact is read (issue #161)
+    (VRD, "    return max(attempts, default=0) + 1",
+     "    return max(attempts, default=0) + 1 if not attempts or attempts[max(attempts)][0].get('next') in ('retry', 'fallback') else 0",
+     [f'{TV}.Artifacts.test_next_attempt', f'{TV}.Artifacts.test_a_fallback_after_a_retry_that_did_not_start_is_read',
+      f'{TV}.Main.test_the_fallback_attempt_recorded_here_decides',
+      f'{TV}.Salvage.test_the_fallback_after_a_retry_that_did_not_start']),
+    (VRD, "        while n <= MAX_ATTEMPT:", "        while n <= 2:",
+     [f'{TV}.Artifacts.test_a_fallback_after_a_retry_that_did_not_start_is_read',
+      f'{TV}.Artifacts.test_every_attempt_is_read_up_to_the_bound']),
+    (VRD, "            n += 1\n        if not attempts:", "            break\n        if not attempts:",
+     [f'{TV}.Artifacts.test_ends_read_the_records_where_the_artifacts_stop',
+      f'{TV}.Artifacts.test_every_attempt_is_read_up_to_the_bound']),
+    (VRD, "        while n in refs:", "        if n in refs:",
+     [f'{TV}.Salvage.test_each_attempt_after_the_last_artifact_recorded_here']),
     (VRD, "{'outcome': 'lost', 'reason': 'no artifact and no record'}",
      "{'outcome': 'pass', 'reason': 'no artifact and no record'}",
      [f'{TV}.Artifacts.test_ends_read_the_records_where_the_artifacts_stop',
@@ -1116,19 +1129,11 @@ MUTANTS = [
     (VRD, "        if not token:", "        if False:", [f'{TV}.Main.test_malformed_inputs_post_nothing']),
     # salvage, per host (design §4.5, decision 12.13)
     # the old lookup: the part's newest record across the repository's runs
-    (VRD, "    best = None\n    for n in range(1, MAX_ATTEMPT + 1):\n",
-     "    base = os.path.join(parts_root, repo)\n"
-     "    starts = {r: json.loads(_read(os.path.join(base, r, f'{pid}-1', 'record.json')) or '{}').get('start_epoch', 0)\n"
-     "              for r in os.listdir(base)}\n"
-     "    run = max(starts, key=starts.get, default=run)\n"
-     "    best = None\n    for n in range(1, MAX_ATTEMPT + 1):\n",
+    (VRD, "    d = os.path.join(parts_root, repo, run)\n",
+     "    base = os.path.join(parts_root, repo)\n    d = os.path.join(base, max(os.listdir(base)))\n",
      [f'{TV}.Salvage.test_another_runs_part_of_the_same_id_changes_nothing']),
-    (VRD, "        if got is None or got[0] != n:", "        if got is None:",
-     [f'{TV}.Salvage.test_a_retry_that_ran_elsewhere_is_left_alone',
-      f'{TV}.Salvage.test_another_runs_part_of_the_same_id_changes_nothing']),
-    (VRD, "    for n in range(1, MAX_ATTEMPT + 1):", "    for n in range(1, MAX_ATTEMPT):",
-     [f'{TV}.Salvage.test_the_retry_whose_artifact_is_missing',
-      f'{TV}.Salvage.test_another_runs_part_of_the_same_id_changes_nothing']),
+    (VRD, "        if not m or os.path.islink(os.path.join(d, entry)):", "        if not m:",
+     [f'{TV}.Salvage.test_each_attempt_after_the_last_artifact_recorded_here']),
     (VRD, "        if isinstance(rec, dict) and rec.get('id') == pid:", "        if isinstance(rec, dict):",
      [f'{TV}.Salvage.test_only_this_hosts_parts_that_stop_short']),
     (VRD, "json.dump({**got, 'salvaged': True}, f, sort_keys=True)", "json.dump(got, f, sort_keys=True)",

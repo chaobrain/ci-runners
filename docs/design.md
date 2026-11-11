@@ -1767,10 +1767,13 @@ several hosts adds a `salvage` job on each such host's light pool (decision 12.1
 | `parts` | required | the ids of the parts the run started, space-separated |
 | `wait-seconds` | 0 | how long to wait for a part of this host that still runs |
 
-For each part whose artifacts stop short at an attempt, and whose newest record of this
-run (`<run id>-<run attempt>`) on this host is that attempt, it uploads `outcome.json`
-as `ci-part-<id>-<attempt>`, with `salvaged: true`. A part it does not find in this
-run's records here is left alone. Only this run's records are read: every run's part has
+For each part, the attempt after its last artifact (its first, when it has none), and
+each attempt after that one, while this host has a record of it in this run (`<run
+id>-<run attempt>`), is uploaded: its `outcome.json` as `ci-part-<id>-<attempt>`, with
+`salvaged: true`. Whatever the last artifact said in `next`: a consumer's own fallback
+job after a retry that did not start is the part's attempt 3, after an attempt 2 that
+said `none` (issue #161; until then only a retry the last artifact asked for, up to
+attempt 2, was read). A part whose next attempt this host did not record is left alone. Only this run's records are read: every run's part has
 its own record (`<repo>/<run>/<id>-<attempt>`), so a part of the same id in another run,
 older or newer, changes nothing (`v1.5.1`; until then "newest" was read across runs, and
 a later run's part of the same id on the host left the lost part `lost`). A composite
@@ -1822,7 +1825,8 @@ hosts, a coverage job). These rules are the consumer's:
 5. **The verdict** runs last, on the light pool of one host that ran parts, after a
    `salvage` job on every other host that did (§4.5), unless the run was cancelled (a
    newer head's run posts instead). It reads the parts' `ci-part-<id>-<attempt>`
-   artifacts, and a part's last attempt decides: any `red` sets the context to failure;
+   artifacts, and a part's last attempt decides (every attempt is read: where the
+   artifacts stop, the next attempts' records on this host, §4.5): any `red` sets the context to failure;
    all `pass`, success; else error. A run's artifacts outlive its GitHub re-runs, so an
    attempt made in an earlier run attempt than the part's first attempt is not read
    (`v1.5.2`, issue #64): the run attempt is the outcome's `run-attempt`, else the one its

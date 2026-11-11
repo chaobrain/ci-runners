@@ -3,22 +3,23 @@
 ``ci-run verdict --context C --sha S --parts "cpu gpu" --artifacts DIR`` reads the
 parts' ``ci-part-<id>-<attempt>`` artifacts (``outcome.json``, ``summary.md``) that the
 action downloaded into ``DIR``; an attempt an earlier run attempt left behind is dropped
-(``current``). A part's last attempt decides: an attempt whose ``next``
-asked for a retry is followed by the retry's record. A part whose last attempt left no
-artifact (its runner stopped) is read from its record on this host (``salvage``), else
-it is ``lost``. The verdict is then posted as the ``context`` status of ``S``, and the
-parts' summaries go to the job summary.
+(``current``). A part's last attempt decides. Where a part's artifacts stop, the
+attempts after its last artifact are read from their records on this host
+(``salvage``), as many as there are: a retry, and a consumer's own fallback after a
+retry that did not start (attempt 3, issue #161), whatever the attempt before it said
+in ``next``. A part with neither artifact nor record is ``lost``. The verdict is then
+posted as the ``context`` status of ``S``, and the parts' summaries go to the job summary.
 
 ``decide`` is pure. Only an infrastructure end the retry did not cure is ``error``; a
 ``red`` part fails the head whatever the others did (D6).
 
 ``ci-run salvage --parts "cpu gpu" --artifacts DIR --out DIR`` is the ``salvage`` action
 (§4.5, decision 12.13), run on the light pool of each host that ran parts of a run whose
-verdict runs elsewhere. For each part whose artifacts stop short at an attempt, and whose
-newest record of this run on this host is that attempt, it writes ``<out>/ci-part-<id>-
-<attempt>/outcome.json`` with ``salvaged: true``, which the action uploads. A part it does
-not find in this run's records here, or whose newest attempt here is another, is left
-alone; other runs' records are never read.
+verdict runs elsewhere. For each part, the attempt after its last artifact (its first,
+when it has none) and each attempt after that one, while this host has a record of this
+run of it, gives ``<out>/ci-part-<id>-<attempt>/outcome.json`` with ``salvaged: true``, which the
+action uploads. A part whose next attempt this host did not record is left alone; other
+runs' records are never read.
 """
 from __future__ import annotations
 
@@ -39,8 +40,10 @@ KINDS = frozenset({'pass', 'red', 'oom', 'thermal', 'reboot', 'unavailable', 'lo
 FAILING = frozenset({'red'})
 #: the most parts one salvage job uploads: the action has this many upload steps
 MAX_SALVAGED = 16
-#: attempts per part: the first and one retry (design §4.4)
-MAX_ATTEMPT = 2
+#: the highest attempt read: an artifact's ``ci-part-<id>-<n>`` has two digits. A part has
+#: its first attempt and one retry (design §4.4), and a consumer may add its own fallback
+#: after a retry that did not start (attempt 3, issue #161); every one is read.
+MAX_ATTEMPT = 99
 ARTIFACT = re.compile(r'ci-part-([A-Za-z0-9][A-Za-z0-9_.-]{0,63})-([0-9]{1,2})\Z')
 #: a record's run attempt: ``…/<run id>-<run attempt>/<id>-<n>`` at the end of ``record``
 RECORD_RUN = re.compile(r'/[0-9]+-([0-9]+)/[^/]+-[0-9]{1,2}\Z')
@@ -153,31 +156,30 @@ def _read(path: str) -> str | None:
 
 
 def next_attempt(attempts: Mapping[int, tuple[dict, str]]) -> int:
-    """The attempt to read from the host's records when the artifacts stop short: 1 when
-    there is none; the retry when the last artifact asked for one and no retry artifact
-    came; else 0 (the artifacts are complete). Pure."""
-    if not attempts:
-        return 1
-    last = max(attempts)
-    if attempts[last][0].get('next') in ('retry', 'fallback') and last < MAX_ATTEMPT:
-        return last + 1
-    return 0
+    """The attempt after a part's last artifact, read from the host's records when there
+    is one: 1 when there is no artifact, else one more than the last. Not only a retry its
+    last artifact asked for: a consumer's fallback job after a retry that did not start is
+    attempt 3 of a part whose attempt 2 said ``next none`` (issue #161). Pure."""
+    return max(attempts, default=0) + 1
 
 
 def ends(ids: Iterable[str], found: Mapping[str, Mapping[int, tuple[dict, str]]],
          salvage: Callable[[str, int], dict | None]) -> list[End]:
     """Each expected part's end. ``salvage(id, attempt)`` reads an attempt's record, or
-    gives None when there is none. Pure but for ``salvage``."""
+    gives None when there is none; the attempts after the last artifact are read while
+    there are records of them. Pure but for ``salvage``."""
     out = []
     for pid in ids:
         attempts = dict(found.get(pid, {}))
         n = next_attempt(attempts)
-        if n:
+        while n <= MAX_ATTEMPT:
             got = salvage(pid, n)
-            if got is not None:
-                attempts[n] = (got, '')
-            elif not attempts:
-                attempts[1] = ({'outcome': 'lost', 'reason': 'no artifact and no record'}, '')
+            if got is None:
+                break
+            attempts[n] = (got, '')
+            n += 1
+        if not attempts:
+            attempts[1] = ({'outcome': 'lost', 'reason': 'no artifact and no record'}, '')
         last = max(attempts)
         o, summary = attempts[last]
         out.append(End(pid, str(o.get('outcome')), str(o.get('reason', '')), last, summary))
@@ -253,41 +255,44 @@ def main(argv: list[str], inv: inventory.Inventory, call: Callable | None = None
 # ------------------------------------------------------------------ salvage (§4.5)
 
 
-def newest_record(parts_root: str, repo: str, run: str, pid: str) -> tuple[int, str] | None:
-    """``(attempt, ref)`` of part ``pid``'s newest attempt on this host in run ``run``
-    (``<run id>-<run attempt>``); None if it has none here. ``ref`` is
-    ``<repo>/<run>/<id>-<attempt>``. Only this run's records are read: another run's part
-    of the same id, older or newer, has its own."""
-    best = None
-    for n in range(1, MAX_ATTEMPT + 1):
-        name = f'{pid}-{n}'
-        d = os.path.join(parts_root, repo, run, name)
-        if os.path.islink(d):
+def records(parts_root: str, repo: str, run: str, pid: str) -> dict[int, str]:
+    """``{attempt: ref}`` of part ``pid``'s attempts on this host in run ``run`` (``<run
+    id>-<run attempt>``), every one of them; ``ref`` is ``<repo>/<run>/<id>-<attempt>``.
+    Only this run's records are read: another run's part of the same id, older or newer,
+    has its own."""
+    d = os.path.join(parts_root, repo, run)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return {}
+    name = re.compile(re.escape(pid) + r'-([1-9][0-9]?)\Z')
+    out = {}
+    for entry in names:
+        m = name.fullmatch(entry)
+        if not m or os.path.islink(os.path.join(d, entry)):
             continue
-        doc = _read(os.path.join(d, 'record.json'))
+        doc = _read(os.path.join(d, entry, 'record.json'))
         try:
             rec = json.loads(doc) if doc is not None else None
         except ValueError:
             rec = None
         if isinstance(rec, dict) and rec.get('id') == pid:
-            best = (n, f'{repo}/{run}/{name}')
-    return best
+            out[int(m.group(1))] = f'{repo}/{run}/{entry}'
+    return out
 
 
 def to_salvage(ids: Iterable[str], found: Mapping[str, Mapping[int, tuple[dict, str]]],
-               newest: Callable[[str], tuple[int, str] | None]) -> list[tuple[str, int, str]]:
-    """``(id, attempt, ref)`` of the parts this host salvages: the artifacts stop short at
-    ``attempt``, and the part's newest record of this run here is that attempt. Pure but
-    for ``newest``."""
+               here: Callable[[str], Mapping[int, str]]) -> list[tuple[str, int, str]]:
+    """``(id, attempt, ref)`` of the attempts this host salvages: the attempt after the
+    part's last artifact, and each attempt after it, while this host has its record
+    (``here(id)``). Pure but for ``here``."""
     out = []
     for pid in ids:
+        refs = here(pid)
         n = next_attempt(found.get(pid, {}))
-        if not n:
-            continue  # complete (no record attempt is 0, so the check below says the same)
-        got = newest(pid)
-        if got is None or got[0] != n:
-            continue  # not run here, or its newest attempt here is another one
-        out.append((pid, n, got[1]))
+        while n in refs:
+            out.append((pid, n, refs[n]))
+            n += 1
     return out
 
 
@@ -309,7 +314,7 @@ def salvage_main(argv: list[str], inv: inventory.Inventory, *, systemctl: Callab
         if a.wait_seconds < 0:
             raise ValueError('wait-seconds is negative')
         root = os.path.join(inv.host['data'], 'ci-runners', 'state', 'parts')
-        todo = to_salvage(ids, collect(a.artifacts), lambda pid: newest_record(root, repo, run, pid))
+        todo = to_salvage(ids, collect(a.artifacts), lambda pid: records(root, repo, run, pid))
         if len(todo) > MAX_SALVAGED:
             raise ValueError(f'{len(todo)} parts to salvage, more than the action uploads ({MAX_SALVAGED})')
         names = []

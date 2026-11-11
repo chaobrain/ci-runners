@@ -814,7 +814,7 @@ class Stop(Driver):
         t = self.when_running(lambda: os.kill(ex.proc.pid, signal.SIGTERM))  # the scope's stop reaches the driver
         code, out = self.execute(ex, command='sleep 60')
         t.join(10)
-        self.assertEqual((code, out['outcome'], out['next']), (0, 'stopped', 'none'))
+        self.assertEqual((code, out['outcome'], out['next']), (0, 'stopped', 'retry'))  # the run decides (15.4)
         self.assertEqual(self.jobs()[0]['state'], 'CANCELLED')
         self.assertEqual(self.jobs()[0]['cancelled_by'], os.getuid())
         b = self.block(out)

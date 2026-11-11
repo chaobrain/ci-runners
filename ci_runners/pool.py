@@ -49,7 +49,7 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
     billed = true
     [machine.cluster.targets.cpu]        # one row per target, keyed <machine>:<target>
     partition = "<partition>"
-    cpus = 32                            # cores a job takes
+    cpus = 32                            # cores a job takes (a GPU target: per card, the site's cpus_per_card)
     memory_gib = 1900
     max_minutes = 90
     variant = "cpu"                      # the env's variant (envs/<project>-<variant>)
@@ -75,9 +75,17 @@ status`` only: ``pool run`` refuses them.
 ``HostState`` (``labels``, ``problems``, ``queue``, ``gpu_free``, ``multi_gpu``,
 ``gpu_model``, ``cuda``, ``cpus_free``, ``billed``, ``price``, ``target``,
 ``numerics_ok``, ``start_now``) and a few of its own (``slots_free``, ``slots``,
-``mem_free_gib``, ``here``, ``access``). A host's slots are read from ``/proc/locks``
+``mem_free_gib``, ``here``, ``access``, ``runners_online``, ``runners``, ``jobs_free``). A host's slots are read from ``/proc/locks``
 without being taken (``slots._flocked``). A cluster target's free cores and cards come from
 ``sinfo``, less what the account's own running jobs hold of its association's ``GrpTRES``.
+Decision 15.7 adds two, for brainspike's placement: the ``local`` machine's row has
+``runners``, the runner instances its inventory (``<etc>/inventory.toml``, beside the
+registry) registers per label (``setup.runners``: each instance once per label it carries,
+shared labels included); a forced probe returns its own host's the same way. A row whose
+inventory is missing or does not load has none. A cluster target's row has ``jobs_free``,
+how many jobs of its size (``start_now``'s: its cores, on a GPU target cards x cores per
+card, and the memory) the partition's ``idle`` and ``mix`` nodes hold now, summed, capped
+by the association's room; positive exactly where ``start_now`` is true.
 
 A machine that is not ``ready`` is skipped by ``pool run``'s plan unless ``--on`` names it
 (``pool add``'s checks run there that way). A cluster's entry is hand-written.
@@ -89,7 +97,7 @@ part takes none. Without ``leases`` a host's cards are its parts' alone, and a G
 to a cluster target. A host whose ``drain`` file drains it (the CI account's world-readable
 copy of its drain state; unreadable or malformed drains it, missing does not) shows the
 problem ``drained`` and starts no pool run. A host whose entry names ``runners`` (the CI
-account's ``<data>/actions-runner``) gets ``runners``, how many of them have a live process,
+account's ``<data>/actions-runner``) gets ``runners_online``, how many of them have a live process,
 and with none the problem ``no runner online`` (decision 15.5): brainspike's plan places no
 part there, while a pool run, which takes a slot and no runner, ignores it.
 
@@ -606,21 +614,45 @@ def _probe_src() -> str:
     return '\n\n'.join(inspect.getsource(f) for f in (drained, runners_alive, probe))
 
 
-def local_probe(reg: Registry) -> dict:
+def runner_labels(etc: str = '') -> dict[str, int] | None:
+    """The runner instances per label that this account's inventory (``<etc>/inventory.toml``)
+    registers, by setup's own rule (``setup.runners``, design §5.1): each instance once for
+    each label it carries, shared labels included (decision 15.7). None where the inventory
+    is missing or does not load (a maintainer's registry has none beside it)."""
+    from ci_runners import inventory, setup
+    try:
+        with open(os.path.join(_etc(etc), 'inventory.toml'), encoding='utf-8') as f:
+            rs = setup.runners(inventory.load(f.read()))
+    except (OSError, ValueError):  # InventoryError is a ValueError, as are two runners of one name
+        return None
+    out: dict[str, int] = {}
+    for _, labels, _ in rs:
+        for label in set(labels):
+            out[label] = out.get(label, 0) + 1
+    return out
+
+
+def local_probe(reg: Registry, etc: str = '') -> dict:
     """``ci-run pool probe``: the probe of the registry's one ``local`` machine, what a
-    forced key's caller reads (item 8). Takes no input."""
+    forced key's caller reads (item 8), with this account's ``runner_labels`` where its
+    inventory loads (decision 15.7). Takes no input."""
     local = [m for m in reg.machines.values() if m.access == 'local']
     if len(local) != 1:
         raise RegistryError(f'pool probe: {len(local)} local machines in the registry, not one')
     m = local[0]
     lz = m.leases or LeaseDir('', 1)
-    return probe(m.slots.lock, m.slots.count, m.slots.queue, m.drain, lz.dir, lz.parts, m.gpus, m.runners)
+    p = probe(m.slots.lock, m.slots.count, m.slots.queue, m.drain, lz.dir, lz.parts, m.gpus, m.runners)
+    labels = runner_labels(etc)
+    if labels is not None:
+        p['runner_labels'] = labels
+    return p
 
 
 def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> dict:
     """A host's row (``HostState`` fields and ours) from its probe ``p``, or with ``why`` it
     could not be read. ``cpus_free``: the cores the load leaves, 0 while no slot is free (a
-    run would wait in line). Pure."""
+    run would wait in line); ``runners_online``: the probe's count of live runners;
+    ``runners``: its ``runner_labels``, where it has a well-formed one. Pure."""
     row = _base_row(m.key, m, here)
     row.update(gpu_model=m.gpu_model, cuda=m.cuda, multi_gpu=m.p2p, price=m.price, slots=m.slots.count if m.slots else 0)
     if p is None:
@@ -631,9 +663,12 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
     if p.get('drained'):
         row['problems'].append('drained')
     if p.get('runners') is not None:  # a forced probe counts what its host's own registry names (decision 15.5)
-        row['runners'] = int(p['runners'])
-        if not row['runners']:
+        row['runners_online'] = int(p['runners'])
+        if not row['runners_online']:
             row['problems'].append(NO_RUNNER)
+    labels = p.get('runner_labels')  # the host's own inventory's instances per label (decision 15.7)
+    if isinstance(labels, dict) and all(isinstance(k, str) and type(v) is int and v >= 0 for k, v in labels.items()):
+        row['runners'] = dict(labels)
     free = int(p.get('slots_free', 0))
     cores = max(0, (m.cpus or int(p.get('cpus', 0))) - math.ceil(float(p.get('load', 0.0))))
     gpu_free = {int(k): int(v) for k, v in p.get('gpu_free', {}).items()}
@@ -735,8 +770,10 @@ def target_row(m: Machine, t: Target, nodes: Sequence[Node], assoc: Mapping[str,
                used: Mapping[str, Mapping[str, int]], cards: int = 1, mem_gib: int = 1) -> dict:
     """A cluster target's row: its best node's idle cores and free cards (an ``idle`` or
     ``mix`` node of its partition), less what the account's running jobs hold of its
-    association's ``GrpTRES``; ``start_now`` if a job of the target (``cards`` cards on a
-    GPU target) would start now. Pure."""
+    association's ``GrpTRES``; ``start_now`` if a job of the target would start now, and
+    ``jobs_free``, how many (decision 15.7). A job takes the target's ``cpus`` cores, on a
+    GPU target ``cards`` cards (at most ``max_cards``) and ``cpus`` cores per card, and
+    ``mem_gib`` GiB (at most the target's). Pure."""
     row = _base_row(f'{m.key}:{t.name}', m, '')
     row.update(target=t.name, gpu_model=t.gpu_model, cuda=t.cuda or t.variant, price=t.price,
                numerics_ok=t.numerics_ok, labels=dict(t.labels), multi_gpu=t.max_cards >= 2)
@@ -745,8 +782,9 @@ def target_row(m: Machine, t: Target, nodes: Sequence[Node], assoc: Mapping[str,
     room_cpu = lim['cpu'] - u.get('cpu', 0) if 'cpu' in lim else None
     room_gpu = lim['gpu'] - u.get('gpu', 0) if 'gpu' in lim else None
     mine = [n for n in nodes if n.partition.lower() == part and n.state.rstrip('*~#!%$@^-') in ('idle', 'mix')]
-    need_cpu = t.cpus if not t.gpu_model else 1
-    need_cards = min(cards, t.max_cards) if t.gpu_model else 0
+    need_cards = max(1, min(cards, t.max_cards)) if t.gpu_model else 0
+    need_cpu = t.cpus * need_cards if t.gpu_model else t.cpus  # a GPU target's cpus are per card (the gate's cpus_per_card)
+    need_mib = max(1, min(t.memory_gib, mem_gib)) * 1024  # at least 1 GiB: a target of memory_gib 0 divides nothing
     best = max(mine, key=lambda n: (n.cards_free, n.cpus_idle), default=None)
     cpus = best.cpus_idle if best else 0
     free_cards = best.cards_free if (best and t.gpu_model) else 0
@@ -754,11 +792,17 @@ def target_row(m: Machine, t: Target, nodes: Sequence[Node], assoc: Mapping[str,
         cpus = min(cpus, max(0, room_cpu))
     if room_gpu is not None:
         free_cards = min(free_cards, max(0, room_gpu))
-    fits = [n for n in mine if n.cpus_idle >= need_cpu and n.mem_free_mib >= min(t.memory_gib, max(1, mem_gib)) * 1024
-            and n.cards_free >= need_cards]
-    start = bool(fits) and (room_cpu is None or room_cpu >= need_cpu) and (room_gpu is None or room_gpu >= need_cards)
+
+    def held(n: Node) -> int:  # the jobs node n has room for now
+        return min([n.cpus_idle // need_cpu, n.mem_free_mib // need_mib] + ([n.cards_free // need_cards] if need_cards else []))
+    jobs = sum(max(0, held(n)) for n in mine)
+    if room_cpu is not None:
+        jobs = min(jobs, max(0, room_cpu) // need_cpu)
+    if room_gpu is not None and need_cards:
+        jobs = min(jobs, max(0, room_gpu) // need_cards)
+    start = jobs > 0
     row.update(cpus_free=cpus, gpu_free={i: t.gpu_mib for i in range(free_cards)}, start_now=start,
-               slots_free=1 if start else 0)
+               slots_free=1 if start else 0, jobs_free=jobs)
     if not mine:
         row['problems'] = [f'no usable node in its partition']
     return row
@@ -814,9 +858,14 @@ def probe_host(m: Machine, run: Runner = subprocess.run, here: str = '', etc: st
     if r.returncode != 0:
         return host_row(m, None, f'unreachable (exit {r.returncode})', here)
     try:
-        return host_row(m, json.loads(r.stdout.strip().splitlines()[-1]), here=here)
+        p = json.loads(r.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         return host_row(m, None, 'probe answer not JSON', here)
+    if m.access == 'local' and isinstance(p, dict):  # the caller's own host: its inventory is this account's (15.7)
+        labels = runner_labels(etc)
+        if labels is not None:
+            p['runner_labels'] = labels
+    return host_row(m, p, here=here)
 
 
 CLUSTER_PROBE = ('sinfo -h -N -O "NodeHost:|,Partition:|,StateCompact:|,CPUsState:|,Memory:|,AllocMem:|,Gres:|,GresUsed:|"; '
@@ -898,7 +947,8 @@ def table(rows: Sequence[Mapping]) -> str:
         slots = f'{r["slots_free"]}/{r["slots"]}' if r['access'] != 'slurm' else '-'
         lines.append((r['key'] + (' (here)' if r.get('here') else ''), slots, str(r['queue']), str(r['cpus_free']),
                       str(r['mem_free_gib']) if r['access'] != 'slurm' else '-', cards, r['gpu_model'] or '-',
-                      f'{r["price"]:g}/h' if r['billed'] else 'free', 'now' if r['start_now'] else 'no',
+                      f'{r["price"]:g}/h' if r['billed'] else 'free',
+                      ('now' + (f' ({r["jobs_free"]})' if 'jobs_free' in r else '')) if r['start_now'] else 'no',
                       'ok' if r['numerics_ok'] else 'not passed', '; '.join(r['problems']) or '-'))
     w = [max(len(x[i]) for x in lines) for i in range(len(head))]
     return '\n'.join('  '.join(c.ljust(w[i]) for i, c in enumerate(x)).rstrip() for x in lines)
@@ -1716,7 +1766,7 @@ def main(argv: Sequence[str], etc: str) -> int:
         return EXIT_USAGE
     if a.cmd == 'probe':
         try:
-            print(json.dumps(local_probe(reg), sort_keys=True))
+            print(json.dumps(local_probe(reg, etc), sort_keys=True))
         except RegistryError as e:
             print(f'pool: {e}', file=sys.stderr)
             return EXIT_USAGE

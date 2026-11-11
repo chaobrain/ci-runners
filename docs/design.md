@@ -1251,7 +1251,7 @@ two fields. Both are optional for a reader: a row without them reads as before.
      status`) and `cards × cpus` cores. A GPU target's registry `cpus` is its cores per
      card, the site's `cpus_per_card` that the gate requests (`slurmgate.render`);
    - the memory `start_now` asks: the GiB asked (1 for `pool status`), at most the
-     target's `memory_gib`.
+     target's `memory_gib`, and at least 1 GiB.
 
    Each `idle` or `mix` node of the target's partition holds `min(idle cores // job cores,
    free cards // job cards, free MiB // job MiB)` jobs (the cards term on a GPU target
@@ -1266,10 +1266,14 @@ two fields. Both are optional for a reader: a row without them reads as before.
    its room: each row counts all of it, and a reader that books one target's jobs books
    the other's against the same room. Example: a CPU target of 32-core jobs whose
    association allows 72 cores, with none running, has `jobs_free` at most 2.
-3. **15.5's count is renamed `runners_online`** (the runners with a live process). It has
-   not been released, and nothing reads it. `runners` is now the label table. The probe's
-   own JSON keeps the name `runners` for that count, so a forced probe of either release
-   is read as its release wrote it.
+3. **15.5's count is renamed `runners_online`** (the runners with a live process), and
+   `runners` is now the label table. The count shipped with `v1.11.0`, where a row has it
+   only once its registry names `runners`; no consumer reads it (brainspike's plan does
+   not), so the type change breaks none and needs no major version (§8). Until a host's
+   hook is the next release, a row of it may still carry `runners` as an int: a reader of
+   15.7 takes a `runners` that is not `{label: count}` as not reported. The probe's own
+   JSON keeps the name `runners` for the count, so a forced probe of either release is
+   read as its release wrote it.
 4. **Rollout.** Additive: no inventory key, registry key, label, action input or output
    changes. `pool status` gains the fields with the next release; a CI account's local
    row gains `runners` once its hook is that release, and the other host's row once that

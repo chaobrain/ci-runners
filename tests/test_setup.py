@@ -1164,25 +1164,23 @@ class Shared(unittest.TestCase):
         conf.write_text(setup.tmpfiles_text(self.h))
         self.assertEqual(setup.shared_state(self.h, uid_of=names.__getitem__, read=str(conf))[0][1], 'not root-owned')
 
-    def _acl_state(self, h, names, has_account=lambda uid: True, mine=()):
+    def _acl_state(self, h, names, has_account=lambda uid: True, mine=None):
         """``shared_state`` and ``stale_entries`` of ``h`` as root would see them (the tests
-        cannot chown to root: the files read as root's, but those in ``mine``), with
-        ``names``' uids; and a ``setfacl`` that skips the test where the file system has no
-        ACLs."""
-        real = os.lstat
+        cannot chown to root: the files read as root's, but those in ``mine`` as owned by
+        the uid it gives), with ``names``' uids; and a ``setfacl`` that skips the test where
+        the file system has no ACLs."""
+        real, mine = os.lstat, mine or {}
 
         def as_root(path):
             st = real(path)
-            if path in mine:
-                return st
-            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, 0, 0, *st[6:10]))
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, mine.get(path, 0), 0, *st[6:10]))
         conf = pathlib.Path(self.tmp.name, 'tmpfiles.conf')
         conf.write_text(setup.tmpfiles_text(h))
 
         def state():
             with mock.patch.object(setup.os, 'lstat', as_root):
                 return (setup.shared_state(h, uid_of=names.__getitem__, read=str(conf)),
-                        setup.stale_entries(h, has_account=has_account))
+                        setup.stale_entries(h, uid_of=names.__getitem__, has_account=has_account))
 
         def acl(*args):
             r = subprocess.run(['setfacl', *args], capture_output=True, text=True)
@@ -1204,8 +1202,7 @@ class Shared(unittest.TestCase):
         return files, dirs
 
     def _with_leases(self):
-        h = {**self.h, 'files': {**self.h['files'], 'lease_dir': f'{self.p}-leases'}}
-        return h
+        return {**self.h, 'files': {**self.h['files'], 'lease_dir': f'{self.p}-leases'}}
 
     def test_the_lease_directorys_queue_is_checked(self):
         """Issue #125: the lease directory's queue, which the parts make, is checked as the
@@ -1214,7 +1211,7 @@ class Shared(unittest.TestCase):
         if not shutil.which('setfacl'):
             self.skipTest('no setfacl')
         h, me, other, queue = self._with_leases(), os.getuid(), 65534, f'{self.p}-leases/queue'
-        state, acl = self._acl_state(h, {'acct-x': me, 'localuser': other}, mine=(queue,))
+        state, acl = self._acl_state(h, {'acct-x': me, 'localuser': other}, mine={queue: 4000001})
         self._shared_made(h, acl, (me, other))
         self.assertEqual(state(), ([], []))  # not made yet: the first part makes it
         os.mkdir(queue)  # made by the parts with the inherited default entries, the maker's own
@@ -1229,23 +1226,35 @@ class Shared(unittest.TestCase):
 
     def test_a_renumbered_account(self):
         """Issue #125: the CI account renumbered, its old uid's entries left: the account's
-        own entries are missing (a step), and the old uid's are reported as stale (a warning)."""
+        own entries are missing (a step), on the lock files the parts left in the lease
+        directory too, and the old uid's entries and files are reported as stale (a warning)."""
         if not shutil.which('setfacl'):
             self.skipTest('no setfacl')
         h, me, other, old = self._with_leases(), os.getuid(), 65534, 3999011
-        state, acl = self._acl_state(h, {'acct-x': me, 'localuser': other}, has_account=lambda uid: uid != old)
+        queue, card = f'{self.p}-leases/queue', f'{self.p}-leases/card0.0.lock'
+        state, acl = self._acl_state(h, {'acct-x': me, 'localuser': other}, has_account=lambda uid: uid != old,
+                                     mine={queue: old, card: old})
         files, dirs = self._shared_made(h, acl, (old, other))
-        os.mkdir(f'{self.p}-leases/queue')
+        os.mkdir(queue)
+        pathlib.Path(card).touch()  # a lock file the old uid's part made
+        acl('-m', f'u:{old}:rw,u:{other}:rw,m::rw', card)
+        os.mkdir(f'{self.p}-leases/sub')  # neither a lock file nor the queue: not the parts'
+        os.symlink(card, f'{self.p}-leases/link.lock')
         todo, stale = state()
-        every = [*files, *dirs, f'{self.p}-leases/queue']
-        self.assertEqual(sorted(p for p, _ in todo), sorted([*files, *dirs, *dirs, f'{self.p}-leases/queue',
-                                                               f'{self.p}-leases/queue']))
+        self.assertEqual(sorted(p for p, _ in todo), sorted([*files, *dirs, *dirs, queue, queue, card]))
         self.assertTrue(all(w.endswith(' for acct-x') for _, w in todo))
         self.assertEqual((setup._has_account(os.getuid()), setup._has_account(old)), (True, False))
-        self.assertEqual(stale, [x for p in every for x in [
-            (p, f'ACL entry for uid {old}, which has no account (a renumbered account?)'),
-            *([(p, f'default ACL entry for uid {old}, which has no account (a renumbered account?)')]
-              if p not in files else [])]])
+        gone = f'which has no account (a renumbered account?)'
+        self.assertEqual(stale, [x for p in [*files, *dirs, queue, card] for x in [
+            *([(p, f'owned by uid {old}, {gone}')] if p in (queue, card) else []),
+            (p, f'ACL entry for uid {old}, {gone}'),
+            *([(p, f'default ACL entry for uid {old}, {gone}')] if p in (*dirs, queue) else [])]])
+        for d in (*dirs, queue):  # the lease directory and its queue mended by hand, not the lock file
+            acl('-m', f'u:{me}:rwx,d:u:{me}:rwx', d)
+        for f in files:
+            acl('-m', f'u:{me}:rw', f)
+        self.assertEqual(state()[0], [(card, 'no rw ACL entry for acct-x')])
+        self.assertEqual(setup.lease_files(self.h), [])  # no lease directory, no lock files
 
     def test_a_stale_entry_beside_the_accounts_own_is_a_warning(self):
         """Issue #125: once the account's own entries are there, an old uid's are a warning in
@@ -1260,6 +1269,12 @@ class Shared(unittest.TestCase):
         self.assertEqual(len(stale), len(files) + 2)
         self.assertEqual(stale[-1], (queue, f'default ACL entry for uid {old}, which has no account '
                                             '(a renumbered account?)'))
+        acl('-m', 'u:4000123:rw', files[0])  # an account's uid, but none of the inventory's
+        self.assertEqual(state(), ([], [(files[0], f'ACL entry for uid {old}, which has no account (a renumbered '
+                                                   'account?)'),
+                                        (files[0], "ACL entry for uid 4000123, which is none of the accounts' "
+                                                   '(a reused uid?)'), *stale[1:]]))
+        acl('-x', 'u:4000123', files[0])
         with mock.patch.object(setup, 'shared_state', lambda h: []), \
                 mock.patch.object(setup, 'stale_entries', lambda h: stale), \
                 mock.patch.object(setup, 'account_uid', lambda a: 4242), \

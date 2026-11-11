@@ -811,7 +811,8 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    free, and its cards' free MiB comes from `nvidia-smi`. A cluster target's figures come
    from `sinfo` (an `idle` or `mix` node of its partition with the cores, memory and cards),
    less what the account's running jobs hold of its association's `GrpTRES`, and give
-   `start_now`.
+   `start_now`. Decision 15.7 adds a host row's `runners` (its runner instances per label)
+   and a target row's `jobs_free` (how many jobs of its size could start now).
 3. **The claim** on a host is a slot of the host's CI slot queue (§7), the same files and
    `SlotQueue` that a part's `ci-slot` and brainspike's `ci_slot.sh` take. So a pool run and a
    part never hold one slot, and a run waits in line in arrival order or, with `--no-wait`,
@@ -1121,7 +1122,8 @@ placing parts on the host, whose jobs queued.
    `<runners>/<name>/bin/Runner.Listener`, or its helper, whose `argv[1]` (after its shell)
    is `<runners>/<name>/run-helper.sh` (it outlives the listener's self-update); the path
    as written or as its real path (the runner's scripts start from their physical
-   directory), and only processes of the directory's owner where it is known. The row gets `runners`, that count, and the problem
+   directory), and only processes of the directory's owner where it is known. The row gets `runners_online`, that count
+   (named `runners` until decision 15.7 gave that name to the runner instances per label), and the problem
    `no runner online` when it is 0, so brainspike's plan places no part on the host and
    its other host takes them. A pool run ignores the problem: it takes a slot, not a
    runner. A forced probe counts what the receiving account's own
@@ -1218,6 +1220,69 @@ only the maintainer holds.
   same login, but the workstation sleeps and is not always on. (B) A comment at every
   check while the host is down: the same news every 15 min. (C) An alert after one check:
   a runner's update or a short tunnel restart would open and close issues.
+
+## Lead decision (2026-11-11): runner instances and free cluster jobs in `pool status` (decision 15.7, issue #147)
+
+Approved by the lead on 2026-11-11, with each 3090 host's `slurm` pool raised to 8 runners
+(§5.1). brainspike's plan places each part by a capacity that each part uses up: a 3090
+CPU pool's free runners, slots and cores, then the cluster's free `slurm` runners and its
+association's room. `pool status --json` gives the slots and cores, but no runner counts,
+and a cluster target that can start one job now reads as room for any number. Its rows gain
+two fields. Both are optional for a reader: a row without them reads as before.
+
+1. **A host row's `runners`**, `{label: count}`: the runner instances the host registers
+   for each label. They come from the host's own inventory (`<etc>/inventory.toml` beside
+   the registry, the CI account's), by the rule setup registers them with
+   (`setup.runners`, §5.1). Each instance counts once for each label it carries, shared
+   labels included: a 3090 host with 8 `slurm` runners has `<host>-slurm: 8` and
+   `3090-slurm: 8`, and a per-card runner counts for its `<host>-gpu<N>` too. These are
+   registered instances, not online ones: the reader subtracts GitHub's active jobs per
+   label, and `runners_online` (item 3) tells whether any runs. Only the registry's
+   `local` machine is read this way, since a caller cannot read an ssh host's inventory.
+   The other 3090 host's row comes through the forced probe (15.1, item 8): its `ci-run
+   pool probe` reads the receiving account's own inventory the same way and returns it
+   beside the probe, as `runner_labels`. A row has no `runners` where the inventory is
+   missing or does not load (a maintainer's registry, whose `etc` has none) or where the
+   forced probe is of an older release.
+2. **A cluster target row's `jobs_free`**, an int: how many jobs of the target's own size
+   could start now. A job's size is what `start_now` asks of a node:
+   - on a CPU target, its `cpus` cores;
+   - on a GPU target, `cards` cards (the cards asked, at most its `max_cards`; 1 for `pool
+     status`) and `cards × cpus` cores. A GPU target's registry `cpus` is its cores per
+     card, the site's `cpus_per_card` that the gate requests (`slurmgate.render`);
+   - the memory `start_now` asks: the GiB asked (1 for `pool status`), at most the
+     target's `memory_gib`, and at least 1 GiB.
+
+   Each `idle` or `mix` node of the target's partition holds `min(idle cores // job cores,
+   free cards // job cards, free MiB // job MiB)` jobs (the cards term on a GPU target
+   only). The sum over the nodes is capped by the association's room: `(GrpTRES cpu − the
+   account's running cores) // job cores`, and the same for `gpu` on a GPU target, each
+   where the association names a limit. `start_now` is a node that holds one such job
+   and room for one, so `jobs_free` is positive exactly where `start_now` is true, and 0
+   where it is false (an unreachable cluster included). On a GPU target this raises
+   `start_now`'s core need from 1 to the job's real request, so it no longer claims a
+   start on a node whose free cards lack the cores; and a CPU target, whose job takes no
+   card, no longer reads the association's `gpu` room. Targets that share a partition share
+   its room: each row counts all of it, and a reader that books one target's jobs books
+   the other's against the same room. Example: a CPU target of 32-core jobs whose
+   association allows 72 cores, with none running, has `jobs_free` at most 2.
+3. **15.5's count is renamed `runners_online`** (the runners with a live process), and
+   `runners` is now the label table. The count shipped with `v1.11.0`, where a row has it
+   only once its registry names `runners`; no consumer reads it (brainspike's plan does
+   not), so the type change breaks none and needs no major version (§8). Until a host's
+   hook is the next release, a row of it may still carry `runners` as an int: a reader of
+   15.7 takes a `runners` that is not `{label: count}` as not reported. The probe's own
+   JSON keeps the name `runners` for the count, so a forced probe of either release is
+   read as its release wrote it.
+4. **Rollout.** Additive: no inventory key, registry key, label, action input or output
+   changes. `pool status` gains the fields with the next release; a CI account's local
+   row gains `runners` once its hook is that release, and the other host's row once that
+   host's is. The table shows `jobs_free` in its `start` column (`now (2)`).
+- *Options weighed.* (a) `runners` from GitHub's runner list: that needs an org owner's
+  login, which no CI account holds (12.2, 15.6). (b) `jobs_free` from the best node alone,
+  as `cpus_free` is: a partition with two nodes of room would read as one. (c) Keep
+  `start_now` at 1 core on a GPU target and size `jobs_free` by the real request: the two
+  would disagree on a node with free cards and too few idle cores.
 
 ## Decisions of this spec
 

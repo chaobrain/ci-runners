@@ -77,7 +77,7 @@ def queue_full(waiting: int, max_waiting: int) -> bool:
 # ------------------------------------------------------------------ the queue on disk
 #
 # The files are brainspike's ``ci_slot.sh``'s (D5): slot 1 is ``<lock>``, slot i >= 2
-# is ``<stem>.<i>.lock``; the queue directory holds ``seq``, ``seq.lock`` and its
+# is ``<stem>.<i>.lock``; the queue directory holds ``seq``, ``seq.lock``, ``take.lock`` and its
 # tickets ``<seq, 12 digits>.ticket``: ``<seq> <pid> <start epoch> <cwd> <command>``.
 #
 # ``ci_slot.sh`` serves its tickets first come, first served: only the lowest live

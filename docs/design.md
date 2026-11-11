@@ -975,10 +975,10 @@ runs only when someone runs it.
    *Amended 2026-11-11 (issue #124, approved by the lead):* the slot queue's `seq.lock`
    and `take.lock` are checked as the lease directory's lock files are. They are opened in
    place, so they keep the ACL entries they were made with; after a renumbering, `seq.lock`
-   named only the old uid, and every part failed in `slots.take_ticket` after the gate,
+   named only the old uid, and every part failed in `slots.SlotQueue.take_ticket` after the gate,
    logged but not drained. The rest of the queue (`seq`, the tickets, `holder.<i>`) is
    written new and renamed, so the directory's entries govern it. `setup`'s plan checks
-   and warns of them as of the lease directory's lock files.
+   and warns of them as it does of the lease directory's lock files.
 4. Only a proven miss drains. A check that cannot run (an unexpected error) ends the part
    `unavailable` (`shared state unknown`) without draining. Nothing undrains by itself:
    the operator runs `ci-run drain off` once the plan shows the root steps done.

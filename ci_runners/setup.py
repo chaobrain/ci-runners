@@ -616,8 +616,8 @@ def lease_files(h: dict) -> list[str]:
 def stale_entries(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid,
                   has_account=_has_account) -> list[tuple[str, str]]:
     """``(path, what)`` for each named-user ACL entry, access or default, of a shared file
-    or directory (``shared_files``, ``queue_files``, ``lease_files``) whose uid has no account, the mark of
-    a renumbered account whose old uid kept its entries, or belongs to none of the
+    or directory (``shared_files``, ``queue_files``, ``lease_files``) whose uid has no
+    account, the mark of a renumbered account whose old uid kept its entries, or belongs to none of the
     inventory's accounts (a reused uid); and for each of those owned by a uid with no
     account (issue #125). A warning, never a step: such an entry is harmless to the
     accounts once their own are there (``shared_state``). Reads the files."""

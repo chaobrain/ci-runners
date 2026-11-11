@@ -1261,7 +1261,8 @@ two fields. Both are optional for a reader: a row without them reads as before.
    and room for one, so `jobs_free` is positive exactly where `start_now` is true, and 0
    where it is false (an unreachable cluster included). On a GPU target this raises
    `start_now`'s core need from 1 to the job's real request, so it no longer claims a
-   start on a node whose free cards lack the cores. Targets that share a partition share
+   start on a node whose free cards lack the cores; and a CPU target, whose job takes no
+   card, no longer reads the association's `gpu` room. Targets that share a partition share
    its room: each row counts all of it, and a reader that books one target's jobs books
    the other's against the same room. Example: a CPU target of 32-core jobs whose
    association allows 72 cores, with none running, has `jobs_free` at most 2.

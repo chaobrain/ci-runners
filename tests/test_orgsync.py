@@ -80,7 +80,7 @@ class Merge(unittest.TestCase):
 
     def test_members_act_only_in_the_snapshots_private_repositories(self):
         # a hand-listed public repository is never opened to members, and is refused anyway
-        self.assertEqual(policy.actors_for(MERGED, 'chaobrain/brainevent'), frozenset({'alice'}))
+        self.assertFalse(MERGED.repos['chaobrain/brainevent'].org_members)
         self.assertEqual(reason(MERGED, env('chaobrain/brainevent', '2002', actor='alice', cls='gpu'),
                                 push('alice', 'chaobrain/brainevent', 2002)), 'repository')
         # a hand-listed private repository: open to members only if the snapshot holds it with its id
@@ -91,9 +91,10 @@ class Merge(unittest.TestCase):
         self.assertEqual(reason(m, env('chaobrain/handkept', '6006'), push(name='chaobrain/handkept', rid=6006)),
                          'actor')
         self.assertEqual(reason(m, env('chaobrain/moved', '7007'), push(name='chaobrain/moved', rid=7007)), 'actor')
-        self.assertEqual(policy.actors_for(m, 'chaobrain/handkept'), frozenset({'alice'}))
-        self.assertEqual(policy.actors_for(m, 'ChaoBrain/NewProj'), frozenset({'alice', 'dave', 'eve'}))
-        self.assertEqual(policy.actors_for(m, 'chaobrain/nowhere'), frozenset({'alice'}))
+        self.assertFalse(m.repos['chaobrain/handkept'].org_members)
+        self.assertTrue(m.repos['chaobrain/newproj'].org_members)
+        self.assertEqual(m.actors | m.members, frozenset({'alice', 'dave', 'eve'}))
+        self.assertNotIn('chaobrain/nowhere', m.repos)
         snap3 = snap(repositories={**SNAP['repositories'], 'chaobrain/handkept': 6006})
         m = policy.with_snapshot(policy.load(text), snap3, NOW)
         self.assertTrue(m.repos['chaobrain/handkept'].org_members)
@@ -291,7 +292,9 @@ class Hook(unittest.TestCase):
         self.assertEqual(code, 0, line)
         self.assertNotIn('org=', line)
 
-    def test_claim_takes_the_same_allowlist(self):
+    def test_claim_counts_no_member(self):
+        """Decision 15.9: the claim counts the runners' statuses only. A member's green, even
+        one the hook would accept, does not skip the head, and the claim reads no snapshot."""
         self.write()
         calls = []
 
@@ -302,24 +305,19 @@ class Hook(unittest.TestCase):
                          'created_at': '2026-11-06T00:00:00Z', 'updated_at': '2026-11-06T00:00:00Z'}]
             return {}
         saved = dict(os.environ)
-        os.environ.update({'GITHUB_REPOSITORY': 'chaobrain/newproj', 'GITHUB_TOKEN': 't', 'GITHUB_OUTPUT': ''})
         try:
-            code = github.main(['--context', 'newproj/ci', '--sha', 'a' * 40], str(self.etc), call=call)
+            for snapshot in (None, b' ' * ((4 << 20) + 1)):  # a fresh one, then one no reader would take
+                if snapshot is not None:
+                    (self.etc / 'org.json').write_bytes(snapshot)
+                calls.clear()
+                os.environ.update({'GITHUB_REPOSITORY': 'chaobrain/newproj', 'GITHUB_TOKEN': 't', 'GITHUB_OUTPUT': ''})
+                with contextlib.redirect_stderr(io.StringIO()):
+                    code = github.main(['--context', 'newproj/ci', '--sha', 'a' * 40], str(self.etc), call=call)
+                self.assertEqual(code, 0)
+                self.assertEqual([m for m, _ in calls], ['GET', 'POST'])  # eve's green ignored: run, post pending
         finally:
             os.environ.clear()
             os.environ.update(saved)
-        self.assertEqual(code, 0)
-        self.assertEqual([m for m, _ in calls], ['GET'])  # eve's green counts: skipped, nothing posted
-        (self.etc / 'org.json').write_bytes(b' ' * ((4 << 20) + 1))
-        os.environ.update({'GITHUB_REPOSITORY': 'chaobrain/newproj', 'GITHUB_TOKEN': 't', 'GITHUB_OUTPUT': ''})
-        try:
-            with contextlib.redirect_stderr(io.StringIO()) as err:
-                code = github.main(['--context', 'newproj/ci', '--sha', 'a' * 40], str(self.etc), call=call)
-        finally:
-            os.environ.clear()
-            os.environ.update(saved)
-        self.assertEqual(code, 2)
-        self.assertIn('larger than 4 MiB', err.getvalue())
 
 
 def api_pages(members, repos):

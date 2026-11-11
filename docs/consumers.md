@@ -152,7 +152,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
   | `policy` / `timeout` / `error` | hook 无法做出判断，请联系维护者 |
 
 - **新建的私有仓库或新成员**：最多等 10 分钟，下一次同步后就能用。
-- **想对同一个 head 重跑**：已经绿的 head 会被 claim 跳过，要重跑就推一个新 commit。红的 head 或 error 的 head 重新触发会再跑一次。
+- **想对同一个 head 重跑**：已经绿的 head 会被 claim 跳过，要重跑就推一个新 commit。红的 head 或 error 的 head 重新触发会再跑一次。claim 只认 runner 自己（workflow bot）发的状态：个人发的 `pending` 或 `success`（比如旧式的本地运行）既不会占住 head，也不会让它被跳过（design 决定 15.9）。
 - **`unavailable: health gate`**：分到的卡太热，会自动换一张凉卡重试。
 - **作业排队很久**：CPU 部件共用主机的 CI 槽位，GPU 部件一张卡一次只跑一个。每个项目在每个池子里最多有 1 个等待中的部件，再多的第一次尝试就直接 `unavailable`（"project queue full"），去另一台主机重试；重试本身不受这个上限限制，会排队等到排队超时（design 决定 13.6）。
 

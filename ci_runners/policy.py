@@ -367,14 +367,6 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
     return Decision(True, 'ok')
 
 
-def actors_for(policy: Policy, repository: str) -> frozenset[str]:
-    """The logins that may act in ``repository`` (as ``decide`` counts them, the bot
-    aside): the hand-kept actors, plus the org's members where the snapshot opened the
-    repository to them. ``claim`` counts these logins' statuses. Pure."""
-    repo = policy.repos.get(_ascii_lower(repository, _REPO) or '')
-    return policy.actors | policy.members if repo is not None and repo.org_members else policy.actors
-
-
 def line(decision: Decision, policy_digest: str, snapshot_digest: str = '') -> str:
     """The one line the hook prints: ``ci-runners: accepted|refused <reason> policy=<hash>``,
     and `` org=<hash>`` when the org snapshot was merged."""

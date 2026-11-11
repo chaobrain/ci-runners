@@ -32,11 +32,9 @@ class Claim(unittest.TestCase):
         return {'context': 'p/ci', 'state': state, 'creator': {'login': login},
                 'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', t)}
 
-    def claim(self, call, **kw):
-        kw.setdefault('wait_seconds', 0)
-        return github.run_claim(self.ENV, context='p/ci', sha=SHA, lapse_minutes=45, description='queued',
-                                actors=frozenset({'alice'}), bot='github-actions[bot]', call=call,
-                                sleep=lambda s: None, **kw)
+    def claim(self, call):
+        return github.run_claim(self.ENV, context='p/ci', sha=SHA, description='queued', bot='github-actions[bot]',
+                                call=call)
 
     def test_run_posts_pending(self):
         call, calls = self.api([])
@@ -50,27 +48,22 @@ class Claim(unittest.TestCase):
         c = self.claim(call)
         self.assertEqual((c.run, c.reason, [m for m, *_ in calls]), (False, 'green', ['GET']))
 
-    def test_the_wait_lets_a_local_claim_appear(self):
-        seen = []
-
-        def statuses():
-            seen.append(1)
-            return [self.status('pending', 'alice')] if len(seen) > 2 else []
-        call, calls = self.api(statuses)
-        clock = iter(range(0, 1000, 5))
-        c = github.run_claim(self.ENV, context='p/ci', sha=SHA, wait_seconds=60, lapse_minutes=45, description='q',
-                             actors=frozenset({'alice'}), bot='github-actions[bot]', call=call,
-                             now=lambda: float(next(clock)) + time.time(), sleep=lambda s: None)
-        self.assertEqual((c.run, c.reason), (False, 'claimed by a local run'))
-        self.assertNotIn('POST', [m for m, *_ in calls])
+    def test_a_persons_pending_or_green_does_not_hold_the_head(self):
+        """Decision 15.9: an old-style local run's claim or verdict by a person is ignored;
+        the runners take the head and post their own pending, in one read."""
+        for state in ('pending', 'success'):
+            call, calls = self.api([self.status(state, 'alice')])
+            c = self.claim(call)
+            self.assertEqual((c.run, c.reason), (True, 'no verdict on this head'), state)
+            self.assertEqual([m for m, *_ in calls], ['GET', 'POST'], state)
+            self.assertEqual(calls[-1][2]['state'], 'pending')
 
     def test_bad_inputs(self):
         call, _ = self.api([])
         for env, sha in (({**self.ENV, 'GITHUB_TOKEN': ''}, SHA), (self.ENV, 'abc'),
                          ({**self.ENV, 'GITHUB_REPOSITORY': 'x/../y z'}, SHA)):
             with self.assertRaises(ValueError):
-                github.run_claim(env, context='p/ci', sha=sha, wait_seconds=0, lapse_minutes=45, description='q',
-                                 actors=frozenset(), bot='b[bot]', call=call)
+                github.run_claim(env, context='p/ci', sha=sha, description='q', bot='b[bot]', call=call)
 
     def test_api_retries_server_errors_only(self):
         tries = []
@@ -114,17 +107,17 @@ class Claim(unittest.TestCase):
         self.assertEqual(json.loads(req_seen[0].data), {'a': 1})
 
     def test_statuses_are_read_page_by_page(self):
-        pages = {1: [self.status('pending', 'bob')] * 100, 2: [self.status('pending', 'alice')]}
+        pages = {1: [self.status('pending', 'bob')] * 100, 2: [self.status('success', 'github-actions[bot]')]}
         urls = []
 
         def call(method, url, token, body=None):
             urls.append(url)
             return pages.get(int(url.rsplit('page=', 1)[1]), []) if method == 'GET' else {}
         c = self.claim(call)
-        self.assertEqual((c.run, c.reason), (False, 'claimed by a local run'))  # the claim on page 2 counts
+        self.assertEqual((c.run, c.reason), (False, 'green'))  # the runners' green on page 2 counts
         self.assertEqual(len(urls), 2)
         pages[1] = [self.status('success', 'github-actions[bot]')] + [self.status('pending', 'bob')] * 99
-        pages[2] = [self.status('pending', 'alice', age=60)]
+        pages[2] = [self.status('failure', 'github-actions[bot]', age=60)]
         self.assertEqual(self.claim(call).reason, 'green')  # page 1, the newest, counts too
         with self.assertRaises(github.ApiError):
             github.statuses(lambda *a, **k: {'message': 'x'}, 'https://x/y?per_page=100', 't')
@@ -164,8 +157,9 @@ class ClaimMain(unittest.TestCase):
             return statuses
         return call, posts
 
-    def local_pending(self):
-        return [{'context': 'p/ci', 'state': 'pending', 'creator': {'login': 'alice'},
+    @staticmethod
+    def status(state, login):
+        return [{'context': 'p/ci', 'state': state, 'creator': {'login': login},
                  'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}]
 
     def test_an_api_error_exits_2_without_a_verdict(self):
@@ -177,9 +171,22 @@ class ClaimMain(unittest.TestCase):
         self.assertNotIn('t0k', err)
 
     def test_a_skip_writes_run_false(self):
-        call, posts = self.answer(self.local_pending())
-        self.assertEqual(self.main(call)[:2], (0, 'run=false\nreason=claimed by a local run\n'))
+        call, posts = self.answer(self.status('success', 'github-actions[bot]'))
+        self.assertEqual(self.main(call)[:2], (0, 'run=false\nreason=green\n'))
         self.assertEqual(posts, [])
+
+    def test_a_persons_pending_writes_run_true(self):
+        call, posts = self.answer(self.status('pending', 'alice'))  # alice is the policy's actor: no matter
+        self.assertEqual(self.main(call)[:2], (0, 'run=true\nreason=no verdict on this head\n'))
+        self.assertEqual([b['state'] for b in posts], ['pending'])
+
+    def test_the_policy_names_the_runners_identity(self):
+        (self.etc / 'policy.toml').write_text('schema = 2\nbot = "ci-app[bot]"\nactors = ["alice"]\n')
+        call, posts = self.answer(self.status('success', 'github-actions[bot]'))
+        self.assertEqual(self.main(call)[:2], (0, 'run=true\nreason=no verdict on this head\n'))
+        self.out.write_text('')
+        call, posts = self.answer(self.status('success', 'ci-app[bot]'))
+        self.assertEqual(self.main(call)[:2], (0, 'run=false\nreason=green\n'))
 
     def test_a_run_writes_run_true_and_posts(self):
         call, posts = self.answer([])
@@ -187,7 +194,7 @@ class ClaimMain(unittest.TestCase):
         self.assertEqual([b['state'] for b in posts], ['pending'])
 
     def test_the_policy_is_required(self):
-        call, _ = self.answer(self.local_pending())
+        call, _ = self.answer(self.status('success', 'github-actions[bot]'))
         self.assertEqual(self.main(call, etc=pathlib.Path(self.tmp.name) / 'absent')[0], 2)
 
 

@@ -1,5 +1,5 @@
-"""The ``claim`` rule (design §4.1) and the status parser; forged statuses do not count
-(T11)."""
+"""The ``claim`` rule (design §4.1) and the status parser; only the runners' statuses count
+(T11, decision 15.9)."""
 from __future__ import annotations
 
 import unittest
@@ -14,8 +14,8 @@ def S(state, creator='alice', age_min=1.0):
     return claim.Status(state, creator, NOW - age_min * 60)
 
 
-def run(statuses, lapse=45):
-    c = claim.decide(statuses, actors=['Alice'], bot=BOT, now=NOW, lapse_minutes=lapse)
+def run(statuses):
+    c = claim.decide(statuses, bot=BOT)
     return c.run, c.reason
 
 
@@ -23,38 +23,33 @@ class Decide(unittest.TestCase):
     def test_no_status_runs(self):
         self.assertEqual(run([]), (True, 'no verdict on this head'))
 
-    def test_green_by_the_bot_or_a_member_skips(self):
+    def test_green_by_the_runners_skips(self):
         self.assertEqual(run([S('success', BOT)]), (False, 'green'))
-        self.assertEqual(run([S('success', 'ALICE')]), (False, 'green'))
+        self.assertEqual(run([S('success', 'GitHub-Actions[bot]')]), (False, 'green'))  # logins ignore case
+        self.assertFalse(claim.decide([S('success', BOT)], bot='GitHub-Actions[bot]').run)  # on both sides
 
-    def test_a_local_red_skips_but_a_runner_red_runs(self):
-        self.assertEqual(run([S('failure')]), (False, 'red in a local run'))
-        self.assertEqual(run([S('failure', BOT)])[0], True)
-        self.assertEqual(run([S('error')])[0], True)  # error is not a verdict
+    def test_a_runner_red_pending_or_error_runs(self):
+        self.assertEqual(run([S('failure', BOT)]), (True, 'failure by the runners'))
+        self.assertEqual(run([S('error', BOT)]), (True, 'error by the runners'))  # error is not a verdict
+        self.assertEqual(run([S('pending', BOT)]), (True, 'pending by the runners'))  # "queued on the runners"
 
-    def test_a_live_local_claim_skips_until_it_lapses(self):
-        self.assertEqual(run([S('pending', age_min=44.9)]), (False, 'claimed by a local run'))
-        self.assertEqual(run([S('pending', age_min=45)]), (True, 'a local claim lapsed'))
-        self.assertEqual(run([S('pending', age_min=10)], lapse=5), (True, 'a local claim lapsed'))
-        self.assertEqual(run([S('pending', BOT, age_min=1)])[0], True)  # "queued on the runners"
+    def test_a_persons_status_neither_holds_nor_skips_a_head(self):
+        """Decision 15.9: an old local run's claim (pending) or verdict (success, failure) by
+        a person counts for nothing, however fresh; a forged green neither."""
+        for state in ('pending', 'success', 'failure'):
+            self.assertEqual(run([S(state, 'alice', age_min=0)]), (True, 'no verdict on this head'), state)
+        self.assertEqual(run([S('pending', 'alice', 0), S('success', BOT, 5)]), (False, 'green'))  # under it, the runners' green
+        self.assertEqual(run([S('success', 'alice', 0), S('failure', BOT, 5)]), (True, 'failure by the runners'))
+        self.assertEqual(run([S('success', 'mallory', 0)])[0], True)
+        self.assertEqual(run([S('success', 'github-actions')])[0], True)  # not the bot
 
-    def test_only_the_newest_counted_status_decides(self):
-        self.assertEqual(run([S('pending', age_min=1), S('success', BOT, age_min=5)]),
-                         (False, 'claimed by a local run'))
-        self.assertEqual(run([S('failure', BOT, age_min=1), S('success', 'alice', age_min=5)])[0], True)
+    def test_only_the_newest_runner_status_decides(self):
+        self.assertEqual(run([S('pending', BOT, age_min=1), S('success', BOT, age_min=5)])[0], True)
+        self.assertEqual(run([S('success', BOT, age_min=1), S('failure', BOT, age_min=5)]), (False, 'green'))
         self.assertEqual(run([S('success', BOT, age_min=5), S('pending', BOT, age_min=1)])[0], True)  # order-free
         # equal times: the first listed (the API's newest) wins
         self.assertEqual(run([S('success', BOT, 2), S('pending', BOT, 2)])[0], False)
         self.assertEqual(run([S('pending', BOT, 2), S('success', BOT, 2)])[0], True)
-
-    def test_forged_statuses_do_not_count(self):
-        self.assertEqual(run([S('success', 'mallory')]), (True, 'no verdict on this head'))
-        self.assertEqual(run([S('success', 'mallory', 0), S('failure', BOT, 5)])[0], True)
-        self.assertEqual(run([S('success', 'github-actions')])[0], True)  # not the bot
-
-    def test_the_bot_listed_as_an_actor_is_still_the_bot(self):
-        c = claim.decide([S('failure', BOT)], actors=['alice', BOT], bot=BOT, now=NOW)
-        self.assertTrue(c.run)
 
 
 class Parse(unittest.TestCase):

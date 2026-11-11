@@ -996,8 +996,8 @@ quiet one needs a clock that is not GitHub's.
    window, 20:50 to 23:00 UTC inclusive. The last tick is 22:59, since one at 23:00:00
    starts past the window's end and does nothing. `OnCalendar` is in UTC whatever the
    host's zone; `AccuracySec=1s`, no random delay, not `Persistent` (a host that was down
-   does not catch up: the window may be over). The service is a oneshot, so a run still
-   going holds the next tick.
+   does not catch up: the window may be over). The service is a oneshot, so a tick that comes
+   while a run is still going is skipped (with the 5-min bound, none can).
 3. **What.** `nightly-backstop.sh [--report-only] CHECKOUT PYTHON NET_WRAP` runs `PYTHON
    -I scripts/merge_gate.py --backstop` in CHECKOUT, brainspike's main checkout: the same
    tested check as the gate's own wakes. It dispatches `nightly.yml` on `main` only when
@@ -1646,7 +1646,7 @@ account:
 
 | change | detail |
 |---|---|
-| prerequisites | linger for the maintainer's account; gh's login in its config file, not a keyring that needs a session; brainspike's main checkout (the gate runs from it as it is, and each run prints its commit); the host's proxy wrapper |
+| prerequisites | linger for the maintainer's account; gh's login in its config file, not a keyring that needs a session, and gh on the user manager's PATH; brainspike's main checkout (the gate runs from it as it is, and each run prints its commit); the host's proxy wrapper |
 | `ci-nightly-backstop.{service,timer}` | user units of the maintainer's account: at 21:00, 21:15, …, 22:45 and 22:59 UTC, `nightly-backstop.sh CHECKOUT PYTHON NET_WRAP` from a checkout of a release runs `merge_gate.py --backstop` in the checkout under the wrapper, with the login from `gh auth token` in its environment; `TimeoutStartSec=5min` |
 | unchanged | the CI account and its units; the maintainer's gh login; nothing is stored |
 

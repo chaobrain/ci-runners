@@ -676,6 +676,16 @@ direct = ["localhost", "127.0.0.1", "::1"]
             (self.tun / name).write_text('Host egress\n  HostName egress.example\n' if name == 'ssh_config' else 'x\n')
             os.chmod(self.tun / name, 0o600)
 
+    def test_the_tunnel_no_longer_enabled_is_enabled_again(self):
+        """Decision 15.4: a missing tunnel link alone plans its enable --now again."""
+        self.unpacked = []
+        self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+        self.assertEqual(setup.build(str(self.etc)).actions, [])
+        (self.units / 'default.target.wants' / 'ci-tunnel.service').unlink()
+        plan = setup.build(str(self.etc))
+        self.assertIn(['systemctl', '--user', 'enable', '--now', 'ci-tunnel.service'], [a.get('argv') for a in plan.actions])
+        self.assertIn('  not enabled now: ci-tunnel.service\n', plan.text())
+
     def test_plan_with_a_tunnel(self):
         self.unpacked = []
         text = setup.build(str(self.etc)).text()
@@ -1008,6 +1018,18 @@ class Shared(unittest.TestCase):
             self.assertIn(enable, [a.get('argv') for a in plan.actions])
             self.assertEqual(self.apply(plan.text()), 0)
             self.assertIn(enable, self.ran)
+
+    def test_the_hooks_copy_no_longer_enabled_is_enabled_again(self):
+        """Decision 15.4: the hooks' copy is wanted by default.target as the runners are."""
+        with mock.patch.object(setup, 'shared_state', lambda h: []), \
+                mock.patch.object(setup, 'account_uid', lambda a: 4242), \
+                mock.patch.object(setup, 'private_state', lambda h, uid: []):
+            self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+            self.assertEqual(setup.build(str(self.etc)).actions, [])
+            (self.home / '.config/systemd/user/default.target.wants/ci-hooks.service').unlink()
+            plan = setup.build(str(self.etc))
+            self.assertIn('  not enabled now: ci-hooks.service\n', plan.text())
+            self.assertIn(['systemctl', '--user', 'enable', '--now', 'ci-hooks.service'], [a.get('argv') for a in plan.actions])
 
     def test_the_runners_run_the_hooks_copies(self):
         """Decision 13.5: on a host with the private namespace the runners' .env names the

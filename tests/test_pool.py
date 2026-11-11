@@ -614,10 +614,19 @@ class Probe(unittest.TestCase):
                 [f'{root}/hx-part-3/x/bin/Runner.Listener', 'run'],  # not right under it
                 [f'{root}//bin/Runner.Listener', 'run'],  # no name
                 ['/bin/sh', '-c', f'{root}/hx-part-4/run-helper.sh'],  # argv[2]: a command line naming it
-                ['python3', f'{root}/hx-part-5/bin/Runner.Listener'],  # argv[1]: not its own process
+                ['python3', f'{root}/hx-part-5/bin/Runner.Listener'],  # a listener's path at argv[1]: not one
+                [f'{root}/hx-part-6/run-helper.sh'],  # a helper's path at argv[0]: not one
             ])
             for r in (root, root + '/'):
-                self.assertEqual(pool.runners_alive(r, proc), {'hx-gpu0', 'hx-light-1', 'hx-part-5'})
+                self.assertEqual(pool.runners_alive(r, proc), {'hx-gpu0', 'hx-light-1'})
+            link = os.path.join(d, 'link')  # the runners start from their real path: a linked root still counts
+            os.symlink(root, link)
+            real = self.fake_proc(os.path.join(d, 'r'), [[f'{os.path.realpath(root)}/hx-gpu1/bin/Runner.Listener']])
+            self.assertEqual(pool.runners_alive(link, real), {'hx-gpu1'})
+            st = os.stat(root)  # another account's process naming the path does not count
+            with unittest.mock.patch('os.stat', lambda p, _s=os.stat: _s(p) if p == root else
+                                     os.stat_result((st.st_mode, 0, 0, 0, st.st_uid + 1, 0, 0, 0, 0, 0))):
+                self.assertEqual(pool.runners_alive(root, proc), set())
             self.assertEqual(pool.runners_alive(root, os.path.join(d, 'none')), None)  # no /proc: not known
             empty = self.fake_proc(os.path.join(d, 'e'), [])
             self.assertEqual(pool.runners_alive(root, empty), set())

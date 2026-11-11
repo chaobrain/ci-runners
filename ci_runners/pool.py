@@ -499,25 +499,28 @@ NO_RUNNER = 'no runner online'
 
 def runners_alive(root: str, proc: str = '/proc') -> 'set[str] | None':
     """The names of the runners under ``root`` (``<data>/actions-runner``) with a live
-    process, read from each process's ``cmdline`` without taking anything: a
-    ``<root>/<name>/bin/Runner.Listener`` or its ``<root>/<name>/run-helper.sh``, which
-    outlives the listener's self-update (decision 15.4). None when it cannot be known:
-    ``proc`` hides other accounts' processes (``hidepid``) and ``root`` is not the
-    caller's. Self-contained (its source runs on the host). Stdlib."""
+    process, read from each process's ``cmdline`` without taking anything: a listener
+    (``argv[0]`` ``<root>/<name>/bin/Runner.Listener``) or its helper (``argv[1]``
+    ``<root>/<name>/run-helper.sh``, after its shell), which outlives the listener's
+    self-update (decision 15.4). ``root`` counts as written and as its real path (the
+    runner's scripts start from their physical directory), and where its owner is known
+    only that account's processes count. None when it cannot be known: ``proc`` hides
+    other accounts' processes (``hidepid``) and ``root`` is not the caller's.
+    Self-contained (its source runs on the host). Stdlib."""
     import os
-    prefix = root.rstrip('/') + '/'
+    prefixes = {r.rstrip('/') + '/' for r in (root, os.path.realpath(root))}
+    try:
+        owner = os.stat(root).st_uid
+    except OSError:
+        owner = None
     try:
         with open(os.path.join(proc, 'self', 'mountinfo'), errors='replace') as f:
             hidden = any(' /proc ' in line and 'hidepid=' in line and not any(
                 f'hidepid={v}' in line for v in ('0', 'off')) for line in f)
     except OSError:
         hidden = False
-    if hidden:
-        try:
-            if os.stat(root).st_uid != os.getuid():
-                return None
-        except OSError:
-            return None
+    if hidden and owner != os.getuid():
+        return None
     names = set()
     try:
         pids = [p for p in os.listdir(proc) if p.isdigit()]
@@ -525,17 +528,18 @@ def runners_alive(root: str, proc: str = '/proc') -> 'set[str] | None':
         return None
     for pid in pids:
         try:
+            if owner is not None and os.stat(os.path.join(proc, pid)).st_uid != owner:
+                continue  # another account's process naming the path
             with open(os.path.join(proc, pid, 'cmdline'), 'rb') as f:
                 argv = f.read(8192).split(b'\0')
         except OSError:
             continue  # gone, or hidden
-        for a in argv[:2]:  # the listener's argv[0]; the helper's argv[1], after its shell
-            path = a.decode('utf-8', 'replace')
-            if not path.startswith(prefix):
-                continue
-            rest = path[len(prefix):].split('/')
-            if rest[0] and rest[1:] in (['bin', 'Runner.Listener'], ['run-helper.sh']):
-                names.add(rest[0])
+        for i, tail in ((0, ['bin', 'Runner.Listener']), (1, ['run-helper.sh'])):
+            path = argv[i].decode('utf-8', 'replace') if len(argv) > i else ''
+            for prefix in prefixes:
+                rest = path[len(prefix):].split('/') if path.startswith(prefix) else []
+                if rest and rest[0] and rest[1:] == tail:
+                    names.add(rest[0])
     return names
 
 

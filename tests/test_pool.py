@@ -651,20 +651,21 @@ class Probe(unittest.TestCase):
                 self.assertIsNone(pool.runners_alive(os.path.join(d, 'missing'), proc))  # owner unknown
 
     def test_a_host_with_no_runner_online(self):
-        """The probe's count becomes the row's ``runners``; 0 is a problem brainspike's plan
-        reads, which a pool run ignores (it takes a slot, not a runner); unknown or not
-        asked is none."""
+        """The probe's count becomes the row's ``runners_online`` (15.7: ``runners`` is the
+        instances per label); 0 is a problem brainspike's plan reads, which a pool run
+        ignores (it takes a slot, not a runner); unknown or not asked is none."""
         m = reg().machines['hosta']
         base = {'slots_free': 1, 'load': 0.0, 'cpus': 16}
         down = pool.host_row(m, {**base, 'runners': 0})
-        self.assertEqual((down['runners'], down['problems']), (0, ['no runner online']))
+        self.assertEqual((down['runners_online'], down['problems']), (0, ['no runner online']))
+        self.assertNotIn('runners', down)
         self.assertEqual(pool.fits(down, pool.Ask(), m, 0), '')
         self.assertEqual(pool.fits(dict(down, problems=['drained', 'no runner online']), pool.Ask(), m, 0), 'drained')
         up = pool.host_row(m, {**base, 'runners': 3})
-        self.assertEqual((up['runners'], up['problems']), (3, []))
+        self.assertEqual((up['runners_online'], up['problems']), (3, []))
         for p in ({**base, 'runners': None}, base):
             row = pool.host_row(m, p)
-            self.assertEqual((row.get('runners'), row['problems']), (None, []))
+            self.assertEqual((row.get('runners_online'), row['problems']), (None, []))
         with tempfile.TemporaryDirectory() as d:
             lock = os.path.join(d, 's.lock')
             open(lock, 'w').close()
@@ -723,7 +724,64 @@ class Cluster(unittest.TestCase):
 
     def test_an_unreachable_cluster_starts_nothing(self):
         rows = pool.probe_cluster(reg().machines['cl'], lambda a, **k: subprocess.CompletedProcess(a, 255, '', ''))
-        self.assertTrue(all(not r['start_now'] and r['problems'] for r in rows))
+        self.assertTrue(all(not r['start_now'] and r['problems'] and r['jobs_free'] == 0 for r in rows))
+
+    def test_jobs_free_sums_the_nodes_within_the_association(self):
+        """Decision 15.7: the jobs of the target's size each idle or mix node holds, summed,
+        capped by the association's room less the account's running jobs; positive
+        exactly where start_now is true."""
+        m = reg().machines['cl']
+        cpu, v100 = m.targets['cpu'], m.targets['v100']
+        nodes = pool.parse_sinfo('\n'.join([
+            'c1|part_c|mix|28/72/0/100|2060000|0|(null)|(null)|',  # 72 idle cores: two 32-core jobs
+            'c2|part_c|idle|0/40/0/40|2060000|0|(null)|(null)|',  # one
+            'c3|part_c|mix|60/31/0/91|2060000|0|(null)|(null)|',  # 31 cores: none
+            'c4|part_c|mix|0/64/0/64|2048|1024|(null)|(null)|',  # 64 cores but 1 GiB free: one 1 GiB job, no 2 GiB one
+            'c5|part_c|mix|0/64/0/64|1024|2048|(null)|(null)|',  # more memory allocated than it has: none
+            'c6|part_c|drain|0/96/0/96|2060000|0|(null)|(null)|',  # not idle or mix: none
+            'g1|part_v|mix|0/40/0/40|510000|0|gpu:tesla:4|gpu:tesla:0(IDX:N/A)|',  # 4 cards, 40 cores
+            'g2|part_v|mix|10/30/0/40|510000|0|gpu:tesla:4|gpu:tesla:1(IDX:0)|',  # 3 cards, 30 cores
+            'g3|part_v|mix|35/5/0/40|510000|0|gpu:tesla:4|gpu:tesla:0(IDX:N/A)|',  # 4 cards, 5 cores: none
+            'g4|part_v|mix|20/20/0/40|510000|0|gpu:tesla:4|gpu:tesla:0(IDX:N/A)|',  # 4 cards, 20 cores
+            'g5|part_v|mix|0/40/0/40|510000|0|gpu:tesla:4|gpu:tesla:3(IDX:0-2)|',  # 1 card, 40 cores
+        ]))
+
+        def jobs(t, assoc=None, used=None, **kw):
+            r = pool.target_row(m, t, nodes, assoc or {}, used or {}, **kw)
+            self.assertEqual(r['start_now'], r['jobs_free'] > 0)
+            return r['jobs_free']
+        self.assertEqual(jobs(cpu), 2 + 1 + 1)  # c1, c2, c4; no association limit
+        self.assertEqual(jobs(cpu, mem_gib=2), 2 + 1)
+        self.assertEqual(jobs(cpu, mem_gib=4000), 1 + 1)  # the asked memory is at most the target's 1900 GiB: c1, c2
+        self.assertEqual(jobs(cpu, {'part_c': {'cpu': 72}}), 2)  # the association binds: 72 // 32
+        self.assertEqual(jobs(cpu, {'part_c': {'cpu': 72}}, {'part_c': {'cpu': 32}}), 1)
+        self.assertEqual(jobs(cpu, {'part_c': {'cpu': 72}}, {'part_c': {'cpu': 64}}), 0)
+        self.assertEqual(jobs(cpu, {'part_c': {'cpu': 72}}, {'part_c': {'cpu': 96}}), 0)  # over the limit: none
+        self.assertEqual(jobs(cpu, {'part_c': {'cpu': 1000, 'gpu': 0}}), 4)  # a CPU job takes no card
+        # a GPU job takes its cards and cpus (10) per card: one card g1 4, g2 3, g4 2, g5 1;
+        # two cards g1 2, g2 1, g4 1 (its 20 cores)
+        self.assertEqual(jobs(v100), 4 + 3 + 2 + 1)
+        self.assertEqual(jobs(v100, cards=0), 4 + 3 + 2 + 1)  # one card at least
+        self.assertEqual(jobs(v100, cards=2), 2 + 1 + 1)
+        self.assertEqual(jobs(v100, cards=8), 2 + 1 + 1)  # at most its max_cards
+        self.assertEqual(jobs(v100, {'part_v': {'gpu': 20}}, {'part_v': {'gpu': 17}}), 3)
+        self.assertEqual(jobs(v100, {'part_v': {'gpu': 20}}, {'part_v': {'gpu': 17}}, cards=2), 1)
+        self.assertEqual(jobs(v100, {'part_v': {'cpu': 200}}, {'part_v': {'cpu': 180}}, cards=2), 1)
+        self.assertEqual(jobs(v100, {'part_v': {'cpu': 200}}, {'part_v': {'cpu': 190}}, cards=2), 0)
+        few = pool.parse_sinfo('g3|part_v|mix|35/5/0/40|510000|0|gpu:tesla:4|gpu:tesla:0(IDX:N/A)|')
+        r = pool.target_row(m, v100, few, {}, {})  # free cards, too few cores for one card's 10
+        self.assertEqual((r['start_now'], r['jobs_free'], r['problems']), (False, 0, []))
+        self.assertEqual(pool.target_row(m, cpu, [], {}, {})['jobs_free'], 0)
+
+    def test_the_table_shows_the_jobs_a_target_starts_now(self):
+        m = reg().machines['cl']
+        rows = [pool.target_row(m, m.targets['cpu'], pool.parse_sinfo(SINFO), {'part_c': {'cpu': 72}}, {}),
+                pool.target_row(m, m.targets['a40'], pool.parse_sinfo(SINFO), {}, {}),
+                pool.host_row(reg().machines['hosta'], {'slots_free': 1, 'load': 0, 'cpus': 16})]
+        lines = pool.table(rows).splitlines()
+        self.assertIn(' now (2) ', lines[1])
+        self.assertIn(' no ', lines[2])
+        self.assertRegex(lines[3], r' now +ok ')  # a host row has no jobs_free
 
 
 def row(key, **kw):
@@ -1124,6 +1182,35 @@ CAPACITY = (SINFO.replace('part_c', 'cpu-partition') + '\n===\n' + 'cpu-partitio
             + 'cpu-partition|32|N/A\n')
 
 
+def inventory_text(this, slurm=8):
+    """A host's inventory (decision 15.7): a pool with the default labels, two with their
+    own, a per-card pool, and a slurm pool that also carries the label both hosts share."""
+    return textwrap.dedent(f'''\
+        schema = 1
+        this = "{this}"
+        [hosts.{this}]
+        account = "acct-{this}"
+        home = "/srv/ci/{this}"
+        data = "/srv/ci/{this}/data"
+        slots = 2
+        memory_max = "64G"
+        disk_min_gib = 50
+        gpus = [0, 3]
+        max_temp_c = 80
+        files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
+        [hosts.{this}.pools]
+        light = 2
+        part = {{ count = 3, labels = ["{this}-cpu"] }}
+        cards = {{ per_card = true, class = "gpu", labels = ["{this}-gpu"] }}
+        slurm = {{ count = {slurm}, labels = ["{this}-slurm", "shared-slurm"] }}
+        ''')
+
+
+def runners_of(this, slurm=8):
+    return {'light': 2, this: 2, f'{this}-cpu': 3, f'{this}-gpu': 2, f'{this}-gpu0': 1, f'{this}-gpu3': 1,
+            f'{this}-slurm': slurm, 'shared-slurm': slurm}
+
+
 class CIAccount(unittest.TestCase):
     """A CI account's registry: the cluster through its CI key and the gate's ``capacity``,
     the other host through a key forced to ``ci-run pool probe``; both for pool status only."""
@@ -1262,6 +1349,13 @@ class CIAccount(unittest.TestCase):
         p = json.loads(out.getvalue())
         self.assertEqual((p['slots_free'], p['slots_missing'], p['drained']), (1, 0, False))
         self.assertNotIn('cards_leased', p)
+        self.assertNotIn('runner_labels', p)  # no inventory beside the registry
+        with open(os.path.join(self.etc, 'inventory.toml'), 'w') as f:
+            f.write(inventory_text('hx'))
+        out = io.StringIO()
+        with unittest.mock.patch('sys.stdout', out):
+            self.assertEqual(pool.main(['probe'], self.etc), 0)
+        self.assertEqual(json.loads(out.getvalue())['runner_labels'], runners_of('hx'))  # the etc's inventory
         for text in (CI_REGISTRY.replace('access = "local"', 'access = "ssh"\nssh = "b"'),
                      CI_REGISTRY.replace('access = "ssh"\nssh = "alias-a"', 'access = "local"').replace(
                          'probe = "forced"\n', '')):
@@ -1270,6 +1364,43 @@ class CIAccount(unittest.TestCase):
             with unittest.mock.patch('sys.stderr', err):
                 self.assertEqual(pool.main(['probe'], self.etc), pool.EXIT_USAGE)
             self.assertIn('local machines in the registry, not one', err.getvalue())
+
+    def test_a_host_row_counts_its_runners_per_label(self):
+        """Decision 15.7: the local row's ``runners`` come from the inventory beside the
+        registry, each instance once per label it carries; the other host's from its own
+        inventory, through the forced probe; a label both carry is counted on each."""
+        self.assertIsNone(pool.runner_labels(self.etc))  # no inventory
+        with open(os.path.join(self.etc, 'inventory.toml'), 'w') as f:
+            f.write('schema = 1\n')
+        self.assertIsNone(pool.runner_labels(self.etc))  # one that does not load
+        with open(os.path.join(self.etc, 'inventory.toml'), 'w') as f:
+            f.write(inventory_text('hx'))
+        self.assertEqual(pool.runner_labels(self.etc), runners_of('hx'))
+        other = os.path.join(self.tmp.name, 'other', 'ci-runners', 'etc')  # the other host's CI account
+        os.makedirs(other)
+        with open(os.path.join(other, 'inventory.toml'), 'w') as f:
+            f.write(inventory_text('hy', slurm=4))
+        lock = os.path.join(self.tmp.name, 'x.lock')
+        open(lock, 'w').close()
+        theirs = pool.local_probe(pool.load(CI_REGISTRY.replace('lock = "/tmp/x.lock", count = 1',
+                                                                f'lock = "{lock}", count = 1')), other)
+        self.assertEqual(theirs['runner_labels'], runners_of('hy', slurm=4))
+
+        def answer(p):
+            return lambda argv, **kw: subprocess.CompletedProcess(argv, 0, json.dumps(p) + '\n', '')
+        local = pool.probe_host(self.reg.machines['hostb'], answer({'slots_free': 1, 'load': 0}), etc=self.etc)
+        forced = pool.probe_host(self.reg.machines['hosta'], answer(theirs), etc=self.etc)
+        self.assertEqual(local['runners'], runners_of('hx'))
+        self.assertEqual(forced['runners'], runners_of('hy', slurm=4))  # its own, not the caller's
+        self.assertEqual((local['runners']['shared-slurm'], forced['runners']['shared-slurm']), (8, 4))
+        os.unlink(os.path.join(self.etc, 'inventory.toml'))
+        self.assertNotIn('runners', pool.probe_host(self.reg.machines['hostb'], answer({'slots_free': 1}), etc=self.etc))
+        self.assertNotIn('runner_labels', pool.local_probe(pool.load(CI_REGISTRY.replace(
+            'lock = "/tmp/x.lock", count = 1', f'lock = "{lock}", count = 1')), self.etc))
+        m = self.reg.machines['hosta']
+        for bad in ({'a': True}, {'a': -1}, {'a': '1'}, ['a'], 3):  # a malformed answer gives none
+            self.assertNotIn('runners', pool.host_row(m, {'slots_free': 1, 'runner_labels': bad}), msg=repr(bad))
+        self.assertEqual(pool.host_row(m, {'slots_free': 1, 'runner_labels': {}})['runners'], {})
 
     def test_a_forced_probes_leases_hold_its_cards_whatever_the_callers_entry(self):
         m = self.reg.machines['hosta']

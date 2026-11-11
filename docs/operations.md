@@ -277,11 +277,16 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 **查看**：`ci-run pool status` 打印一张表，`--json` 输出每行的 `HostState` 字段。主机的空闲 slot 从 `/proc/locks` 读取，不会去占用；集群的数字来自 `sinfo`，再减去本账户运行中作业所占的关联 `GrpTRES`。
 
+另有两个可选字段，供 brainspike 按容量放部件（design 决定 15.7）：
+
+- **主机行的 `runners`**：`{标签: 个数}`，即这台主机按标签注册的 runner 实例数。数据来自注册表旁边的清单（`<etc>/inventory.toml`，CI 账户自己的那份），按 setup 注册 runner 的同一条规则（`setup.runners`）计算。每个实例带几个标签就计几次，共享标签也算在内：有 8 个 `slurm` runner 的 3090 主机是 `<host>-slurm: 8`、`3090-slurm: 8`。这里数的是注册的实例，不是在线的（brainspike 自己减去 GitHub 上每个标签正在跑的作业）。只有注册表里的 `local` 那一项这样读；另一台主机的数字经强制探测，由对方用自己的清单算好再传回来。没有清单（比如维护者自己的注册表），或者清单读不进来时，这一行就没有这个字段。
+- **集群目标行的 `jobs_free`**：按这个目标的作业规格，现在能启动几个作业。CPU 目标的规格是它的 `cpus` 个核；GPU 目标是 `cards` 张卡（`pool status` 按 1 张算，不超过 `max_cards`）加上卡数 × `cpus` 个核（注册表里 GPU 目标的 `cpus` 指每张卡的核数）；内存按 `start_now` 的同一条规则。分区里每个 `idle`、`mix` 节点能放 min(空闲核 // 作业核数, 空闲卡 // 作业卡数, 空闲内存 // 作业内存) 个，各节点加起来，再受 association 余量的限制（`GrpTRES` 减去本账户运行中作业占用的 cpu，GPU 目标还有 gpu）。`start_now` 为真时它大于 0，为假时它是 0。共用一个分区的目标共用同一份余量，每一行都按整份算。表格的 `start` 列显示为 `now (2)` 这样的形式。
+
 **CI 账户的注册表**（design 决定 15.1 第 8 条）：brainspike 的 plan 作业以 runner 的 CI 账户运行 `pool status --json`，所以每台 3090 主机的 CI 账户也有一份 `pool.toml`（模式 600），写本机（`local`）、另一台 3090 主机和集群的各个目标。CI 账户在哪里都没有不受限的登录，所以：
 
 - **集群**：项里不写 `ssh` 和 `gate`，改写站点配置的 `site` 和 `account`（`etc/slurm/<site>.toml` 里的站点名和账户别名）。`pool status` 像部件一样经账户的 CI 密钥（`etc/slurm/keys/<account>`）调用 gate 的只读动词 `capacity`：它对账户各目标的分区跑那三个查询（`sinfo`、`sacctmgr`、`squeue`），中间用 `===` 隔开。这个动词随账户的 `ci-run slurm apply` 到集群上；还没 apply 的账户，或者某个查询失败时，表里的问题是 `the gate refused capacity`（用 `ci-run slurm check <site> <account>` 看原因）。注册表要放在 `<data>/ci-runners/etc` 里：gate 的 ssh 控制连接放在 `<data>/ci-runners/state` 下。
 - **另一台主机**：项里写 `probe = "forced"`。`pool status` 不发送代码，只用 `etc/pool/keys/<项名>`（私钥 600）登录，对方 CI 账户 `authorized_keys` 里这把公钥的那一行是 `restrict`，强制运行 `ci-run pool probe`：不带参数、不读 stdin，打印对方自己注册表里唯一的 `local` 机器的探测结果（JSON）。那一行由对方主机的 setup 计划写：把公钥写进对方 inventory 的 `probe_key`，`plan.sh` 列出这一行（标记 `ci-runners-pool-probe`），批准后 `apply`；删掉 `probe_key` 再 apply（`push_key` 还在时），这一行就没了。`probe_key` 不能和 `push_key` 是同一把钥匙。别名写在 CI 账户的 `~/.ssh/config` 里（`HostName`、`User`、`Port`），对方的主机密钥固定在 `known_hosts` 里。
-- **本机的 runner**：CI 账户注册表里 `local` 那一项写 `runners = "<data>/actions-runner"`（私有路径，和 `drain` 一样）。`pool status` 数这个目录下有活进程（`Runner.Listener` 或它的 `run-helper.sh`）的 runner，写进行的 `runners` 字段；一个都没有时问题是 `no runner online`，brainspike 的 plan 就不往这台主机放部件。对方经强制探测读的也是这一项。`pool run` 不看这个问题（它只占 slot，不用 runner）。数的是进程，不是 GitHub 看到的在线状态：隧道断了时进程还在，照样算（design 决定 15.5）。
+- **本机的 runner**：CI 账户注册表里 `local` 那一项写 `runners = "<data>/actions-runner"`（私有路径，和 `drain` 一样）。`pool status` 数这个目录下有活进程（`Runner.Listener` 或它的 `run-helper.sh`）的 runner，写进行的 `runners_online` 字段（决定 15.7 之前叫 `runners`）；一个都没有时问题是 `no runner online`，brainspike 的 plan 就不往这台主机放部件。对方经强制探测读的也是这一项。`pool run` 不看这个问题（它只占 slot，不用 runner）。数的是进程，不是 GitHub 看到的在线状态：隧道断了时进程还在，照样算（design 决定 15.5）。
 - 这两种项只给 `pool status` 用，`pool run` 不会选它们。每个探测有自己的上限（主机 60 秒，集群 90 秒），并行运行，所以整张表在 plan 那一步的 120 秒之内出来。
 - 紧急关闭：以每个 CI 账户运行 `ci-run drain on --pool slurm`，或者把注册表移走（plan 会退回静态池并留一条说明）。
 

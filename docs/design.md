@@ -947,8 +947,9 @@ runs it.
    the job, never on the host's state.
 2. **The check.** For the part's own uid (`os.getuid()`, never a uid from a file) on
    each shared path of `setup.shared_files`: the host lock's files, the slot files, the
-   slot queue, the lease directory and its `queue` (which may be missing until the first
-   part makes it): the path of its kind and not a link, and a named-user access entry
+   slot queue, the lease directory, its `queue` and the lock files the parts left in it
+   (`setup.lease_files`; the `queue` may be missing until the first part makes it): the
+   path of its kind and not a link, and a named-user access entry
    for the uid with `rw` (`rwx` on a directory) after the mask, and on a directory a
    default entry with `rwx`. The ACLs are read by xattr (`setup.acl_users`): no
    subprocess, no network, under 10 ms. Named-user entries whose uid has no account

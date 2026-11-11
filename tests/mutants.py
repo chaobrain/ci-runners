@@ -2888,6 +2888,8 @@ MUTANTS = [
      [f'{TB}.Kept.test_a_refresh_takes_no_kept_record']),
     (ENB, "    sha, spec, files, _ = kept_record(rec, repository, f'--kept {path}')", "    sha, spec, files, _ = kept_record(rec, rec.get('repository') if isinstance(rec, dict) else '', f'--kept {path}')",
      [f'{TB}.Kept.test_a_record_that_does_not_fit_builds_nothing']),
+    (PA, "            m = re.search(r'CUDA (?:UMD )?Version:", "            m = re.search(r'CUDA Version:",
+     ['tests.test_pooladd.Probe.test_the_probe_reads_the_cuda_major_of_either_driver_header']),
 ]
 
 

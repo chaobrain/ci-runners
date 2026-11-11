@@ -11,6 +11,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from contextlib import redirect_stderr, redirect_stdout
 
 from ci_runners import pool, pooladd
@@ -150,6 +151,24 @@ class Probe(unittest.TestCase):
         self.assertEqual(len(p['missing']), 2, p['missing'])  # the python and both slot files; the work dir is there
         self.assertIn('no-python', p['missing'][0])
         self.assertIn('2 CI slot file(s)', p['missing'][1])
+
+    def test_the_probe_reads_the_cuda_major_of_either_driver_header(self):
+        """Driver 610's nvidia-smi says 'CUDA UMD Version: 13.3' where older ones say 'CUDA Version: 12.4'."""
+        def run(argv, **kw):
+            return subprocess.run([sys.executable, '-I', '-'], input=kw['input'], capture_output=True, text=True)
+        for header, want in (('| NVIDIA-SMI 610.43.02   KMD Version: 610.43.02   CUDA UMD Version: 13.3 |', 13),
+                             ('| NVIDIA-SMI 550.54.15   Driver Version: 550.54.15   CUDA Version: 12.4 |', 12),
+                             ('| NVIDIA-SMI 1.0 |', 0)):
+            with tempfile.TemporaryDirectory() as d:
+                smi = os.path.join(d, 'nvidia-smi')
+                with open(smi, 'w') as f:
+                    f.write('#!/bin/sh\ncase "$1" in --query-gpu=*) echo "NVIDIA H100 PCIe, 81559" ;; '
+                            f'*) echo "{header}" ;; esac\n')
+                os.chmod(smi, 0o755)
+                with mock.patch.dict(os.environ, {'PATH': f'{d}:/usr/bin:/bin'}):
+                    p = pooladd.probe('ssh', 'alias-n', {'python': sys.executable, 'work': d,
+                                                         'lock': os.path.join(d, 's.lock'), 'count': 1, 'cache': ''}, run)
+            self.assertEqual((p['cards'], p['cuda_major']), ([['NVIDIA H100 PCIe', 81559]], want), header)
 
 
 class Add(Etc):

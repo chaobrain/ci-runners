@@ -110,7 +110,7 @@ def probe_machine(python: str, work: str, lock: str, count: int, cache: str) -> 
         if r.returncode == 0:
             out['cards'] = [[a.strip(), int(b)] for a, b in (x.rsplit(',', 1) for x in r.stdout.splitlines() if x.strip())]
             h = subprocess.run(['nvidia-smi'], capture_output=True, text=True, timeout=60)
-            m = re.search(r'CUDA Version:\s*(\d+)', h.stdout)
+            m = re.search(r'CUDA (?:UMD )?Version:\s*(\d+)', h.stdout)  # 'CUDA UMD Version' from driver 610
             out['cuda_major'] = int(m.group(1)) if m else 0
     except (OSError, subprocess.SubprocessError, ValueError):
         pass

@@ -319,8 +319,10 @@ class Checks(Etc):
                          ["the registry names no numerics command (its top-level 'numerics')"])
 
     def test_the_cli_adds_checks_and_makes_ready(self):
+        root = os.path.join(self.etc, 'checkout')  # a checkout of its own: the mutants' trees have no .git
+        subprocess.run(['git', 'init', '-q', root], check=True)
         argv = ['add', 'hostm', '--ssh', 'alias-m', '--python', '/opt/env/bin/python', '--work', '/var/pool-work',
-                '--slots-lock', '/tmp/m.lock', '--slots-count', '1', '--labels', 'cpu=hostm-cpu', '--dir', ROOT,
+                '--slots-lock', '/tmp/m.lock', '--slots-count', '1', '--labels', 'cpu=hostm-cpu', '--dir', root,
                 '--caller-python', '/my/env/bin/python', '--host-python', '/opt/py/bin/python3']
         pr, calls = fake_runs({})
         probed = []

@@ -288,7 +288,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 ## 11. 设备池：`pool status` 与 `pool run`（design 决定 15.1）
 
-**注册表**：`$CI_RUNNERS_ETC/pool.toml`（默认 `~/data/ci-runners/etc/pool.toml`，权限 600），格式见 `ci_runners/pool.py` 的模块说明。它和清单一样是私有配置，不进仓库：写好后运行 `python -m ci_runners.pool deny <pool.toml>`，把新的哈希合进 `tests/deny.sha256`。每台机器一项，写明访问方式（`ssh`/`local`/`slurm`）、核数、内存、卡、环境、工作目录和 CI slot 文件。集群写登录账户的 ssh 别名和 `ci-slurm-gate` 的路径，每个目标一行。
+**注册表**：`$CI_RUNNERS_ETC/pool.toml`（默认 `~/data/ci-runners/etc/pool.toml`，权限 600），格式见 `ci_runners/pool.py` 的模块说明。它和清单一样是私有配置，不进仓库：写好后运行 `python -m ci_runners.pool deny <pool.toml>`，把新的哈希合进 `tests/deny.sha256`。每台机器一项，写明访问方式（`ssh`/`local`/`slurm`）、核数、内存、卡、环境、工作目录和 CI slot 文件。主机端（状态探测和 `pool run` 在远端的那一半）默认用系统的 `/usr/bin/python3`；它低于 3.11 时（h100 是 3.10，没有 `tomllib`），在项里写 `host_python = "<3.11 以上的 python 的绝对路径>"`（`pool add --host-python`；和 `python` 一样是私有路径）。集群写登录账户的 ssh 别名和 `ci-slurm-gate` 的路径，每个目标一行。
 
 **查看**：`ci-run pool status` 打印一张表，`--json` 输出每行的 `HostState` 字段。主机的空闲 slot 从 `/proc/locks` 读取，不会去占用；集群的数字来自 `sinfo`，再减去本账户运行中作业所占的关联 `GrpTRES`。
 

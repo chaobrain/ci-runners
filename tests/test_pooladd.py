@@ -152,6 +152,22 @@ class Probe(unittest.TestCase):
         self.assertIn('no-python', p['missing'][0])
         self.assertIn('2 CI slot file(s)', p['missing'][1])
 
+    def test_the_probe_and_the_entry_take_the_host_python(self):
+        """``pool add --host-python`` (decision 15.8, item 9): the probe runs it, the entry names it."""
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, json.dumps(PROBE) + '\n', '')
+        pooladd.probe('ssh', 'alias-n', {'python': '/p', 'work': '/w', 'lock': '/l', 'count': 1, 'cache': ''}, run,
+                      '/opt/py/bin/python3')
+        self.assertEqual(calls[0][-1], '/opt/py/bin/python3 -I -')
+        e = pooladd.entry('ssh', 'alias-n', PROBE, host_python='/opt/py/bin/python3', **ARGS)
+        self.assertEqual(e['host_python'], '/opt/py/bin/python3')
+        self.assertEqual(pool.load(TOP + '\n' + pooladd.render('hostn', e)).machines['hostn'].host_python,
+                         '/opt/py/bin/python3')
+        self.assertNotIn('host_python', entry())
+
     def test_the_probe_reads_the_cuda_major_of_either_driver_header(self):
         """Driver 610's nvidia-smi says 'CUDA UMD Version: 13.3' where older ones say 'CUDA Version: 12.4'."""
         def run(argv, **kw):
@@ -305,11 +321,13 @@ class Checks(Etc):
     def test_the_cli_adds_checks_and_makes_ready(self):
         argv = ['add', 'hostm', '--ssh', 'alias-m', '--python', '/opt/env/bin/python', '--work', '/var/pool-work',
                 '--slots-lock', '/tmp/m.lock', '--slots-count', '1', '--labels', 'cpu=hostm-cpu', '--dir', ROOT,
-                '--caller-python', '/my/env/bin/python']
+                '--caller-python', '/my/env/bin/python', '--host-python', '/opt/py/bin/python3']
         pr, calls = fake_runs({})
-        probe = fake_probe({**PROBE, 'hostname': 'host-m', 'cards': []})
+        probed = []
+        probe = fake_probe({**PROBE, 'hostname': 'host-m', 'cards': []}, probed)
         with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()) as out:
             self.assertEqual(pooladd.main([*argv, '--dry-run'], self.etc, run=probe, pool_run=pr), 0)
+            self.assertEqual(probed[0][0][-1], '/opt/py/bin/python3 -I -')
             self.assertNotIn('hostm', pool.load_file(self.path).machines)
             self.assertEqual(calls, [])  # a dry run runs no check
             self.assertEqual(pooladd.main(argv, self.etc, run=probe, pool_run=pr), 0)
@@ -319,7 +337,8 @@ class Checks(Etc):
         self.assertIn('setup/plan.sh ROLE', out.getvalue())
         self.assertIn('ci-run env build proj --dry-run', out.getvalue())
         m = pool.load_file(self.path).machines['hostm']
-        self.assertEqual((m.ready, m.numerics_ok, m.labels), (True, True, {'cpu': 'hostm-cpu'}))
+        self.assertEqual((m.ready, m.numerics_ok, m.labels, m.host_python),
+                         (True, True, {'cpu': 'hostm-cpu'}, '/opt/py/bin/python3'))
 
     def test_ready_text_edits_that_entry_only(self):
         text = pooladd.add_text(TOP, 'hostn', entry()) + '\n# a trailing note\n'

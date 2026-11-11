@@ -2890,6 +2890,21 @@ MUTANTS = [
      [f'{TB}.Kept.test_a_record_that_does_not_fit_builds_nothing']),
     (PA, "            m = re.search(r'CUDA (?:UMD )?Version:", "            m = re.search(r'CUDA Version:",
      ['tests.test_pooladd.Probe.test_the_probe_reads_the_cuda_major_of_either_driver_header']),
+    # the host side's interpreter, host_python (decision 15.8, item 9)
+    (PO, "HOST_PYTHON = '/usr/bin/python3'", "HOST_PYTHON = '/usr/bin/python3.11'", [f'{TPO}.Probe.test_the_host_side_runs_the_entrys_host_python']),
+    (PO, "'price', 'python', 'host_python', 'work',", "'price', 'python', 'work',", [f'{TPO}.Probe.test_the_host_side_runs_the_entrys_host_python']),
+    (PO, "host_python=_abs(t, 'host_python', where) or HOST_PYTHON,", "host_python=HOST_PYTHON,", [f'{TPO}.Probe.test_the_host_side_runs_the_entrys_host_python']),
+    (PO, "PRIVATE_KEYS = ('ssh', 'hostname', 'python', 'host_python',", "PRIVATE_KEYS = ('ssh', 'hostname', 'python',",
+     [f'{TPO}.Probe.test_the_host_side_runs_the_entrys_host_python']),
+    (PO, "argv, kw = _remote(m, [m.host_python, '-I', '-'])", "argv, kw = _remote(m, [HOST_PYTHON, '-I', '-'])",
+     [f'{TPO}.Probe.test_the_host_side_runs_the_entrys_host_python']),
+    (PO, "'sh', d, m.host_python, '-I', '-c', launch,", "'sh', d, HOST_PYTHON, '-I', '-c', launch,", [f'{TPO}.Probe.test_the_host_side_runs_the_entrys_host_python']),
+    (PA, "[host_python or pool.HOST_PYTHON, '-I', '-']", "[pool.HOST_PYTHON, '-I', '-']", [f'{TPA}.Probe.test_the_probe_and_the_entry_take_the_host_python']),
+    (PA, "**({'host_python': host_python} if host_python else {})", "**({'host_python': host_python})", [f'{TPA}.Probe.test_the_probe_and_the_entry_take_the_host_python']),
+    (PA, "**({'host_python': host_python} if host_python else {})", "**{}", [f'{TPA}.Probe.test_the_probe_and_the_entry_take_the_host_python']),
+    (PA, "'cache': cache}, run,\n                  host_python)", "'cache': cache}, run)", [f'{TPA}.Checks.test_the_cli_adds_checks_and_makes_ready']),
+    (PA, "cache=cache, host_python=host_python)", "cache=cache)", [f'{TPA}.Checks.test_the_cli_adds_checks_and_makes_ready']),
+    (PA, "host_python=a.host_python, dry_run=a.dry_run,", "dry_run=a.dry_run,", [f'{TPA}.Checks.test_the_cli_adds_checks_and_makes_ready']),
 ]
 
 

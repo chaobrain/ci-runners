@@ -784,7 +784,7 @@ def target_row(m: Machine, t: Target, nodes: Sequence[Node], assoc: Mapping[str,
     mine = [n for n in nodes if n.partition.lower() == part and n.state.rstrip('*~#!%$@^-') in ('idle', 'mix')]
     need_cards = max(1, min(cards, t.max_cards)) if t.gpu_model else 0
     need_cpu = t.cpus * need_cards if t.gpu_model else t.cpus  # a GPU target's cpus are per card (the gate's cpus_per_card)
-    need_mib = min(t.memory_gib, max(1, mem_gib)) * 1024
+    need_mib = max(1, min(t.memory_gib, mem_gib)) * 1024  # at least 1 GiB: a target of memory_gib 0 divides nothing
     best = max(mine, key=lambda n: (n.cards_free, n.cpus_idle), default=None)
     cpus = best.cpus_idle if best else 0
     free_cards = best.cards_free if (best and t.gpu_model) else 0

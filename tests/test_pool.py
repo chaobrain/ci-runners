@@ -772,6 +772,9 @@ class Cluster(unittest.TestCase):
         r = pool.target_row(m, v100, few, {}, {})  # free cards, too few cores for one card's 10
         self.assertEqual((r['start_now'], r['jobs_free'], r['problems']), (False, 0, []))
         self.assertEqual(pool.target_row(m, cpu, [], {}, {})['jobs_free'], 0)
+        nomem = dataclasses.replace(cpu, memory_gib=0)  # the registry allows it: a job still takes 1 GiB
+        self.assertEqual(jobs(nomem), 2 + 1 + 1)
+        self.assertEqual(jobs(cpu, mem_gib=0), 2 + 1 + 1)
 
     def test_the_table_shows_the_jobs_a_target_starts_now(self):
         m = reg().machines['cl']
@@ -1402,6 +1405,7 @@ class CIAccount(unittest.TestCase):
         for bad in ({'a': True}, {'a': -1}, {'a': '1'}, ['a'], 3):  # a malformed answer gives none
             self.assertNotIn('runners', pool.host_row(m, {'slots_free': 1, 'runner_labels': bad}), msg=repr(bad))
         self.assertEqual(pool.host_row(m, {'slots_free': 1, 'runner_labels': {}})['runners'], {})
+        self.assertEqual(pool.host_row(m, {'slots_free': 1, 'runner_labels': {'a': 0}})['runners'], {'a': 0})
 
     def test_a_forced_probes_leases_hold_its_cards_whatever_the_callers_entry(self):
         m = self.reg.machines['hosta']

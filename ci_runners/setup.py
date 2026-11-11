@@ -499,6 +499,40 @@ def acl_users(path: str, default: bool = False, strict: bool = False) -> dict[in
     return {uid: perm & mask for tag, perm, uid in entries if tag == ACL_USER}
 
 
+def _account_of(uid: int) -> str | None:
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return None
+
+
+def path_state(path: str) -> dict[str, object]:
+    """What a shared path that refused an account is made of (issue #124), for the host's
+    log only (§3.3): its owner (``[uid, account]``, the account None for a uid with no
+    account, the mark of a renumbering), its mode, and the named-user entries of its
+    access ACL and, on a directory, its default ACL (``[uid, perm after the mask,
+    account]``; None for no such ACL). What cannot be read is an ``error`` (or ``unread:``)
+    in its place. Never raises. Reads the path and its ACLs by xattr."""
+    out: dict[str, object] = {'path': path}
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        out['error'] = f'{type(e).__name__}: {e.strerror}'
+        return out
+    out.update(owner=[st.st_uid, _account_of(st.st_uid)], mode=f'{stat.S_IMODE(st.st_mode):04o}',
+               kind='directory' if stat.S_ISDIR(st.st_mode) else 'file' if stat.S_ISREG(st.st_mode) else 'other')
+    for key, default in (('acl', False), ('default_acl', True))[:2 if stat.S_ISDIR(st.st_mode) else 1]:
+        try:
+            got = acl_users(path, default, strict=True)
+        except OSError as e:
+            out[key] = f'unread: {type(e).__name__}: {e.strerror}'
+            continue
+        out[key] = None if got is None else [
+            [uid, ''.join(c if perm & b else '-' for c, b in (('r', 4), ('w', 2), ('x', 1))), _account_of(uid)]
+            for uid, perm in sorted(got.items())]
+    return out
+
+
 def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None) -> list[tuple[str, str]]:
     """``(path, what is missing)`` for each root step not done: the ``tmpfiles.d`` file as
     planned, and each shared file root-owned with ``rw`` for every account (the queue with

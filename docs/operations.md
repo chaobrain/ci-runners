@@ -12,6 +12,7 @@
 | **egress 主机** | `ci-egress.service`：HTTP CONNECT 代理，只放行允许清单里的域名的 443 端口 | root 安装，DynamicUser 运行 |
 | **工作站** | `ci-orgsync-push.timer`：每 10 分钟用维护者的 gh 登录拉 org 快照，经 ssh 推到每台主机 | 维护者本人的 user 单元 |
 | **3090b 上的维护者账户** | `ci-nightly-backstop.timer`：UTC 21:00–22:45 每 15 分钟一次，外加 22:59，用维护者的 gh 登录、经主机的代理包装，在 brainspike 的主 checkout 里跑 `merge_gate.py --backstop`：当晚 20:00 UTC 以来没有 nightly、也没有排队或在跑的，就在 `main` 上派发一次（§12） | 维护者本人的 user 单元 |
+| **3090b 上的维护者账户** | `ci-runner-watch.timer`：每 15 分钟一次（UTC :00/:15/:30/:45），用维护者的 gh 登录、经主机的代理包装读 org 的自托管 runner，按主机分组；某台主机连续两次检查都没有在线的 runner，就在 ci-runners 开一个 issue `No runner of <host> online`，恢复后评论并关闭（§13） | 维护者本人的 user 单元 |
 
 数据流：
 
@@ -196,6 +197,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 | runner 掉线 | 先查 `systemctl --user status ci-tunnel`：隧道断了，runner 的流量就断。再查 egress 主机的 `ci-egress` 和 `journalctl -u ci-egress`。隧道恢复后 runner 会自己重连。 |
 | 所有任务在 "Set up runner" 被拒，原因 `stale` | 快照太旧。查工作站的 `systemctl --user status ci-orgsync-push.service`、gh 登录和 ssh。手动推一次：`systemctl --user start ci-orgsync-push.service`。 |
 | GitHub 的定时任务停了，当晚没有 nightly | 先看 3090b 维护者账户的 `journalctl --user -u ci-nightly-backstop`：每次运行先打印 checkout 的分支和 commit，再打印 gate 的一行结论。失败多半是 gh 登录、代理或 GitHub 出错，下一次触发会再试；过了 23:00 UTC 就手动派发。 |
+| ci-runners 里出现 `No runner of <host> online` | 那台主机的 runner 在 GitHub 看来全部离线，已经连续两次检查（约 15 分钟）。到那台主机的 CI 账户看 `systemctl --user status 'ci-runner@*' ci-hooks ci-tunnel` 和日志，再看 `ci-run pool status`。runner 恢复后，下一次检查会自动评论并关闭 issue。监视器自身的记录在 3090b 维护者账户的 `journalctl --user -u ci-runner-watch`。 |
 | 部件一秒内就 `lost` | 多半是 `systemd-run` 拒绝了某个参数（例如在旧 systemd 上用了 `OOMPolicy`）。到部件记录 `state/parts/<repo>/<run>-<attempt>/<id>-<n>/` 里看 `log` 和 `record.json`。 |
 | 报错 `unknown keys [...]` 或 inventory 无法加载 | 主机文件和正在跑的 release 版本不一致（§5 第二个教训）。确认 `releases/hook` 和 `v1` 指向的版本，再决定 apply 还是移动 `v1`。 |
 | 想知道某个部件是哪个 runner 跑的 | 被调用的工作流里，API 返回的作业 `runnerName` 是空的。看主机上部件记录 `record.json` 里的 `runner`。 |
@@ -297,3 +299,19 @@ brainspike 的 nightly 靠 GitHub 的 `schedule` 触发，merge gate 的事件�
   3. 先在 user manager 下演练一次（不要在登录 shell 里跑：那里的 PATH 和 keyring 和定时器的不一样）：`systemd-run --user --wait --pipe <release>/setup/workstation/nightly-backstop.sh --report-only <checkout> <python> <wrapper>`，它只做判断、打印结论，不派发；
   4. `systemctl --user daemon-reload && systemctl --user enable --now ci-nightly-backstop.timer`，再用 `systemctl --user list-timers ci-nightly-backstop.timer` 确认下一次触发的时间。
 - 前提：维护者账户开了 linger；gh 的登录存在配置文件里，而不是需要会话才能解锁的 keyring；gh 在 user manager 的 PATH 上。
+
+## 13. 主机没有在线 runner 时的提醒（design 决定 15.6）
+
+3090b 上维护者本人的账户跑一个 user 定时器，每 15 分钟用维护者的 gh 登录读一次 org 的自托管 runner（`GET /orgs/{org}/actions/runners`），看每台主机有没有 GitHub 认为在线的 runner。要看哪些主机写在单元里，仓库里不写主机名。runner 的名字或某个标签等于主机名、或以 `<主机名>-` 开头，就算那台主机的。
+
+- 单元：`setup/workstation/ci-runner-watch.{service,timer}`，脚本 `setup/workstation/runner-watch.sh [--report-only] STATE NET_WRAP ORG HOST...`，它在代理包装下运行 release 自己的 `ci-run runner-watch`。
+- 提醒：某台主机连续两次检查（间隔不超过 40 分钟）都没有在线的 runner，就在 `<org>/ci-runners` 开一个标题固定的 issue `No runner of <host> online`；已经有同名的 open issue 就沿用它，不重复开。一次故障只开一次：故障期间有人手动关掉，监视器不会再开。之后第一次检查看到那台主机有在线的 runner，就给每个同名的 open issue 评论并关闭。
+- 状态：每台主机连续离线的次数和上次检查的时间，存在单元的状态目录里（`%S/ci-runners/runner-watch.json`，systemd 255 上是 `~/.local/state`，权限 600）。离上次检查不到 5 分钟的检查（比如手动启动）不再计数。读 runner 失败时什么都不写，下一次再试；写 issue 只试一次，失败了下一次再试。
+- 登录：和 §12 一样，每次运行时用 `gh auth token` 读，只放在 `ci-run` 的环境变量 `GH_TOKEN` 里。需要 `admin:org`（读 runner）和 `repo`（写 issue）。没有新令牌。
+- 局限：监视器跑在 3090b 上，所以 3090b 整台宕机、或者它的网络或维护者账户出了问题时，它报告不了 3090b 自己；其他原因（CI 账户的 user manager、隧道、和 GitHub 的连接）都会报告。
+- 安装（由 lead 执行，定时器属于高影响操作）：
+  1. 用 `setup/install.sh --commit <sha>` 把一个 release 装到维护者自己的目录下（和 §12 的同一个也可以）；
+  2. 把两个单元复制到 `~/.config/systemd/user/`，在 service 里填好 `@RELEASE@`、`@NET_WRAP@`、`@ORG@`、`@HOSTS@`（要看的主机，空格分隔）；
+  3. 先在 user manager 下演练一次：`systemd-run --user --wait --pipe <release>/setup/workstation/runner-watch.sh --report-only <state 文件的绝对路径> <wrapper> <org> <host>...`，它只打印每台主机的结论和会开、会关的 issue，什么都不写；
+  4. `systemctl --user daemon-reload && systemctl --user enable --now ci-runner-watch.timer`，再用 `systemctl --user list-timers ci-runner-watch.timer` 确认下一次触发的时间。
+- 前提：同 §12。

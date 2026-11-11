@@ -3,6 +3,8 @@
     ci-run reap            the reaper's pass (ci-reaper.timer), which also rewrites a hook copy
     ci-run egress --port P --allow FILE   the egress proxy (ci-egress.service on the egress host; 11.10)
     ci-run org-sync [--fetch --org NAME | --receive]   the org snapshot (§6.5, decision 11.9)
+    ci-run runner-watch --org O --state F [--report-only] HOST...   an issue when a host has no
+                           runner online (the maintainer's timer; decision 15.6)
     ci-run plan|apply ...  host setup (setup/plan.sh, setup/apply.sh)
     ci-run runners         this host's runners: name, labels, class
     ci-run role            this host's role
@@ -62,6 +64,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'pool':  # the registry is its own file: no inventory needed (an agent's account has none)
         from ci_runners import pool
         return pool.main(args, etc_dir())
+    if cmd == 'runner-watch':  # the maintainer's account: no inventory there (decision 15.6)
+        from ci_runners import runnerwatch
+        return runnerwatch.main(args)
     if cmd == 'org-sync':
         from ci_runners import orgsync
         return orgsync.cli(args, etc_dir())

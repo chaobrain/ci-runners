@@ -199,7 +199,7 @@ class Load(unittest.TestCase):
             'slots bool': EXAMPLE.replace('slots = 2', 'slots = true'),
             'memory': EXAMPLE.replace('memory_max = "120G"', 'memory_max = "120GB"'),
             'gpus': EXAMPLE.replace('gpus = [0, 1]\n', 'gpus = [0, "1"]\n'),
-            'cpus': EXAMPLE.replace('cpus = "0-3,16-27"', 'cpus = "0-3,16-27;rm"'),
+            'cpus': EXAMPLE.replace('cpus = "0-27"', 'cpus = "0-27;rm"'),
             'pool count': EXAMPLE.replace('light = { count = 2,', 'light = { count = 0,'),
             'files keys': re.sub(r'slot_queue = .*\n', '', EXAMPLE),
             'role': EXAMPLE.replace('[hosts.3090b]', '[hosts.X3090b]'),

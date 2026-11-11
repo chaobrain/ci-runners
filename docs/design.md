@@ -2606,7 +2606,8 @@ Rules:
      node limit (`AssocGrpNodeLimit`) while the account's own CPU job held the partition, a capacity condition (the
      release changes no slurm part code; the GPU part passed). `v1` moved then; the rerun, once the partition was
      free, was green.
-- **`v1.13.0`** (minor, stamped 2026-11-11; decision 15.8, #158; lead-approved, brainspike's D-0116): h100 back on its
+- **`v1.13.0`** (minor, stamped 2026-11-11; decision 15.8, #158; lead-approved, brainspike's D-0116; `v1` moved to it
+  after the 3090 canary and the h100 canary at `@v1.13.0`, each green and red, 2026-11-11): h100 back on its
   shared account and the light pool to about 20. An inventory's `probe_key` may be a list (one forced line per key);
   `ci-run env build <project> --kept FILE` builds from another host's kept record with no token; a pool entry may
   name `host_python`, the interpreter of its host side (the status probe and `pool run`'s remote half), for a host
@@ -2620,6 +2621,9 @@ Rules:
      take `host_python` once the checkout is at `v1.13.0` or later.
   2. **Setup.** A host whose `probe_key` becomes a list gets one more marked line in its account's
      `authorized_keys` from its plan; on the 3090 hosts and h100 the plan changes nothing else, so no runner restarts.
+  3. **The h100 canary** (`canary-h100.yml`, on h100's labels): the claim, salvage and verdict on `h100-light`, a
+     CPU part on `h100-cpu`, a part on each card's `h100-gpu<N>`, and the OOM part, which the supervisor's cap
+     (11.11) ended on cgroup v1 (`oom`, then its retry passed); the red head was red on the CPU and every GPU part.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

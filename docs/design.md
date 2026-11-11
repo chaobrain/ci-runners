@@ -1078,6 +1078,77 @@ infrastructure end once and keeps `stopped` for a cancel by a newer push.
   dispatches the head again: every part runs again, much later, and that is the consumer's
   (brainspike's CI contract §5.2), not the outcome's.
 
+## Lead decision (proposed, 2026-11-11): the runners come back by themselves (decision 15.5, issue #134)
+
+Proposed for the lead's approval. On 2026-11-11 the lab's UID migration stopped 3090a's CI
+account's user manager at 01:01 and started it again at 01:03. At that start
+`ci-hooks.service` failed once (`/tmp is not private here`; the next start, at 11:46,
+with the same drop-in, passed, and the journal shows no namespace error: the cause of the
+one miss is not established). Every runner unit `Requires=` it, so all ten runners' start
+jobs ended "Dependency failed". A dependency failure is no exit of the runner's process, so
+`Restart=always` never acted; `ci-hooks.service`, a oneshot, had no restart policy. Linger
+was on and every runner was enabled (wanted by `default.target`). The runners stayed down
+for 10 h 45 min, until a person restarted the user manager, and brainspike's plan kept
+placing parts on the host, whose jobs queued.
+
+1. **The runner waits for the hooks' copy instead of requiring it.** `ci-runner@.service`
+   has `Wants=` and `After=ci-hooks.service` (not `Requires=`) and, first among its
+   `ExecStartPre=`, `systemctl --user is-active --quiet ci-hooks.service`, then the check of
+   both copies (13.5). A runner thus starts only while the copy has succeeded in this user
+   manager, in its private `/tmp`: fail closed as before (a copy cannot be planted in a
+   shared `/tmp`, since `hooks copy` refuses there and the unit is then not active). A
+   failed check is a failed start, so `Restart=always` retries it every 30 s, and each
+   retry pulls `ci-hooks.service` in again.
+2. **The copy retries too.** `ci-hooks.service` gets `Restart=on-failure`,
+   `RestartSec=30`; both units set `StartLimitIntervalSec=0`, so systemd never gives up
+   on them. Whenever the user manager starts (a boot with linger, a login, a restart by
+   root), the runners come up as soon as one copy succeeds, with no person involved. A
+   restart of `ci-hooks.service` no longer restarts the runners; `apply` still reloads it.
+3. **setup's plan checks what the start depends on**, on every host:
+   - *Linger*, a root step (`loginctl enable-linger <account>`): done when
+     `/var/lib/systemd/linger/<account>` exists. `apply` refuses until it is done.
+   - *Enablement*: each unit the plan enables has its link in the target's `.wants`
+     directory of the account's unit directory (`default.target.wants`: each runner,
+     `ci-hooks.service`, `ci-tunnel.service`; `timers.target.wants`: each timer). A missing
+     link plans the `enable` again, on every host (until now only the runners, and only on
+     a host with `local_accounts`).
+   - *The runners now*, on standard error (so not part of the approved plan's text): how
+     many of the inventory's runners have a live process, and the names of those without.
+4. **A host with no runner online is a problem in `pool status`.** A host entry of the
+   registry may name `runners`, the CI account's `<data>/actions-runner` (private, as
+   `drain`). The probe counts the runners with a live process there, read from
+   `/proc/<pid>/cmdline` without taking anything: a `Runner.Listener` whose `argv[0]` is
+   `<runners>/<name>/bin/Runner.Listener`, or its helper, whose `argv[1]` (after its shell)
+   is `<runners>/<name>/run-helper.sh` (it outlives the listener's self-update); the path
+   as written or as its real path (the runner's scripts start from their physical
+   directory), and only processes of the directory's owner where it is known. The row gets `runners`, that count, and the problem
+   `no runner online` when it is 0, so brainspike's plan places no part on the host and
+   its other host takes them. A pool run ignores the problem: it takes a slot, not a
+   runner. A forced probe counts what the receiving account's own
+   registry names, as with the leases (15.1, item 8). Where `/proc` hides other accounts'
+   processes (`hidepid`) and the directory is not the caller's, the count is unknown and
+   no problem is raised (fail open: as before this decision). A process is not GitHub's
+   view: a runner whose process lives but whose connection fails (the tunnel down) still
+   counts; §8's tunnel row holds for it.
+5. **Rollout.** The units change with a release and each host's plan (the lead's);
+   `apply` rewrites `ci-runner@.service` and `ci-hooks.service`, runs `daemon-reload` and
+   restarts nothing, so the change takes effect at the user manager's next start. Each CI
+   account's registry gains `runners` on its `local` entry (a hand edit, mode 600).
+- *Alerting.* None exists in this repository; `pool status` is read by every brainspike
+  plan job, which is what turned the outage into hours of queued jobs. GitHub's own runner
+  status (`GET /orgs/{org}/actions/runners`) needs an org owner's login, which only the
+  maintainer's workstation holds (11.9). Polling it there and opening an issue when a host
+  has no runner online is a separate decision for the lead (option (c) below).
+- *Options weighed.* (a) Keep `Requires=` and give only `ci-hooks.service` a restart
+  policy: the runners' start jobs are already cancelled when it fails, and nothing starts
+  them again when it later succeeds. (b) `Wants=` and the copies' check alone: a runner
+  would start on copies another account planted in a shared `/tmp` when the manager runs
+  without its namespace; the `is-active` check closes that. (c) The workstation's push
+  timer reads GitHub's runner status every 10 min and opens or updates an issue for a host
+  with every runner offline: the truest signal (it also sees a dead connection), but a new
+  path that writes to GitHub with the maintainer's login. Recommended: (1)–(4) now, (c)
+  only if the lead wants an alert beyond `pool status`.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -1582,7 +1653,8 @@ All are idempotent and run as the runner account. None needs sudo.
 
 - `setup/plan.sh <host>` reads the inventory and prints every change it would make:
   files with their diffs, units, `.env` lines and runner directories. It changes
-  nothing. The lead approves this output. Save only its standard output as the plan.
+  nothing. It also checks linger for the account (a root step) and each enabled unit's link,
+  and prints the runners not running now on standard error (15.5). The lead approves this output. Save only its standard output as the plan.
 - `setup/apply.sh <host> --plan <file>` applies exactly an approved plan. It refuses if
   the plan's text differs from a fresh `plan.sh` output, or while a root step the plan
   lists (§5.3) is not done. It writes a state file, and a
@@ -1662,8 +1734,8 @@ refreshed from a546b92f (T17):
 | runner app | the pinned release, checked by sha256, into 9 runner directories on 3090b and 8 on 3090a (§5.1) |
 | `.env` per runner | as on h100; `CI_RUNNER_CARD=<N>` on a `gpu` runner; `https_proxy` at the tunnel; from `v1.5` the two hook variables name the copies in `/tmp/ci-runners-hooks/` (decision 13.5) |
 | the hooks (`v1.5`) | `hooks/job-started.sh` and `job-completed.sh` under `data` gain the line `base=<data>/ci-runners`, from which they find `releases/hook` (13.5) |
-| `ci-runner@.service`, `ci-tunnel.service`, `ci-reaper.timer` | as on h100; from `v1.5` the runner's unit also has `Requires=` and `After=ci-hooks.service` and an `ExecStartPre=` that checks both hook copies are executable files (13.5) |
-| `ci-hooks.service` (`v1.5`) | oneshot, `RemainAfterExit=yes`: `ci-run hooks copy` into the private `/tmp` (13.5); enabled; started before the runners, and reloaded (`ExecReload=`, the same copy) by `apply` when a hook changes: a restart would restart every runner through `Requires=` |
+| `ci-runner@.service`, `ci-tunnel.service`, `ci-reaper.timer` | as on h100; from `v1.5` the runner's unit also has `After=ci-hooks.service` and an `ExecStartPre=` that checks both hook copies are executable files (13.5); from 15.5 `Wants=` (not `Requires=`) `ci-hooks.service`, a first `ExecStartPre=` that it is active, and `StartLimitIntervalSec=0` |
+| `ci-hooks.service` (`v1.5`) | oneshot, `RemainAfterExit=yes`: `ci-run hooks copy` into the private `/tmp` (13.5); enabled; started before the runners, and reloaded (`ExecReload=`, the same copy) by `apply` when a hook changes; from 15.5 `Restart=on-failure` after 30 s, `StartLimitIntervalSec=0` |
 | `ci-hostload.{service,timer}` (`v1.5`) | every 60 s, `ci-run hostload sample`: one line of the load record (decision 13.2); `Nice=10`, bounded at 30 s |
 | `ci-envrefresh.{service,timer}` | every 30 min, `ci-run env refresh` for each project whose registry sets `refresh` (decision 12.11) |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 120G of 188 GiB on 3090b, 80G of 125 GiB on 3090a) and `ci-<project>.slice` |
@@ -1901,6 +1973,8 @@ Rules:
 |---|---|---|
 | runner offline mid-part | GitHub fails the job without outputs | `lost`: the verdict salvages the record |
 | host reboot | running parts end; with linger the units start again, the tunnel first | `reboot` (as thermal); the reaper cleans up |
+| the user manager stopped and started again (15.5) | running parts end; the units start again with the manager | a runner whose start fails (the hooks' copy not yet done) is retried every 30 s, and the copy too, with no start limit |
+| no runner of a host online (15.5) | jobs labelled for that host wait in GitHub's queue | `pool status` shows `no runner online`, and brainspike's plan places no part there; the plan prints the runners not running |
 | thermal kill or early stop | the part's processes die, or we stop them | `thermal`: one retry on a cool card |
 | OOM | the scope's processes are killed | `oom`: one retry with `resume` |
 | h100's tunnel down | the runners go offline for its length (their own traffic goes through it, decision 11.10); a running part goes on, but its job cannot report and may end `lost`, then is salvaged | ssh's keep-alive ends a dead link in 90 s, and systemd restarts it after 10 s; the runner app retries its connection on its own. The egress proxy answers 502 when its own connection fails |
@@ -1936,7 +2010,7 @@ Rules:
 | reaper | every 10 min, which also checks the hook copies (13.5) |
 | load record | a sample every 60 s, bounded at 30 s; kept 2 days; busy window 10 min (inventory) |
 | busy markers | 14 days |
-| runner restart | 30 s after a failure |
+| runner restart | 30 s after a failure, a failed start included; never given up (15.5) |
 | GitHub | queued 24 h fails a job; a job lasts at most 5 days; offline 14 days removes a runner |
 
 ## 9. Versioning and rollout

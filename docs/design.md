@@ -12,12 +12,14 @@ Decision 12.17 (2026-11-07) retires h100 and `h100-test.yml`: the CI runs on the
 avoidance, deletes the h100 class and the watchdog, and moves the hooks' path off the disk.
 Decision 14 (2026-11-08, RUN-9) adds a time-billed Slurm cluster as a remote target of the
 3090 hosts' runners: the `slurm` class, the gate, the site config and the install commands.
+Decision 15.8 (2026-11-11) brings h100 back as a full runner host on its shared account and
+raises the light pool to about 20 runners on the three hosts, with one shared label.
 
 Guides, in Chinese: [consumers.md](consumers.md) for the repositories that use the CI,
 [operations.md](operations.md) for the maintainer of the hosts. This file is the contract;
 where a guide and this file disagree, this file holds.
 
-This repository is public (D1). Hosts appear here under role names: **h100** (retired by 12.17), **3090b**,
+This repository is public (D1). Hosts appear here under role names: **h100** (retired by 12.17, back with 15.8), **3090b**,
 **3090a**, the **egress host** and the maintainer's **workstation**. Real host names and ssh aliases,
 accounts, paths under a home directory, addresses and allowlists are inventory and stay
 on the hosts (§3.3).
@@ -1284,6 +1286,99 @@ two fields. Both are optional for a reader: a row without them reads as before.
   `start_now` at 1 core on a GPU target and size `jobs_free` by the real request: the two
   would disagree on a node with free cards and too few idle cores.
 
+## Lead decision (2026-11-11): h100 back on its shared account, the light pool to about 20 (decision 15.8)
+
+Approved by the lead on 2026-11-11 (brainspike's D-0116, its CI contract decision 16). The
+light pool, 3 runners on two hosts, took every claim and plan of brainspike's runs: in a
+batch of 7 runs the last plan started 14 min late. And the cluster takes only 2 CPU parts at
+once, a quota that cannot change. h100 is free capacity: 176 threads, 2 TiB, 5 H100 PCIe
+80 GB cards, driver 610 (CUDA 13), measured on 2026-11-11 from its shared account: cgroup
+v1 with systemd 249, linger on, other people logged in and on one card, `api.github.com`
+answering directly and the package indexes not. These decisions reverse 12.17 for h100 and
+amend 12.2 and §5.1.
+
+1. **h100 returns as a full runner host on its shared account.** Light, CPU part and
+   per-card GPU runners, all five cards, under the shared account of 11.3: the lead waives
+   12.2's dedicated account for this host, since none can be created now; the exit path
+   stays 11.7. The shared-account rules, which §5.3's and §6's h100 rows kept as history
+   (13.4), hold again:
+   - *No private namespace.* The inventory names no `local_accounts`, so there is no root
+     step, no `ci-hooks.service`, and the runners run the hooks under `data` (13.5). `/tmp`,
+     `/var/tmp` and `/dev/shm` are the host's; a part's files there are as readable as
+     their modes make them. Co-users of the account reach everything of ours (T6, T13, T14).
+   - *Its own slot files and leases, under `state/`* (D5: no host lock, no slot interop).
+     The shared-state gate (15.2) runs where the inventory names `local_accounts`: on h100
+     no other account shares a file with the CI, so it has nothing to check there.
+   - *Memory.* The supervisor enforces each part's cap (11.11); the slices are not
+     enforced, and the CI slots bound the sum.
+   - *Busy avoidance* (13.2) finds nothing there and fails open: cgroup v1 gives no
+     `user@<uid>.service` CPU or memory reading, and without `hidepid` every process is
+     visible, so another account's card memory is never counted. A part waits for its
+     slot or card, as before 13.2.
+   - *Units and files.* Setup writes only our subtree, the `ci-*` units it records
+     (`plan.sh` refuses one that no apply wrote) and the probe keys' lines of item 4; it
+     never changes another unit, the shell files or the crontab of the account.
+2. **h100's pools** (§5.1): `light` 8 (`h100-light`, `ci-light`); `part` 9 (`h100-cpu`) on 8
+   CI slots, all 176 threads: 8 CPU parts of 8 workers and 56 GiB take 64 threads and
+   448 GiB, which leaves room for the GPU parts and the host's other users; `gpu` per card
+   on cards 0 to 4 (`h100-gpu`, `h100-gpu<N>`). No `multi` (D7 restated): cards 0 to 3
+   share a PCIe switch whose peer copies read zeros, so a two-card pool needs a P2P
+   self-test that passed on the cards it would lease first. No `compile`, `nightly` or
+   `slurm` pool. `peer_labels` names 3090b's pools.
+3. **The light pool to about 20, with one shared label.** 3090b 6, 3090a 6, h100 8; every
+   light runner also carries `ci-light`, so a light job that reads no host's state asks for
+   it and takes whichever light runner is free. The 3090 hosts' `3090-light` stays until
+   brainspike's workflows ask for `ci-light`; then it may go. A new runner gets its labels
+   at registration; an existing runner gets `ci-light` through the org's runner API
+   (`POST /orgs/{org}/actions/runners/{id}/labels`, the lead's `admin:org`), and its
+   `.env`'s pool labels follow the inventory through the plan. A light part takes no CI
+   slot. *Measured on 3090b, 2026-11-11:* a plan job's checks peaked at 0.44 GiB (mypy,
+   fresh cache) and 1.7 GiB (the source scans), so 8 plans at once take at most about
+   24 GiB, within `ci.slice` on both 3090 hosts (120G, 80G) beside their parts: no change.
+4. **The pool probe, both ways, among three hosts** (15.1, item 8). Every host's CI
+   registry names its own host `local` and the others by forced probe, so a plan job on any
+   light runner reads every host. An inventory's `probe_key` may therefore be a list of
+   keys, one marked line each (a single key, as before, still loads). On h100 the probe
+   lines are written into the shared account's `authorized_keys`, every other line kept:
+   the one file outside our subtree that setup writes there, approved by the lead. A
+   co-user who takes h100's probe keys can run `pool probe` on a 3090 CI account and read
+   its status row, nothing else.
+5. **No cluster key on the shared account.** A cluster key runs the gate, which submits
+   billed jobs, and any co-user could take it. So h100's registry names no cluster: a plan
+   job that runs on h100 reads no cluster target and places on the free hosts only. A
+   capacity-only key (a gate restricted to `capacity`) would lift that; it is not built.
+6. **Egress as on 3090b** (11.10, 12.3): `ci-tunnel.service` with h100's own key, its line on
+   the egress account, through the same forward to the egress host's ssh that 3090b uses;
+   that forward is the maintainer's, not a `ci-` unit, and outside the plan. Every GitHub
+   name and the package indexes go through it.
+7. **An env without a token on the shared account** (amends 11.4). `ci-run env build
+   <project> --kept FILE` (`-`: standard input) builds from the record another host's env of
+   the project kept (`ci-env.json`, §4.9): the default branch's spec and requirement files at
+   the commit that env was built from, which that host read with the maintainer's token. The
+   record is checked as a refresh checks its own (the registry's repository, a spec that
+   parses, upstreams that match it), and the upstreams are cloned without credentials, so a
+   private upstream fails the build. No token reaches h100, where co-users could read it from
+   the build's environment (T5). `env refresh` then follows the upstreams as on the 3090
+   hosts. A spec change on the default branch reaches h100 by another `--kept` build, from a
+   3090 env built after it.
+8. **The org snapshot and the runner watch** list h100 again: the workstation's push
+   (11.9) over the maintainer's own ssh access, and the watch (15.6). Both are words of the
+   maintainer's units (§3.3).
+9. **The registry row.** `pool add` in the maintainer's registry: free (no `billed`),
+   `gpu_model` `h100`, `cuda13`, `p2p` from the self-test; `ready` only once brainspike's
+   numerics check passes (its full CPU selection and its GPU smoke set, f64 bit-identical
+   to the reference host's). The CI accounts' registries name the row by hand, as in item 4.
+10. **Rollout.** Items 4 and 7 ship in `v1.13.0`; both are additive (a single `probe_key`
+    and a build without `--kept` behave as before), so it is a minor release. Each host
+    installs it; the 3090 hosts' plans raise the light pools, with the light pool drained
+    around the runners' restart; h100 is planned, applied and registered as a new host
+    (§10), then its env, the canary and the registry's checks.
+- *Options weighed.* (a) A dedicated account: not possible now (the lead). (b) A token on
+  h100 for the env build: readable by co-users for the build's length, and the
+  maintainer's login holds `admin:org`. (c) One probe key shared by every caller: a key
+  copied onto the shared account. (d) A capacity-only cluster key on h100 (item 5): a gate
+  change and a line from the cluster account's owner, for a later decision.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -1311,6 +1406,8 @@ two fields. Both are optional for a reader: a row without them reads as before.
   its outcome and a `next` hint for the retry job.
 - **D7.** *One card per h100 part.* Lapsed with h100 (12.17), its code deleted by 13.4. The
   3090 hosts' `multi` pool runs two-card parts behind a P2P self-test (decision 12.6).
+  Restated by 15.8: h100 has no `multi` pool until a P2P self-test passes on the cards it
+  would lease.
 - **D8.** *The keyed verify draw.* Retired by 11.12.
 
 ## 1. Scope
@@ -1418,8 +1515,8 @@ publish what it protects. `setup/plan.sh` regenerates it from a host's inventory
 ### 3.2 Hosts
 
 Every host has the layout below, rooted at its `data` directory (inventory): on 3090b and
-3090a a directory of the CI account (decision 12.2); on h100, while it ran (12.17), our
-subtree of the shared account (decision 11.3).
+3090a a directory of the CI account (decision 12.2); on h100 our subtree of the shared
+account (decision 11.3; retired by 12.17, again from 15.8).
 
 ```
 <our subtree>/ci-runners/releases/<tag>/   installed host layer, read-only
@@ -1486,7 +1583,8 @@ policy's hash, so a change shows.
 host lock; read again, decision 12.9), `local_accounts` (the local accounts that share
 the lock and slot files, 12.9) and `push_key` (the public key of the org snapshot's
 push, an `ssh-ed25519` line, 12.4); decision 15.1 (item 8) adds `probe_key` (the other
-host's CI account's pool probe key, the same form). A host with `files.host_lock` has the host lock,
+host's CI account's pool probe key, the same form; from 15.8 a list of such keys, one per
+calling host). A host with `files.host_lock` has the host lock,
 and one without it has none. `v1.5` adds, both optional: `peer_labels` (a table from a
 runner class to the labels of the other host's pool of that class, 13.3) and `busy` (a
 table of `window_minutes`, `cpu_cores`, `memory_gib`, `gpu_mib` and `lock_minutes`, each
@@ -1747,31 +1845,45 @@ place as a build is. It refuses a spec with a private upstream, since it holds n
 `refresh = true`; a failed refresh leaves the old env and logs why. A project's default
 branch that changes its spec still needs a maintainer's `env build`.
 
+`ci-run env build <project> --kept FILE` (decision 15.8; `-` reads standard input) builds
+without a token, from the record another host's env of the project kept (its
+`ci-env.json`): that env's spec, requirement files and repository commit, checked as a
+refresh checks its own record. It is for a host whose account others share (h100), where a
+token would be readable for the build's length; its upstreams are cloned without
+credentials.
+
 ## 5. Hosts
 
 ### 5.1 Runner pools
 
 Every runner also carries GitHub's `self-hosted`, `Linux` and `X64` labels. The runner
 class (`CI_RUNNER_CLASS`) decides what the hook and the executor allow (§6.3). h100's
-pools went with it (12.17), and its `h100` class with 13.4.
+first pools went with it (12.17), and its `h100` class with 13.4; it returns with the
+classes of the 3090 hosts (15.8).
 
 | host | pool (class) | instances | labels | runs |
 |---|---|---|---|---|
-| 3090b | `light` | 2 | `3090b-light` | claim, salvage, verdict; short consumer commands (a plan) |
+| 3090b | `light` | 6 | `3090b-light`, `3090-light`, `ci-light` | claim, salvage, verdict; short consumer commands (a plan) |
 | 3090b | `part` | 3 | `3090b-cpu` | CPU parts, pinned to the inventory's `cpus` |
 | 3090b | `gpu` | 2 | `3090b-gpu`, `3090b-gpu<N>` | one-card parts on card N |
 | 3090b | `multi` | 1 | `3090b-multi` | two-card parts, after the P2P self-test (12.6) |
 | 3090b | `compile` | 1 | `3090b-compile` | exclusive timing parts on `compile_cpus` (12.7) |
 | 3090b | `slurm` | 8 | `3090b-slurm`, `3090-slurm` | cluster parts: one batch job each, no CI slot or card of the host (14.3) |
-| 3090a | `light` | 1 | `3090a-light` | as on 3090b |
+| 3090a | `light` | 6 | `3090a-light`, `3090-light`, `ci-light` | as on 3090b |
 | 3090a | `part` | 3 | `3090a-cpu` | CPU parts |
 | 3090a | `gpu` | 2 | `3090a-gpu`, `3090a-gpu<N>` | one-card parts on card N |
 | 3090a | `multi` | 1 | `3090a-multi` | two-card parts, after the P2P self-test |
 | 3090a | `nightly` | 1 | `3090a-nightly` | a consumer's nightly, up to 600 min, holding the host (12.8) |
 | 3090a | `slurm` | 8 | `3090a-slurm`, `3090-slurm` | as on 3090b |
+| h100 | `light` | 8 | `h100-light`, `ci-light` | as on 3090b (15.8) |
+| h100 | `part` | 9 | `h100-cpu` | CPU parts, on 8 CI slots |
+| h100 | `gpu` | 5 | `h100-gpu`, `h100-gpu<N>` | one-card parts on card N; no `multi` until a P2P self-test passes (15.8) |
 
 A pool's size is the host's slots (or cards) plus one waiting seat per project allowed on
-it (§7); the 3090 hosts have 2 CI slots each, the count of brainspike's `ci_slot.sh`.
+it (§7); the 3090 hosts have 2 CI slots each, the count of brainspike's `ci_slot.sh`, and
+h100 has 8. **The light pools** (15.8) take no CI slot: about 20 runners on three hosts,
+each with the shared `ci-light`; the 3090 hosts' `3090-light` goes once no workflow asks
+for it.
 **The `slurm` pools** (lead, 2026-11-11): 8 runners per 3090 host, up from 2, and the
 site config's `max_parts` (cluster parts per driver host) 8, up from 4, so that a runner
 never waits for a driver slot. With 2 per host, at most 4 cluster parts ran at once: a
@@ -1834,7 +1946,8 @@ All are idempotent and run as the runner account. None needs sudo.
 
 ### 5.3 System changes per host (the lead approves the plan before it runs)
 
-**h100** (decision 11.3). Measured on 2026-11-06 from the shared account: linger on;
+**h100** (decision 11.3; back with 15.8, whose pools and probe lines amend this table).
+Measured on 2026-11-06 from the shared account: linger on;
 `systemctl --user` works; 2 TB of memory, 176 CPUs, 5 cards; `api.github.com` answers
 directly, `github.com` and the package indexes do not (decision 11.8), and the Actions
 service breaks off (11.10); not in the docker group; the system `python3` is 3.10;
@@ -1843,7 +1956,7 @@ cgroup v1 with systemd 249 (11.11).
 | change | detail |
 |---|---|
 | directories | §3.2 under our subtree; `etc/` mode 700 |
-| runner app | the pinned release, checked by sha256, into 9 runner directories (§5.1) |
+| runner app | the pinned release, checked by sha256, into 9 runner directories (§5.1); 22 from 15.8 |
 | `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON` (for the launcher and the units; the hooks have the interpreter written into them by setup, so a job's environment never chooses it); `CI_RUNNER_POOL_LABELS`, the pool's own labels, for a retry's `retry-on`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card; `https_proxy` and `http_proxy` at the tunnel's local port, and `no_proxy` (inventory `tunnel.direct`: localhost and the package mirror that answers directly, decision 11.10) |
 | `ci-runner@.service` (template) | `ExecStart=<data>/actions-runner/%i/run.sh`; `After=`/`Wants=ci-tunnel.service`; `NoNewPrivileges=yes`; `KillMode=mixed`; `Restart=always`, `RestartSec=30`; `Slice=ci.slice`; enabled per instance |
 | `ci-tunnel.service` | `ssh -F etc/tunnel/ssh_config -N -L 127.0.0.1:<http port>:127.0.0.1:<egress port>` to the egress account (decision 11.10): batch mode, the egress host's key pinned in `etc/tunnel/known_hosts`, `ExitOnForwardFailure`, keep-alive every 30 s (a dead link ends after 90 s); `Restart=always` after 10 s |
@@ -1853,7 +1966,8 @@ cgroup v1 with systemd 249 (11.11).
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 512G of 2 TB) and `ci-<project>.slice`; not enforced under cgroup v1, where the slots and each part's own cap bound memory (decision 11.11) |
 | slot files | under `state/` (inventory `files`) |
 | unit names | every unit file starts with `ci-` (`ci.slice` included); `uninstall.sh` stops and removes only the units an `apply` recorded in `state/setup.json`; `plan.sh` refuses if a unit of that name exists and no earlier `apply` wrote it (another user of the account may have one). `plan.sh ROLE --adopt` instead lists each such unit as `adopt` and plans it as usual (a regular file of this account only), for units an older release wrote without a record; the lead approves the adoption with the plan, and `apply.sh` takes `--adopt` too. A unit an earlier apply recorded that the plan no longer holds is listed as `remove`, and `apply` stops, disables and deletes it. Never on a shared account without checking each listed file. The unit directory exists (mode 700) and is the account's: setup never changes its mode. |
-| unchanged | the shared account's shell files, crontab, `authorized_keys`, other users' files, envs and units |
+| the pool probe keys (15.8, item 4) | inventory `probe_key`, the 3090 CI accounts' keys: one marked line each in the shared account's `authorized_keys`, `restrict`, forced to `pool probe`; every other line kept |
+| unchanged | the shared account's shell files, crontab, its other `authorized_keys` lines, other users' files, envs and units |
 
 There is no root step on h100: the shared account has no sudo for us, and none is
 needed.

@@ -1087,7 +1087,7 @@ connection, and reading it takes an org owner's login, which only the maintainer
    workstation that sleeps would miss the night.
 2. **When.** Every quarter hour, at :00, :15, :30 and :45 UTC; `AccuracySec=1s`, no random
    delay, not `Persistent`. The service is a oneshot, so a tick that comes while a run is
-   still going is skipped (with the 5-min bound, none can).
+   still going is skipped (with the 10-min bound, none can).
 3. **What it reads.** `runner-watch.sh [--report-only] STATE NET_WRAP ORG HOST...` reads
    every self-hosted runner of the org (up to 10 pages of 100) through NET_WRAP, the
    host's proxy wrapper, which fails rather than go direct. The hosts to watch are the
@@ -1099,7 +1099,8 @@ connection, and reading it takes an org owner's login, which only the maintainer
 4. **Two consecutive checks.** STATE, a file of the maintainer's (the unit's
    `StateDirectory`, mode 600), keeps per host the number of consecutive checks that found
    no runner online and the time of the last check. A check more than 40 min after the
-   last one (a missed tick is allowed, not two) starts the count again at 1. A host listed
+   last one (a missed tick is allowed, not two) starts the count again at 1, and one less
+   than 5 min after it (a start by hand) does not count again. A host listed
    with no runner registered at all counts as none online. A failed read of the runners
    changes nothing (no issue, no state) and ends with status 1.
 5. **The issue.** In `<org>/ci-runners`, titled `No runner of <host> online`, fixed per
@@ -1108,7 +1109,8 @@ connection, and reading it takes an org owner's login, which only the maintainer
    whose body gives the two checks' times, each registered runner of the host with its
    status, and where to look (the CI account's `systemctl --user` and its journal, `pool
    status`, §8). It opens at most one per outage: the state remembers it, so a person who
-   closes it while the host is still down is not overruled. At the first check that finds
+   closes it while the host is still down is not overruled (the state keeps the alert until a
+   check finds the host online, across a gap too). At the first check that finds
    a runner of the host online, every open issue with the title gets a comment (how many
    of the host's runners are online, and when) and is closed. A failed issue call is
    retried at the next tick; the run then ends with status 1, and the other hosts are not
@@ -1120,8 +1122,9 @@ connection, and reading it takes an org owner's login, which only the maintainer
    and `repo` to write the issues; no new token. It writes to GitHub only issues and
    comments in `<org>/ci-runners`, and with `--report-only` nothing: it prints what it
    would open or close and leaves STATE as it was (the dry run).
-7. **Bounds and failures.** `TimeoutStartSec=5min`; each API call 30 s and 3 tries (as
-   `claim`). The watch runs on 3090b, so it does not report 3090b down as a whole (host,
+7. **Bounds and failures.** `TimeoutStartSec=10min`; each read 30 s and 3 tries (as
+   `claim`), each write one try (one that timed out may have been done), retried at the
+   next tick; a comment whose close failed may thus be posted twice. The watch runs on 3090b, so it does not report 3090b down as a whole (host,
    network or the maintainer's account); 3090a's watch is up then. Every other cause of no
    runner online, 3090b's included (its CI account's user manager, the tunnel, GitHub's
    connection), is reported. The units hold no host name: the state path, the wrapper,
@@ -1129,7 +1132,8 @@ connection, and reading it takes an org owner's login, which only the maintainer
    `~/.config/systemd/user/` (§3.3).
 8. **Setup.** The lead applies the units (a timer: AGENTS.md, high-impact actions), from a
    release installed by `setup/install.sh` under a directory of the maintainer's, as the
-   backstop's (§5.3), and rehearses `--report-only` under the user manager first.
+   backstop's (§5.3), and rehearses `--report-only` under the user manager first. A host
+   taken out of the unit's list leaves an open issue of its own to a person.
 - *Options weighed.* (A) The workstation's push timer, every 10 min (#134's text): the
   same login, but the workstation sleeps and is not always on. (B) A comment at every
   check while the host is down: the same news every 15 min. (C) An alert after one check:
@@ -1762,7 +1766,7 @@ account:
 |---|---|
 | prerequisites | linger for the maintainer's account; gh's login in its config file, not a keyring that needs a session, and gh on the user manager's PATH; brainspike's main checkout (the gate runs from it as it is, and each run prints its commit); the host's proxy wrapper |
 | `ci-nightly-backstop.{service,timer}` | user units of the maintainer's account: at 21:00, 21:15, …, 22:45 and 22:59 UTC, `nightly-backstop.sh CHECKOUT PYTHON NET_WRAP` from a checkout of a release runs `merge_gate.py --backstop` in the checkout under the wrapper, with the login from `gh auth token` in its environment; `TimeoutStartSec=5min` |
-| `ci-runner-watch.{service,timer}` (decision 15.5) | user units of the maintainer's account: every quarter hour, `runner-watch.sh STATE NET_WRAP ORG HOST...` from a checkout of a release reads the org's runners under the wrapper, with the login from `gh auth token` in `ci-run`'s environment, and opens or closes an issue `No runner of <host> online` in `<org>/ci-runners`; STATE in the unit's state directory; `TimeoutStartSec=5min` |
+| `ci-runner-watch.{service,timer}` (decision 15.5) | user units of the maintainer's account: every quarter hour, `runner-watch.sh STATE NET_WRAP ORG HOST...` from a checkout of a release reads the org's runners under the wrapper, with the login from `gh auth token` in `ci-run`'s environment, and opens or closes an issue `No runner of <host> online` in `<org>/ci-runners`; STATE in the unit's state directory; `TimeoutStartSec=10min` |
 | unchanged | the CI account and its units; the maintainer's gh login; nothing is stored but the watch's counts (15.5) |
 
 ### 5.4 *The h100 executor* (retired by 12.17 and 13.4)
@@ -1822,7 +1826,7 @@ On 3090b and 3090a the executor of §4.3 adds:
 | 3090b, 3090a | a dedicated CI account per host, runners on it (decision 12.2) | the CI account's files: the runner credentials, the hook, the policy, the envs, each job's `GITHUB_TOKEN` while it runs, the checkout of a private repository, the shared lock and slot files (a job can hold them and stall local runs); nothing of the local accounts (T18), no sudo, no GitHub credential | private repositories only, of org members only; `NoNewPrivileges`; the account's own mount namespace (decision 12.16); `GITHUB_TOKEN` as on h100; per-job directories; the tunnel key opens only allowlisted HTTPS; the push key only `--receive` | a root-owned host layer with system units (§5.3, T13) |
 | egress host | a dynamic user of `ci-egress.service` | nothing of a job's: it sees only the names a job connects to | hardened system unit; root-owned release and allowlist | — |
 | workstation | the maintainer | nothing: no job runs there | the push reads the login at each run and stores nothing | — |
-| 3090b, the maintainer's account (15.3, 15.5) | the maintainer | nothing: no job runs as the maintainer, and the CI account reaches nothing of the local accounts (T18) | the backstop and the runner watch read the login at each run and stores nothing | — |
+| 3090b, the maintainer's account (15.3, 15.5) | the maintainer | nothing: no job runs as the maintainer, and the CI account reaches nothing of the local accounts (T18) | the backstop and the runner watch read the login at each run and store it nowhere; the watch keeps its counts | — |
 
 ### 6.2 Per repository class
 

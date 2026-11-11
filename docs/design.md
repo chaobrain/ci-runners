@@ -948,8 +948,9 @@ runs only when someone runs it.
    the job, never on the host's state.
 2. **The check.** For the part's own uid (`os.getuid()`, never a uid from a file) on
    each shared path of `setup.shared_files`: the host lock's files, the slot files, the
-   slot queue, the lease directory, its `queue` and the lock files the parts left in it
-   (`setup.lease_files`; the `queue` may be missing until the first part makes it): the
+   slot queue and its lock files `seq.lock` and `take.lock` (`setup.queue_files`), the
+   lease directory, its `queue` and the lock files the parts left in it
+   (`setup.lease_files`; what the parts make may be missing until the first one makes it): the
    path of its kind and not a link, and a named-user access entry
    for the uid with `rw` (`rwx` on a directory) after the mask, and on a directory a
    default entry with `rwx`. The ACLs are read by xattr (`setup.acl_users`): no
@@ -966,11 +967,18 @@ runs only when someone runs it.
    logs): each path, the account and its uid, what is missing, the stale uids, and the
    fix: the root step (`systemd-tmpfiles --create` on the `tmpfiles.d` file, while no
    local job holds the files) or the ACL, then `ci-run drain off`.
-   A shared path that refuses the CI account after the gate (issue #124: the slot queue's
-   or the lease directory's files, the host lock) still fails the part as before, an
-   error; its line in the same log holds the error and each path's owner, mode and
+   A shared path that refuses the CI account after the gate (issue #124: a file made or
+   changed after the check, such as a ticket or a lock file made since) still fails the
+   part as before, an error; its line in the same log holds the error and each path's owner, mode and
    named-user ACL entries (`setup.path_state`), and the error gains a note that names no
    path, account or uid.
+   *Amended 2026-11-11 (issue #124, approved by the lead):* the slot queue's `seq.lock`
+   and `take.lock` are checked as the lease directory's lock files are. They are opened in
+   place, so they keep the ACL entries they were made with; after a renumbering, `seq.lock`
+   named only the old uid, and every part failed in `slots.take_ticket` after the gate,
+   logged but not drained. The rest of the queue (`seq`, the tickets, `holder.<i>`) is
+   written new and renamed, so the directory's entries govern it. `setup`'s plan checks
+   and warns of them as of the lease directory's lock files.
 4. Only a proven miss drains. A check that cannot run (an unexpected error) ends the part
    `unavailable` (`shared state unknown`) without draining. Nothing undrains by itself:
    the operator runs `ci-run drain off` once the plan shows the root steps done.

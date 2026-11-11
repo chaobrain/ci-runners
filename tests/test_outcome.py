@@ -71,7 +71,7 @@ class Hint(unittest.TestCase):
     def test_hints(self):
         H = oc.Hint
         table = {
-            'pass': H('none'), 'red': H('none'), 'stopped': H('none'),
+            'pass': H('none'), 'red': H('none'), 'stopped': H('retry', False, 'any'),
             'oom': H('retry', True, 'more-memory'), 'reboot': H('retry', False, 'same-host'),
             'unavailable': H('fallback'), 'lost': H('retry', False, 'any'),
             'thermal': H('fallback'),
@@ -87,6 +87,13 @@ class Hint(unittest.TestCase):
         """Decision 12.6: a failed P2P self-test is a host fault, so ``next`` is ``none``."""
         self.assertEqual(oc.hint('unavailable', host_fault=True), oc.Hint('none'))
         self.assertEqual(oc.hint('unavailable', host_fault=False), oc.Hint('fallback'))
+
+    def test_a_cancel_asks_for_one_retry(self):
+        """Decision 15.4 (#110): ``stopped`` is not final; the consumer's retry job, skipped on
+        a cancelled run, decides. Its second attempt is."""
+        self.assertNotIn('stopped', oc.FINAL)
+        self.assertEqual(oc.hint('stopped'), oc.Hint('retry', where='any'))
+        self.assertEqual(oc.hint('stopped', attempt=2), oc.Hint('none'))
 
     def test_at_most_one_retry(self):
         for k in oc.KINDS:

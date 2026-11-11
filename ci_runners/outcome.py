@@ -12,8 +12,11 @@ import dataclasses
 #: precedence order, highest first; ``lost`` comes from a record that never finished
 KINDS = ('pass', 'red', 'oom', 'thermal', 'reboot', 'unavailable', 'lost', 'stopped')
 PRECEDENCE = ('stopped', 'reboot', 'thermal', 'oom', 'unavailable', 'lost', 'red', 'pass')
-#: outcomes after which nothing is retried
-FINAL = frozenset({'pass', 'red', 'stopped'})
+#: outcomes after which nothing is retried. ``stopped`` is not one: the executor cannot tell
+#: an owner's cancel (the whole run cancelled) from GitHub's cancel of the job alone (a runner
+#: that lost its connection), and a cancelled run runs no retry job (design §4.8 rule 4,
+#: decision 15.4), so only a cancel its run outlives is retried
+FINAL = frozenset({'pass', 'red'})
 NEXT = ('none', 'retry', 'fallback')
 
 
@@ -111,6 +114,6 @@ def hint(kind: str, *, attempt: int = 1, retries: int = 1, cool_card: bool = Fal
         return Hint('retry', resume=True, where='more-memory')
     if kind == 'reboot':
         return Hint('retry', where='same-host')
-    if kind == 'lost':
+    if kind in ('lost', 'stopped'):  # stopped: the run decides (decision 15.4)
         return Hint('retry', where='any')
     return Hint('fallback')  # unavailable

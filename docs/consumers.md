@@ -50,7 +50,7 @@ verdict        [self-hosted, <host>-light]
 | `unavailable`（`busy: nightly holds every slot and card`） | 第一次尝试时这台主机的 `nightly` 部件占着（或正排队等着）全部槽位和卡（design 决定 13.6），不再白等排队超时 | 立刻在另一台主机的同类池子上重试一次；每次都让出 |
 | `unavailable`（`p2p: …`） | 双卡部件（`multi`）开跑前的 P2P 自检失败：主机故障 | 不重试，状态为 `error` |
 | `lost` | 作业没留下输出就结束了，例如 runner 被停 | verdict 从主机上的记录 salvage |
-| `stopped` | 被取消，例如同一个 PR 推了新 head | — |
+| `stopped` | 被取消：同一个 PR 推了新 head、有人取消了运行，或者 GitHub 单独取消了这个作业（runner 和 GitHub 断了连接、作业超过 `timeout-minutes`） | 重试一次（同一个池子）；整个运行被取消时 retry 作业带 `!cancelled()` 不会运行，所以只有运行还在继续的取消才重试（design 决定 15.4） |
 
 只有 `red` 会让部件这一步退出 1。基础设施问题重试一次还没解决，状态就是 `error`，不是 `failure`。
 

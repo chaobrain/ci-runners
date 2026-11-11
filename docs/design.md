@@ -2465,6 +2465,20 @@ Rules:
      restarted).
   4. **No host drains at the move.** Each 3090 host's `setup.own_access` as its CI account, with the queue locks,
      shows no miss (3090b and 3090a at `6241cdd`: 0 misses).
+- **`v1.12.0`** (minor, stamped 2026-11-11; decision 15.7, #147: #151 and #153; lead-approved, #147): `pool status
+  --json` gains two optional row fields for brainspike's placement by capacity. A host row's `runners` is the runner
+  instances its inventory registers per label (`{label: count}`); a cluster target row's `jobs_free` is how many jobs
+  of the target's size its partition holds now within the association's room, and `start_now` is `jobs_free > 0`.
+  15.5's live-runner count is renamed `runners_online`. A GPU target's job now needs `cards × cpus` cores, so its
+  `start_now` is stricter; a CPU target no longer reads the association's `gpu` room. The table's `start` column
+  shows `now (N)`. Also on `main` since `v1.11.0`: design §5.1's text on 8 slurm runners per 3090 host (#150). No
+  action's input or output changes, no label, outcome kind, inventory or registry key, setup, gate, slurm part or
+  egress code changes: the code change is `ci_runners/pool.py` alone. Its notes:
+  1. **When each side runs it.** `pool status` and the forced probe run `releases/hook`, so the fields hold from the
+     install: a CI account's local row gains `runners` once its own hook is `v1.12.0`, the other host's row once
+     that host's is. Until then a row may still carry `v1.11.0`'s int `runners`; a reader takes a `runners` that is
+     not `{label: count}` as not reported (15.7 item 3).
+  2. No setup change: a host's plan at `v1.12.0` is `v1.11.0`'s, so the install restarts no runner.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

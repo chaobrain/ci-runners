@@ -2465,10 +2465,11 @@ Rules:
      restarted).
   4. **No host drains at the move.** Each 3090 host's `setup.own_access` as its CI account, with the queue locks,
      shows no miss (3090b and 3090a at `6241cdd`: 0 misses).
-- **`v1.12.0`** (minor, stamped 2026-11-11; decision 15.7, #147: #151 and #153; lead-approved, #147): `pool status
-  --json` gains two optional row fields for brainspike's placement by capacity. A host row's `runners` is the runner
-  instances its inventory registers per label (`{label: count}`); a cluster target row's `jobs_free` is how many jobs
-  of the target's size its partition holds now within the association's room, and `start_now` is `jobs_free > 0`.
+- **`v1.12.0`** (minor, stamped 2026-11-11; decision 15.7, #147: #151 and #153; lead-approved, #147; `v1` moved to it
+  after the 3090 canary at `@v1.12.0`, and the slurm canary's GPU part, 2026-11-11): `pool status --json` gains two
+  optional row fields for brainspike's placement by capacity. A host row's `runners` is the runner instances its
+  inventory registers per label (`{label: count}`); a cluster target row's `jobs_free` is how many jobs of the
+  target's size its partition holds now within the association's room, and `start_now` is `jobs_free > 0`.
   15.5's live-runner count is renamed `runners_online`. A GPU target's job now needs `cards × cpus` cores, so its
   `start_now` is stricter; a CPU target no longer reads the association's `gpu` room. The table's `start` column
   shows `now (N)`. Also on `main` since `v1.11.0`: design §5.1's text on 8 slurm runners per 3090 host (#150). No
@@ -2479,6 +2480,9 @@ Rules:
      that host's is. Until then a row may still carry `v1.11.0`'s int `runners`; a reader takes a `runners` that is
      not `{label: count}` as not reported (15.7 item 3).
   2. No setup change: a host's plan at `v1.12.0` is `v1.11.0`'s, so the install restarts no runner.
+  3. **The slurm canary at the move.** Its CPU part ended `unavailable`: its job pended on the association's node
+     limit (`AssocGrpNodeLimit`) while the account's own CPU job held the partition, so the verdict was red. That is
+     the cluster's capacity, not the release: the release changes no slurm part code, and the GPU part passed.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

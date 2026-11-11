@@ -45,6 +45,8 @@ REA = 'ci_runners/reaper.py'
 SMP = 'ci_runners/sampler.py'
 ORS = 'ci_runners/orgsync.py'
 OPS = 'setup/workstation/orgsync-push.sh'
+NBS = 'setup/workstation/nightly-backstop.sh'
+NBT = 'setup/workstation/ci-nightly-backstop.timer'
 BRG = 'ci_runners/bridge.py'
 LCH = 'actions/lib/ci-run.sh'
 APT = 'actions/part/action.yml'
@@ -72,6 +74,7 @@ TB = 'tests.test_envbuild'
 TM = 'tests.test_thermal'
 TZ = 'tests.test_orgsync'
 TBR = 'tests.test_bridge'
+TNB = 'tests.test_backstop'
 P2P = 'ci_runners/p2p.py'
 T2 = 'tests.test_p2p'
 TX = 'tests.test_interop'
@@ -2596,6 +2599,25 @@ MUTANTS = [
     (PRT, "        os.makedirs(logs, mode=0o700, exist_ok=True)\n        now = datetime", "        os.makedirs(logs, mode=0o755, exist_ok=True)\n        now = datetime",
      [f'{TD}.SharedState.test_a_renumbered_account_drains_the_host']),
     (REA, "LOGS = ('hook-', 'shared-')", "LOGS = ('hook-',)", [f'{TE}.Reap.test_dated_logs_go_after_14_days_and_nothing_else_there']),
+    # brainspike's nightly backstop on 3090b (decision 15.3)
+    (NBS, 'unset GITHUB_TOKEN GITHUB_REPOSITORY', 'unset GITHUB_REPOSITORY',
+     [f'{TNB}.Script.test_the_gate_runs_in_the_checkout_under_the_wrapper_with_the_login']),
+    (NBS, 'exec "$wrap" "$py" -I', 'exec "$py" -I', [f'{TNB}.Script.test_the_gate_runs_in_the_checkout_under_the_wrapper_with_the_login']),
+    (NBS, '"$py" -I scripts/', '"$py" scripts/', [f'{TNB}.Script.test_the_gate_runs_in_the_checkout_under_the_wrapper_with_the_login']),
+    (NBS, 'GH_TOKEN=$token exec', 'exec', [f'{TNB}.Script.test_the_gate_runs_in_the_checkout_under_the_wrapper_with_the_login']),
+    (NBS, '  report=(--report-only)\n', '  report=()\n', [f'{TNB}.Script.test_report_only_is_passed_on_and_the_commit_printed']),
+    (NBS, '  [[ $a =~ ^/[A-Za-z0-9._/-]*$ ]] ||', '  [[ $a =~ ^[A-Za-z0-9._/-]*$ ]] ||',
+     [f'{TNB}.Script.test_bad_arguments_read_no_login_and_run_nothing']),
+    (NBS, '  [[ $a =~ ^/[A-Za-z0-9._/-]*$ ]] ||', '  [[ $a =~ ^/ ]] ||', [f'{TNB}.Script.test_bad_arguments_read_no_login_and_run_nothing']),
+    (NBS, '[ $# -eq 3 ] ||', '[ $# -ge 3 ] ||', [f'{TNB}.Script.test_bad_arguments_read_no_login_and_run_nothing']),
+    (NBS, '[ -f "$checkout/scripts/merge_gate.py" ] ||', 'true ||', [f'{TNB}.Script.test_bad_arguments_read_no_login_and_run_nothing']),
+    (NBS, '  [ -f "$x" ] && [ -x "$x" ] ||', '  [ -e "$x" ] ||', [f'{TNB}.Script.test_bad_arguments_read_no_login_and_run_nothing']),
+    (NBS, '[ -n "$token" ] ||', 'true ||', [f'{TNB}.Script.test_no_login_runs_nothing']),
+    (NBT, 'OnCalendar=*-*-* 22:59:00 UTC', 'OnCalendar=*-*-* 23:00:00 UTC',
+     [f'{TNB}.Units.test_the_timer_ticks_every_quarter_hour_inside_the_window']),
+    (NBT, 'OnCalendar=*-*-* 21,22:00,15,30,45:00 UTC', 'OnCalendar=*-*-* 21,22:00,15,30,45:00',
+     [f'{TNB}.Units.test_the_timer_ticks_every_quarter_hour_inside_the_window']),
+    (NBT, 'AccuracySec=1s\n', '', [f'{TNB}.Units.test_the_timer_ticks_every_quarter_hour_inside_the_window']),
 ]
 
 

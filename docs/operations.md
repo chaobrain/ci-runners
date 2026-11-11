@@ -11,6 +11,7 @@
 | **3090b**、**3090a** | 各自的 runner 池（`<host>-light`、`-cpu`、`-gpu<N>`、`-multi`，3090b 另有 `-compile`，3090a 另有 `-nightly`，design §5.1）；`ci-tunnel.service`（到 egress 的 ssh 转发）；`ci-reaper.timer`、`ci-envrefresh.timer` | 专用 CI 账户的 systemd user 单元，文件都在 `<data>` 下 |
 | **egress 主机** | `ci-egress.service`：HTTP CONNECT 代理，只放行允许清单里的域名的 443 端口 | root 安装，DynamicUser 运行 |
 | **工作站** | `ci-orgsync-push.timer`：每 10 分钟用维护者的 gh 登录拉 org 快照，经 ssh 推到每台主机 | 维护者本人的 user 单元 |
+| **3090b 上的维护者账户** | `ci-nightly-backstop.timer`：UTC 21:00–22:45 每 15 分钟一次，外加 22:59，用维护者的 gh 登录、经主机的代理包装，在 brainspike 的主 checkout 里跑 `merge_gate.py --backstop`：当晚 20:00 UTC 以来没有 nightly、也没有排队或在跑的，就在 `main` 上派发一次（§12） | 维护者本人的 user 单元 |
 
 数据流：
 
@@ -194,6 +195,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 |---|---|
 | runner 掉线 | 先查 `systemctl --user status ci-tunnel`：隧道断了，runner 的流量就断。再查 egress 主机的 `ci-egress` 和 `journalctl -u ci-egress`。隧道恢复后 runner 会自己重连。 |
 | 所有任务在 "Set up runner" 被拒，原因 `stale` | 快照太旧。查工作站的 `systemctl --user status ci-orgsync-push.service`、gh 登录和 ssh。手动推一次：`systemctl --user start ci-orgsync-push.service`。 |
+| GitHub 的定时任务停了，当晚没有 nightly | 先看 3090b 维护者账户的 `journalctl --user -u ci-nightly-backstop`：每次运行先打印 checkout 的分支和 commit，再打印 gate 的一行结论。失败多半是 gh 登录、代理或 GitHub 出错，下一次触发会再试；过了 23:00 UTC 就手动派发。 |
 | 部件一秒内就 `lost` | 多半是 `systemd-run` 拒绝了某个参数（例如在旧 systemd 上用了 `OOMPolicy`）。到部件记录 `state/parts/<repo>/<run>-<attempt>/<id>-<n>/` 里看 `log` 和 `record.json`。 |
 | 报错 `unknown keys [...]` 或 inventory 无法加载 | 主机文件和正在跑的 release 版本不一致（§5 第二个教训）。确认 `releases/hook` 和 `v1` 指向的版本，再决定 apply 还是移动 `v1`。 |
 | 想知道某个部件是哪个 runner 跑的 | 被调用的工作流里，API 返回的作业 `runnerName` 是空的。看主机上部件记录 `record.json` 里的 `runner`。 |
@@ -281,3 +283,16 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 - 紧急关闭：以每个 CI 账户运行 `ci-run drain on --pool slurm`，或者把注册表移走（plan 会退回静态池并留一条说明）。
 
 **运行**：`ci-run pool run [--cpu N] [--mem G] [--gpu 型号[:数量]] [--on 机器] -- 命令`。它把调用者的工作树（已跟踪的文件，加上未被忽略的未跟踪文件）送到一台现在就能启动的机器上运行。这台机器先从空闲主机里选，再选按价格从低到高的集群目标；都不行就在队列最短的主机上排队。命令的输出实时回传，退出码就是命令的退出码。主机上的占用就是 CI slot，和 CI part 的是同一套，所以两边不会同时拿到同一个 slot。集群上的占用就是作业本身，走同一个 gate。运行前先比对环境，不一致就拒绝运行（退出码 3）；加 `--env-mismatch warn` 可以照常运行，但会给出警告。调用者退出时，远端命令随之结束，slot 也随之释放。brainspike 用 `scripts/pool.sh` 包了一层。
+
+## 12. nightly 的兜底定时器（design 决定 15.3）
+
+brainspike 的 nightly 靠 GitHub 的 `schedule` 触发，merge gate 的事件唤醒也会做同样的检查。为了在没有事件的晚上 GitHub 定时也停了的情况下仍然有 nightly，3090b 上维护者本人的账户跑一个 user 定时器（不是 CI 账户：CI 账户里没有任何 GitHub 凭据，决定 12.2）。
+
+- 单元：`setup/workstation/ci-nightly-backstop.{service,timer}`，脚本 `setup/workstation/nightly-backstop.sh [--report-only] CHECKOUT PYTHON NET_WRAP`。
+- 登录：每次运行时用 `gh auth token` 读维护者的登录，只放在 gate 进程的环境变量 `GH_TOKEN` 里，不进命令行，也不写进任何文件。没有新令牌。
+- 安装（由 lead 执行，定时器属于高影响操作）：
+  1. 用 `setup/install.sh --commit <sha>` 把一个 release 装到维护者自己的目录下（`CI_RUNNERS_ETC` 指向那个目录下的 `ci-runners/etc`），和快照推送的 release 分开放；
+  2. 把两个单元复制到 `~/.config/systemd/user/`，在 service 里填好 `@RELEASE@`、`@CHECKOUT@`、`@PYTHON@`、`@NET_WRAP@`；
+  3. 先在 user manager 下演练一次（不要在登录 shell 里跑：那里的 PATH 和 keyring 和定时器的不一样）：`systemd-run --user --wait --pipe <release>/setup/workstation/nightly-backstop.sh --report-only <checkout> <python> <wrapper>`，它只做判断、打印结论，不派发；
+  4. `systemctl --user daemon-reload && systemctl --user enable --now ci-nightly-backstop.timer`，再用 `systemctl --user list-timers ci-nightly-backstop.timer` 确认下一次触发的时间。
+- 前提：维护者账户开了 linger；gh 的登录存在配置文件里，而不是需要会话才能解锁的 keyring；gh 在 user manager 的 PATH 上。

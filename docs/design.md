@@ -2649,6 +2649,18 @@ Rules:
   3. **The h100 canary** (`canary-h100.yml`, on h100's labels): the claim, salvage and verdict on `h100-light`, a
      CPU part on `h100-cpu`, a part on each card's `h100-gpu<N>`, and the OOM part, which the supervisor's cap
      (11.11) ended on cgroup v1 (`oom`, then its retry passed); the red head was red on the CPU and every GPU part.
+- **`v1.14.0`** (minor, stamped 2026-11-12; decision 15.9, #162; lead-approved, brainspike's task ci-one-verdict-path,
+  D-0116): `claim` counts only the runners' statuses. A status of the context counts only if the policy's `bot` posted
+  it; success skips, anything else runs. A person's pending or success, an allowlisted one's included, neither holds
+  nor skips a head. The inputs `wait-seconds` and `local-lapse-minutes` go, with `ci-run claim`'s matching flags;
+  `claim` reads no actor list and no org snapshot, and `policy.actors_for` goes. No other action's input or output,
+  label, outcome kind, inventory or registry key, hook decision, setup, slurm or egress code changes. Its notes:
+  1. **A removed input that a consumer passes, in a minor release** (15.9 item 4, the lead's ruling): a composite
+     action given an undeclared input logs `Unexpected input(s)` as a warning and runs, so brainspike's claim, which
+     passes both until its own PR drops them, gets the new rule unchanged. That PR lands after `v1` moves: before, an
+     `@v1` claim without `local-lapse-minutes` took `v1.13.0`'s default of 45 min.
+  2. **When it holds.** For a consumer's claim once `v1` moves; the hook does not change.
+  3. No setup change: a host's plan at `v1.14.0` is `v1.13.0`'s, so the install restarts no runner.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

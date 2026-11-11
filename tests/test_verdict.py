@@ -129,24 +129,53 @@ class Artifacts(unittest.TestCase):
 
     def test_next_attempt(self):
         self.assertEqual(verdict.next_attempt({}), 1)
-        self.assertEqual(verdict.next_attempt({1: ({'outcome': 'pass', 'next': 'none'}, '')}), 0)
+        self.assertEqual(verdict.next_attempt({1: ({'outcome': 'pass', 'next': 'none'}, '')}), 2)
         self.assertEqual(verdict.next_attempt({1: ({'outcome': 'oom', 'next': 'retry'}, '')}), 2)
         self.assertEqual(verdict.next_attempt({1: ({'outcome': 'thermal', 'next': 'fallback'}, '')}), 2)
-        self.assertEqual(verdict.next_attempt({1: ({'next': 'retry'}, ''), 2: ({'outcome': 'oom', 'next': 'retry'}, '')}),
-                         0)  # one retry, no more
+        # attempt 2 said none: a consumer's fallback job is attempt 3 (issue #161)
+        self.assertEqual(verdict.next_attempt({1: ({'next': 'retry'}, ''), 2: ({'outcome': 'unavailable',
+                                                                               'next': 'none'}, '')}), 3)
 
     def test_ends_read_the_records_where_the_artifacts_stop(self):
         found = {'cpu': {1: ({'outcome': 'oom', 'next': 'retry'}, '')},
                  'gpu': {1: ({'outcome': 'pass', 'next': 'none'}, 'g')}}
         asked = []
+        have = {('cpu', 2): {'outcome': 'pass'}}
 
         def salvage(pid, n):
             asked.append((pid, n))
-            return {'cpu': {'outcome': 'pass'}, 'lnt': None}.get(pid)
+            return have.get((pid, n))
         got = verdict.ends(['cpu', 'gpu', 'lnt'], found, salvage)
-        self.assertEqual(asked, [('cpu', 2), ('lnt', 1)])  # gpu's artifacts are complete
+        # each part's next attempt is asked for, until one has no record
+        self.assertEqual(asked, [('cpu', 2), ('cpu', 3), ('gpu', 2), ('lnt', 1)])
         self.assertEqual([(e.id, e.outcome, e.attempt) for e in got],
                          [('cpu', 'pass', 2), ('gpu', 'pass', 1), ('lnt', 'lost', 1)])
+
+    def test_a_fallback_after_a_retry_that_did_not_start_is_read(self):
+        # issue #161: attempt 2 (a cluster retry pending past its bound) ended unavailable
+        # with next none; the consumer's fallback job, attempt 3, lost its runner
+        found = {'cpu': {1: ({'outcome': 'oom', 'next': 'retry'}, ''),
+                         2: ({'outcome': 'unavailable', 'reason': 'pending past the bound', 'next': 'none'}, '')}}
+        have = {('cpu', 3): {'outcome': 'red', 'reason': 'exit 1'}}
+        got = verdict.ends(['cpu'], found, lambda pid, n: have.get((pid, n)))
+        self.assertEqual((got[0].outcome, got[0].attempt), ('red', 3))
+        self.assertEqual(verdict.decide(got).state, 'failure')
+        # its own artifact, attempt 3, decides like any last attempt
+        art(self.root, 'ci-part-gpu-1', {'outcome': 'oom', 'next': 'retry'})
+        art(self.root, 'ci-part-gpu-2', {'outcome': 'unavailable', 'next': 'none'})
+        art(self.root, 'ci-part-gpu-3', {'outcome': 'pass', 'next': 'none'})
+        got = verdict.ends(['gpu'], verdict.collect(str(self.root)), lambda pid, n: None)
+        self.assertEqual((got[0].outcome, got[0].attempt), ('pass', 3))
+
+    def test_every_attempt_is_read_up_to_the_bound(self):
+        asked = []
+
+        def salvage(pid, n):
+            asked.append(n)
+            return {'outcome': 'pass'}
+        got = verdict.ends(['cpu'], {}, salvage)
+        self.assertEqual((got[0].attempt, asked[-1], len(asked)), (verdict.MAX_ATTEMPT, verdict.MAX_ATTEMPT,
+                                                                   verdict.MAX_ATTEMPT))
 
     def test_a_retry_that_left_nothing_keeps_the_first_end(self):
         got = verdict.ends(['cpu'], {'cpu': {1: ({'outcome': 'oom', 'next': 'retry'}, '')}}, lambda *_: None)
@@ -214,6 +243,21 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
         self.assertEqual(self.main('--parts', 'cpu gpu'), 1)
         self.assertEqual(self.posted[0][3]['state'], 'error')
         self.assertIn('gpu lost', self.posted[0][3]['description'])
+
+    def test_the_fallback_attempt_recorded_here_decides(self):
+        # issue #161: artifacts stop at attempt 2 (unavailable, next none); attempt 3, the
+        # consumer's fallback, ran on this host and left only its record
+        art(self.arts, 'ci-part-cpu-1', {'outcome': 'oom', 'next': 'retry'})
+        art(self.arts, 'ci-part-cpu-2', {'outcome': 'unavailable', 'reason': 'pending past the bound',
+                                         'next': 'none'})
+        d = pathlib.Path(self.tmp.name) / 'data/ci-runners/state/parts/org/repo/77-1/cpu-3'
+        d.mkdir(parents=True)
+        (d / 'record.json').write_text(json.dumps({'id': 'cpu', 'attempt': 3, 'start_epoch': 1000.0, 'host': 'hb',
+                                                   'class': 'part', 'unit': '', 'run_epoch': 1000.0}))
+        (d / 'outcome.json').write_text(json.dumps({'outcome': 'pass', 'reason': 'exit 0', 'next': 'none',
+                                                    'attempt': 3}))
+        self.assertEqual(self.main('--parts', 'cpu'), 0)
+        self.assertEqual(self.posted[0][3]['state'], 'success')
 
     def test_a_red_part_posts_failure(self):
         art(self.arts, 'ci-part-cpu-1', {'outcome': 'red', 'next': 'none'})
@@ -303,8 +347,9 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
         (new / 'exit.json').write_text(json.dumps({'rc': 1, 'end_epoch': 2010.0}))
         self.record('77-1', 'lnt', start=1000, outcome='red')
         self.record('77-2', 'lnt', start=2000)  # this run's re-run is another run
+        art(self.arts, 'ci-part-gpu-1', {'outcome': 'pass', 'next': 'none'})
         self.record('77-1', 'gpu', 1, start=1000)
-        self.record('77-1', 'gpu', 2, start=2000)  # its newest attempt here is not the one that stops short
+        self.record('78-1', 'gpu', 2, start=2000)  # a later run's attempt 2 is not this run's
         self.assertEqual(self.main('cpu gpu lnt'), 0)
         self.assertEqual(self.uploaded(), ['ci-part-cpu-1', 'ci-part-lnt-1'])
         got = {i: json.loads((self.outdir / f'ci-part-{i}-1' / 'outcome.json').read_text()) for i in ('cpu', 'lnt')}
@@ -317,6 +362,31 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
         self.record('77-1', 'cpu', 2, start=2000)
         self.assertEqual(self.main('cpu'), 0)
         self.assertEqual(self.uploaded(), ['ci-part-cpu-2'])
+
+    def test_the_fallback_after_a_retry_that_did_not_start(self):
+        # issue #161: attempt 2 ended unavailable with next none; the consumer's fallback
+        # job, attempt 3, ran here and lost its runner
+        art(self.arts, 'ci-part-cpu-1', {'outcome': 'oom', 'next': 'retry'})
+        art(self.arts, 'ci-part-cpu-2', {'outcome': 'unavailable', 'next': 'none'})
+        self.record('77-1', 'cpu', 3, outcome='red')
+        self.assertEqual(self.main('cpu'), 0)
+        self.assertEqual(self.uploaded(), ['ci-part-cpu-3'])
+        got = json.loads((self.outdir / 'ci-part-cpu-3' / 'outcome.json').read_text())
+        self.assertEqual((got['outcome'], got['salvaged']), ('red', True))
+
+    def test_each_attempt_after_the_last_artifact_recorded_here(self):
+        # attempts 2 and 3 both ran here and both lost their runners; attempt 5 is no
+        # chain's (attempt 4 is not here), and a malformed or linked entry is no record
+        art(self.arts, 'ci-part-cpu-1', {'outcome': 'oom', 'next': 'retry'})
+        for n in (1, 2, 3, 5):
+            self.record('77-1', 'cpu', n)
+        (self.parts / '77-1' / 'cpu-04').mkdir()
+        (self.parts / '77-1' / 'cpu-4').symlink_to(self.parts / '77-1' / 'cpu-5')
+        self.assertEqual(self.main('cpu'), 0)
+        self.assertEqual(self.uploaded(), ['ci-part-cpu-2', 'ci-part-cpu-3'])
+        self.assertEqual(sorted(verdict.records(str(self.parts.parent.parent), 'org/repo', '77-1', 'cpu')),
+                         [1, 2, 3, 5])
+        self.assertEqual(verdict.records(str(self.parts.parent.parent), 'org/repo', '79-1', 'cpu'), {})
 
     def test_a_retry_that_ran_elsewhere_is_left_alone(self):
         art(self.arts, 'ci-part-cpu-1', {'outcome': 'thermal', 'next': 'retry'})

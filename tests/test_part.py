@@ -1322,9 +1322,26 @@ class Pure(unittest.TestCase):
         self.assertEqual(part.finish('/r', self.REC, {'rc': 143, 'boot_end': 'b1'}, stopped=True)['outcome'], 'stopped')
         self.assertEqual(part.finish('/r', self.REC, None)['outcome'], 'lost')
         stopped = part.finish('/r', self.REC, {'rc': -15, 'signalled': True, 'boot_end': 'b1'})
-        self.assertEqual((stopped['outcome'], stopped['next']), ('stopped', 'none'))  # a scope stopped from outside
+        self.assertEqual((stopped['outcome'], stopped['next']), ('stopped', 'retry'))  # a scope stopped from outside
         self.assertEqual(part.finish('/r', self.REC, {'rc': -15, 'signalled': True, 'timed_out': True,
                                                       'boot_end': 'b1'})['outcome'], 'red')
+
+    def test_a_cancel_is_retried_once_on_its_pool(self):
+        """Decision 15.4 (#110): the executor cannot tell an owner's cancel from GitHub's
+        cancel of the job alone (a runner that lost its connection), so a ``stopped`` part
+        asks for one retry on its own pool, and the consumer's retry job, skipped on a
+        cancelled run, decides. Both ways a part is stopped: before the command (the
+        executor's own end) and during it (the record's exit, read by the salvage)."""
+        rec = {**self.REC, 'host': '3090b', 'pool_labels': ['3090b-cpu']}
+        for ex, kw in (({'rc': 143, 'boot_end': 'b1'}, {'stopped': True}), (None, {'stopped': True}),
+                       ({'rc': -15, 'signalled': True, 'boot_end': 'b1'}, {})):
+            out = part.finish('/r', rec, ex, **kw)
+            self.assertEqual((out['outcome'], out['next'], out['retry-on'], out['resume']),
+                             ('stopped', 'retry', ['self-hosted', '3090b-cpu'], False), (ex, kw))
+            again = part.finish('/r', {**rec, 'attempt': 2}, ex, **kw)
+            self.assertEqual((again['outcome'], again['next'], again['retry-on']), ('stopped', 'none', []))
+            never = part.finish('/r', {**rec, 'retries': 0}, ex, **kw)
+            self.assertEqual(never['next'], 'none')  # a registry with no retry
 
     def test_scope_and_command(self):
         argv = part.scope_argv('ci-part-r-x-1.scope', 'p', '4G', ['sup'])

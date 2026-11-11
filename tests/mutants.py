@@ -2665,7 +2665,7 @@ MUTANTS = [
     (NBT, 'OnCalendar=*-*-* 21,22:00,15,30,45:00 UTC', 'OnCalendar=*-*-* 21,22:00,15,30,45:00',
      [f'{TNB}.Units.test_the_timer_ticks_every_quarter_hour_inside_the_window']),
     (NBT, 'AccuracySec=1s\n', '', [f'{TNB}.Units.test_the_timer_ticks_every_quarter_hour_inside_the_window']),
-    # the runner watch (decision 15.5)
+    # the runner watch (decision 15.6)
     (RWP, "closing #{n} failed: {e}', file=sys.stderr)\n                    status = 1", "closing #{n} failed: {e}', file=sys.stderr)\n                    status = 0",
      [f'{TRW}.Watch.test_a_failed_close_is_retried_at_the_next_tick']),
     (RWP, "if prev['offline'] > 0 and 0 <= now - prev['last'] < SOON:", "if False:",

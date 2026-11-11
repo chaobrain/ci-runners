@@ -299,7 +299,7 @@ brainspike 的 nightly 靠 GitHub 的 `schedule` 触发，merge gate 的事件�
   4. `systemctl --user daemon-reload && systemctl --user enable --now ci-nightly-backstop.timer`，再用 `systemctl --user list-timers ci-nightly-backstop.timer` 确认下一次触发的时间。
 - 前提：维护者账户开了 linger；gh 的登录存在配置文件里，而不是需要会话才能解锁的 keyring；gh 在 user manager 的 PATH 上。
 
-## 13. 主机没有在线 runner 时的提醒（design 决定 15.5）
+## 13. 主机没有在线 runner 时的提醒（design 决定 15.6）
 
 3090b 上维护者本人的账户跑一个 user 定时器，每 15 分钟用维护者的 gh 登录读一次 org 的自托管 runner（`GET /orgs/{org}/actions/runners`），看每台主机有没有 GitHub 认为在线的 runner。要看哪些主机写在单元里，仓库里不写主机名。runner 的名字或某个标签等于主机名、或以 `<主机名>-` 开头，就算那台主机的。
 

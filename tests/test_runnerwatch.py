@@ -1,4 +1,4 @@
-"""The runner watch (design decision 15.5): ci_runners/runnerwatch.py against a fake GitHub,
+"""The runner watch (design decision 15.6): ci_runners/runnerwatch.py against a fake GitHub,
 setup/workstation/runner-watch.sh with a fake gh and ci-run, and its units."""
 from __future__ import annotations
 

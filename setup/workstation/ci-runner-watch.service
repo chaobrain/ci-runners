@@ -1,4 +1,4 @@
-# The runner watch (design decision 15.5): a user unit of the maintainer's account on 3090b,
+# The runner watch (design decision 15.6): a user unit of the maintainer's account on 3090b,
 # not of a CI account. Placeholders: @RELEASE@, the release directory (setup/install.sh with
 # CI_RUNNERS_ETC under a directory of the maintainer's); @NET_WRAP@, the host's proxy wrapper;
 # @ORG@, the org; @HOSTS@, the hosts to watch, one word each. The counts are kept in the unit's

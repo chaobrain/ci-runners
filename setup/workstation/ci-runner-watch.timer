@@ -1,4 +1,4 @@
-# Every quarter hour, at :00, :15, :30 and :45 UTC (design decision 15.5): two consecutive
+# Every quarter hour, at :00, :15, :30 and :45 UTC (design decision 15.6): two consecutive
 # checks with no runner of a host online open its issue. Exact (no random delay); a host that
 # was down does not catch up (not Persistent).
 [Unit]

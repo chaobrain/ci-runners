@@ -1,4 +1,4 @@
-"""``ci-run runner-watch``: an issue when a host has no runner online (design decision 15.5).
+"""``ci-run runner-watch``: an issue when a host has no runner online (design decision 15.6).
 
 ``ci-run runner-watch --org ORG --state FILE [--report-only] -- HOST...`` reads every
 self-hosted runner of ORG from GitHub with ``GH_TOKEN`` (the maintainer's own login, read
@@ -124,7 +124,7 @@ def write_state(path: str, state: dict) -> None:
 
 def opening_body(host: str, rows: list, since: float, now: float) -> str:
     lines = [f'No runner of `{host}` was online at two consecutive checks of the runner watch '
-             f'(design decision 15.5): {stamp(since)} and {stamp(now)}.', '',
+             f'(design decision 15.6): {stamp(since)} and {stamp(now)}.', '',
              f'Runners of the host registered with GitHub: {len(rows)}.']
     lines += [f'- `{r.get("name")}`: {r.get("status")}' for r in sorted(rows, key=lambda r: str(r.get('name')))]
     lines += ['', "Where to look: the host's CI account (`systemctl --user status 'ci-runner@*' ci-hooks "
@@ -164,7 +164,7 @@ def check(call: Callable, org: str, token: str, hosts: list[str], state: dict, n
                 try:
                     call('POST', f'{base}/repos/{repo}/issues/{n}/comments', token,
                          {'body': f'{online} of {len(by_host[h])} runners of `{h}` online at the check of '
-                                  f'{stamp(now)} (runner watch, design decision 15.5). Closing.'}, tries=1)
+                                  f'{stamp(now)} (runner watch, design decision 15.6). Closing.'}, tries=1)
                     call('PATCH', f'{base}/repos/{repo}/issues/{n}', token,
                          {'state': 'closed', 'state_reason': 'completed'}, tries=1)
                     print(f'{head}; closed #{n}', file=out)

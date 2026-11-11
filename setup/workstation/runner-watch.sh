@@ -1,6 +1,6 @@
 #!/bin/bash
 # setup/workstation/runner-watch.sh [--report-only] STATE NET_WRAP ORG HOST...: an issue when a
-# host has no runner online (design decision 15.5). Run by the maintainer's ci-runner-watch.timer
+# host has no runner online (design decision 15.6). Run by the maintainer's ci-runner-watch.timer
 # on 3090b, as the maintainer, every quarter hour. It runs this release's ci-run runner-watch
 # under NET_WRAP, the host's proxy wrapper: it reads the org's self-hosted runners, groups them
 # by HOST (a runner's name or label is HOST or starts with HOST-), and keeps one issue

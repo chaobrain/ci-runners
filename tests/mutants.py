@@ -777,6 +777,11 @@ MUTANTS = [
      [f'{TO}.Hint.test_hints']),
     (OUT, "Hint('retry', resume=True, where='more-memory')", "Hint('retry', where='more-memory')", [f'{TO}.Hint.test_hints']),
     (OUT, "if cool_card else Hint('fallback')", "", [f'{TO}.Hint.test_hints']),
+    # a cancel its run outlives is retried (decision 15.4, #110)
+    (OUT, "FINAL = frozenset({'pass', 'red'})", "FINAL = frozenset({'pass', 'red', 'stopped'})",
+     [f'{TO}.Hint.test_a_cancel_asks_for_one_retry', f'{TT}.Pure.test_a_cancel_is_retried_once_on_its_pool']),
+    (OUT, "    if kind in ('lost', 'stopped'):", "    if kind == 'lost':",
+     [f'{TO}.Hint.test_a_cancel_asks_for_one_retry', f'{TT}.Pure.test_a_cancel_is_retried_once_on_its_pool']),
     # GPUs
     (GPU, "if i in free and free[i] >= need_mib]", "if free.get(i, 0) >= need_mib]", [f'{TG}.Gpus.test_free_memory_and_rank']),
     (GPU, "if leased.get(i, 0) < max_parts]", "]", [f'{TG}.Gpus.test_lease']),

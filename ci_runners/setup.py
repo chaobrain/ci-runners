@@ -83,8 +83,11 @@ TUNNEL_ORDER = 'After=ci-tunnel.service\nWants=ci-tunnel.service'
 TUNNEL_FILES = ('id_ed25519', 'ssh_config', 'known_hosts')
 #: the root step's file (decision 12.9, §5.3): the shared lock and slot files, recreated at boot
 TMPFILES = '/etc/tmpfiles.d/ci-runners-shared.conf'
-#: the runner unit's order after the hooks' copies (decision 13.5)
-HOOKS_ORDER = 'Requires=ci-hooks.service\nAfter=ci-hooks.service'
+#: the runner unit's order after the hooks' copies (decision 13.5): wanted, not required, so
+#: that a failed copy fails the runner's start, which its restart policy retries (15.4)
+HOOKS_ORDER = 'Wants=ci-hooks.service\nAfter=ci-hooks.service'
+#: where logind marks an account's linger (decision 15.4)
+LINGER_DIR = '/var/lib/systemd/linger'
 #: the root step's drop-in (decision 12.16, §5.3): the CI account's user manager in its own mount namespace
 DROPIN = '/etc/systemd/system/user@{uid}.service.d/ci-runners-private.conf'
 #: the comment that marks the push key's line in authorized_keys (decision 12.4)
@@ -140,9 +143,40 @@ HOOK_BASE = 'base=$(/usr/bin/dirname "$(/usr/bin/dirname "$(/usr/bin/readlink -f
 
 
 def hooks_check() -> str:
-    """The runner unit's check that both hook copies are executable files (decision
-    13.5): a runner does not start without them. Pure."""
-    return '\n'.join(f'ExecStartPre=/usr/bin/test -f {hookcopy.DIR}/{n} -a -x {hookcopy.DIR}/{n}' for n in hookcopy.NAMES)
+    """The runner unit's checks: ``ci-hooks.service`` is active, so the copy succeeded in
+    this user manager's private ``/tmp`` (decision 15.4: fail closed without ``Requires=``),
+    and both hook copies are executable files (13.5). A runner does not start without them,
+    and its restart policy tries again. Pure."""
+    return '\n'.join(['ExecStartPre=/usr/bin/systemctl --user is-active --quiet ci-hooks.service'] +
+                     [f'ExecStartPre=/usr/bin/test -f {hookcopy.DIR}/{n} -a -x {hookcopy.DIR}/{n}' for n in hookcopy.NAMES])
+
+
+def linger_on(account: str) -> bool:
+    """Whether logind keeps the account's user manager running without a login, and starts
+    it at boot (decision 15.4)."""
+    return os.path.exists(os.path.join(LINGER_DIR, account))
+
+
+def wanted(h: dict, names: list[str]) -> list[tuple[str, str]]:
+    """Each unit the plan enables, with the target that wants it: the timers, the hooks'
+    copy, the tunnel and the runners ``names`` (decision 15.4). Pure."""
+    out = [(t, 'timers.target') for t in timers(h)]
+    out += [('ci-hooks.service', 'default.target')] if hookcopy.used(h) else []
+    out += [('ci-tunnel.service', 'default.target')] if 'tunnel' in h else []
+    return out + [(f'ci-runner@{n}.service', 'default.target') for n in names]
+
+
+def runners_now(inv: inventory.Inventory) -> str:
+    """The plan's line on standard error: how many of the inventory's runners have a live
+    process now, and the names of those without (decision 15.4). Not part of the plan."""
+    from ci_runners import pool
+    names = [n for n, _, _, _ in _runners(inv)]
+    alive = pool.runners_alive(os.path.join(inv.host['data'], 'actions-runner'))
+    if alive is None:
+        return '# runners now: not known (/proc hides them here)'
+    down = [n for n in names if n not in alive]
+    return f'# runners now: {len(names) - len(down)} of {len(names)} with a live process' + \
+        (f'; none for {", ".join(down)}' if down else '')
 
 
 def hook_text(src: str, python: str, base: str) -> str:
@@ -646,6 +680,7 @@ class Plan:
         self.lines: list[str] = []
         self.actions: list[dict] = []
         self.blocked = ''  # why apply must refuse this plan (a root step not done), or ''
+        self.note = ''  # what plan.sh prints on standard error, outside the plan's text (decision 15.4)
 
     def add(self, line: str, **action) -> None:
         self.lines.append(line)
@@ -807,6 +842,13 @@ def build(etc: str, adopt: bool = False) -> Plan:
             old = ''
         _file(plan, ak, authorized_keys_text(old, h.get('push_key', ''), etc=etc, python=python, base=base,
                                              probe_key=h.get('probe_key', '')), 0o600)
+    on = linger_on(h['account'])
+    plan.add('linger (decision 15.4): the lead runs it as root, before apply; setup cannot:')
+    plan.add(f'  {"done " if on else "to do"}  run    loginctl enable-linger {h["account"]}  (the user manager runs '
+             'without a login and starts at boot)')
+    if not on:
+        plan.blocked = 'linger is off for the account'
+        plan.add('  apply refuses until it is done: run it, then plan again')
     if h.get('local_accounts'):
         text = tmpfiles_text(h)
         todo = shared_state(h)
@@ -855,12 +897,17 @@ def build(etc: str, adopt: bool = False) -> Plan:
                 plan.add(f'  remove {path} (disable --now, then delete)', kind='remove', path=path)
             else:
                 plan.add(f'  forget {path} (already gone)', kind='remove', path=path)
+    rs = _runners(inv)
+    # every unit the plan enables is wanted by its target, on every host (decision 15.4): a
+    # missing link (a 3090 host's root step disables the runners, 12.16) plans the enable again
+    missing = [u for u, target in wanted(h, [n for n, _, _, _ in rs])
+               if not os.path.lexists(os.path.join(unit_dir, f'{target}.wants', u))]
     egress = ['ci-tunnel.service'] if 'tunnel' in h else []
     # egress units already running with an older file: enable --now leaves them as they are
     stale = 'tunnel' in h and any(a['kind'] == 'file' and os.path.dirname(a['path']) == unit_dir
                                   and os.path.basename(a['path']) in egress and os.path.exists(a['path'])
                                   for a in plan.actions)
-    if plan.actions:
+    if plan.actions or 'ci-tunnel.service' in missing:
         plan.add('systemd --user (units, egress):' if 'tunnel' in h else 'systemd --user (units):')
         plan.add('  run    systemctl --user daemon-reload', kind='run', argv=['systemctl', '--user', 'daemon-reload'])
         if egress:
@@ -873,7 +920,6 @@ def build(etc: str, adopt: bool = False) -> Plan:
     via = 'fetched through the egress tunnel' if 'tunnel' in h else 'fetched directly'
     plan.add(f'runners (actions/runner {RUNNER_VERSION}, sha256 {RUNNER_SHA256[:16]}, {via}):')
     cache = os.path.join(base, 'state', 'cache', os.path.basename(RUNNER_URL))
-    rs = _runners(inv)
     waited = 'tunnel' not in h
     for name, labels, cls, card in rs:
         rdir = os.path.join(data, 'actions-runner', name)
@@ -887,22 +933,21 @@ def build(etc: str, adopt: bool = False) -> Plan:
             plan.add(f'  unpack {RUNNER_URL} -> {rdir}/', kind='runner', path=rdir, cache=cache, port=port)
         _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc, card), 0o600)
         plan.add(f'         labels {",".join(labels)}; work {os.path.join(data, "ci-work", name)} (at registration)')
-    # a 3090 host's root step disables the runners (decision 12.16): apply enables them again
-    wants = os.path.join(unit_dir, 'default.target.wants')
-    off = h.get('local_accounts') and any(not os.path.lexists(os.path.join(wants, f'ci-runner@{n}.service'))
-                                          for n, _, _, _ in rs)
-    if plan.actions or off:  # nothing changed: a second apply is a no-op
+    if plan.actions or missing:  # nothing changed and all enabled: a second apply is a no-op
         plan.add('systemd --user (timers, runners):')
+        if missing:
+            plan.add(f'  not enabled now: {" ".join(missing)}')
         cmds = [['systemctl', '--user', 'daemon-reload'],
                 ['systemctl', '--user', 'enable', '--now', *timers(h)]]
         if hookcopy.used(h):  # the copies before the runners; a changed hook is copied again (decision 13.5)
             cmds.append(['systemctl', '--user', 'enable', '--now', 'ci-hooks.service'])
-            if hooks_changed:  # a reload, not a restart: a restart would restart every runner (Requires=)
+            if hooks_changed:  # a reload, not a restart: a runner starting meanwhile would fail its check
                 cmds.append(['systemctl', '--user', 'reload', 'ci-hooks.service'])
         cmds.append(['systemctl', '--user', 'enable', *[f'ci-runner@{n}.service' for n, _, _, _ in rs]])
         for c in cmds:
             plan.add(f'  run    {" ".join(c)}', kind='run', argv=c)
     plan.add('  (a runner starts at its registration: setup/register.sh, run by the lead)')
+    plan.note = runners_now(inv)
     return plan
 
 
@@ -1083,6 +1128,8 @@ def main(argv: list[str]) -> int:
         p = build(etc, adopt=len(argv) == 2)
         sys.stdout.write(p.text())
         print(f'# plan sha256 {p.digest()}', file=sys.stderr)
+        if p.note:
+            print(p.note, file=sys.stderr)
         return 0
     if len(argv) in (3, 4) and argv[0] == 'apply' and argv[1] == '--plan' and argv[3:] in ([], ['--adopt']):
         return apply(etc, argv[2], adopt=len(argv) == 4)

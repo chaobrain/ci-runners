@@ -35,6 +35,7 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
     max_slots = 1                        # the project's cap on that queue (optional; none: the slot count)
     drain = "/abs/<data>/ci-runners/drain.json"   # the CI account's drain copy (optional)
     leases = { dir = "/abs/leases", parts = 1 }   # the cards' leases, shared with the parts (optional)
+    runners = "/abs/<data>/actions-runner"        # the CI account's runners: none alive is a problem (optional)
     labels = { cpu = "hostb-cpu" }       # its runner labels per group (HostState.labels)
     probe = "forced"                     # ssh: its key is forced to `ci-run pool probe` (status only; optional)
     numerics_ok = true                   # its numerics check passed
@@ -87,7 +88,10 @@ CI account), where the registry names it (``leases``); it then takes no CI slot,
 part takes none. Without ``leases`` a host's cards are its parts' alone, and a GPU run goes
 to a cluster target. A host whose ``drain`` file drains it (the CI account's world-readable
 copy of its drain state; unreadable or malformed drains it, missing does not) shows the
-problem ``drained`` and starts no pool run.
+problem ``drained`` and starts no pool run. A host whose entry names ``runners`` (the CI
+account's ``<data>/actions-runner``) gets ``runners``, how many of them have a live process,
+and with none the problem ``no runner online`` (decision 15.4): brainspike's plan places no
+part there, while a pool run, which takes a slot and no runner, ignores it.
 
 **The claim**: a host's capacity is a slot of its CI slot queue, the same ``SlotQueue``
 (and files) that the parts' ``ci-slot`` and brainspike's ``ci_slot.sh`` take, first come
@@ -246,6 +250,7 @@ class Machine:
     max_slots: int | None = None  # the project's cap on the host's slot queue (None: the slot count)
     drain: str = ''  # the CI account's world-readable drain state
     leases: LeaseDir | None = None  # the cards' leases, shared with the parts
+    runners: str = ''  # the CI account's runner directories (decision 15.4)
     labels: Mapping[str, str] = dataclasses.field(default_factory=dict)
     numerics_ok: bool = False
     cache: str = ''
@@ -313,7 +318,7 @@ def _labels(t: Mapping, where: str) -> dict[str, str]:
 
 _MACHINE = {'access', 'ssh', 'hostname', 'cpus', 'memory_gib', 'gpus', 'gpu_model', 'gpu_mib', 'cuda', 'p2p', 'billed',
             'price', 'python', 'work', 'slots', 'labels', 'numerics_ok', 'cache', 'gate', 'targets', 'ready',
-            'max_slots', 'drain', 'leases', 'site', 'account', 'probe'}
+            'max_slots', 'drain', 'leases', 'site', 'account', 'probe', 'runners'}
 _TARGET = {'partition', 'cpus', 'memory_gib', 'max_minutes', 'variant', 'price', 'numerics_ok', 'labels', 'gpu_model',
            'cards', 'max_cards', 'gpu_mib', 'cuda'}
 _TOP = {'schema', 'project', 'repository', 'check', 'gpu_need_mib', 'machine', 'warm', 'numerics'}
@@ -392,7 +397,7 @@ def _machine(key: str, t: Mapping) -> Machine:
     max_slots = _get(t, 'max_slots', int, where)
     if max_slots is not None and not 1 <= max_slots <= slots.count:
         raise RegistryError(f'{where}.max_slots: from 1 to the slot count ({slots.count})')
-    m.update(max_slots=max_slots, drain=_abs(t, 'drain', where), leases=leases)
+    m.update(max_slots=max_slots, drain=_abs(t, 'drain', where), leases=leases, runners=_abs(t, 'runners', where))
     m.update(cpus=_get(t, 'cpus', int, where, required=True), memory_gib=_get(t, 'memory_gib', int, where, required=True),
              gpus=gpus, gpu_model=_get(t, 'gpu_model', str, where, '', required=bool(gpus)),
              gpu_mib=_get(t, 'gpu_mib', int, where, 0), cuda=_get(t, 'cuda', str, where, ''),
@@ -432,7 +437,7 @@ def load_file(path: str) -> Registry:
 #: the keys whose values are inventory (``deny``); the rest are capabilities and role names. The
 #: slot files are not: they are the shared files brainspike's scripts name (a home-directory
 #: path among them is still the lint's). ``drain`` and the leases' ``dir`` are the CI account's
-PRIVATE_KEYS = ('ssh', 'hostname', 'python', 'work', 'gate', 'cache', 'partition', 'drain', 'dir')
+PRIVATE_KEYS = ('ssh', 'hostname', 'python', 'work', 'gate', 'cache', 'partition', 'drain', 'dir', 'runners')
 
 
 def deny_tokens(doc: Mapping) -> set[str]:
@@ -487,12 +492,61 @@ def drained(path: str) -> bool:
     return doc['host'] is not None  # a number: drained since then; anything else is malformed
 
 
-def probe(lock: str, count: int, queue: str, drain: str = '', leases: str = '', parts: int = 1, gpus: int = 0) -> dict:
+#: the problem of a host none of whose runners has a live process: its parts would wait in
+#: GitHub's queue, so brainspike's plan places none there; a pool run needs no runner (15.4)
+NO_RUNNER = 'no runner online'
+
+
+def runners_alive(root: str, proc: str = '/proc') -> 'set[str] | None':
+    """The names of the runners under ``root`` (``<data>/actions-runner``) with a live
+    process, read from each process's ``cmdline`` without taking anything: a
+    ``<root>/<name>/bin/Runner.Listener`` or its ``<root>/<name>/run-helper.sh``, which
+    outlives the listener's self-update (decision 15.4). None when it cannot be known:
+    ``proc`` hides other accounts' processes (``hidepid``) and ``root`` is not the
+    caller's. Self-contained (its source runs on the host). Stdlib."""
+    import os
+    prefix = root.rstrip('/') + '/'
+    try:
+        with open(os.path.join(proc, 'self', 'mountinfo'), errors='replace') as f:
+            hidden = any(' /proc ' in line and 'hidepid=' in line and not any(
+                f'hidepid={v}' in line for v in ('0', 'off')) for line in f)
+    except OSError:
+        hidden = False
+    if hidden:
+        try:
+            if os.stat(root).st_uid != os.getuid():
+                return None
+        except OSError:
+            return None
+    names = set()
+    try:
+        pids = [p for p in os.listdir(proc) if p.isdigit()]
+    except OSError:
+        return None
+    for pid in pids:
+        try:
+            with open(os.path.join(proc, pid, 'cmdline'), 'rb') as f:
+                argv = f.read(8192).split(b'\0')
+        except OSError:
+            continue  # gone, or hidden
+        for a in argv[:2]:  # the listener's argv[0]; the helper's argv[1], after its shell
+            path = a.decode('utf-8', 'replace')
+            if not path.startswith(prefix):
+                continue
+            rest = path[len(prefix):].split('/')
+            if rest[0] and rest[1:] in (['bin', 'Runner.Listener'], ['run-helper.sh']):
+                names.add(rest[0])
+    return names
+
+
+def probe(lock: str, count: int, queue: str, drain: str = '', leases: str = '', parts: int = 1, gpus: int = 0,
+          runners: str = '') -> dict:
     """What a host's row needs, read on the host without taking anything: its free CI slots
     (``/proc/locks``, as ``slots._flocked``), the tickets waiting, the load, the available
-    memory, the cards' free MiB, whether ``drain`` drains it, and with ``leases`` (the
-    leases' directory, ``parts`` a card) the leases held per card. Self-contained (its
-    source and ``drained``'s run on the host). Stdlib."""
+    memory, the cards' free MiB, whether ``drain`` drains it, with ``leases`` (the
+    leases' directory, ``parts`` a card) the leases held per card, and with ``runners``
+    how many of the CI account's runners have a live process (decision 15.4). Self-contained
+    (its source, ``drained``'s and ``runners_alive``'s run on the host). Stdlib."""
     import os
     import subprocess
 
@@ -537,12 +591,15 @@ def probe(lock: str, count: int, queue: str, drain: str = '', leases: str = '', 
     if leases:
         out['cards_leased'] = {c: sum(1 for k in range(parts) if flocked(os.path.join(leases, f'card{c}.{k}.lock')))
                                for c in range(gpus)}
+    if runners:
+        alive = runners_alive(runners)
+        out['runners'] = None if alive is None else len(alive)
     return out
 
 
 def _probe_src() -> str:
     import inspect
-    return inspect.getsource(drained) + '\n\n' + inspect.getsource(probe)
+    return '\n\n'.join(inspect.getsource(f) for f in (drained, runners_alive, probe))
 
 
 def local_probe(reg: Registry) -> dict:
@@ -553,7 +610,7 @@ def local_probe(reg: Registry) -> dict:
         raise RegistryError(f'pool probe: {len(local)} local machines in the registry, not one')
     m = local[0]
     lz = m.leases or LeaseDir('', 1)
-    return probe(m.slots.lock, m.slots.count, m.slots.queue, m.drain, lz.dir, lz.parts, m.gpus)
+    return probe(m.slots.lock, m.slots.count, m.slots.queue, m.drain, lz.dir, lz.parts, m.gpus, m.runners)
 
 
 def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> dict:
@@ -569,6 +626,10 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
         row['problems'].append(f'{p["slots_missing"]} slot lock file(s) missing')
     if p.get('drained'):
         row['problems'].append('drained')
+    if p.get('runners') is not None:  # a forced probe counts what its host's own registry names (decision 15.4)
+        row['runners'] = int(p['runners'])
+        if not row['runners']:
+            row['problems'].append(NO_RUNNER)
     free = int(p.get('slots_free', 0))
     cores = max(0, (m.cpus or int(p.get('cpus', 0))) - math.ceil(float(p.get('load', 0.0))))
     gpu_free = {int(k): int(v) for k, v in p.get('gpu_free', {}).items()}
@@ -740,7 +801,7 @@ def probe_host(m: Machine, run: Runner = subprocess.run, here: str = '', etc: st
     else:
         lz = m.leases or LeaseDir('', 1)
         src = _probe_src() + (f'\nimport json; print(json.dumps(probe({m.slots.lock!r}, {m.slots.count}, '
-                              f'{m.slots.queue!r}, {m.drain!r}, {lz.dir!r}, {lz.parts}, {m.gpus})))\n')
+                              f'{m.slots.queue!r}, {m.drain!r}, {lz.dir!r}, {lz.parts}, {m.gpus}, {m.runners!r})))\n')
         argv, kw = _remote(m, ['/usr/bin/python3', '-I', '-']), {'input': src}
     try:
         r = run(argv, capture_output=True, text=True, timeout=HOST_TIMEOUT, **kw)
@@ -861,8 +922,9 @@ def parse_gpu(s: str) -> tuple[str, int]:
 
 def fits(row: Mapping, ask: Ask, m: Machine, need_mib: int) -> str:
     """Why the row's machine cannot run ``ask`` at all ('' if it can, now or later). Pure."""
-    if row['problems']:
-        return '; '.join(row['problems'])
+    problems = [p for p in row['problems'] if p != NO_RUNNER]  # a pool run takes a slot, not a runner
+    if problems:
+        return '; '.join(problems)
     if ask.cards:
         model = row['gpu_model']
         if not model:

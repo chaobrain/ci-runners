@@ -7,17 +7,17 @@ action downloaded into ``DIR``; an attempt an earlier run attempt left behind is
 attempts after its last artifact are read from their records on this host
 (``salvage``), as many as there are: a retry, and a consumer's own fallback after a
 retry that did not start (attempt 3, issue #161), whatever the attempt before it said
-in ``next``. A part with neither artifact nor record is ``lost``. The verdict is then posted as the ``context`` status of ``S``, and the
-parts' summaries go to the job summary.
+in ``next``. A part with neither artifact nor record is ``lost``. The verdict is then
+posted as the ``context`` status of ``S``, and the parts' summaries go to the job summary.
 
 ``decide`` is pure. Only an infrastructure end the retry did not cure is ``error``; a
 ``red`` part fails the head whatever the others did (D6).
 
 ``ci-run salvage --parts "cpu gpu" --artifacts DIR --out DIR`` is the ``salvage`` action
 (§4.5, decision 12.13), run on the light pool of each host that ran parts of a run whose
-verdict runs elsewhere. For each part, the attempt after its last artifact (its first, when it
-has none) and each attempt after that one, while this host has a record of this run of
-it, gives ``<out>/ci-part-<id>-<attempt>/outcome.json`` with ``salvaged: true``, which the
+verdict runs elsewhere. For each part, the attempt after its last artifact (its first,
+when it has none) and each attempt after that one, while this host has a record of this
+run of it, gives ``<out>/ci-part-<id>-<attempt>/outcome.json`` with ``salvaged: true``, which the
 action uploads. A part whose next attempt this host did not record is left alone; other
 runs' records are never read.
 """

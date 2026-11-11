@@ -2654,7 +2654,7 @@ Rules:
      CPU part on `h100-cpu`, a part on each card's `h100-gpu<N>`, and the OOM part, which the supervisor's cap
      (11.11) ended on cgroup v1 (`oom`, then its retry passed); the red head was red on the CPU and every GPU part.
 - **`v1.14.0`** (minor, stamped 2026-11-12; decision 15.9, #162; lead-approved, brainspike's task ci-one-verdict-path,
-  D-0116): `claim` counts only the runners' statuses. A status of the context counts only if the policy's `bot` posted
+  D-0116; `v1` moved to it after the 3090 canary at `@v1.14.0`, green and red, 2026-11-12): `claim` counts only the runners' statuses. A status of the context counts only if the policy's `bot` posted
   it; success skips, anything else runs. A person's pending or success, an allowlisted one's included, neither holds
   nor skips a head. The inputs `wait-seconds` and `local-lapse-minutes` go, with `ci-run claim`'s matching flags;
   `claim` reads no actor list and no org snapshot, and `policy.actors_for` goes. No other action's input or output,
@@ -2665,6 +2665,11 @@ Rules:
      `@v1` claim without `local-lapse-minutes` took `v1.13.0`'s default of 45 min.
   2. **When it holds.** For a consumer's claim once `v1` moves; the hook does not change.
   3. No setup change: a host's plan at `v1.14.0` is `v1.13.0`'s, so the install restarts no runner.
+  4. **The canary** (`canary-3090-v1140`): its claim passes both removed inputs, which drew the warning `Unexpected
+     input(s) 'wait-seconds', 'local-lapse-minutes'` and nothing else. The green head carried a maintainer's own
+     `success` on the context before its run; the claim ran (`no verdict on this head`) and the run was green, and a
+     rerun of it skipped (`green`, every part skipped). The red head was red on compile, cpu, gpu, multi-a and
+     multi-b.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

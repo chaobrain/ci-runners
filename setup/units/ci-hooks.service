@@ -8,6 +8,7 @@ Description=ci-runners: copy the hooks into the account's private /tmp
 StartLimitIntervalSec=0
 
 [Service]
+@CPU_AFFINITY@
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run hooks copy

@@ -325,6 +325,25 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         self.assertIn(f'Environment=CI_RUNNERS_ETC={self.etc}\n', reaper)
         self.assertIn('Environment=CI_RUNNERS_PYTHON=/usr/bin/python3\n', reaper)
 
+    def test_every_service_runs_on_the_inventorys_cpus(self):
+        """Decision 15.10: with ``cpus`` every service unit of ours (the runners, so their
+        light and cluster jobs, and the timers' services) has ``CPUAffinity=`` on them, off
+        the compile parts' CPUs; without it, no line (the test above)."""
+        inv = self.etc / 'inventory.toml'
+        inv.write_text(inv.read_text().replace('max_temp_c = 80\n', 'max_temp_c = 80\ncpus = "0-3,16-27"\n'))
+        self.apply(setup.build(str(self.etc)).text())
+        units = self.home / '.config' / 'systemd' / 'user'
+        services = sorted(units.glob('ci-*.service'))
+        self.assertGreaterEqual(len(services), 4)
+        for u in services:
+            lines = u.read_text().splitlines()
+            self.assertIn('CPUAffinity=0-3 16-27', lines, u.name)
+            self.assertEqual(lines[lines.index('CPUAffinity=0-3 16-27') - 1], '[Service]', u.name)
+        self.assertEqual(setup.cpu_affinity({'cpus': '5'}), 'CPUAffinity=5')
+        self.assertEqual(setup.cpu_affinity({}), '')
+        with self.assertRaises(ValueError):
+            setup.cpu_affinity({'cpus': '0-3\nExecStart=/bin/x'})  # nothing can add a line
+
 
 class Standalone(unittest.TestCase):
     """A standalone host of the RUN-5 model (decision 11.3, 11.6; h100's, while it ran): no

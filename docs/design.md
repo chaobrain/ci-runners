@@ -1416,6 +1416,41 @@ verdict) until the branch's next push. These amend §4.1, §6.4's T11 and §6.5:
    passes either input gets the same claim. brainspike, the only caller (the org's
    repositories searched, §9), passes both, and drops them in a PR of its own.
 
+## Coordinator decision (2026-11-11): a compile part holds its CPUs, not the host (decision 15.10)
+
+Decided by brainspike's coordinator under the lead's delegation of 2026-11-11 (its task
+ci-compile-split, D-0121). A `compile` part held the host lock `x` for its whole command
+(12.7, §5.5 item 3) and a CI slot. So it waited for every shared holder already in: the other
+parts' per-command `host_lock.sh -s` holds, on CPUs it never uses. In brainspike's batches of
+2026-11-11 its parts waited 0–566 s and 0–1060 s for the lock, the CI's critical path, while
+a measurement (77 compile gates, 10 repeats each) read the gates on `compile_cpus` within
+their spread with an identical compile running at once on other CPUs (shift p90 +6.3 %,
+max +11.4 %). These amend §4.3, §4.8, §5.1, §5.5 and §7:
+
+1. **The compile CPUs, exclusively.** `lock: x` on `compile` holds the lock of its CPU set,
+   `<data>/ci-runners/state/cpus/<compile_cpus>.lock` (commas as `_`), exclusively, then
+   the host lock *shared*, both for the whole command, after the gate. The CPU lock is the
+   host lock's protocol (`ci-lock`'s turnstile) on a file of the CI account's own. A person's
+   `-x` (a timing claim, a local compile stage) still waits for the part's shared hold and
+   keeps it out; another compile part waits for the CPU lock and ends `queue timeout: no
+   compile CPUs`.
+2. **The command's lock is its CPUs'.** The command gets the CPU lock as its host lock
+   (`CI_HOST_LOCK`, `LOCAL_CI_HOST_LOCK`) under the cover `x`. So its own requests, `-x`
+   included (brainspike's timing commands take `host_lock.sh -x` per command), are covered,
+   unchanged: no consumer edit.
+3. **No CI slot.** A compile part's CPUs are its own; the host's slots ration the inventory's
+   `cpus`, which every other part runs on. A compile part runs while every slot is held.
+4. **Everything else off the compile CPUs.** On a host with `compile_cpus`, the inventory's
+   `cpus` must be given and disjoint from them; else a compile part ends `unavailable`
+   (`compile parts need the inventory's cpus, disjoint from compile_cpus`). Every other part
+   is pinned to `cpus` (as before, §5.5 item 4), and every service unit of ours (the runners,
+   so their light, salvage and cluster jobs, and the timers' services) has `CPUAffinity=`
+   set to `cpus`: an affinity, not a cpuset, so a compile part's `taskset` to `compile_cpus`
+   still works. On 3090b: `cpus` 0–3,16–27, `compile_cpus` 4–15.
+5. **A minor release.** No input, output or label changes; the change is the host layer's
+   and the host's inventory and units. Between the inventory edit and the move of `v1` the
+   old release runs on the new `cpus` as before (it pins the other parts to them).
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -1674,7 +1709,7 @@ h100 is the only host, and its labels choose the pool (§5.1); there is nothing 
 | `gpu-mem-mib` | registry | free MiB a card needs |
 | `memory` | registry | the part's memory cap, at most the registry's maximum |
 | `timeout-minutes` | required | inner bound, below the job's `timeout-minutes`; at most 240, or 600 on `nightly` (decision 12.8) |
-| `lock` | `x` on `compile`, else `none` | on a host with the host lock (§7): hold it for the whole command, `s`, `x` or `l`. With `none` the command takes it itself, per step, as brainspike's `local_ci.sh` does. Refused (`unavailable`) on a host without the lock. |
+| `lock` | `x` on `compile`, else `none` | on a host with the host lock (§7): hold it for the whole command, `s`, `x` or `l`; on `compile`, `x` holds the compile CPUs exclusively and the host lock shared (decision 15.10). With `none` the command takes it itself, per step, as brainspike's `local_ci.sh` does. Refused (`unavailable`) on a host without the lock. |
 | `queue-timeout-minutes` | 60 | longest wait for a slot or a lease, then `unavailable` |
 | `results` | none | glob of JUnit XML that the command writes under `CI_RESULTS_DIR` |
 | `resume` | false | sets `CI_RESUME=1`, for a command that can resume |
@@ -1699,7 +1734,8 @@ The command's environment holds:
   the inventory gives none, and in a cluster part's job on its node, the CPUs the command
   may run on (its affinity);
 - the slot path, marked as held; on a host with the host lock, its path, and with `lock`
-  set, the protocol's nesting variable at the mode held (decision 12.9);
+  set, the protocol's nesting variable at the mode held (decision 12.9); on `compile`, the
+  path of its CPU set's lock, held `x`, instead (decision 15.10);
 - `CI_RESUME`;
 - the runner's `https_proxy`, `http_proxy` and `no_proxy` (the host's egress, 11.10, 12.3);
 - the project's registry variables.
@@ -1806,7 +1842,7 @@ hosts, a coverage job). These rules are the consumer's:
    | `part` | `<host>-cpu` | CPU parts | 0 | any | one | ≤ 240 |
    | `gpu` | `<host>-gpu`, `<host>-gpu<N>` | one-card parts on the runner's card | 1 | any | the card's lease | ≤ 240 |
    | `multi` | `<host>-multi` (3090 hosts) | two-card parts, after the P2P self-test | 2 | any | both cards' leases | ≤ 240 |
-   | `compile` | `<host>-compile` (3090b), opt-in (12.14) | exclusive timing parts on `compile_cpus` | 0 | `x` | one | ≤ 240 |
+   | `compile` | `<host>-compile` (3090b), opt-in (12.14) | timing parts on `compile_cpus`, held exclusively (15.10) | 0 | `x` | none (15.10) | ≤ 240 |
    | `nightly` | `<host>-nightly` (3090a), opt-in (12.14) | the consumer's nightly | 0 to all cards | any | every slot and card lease | ≤ 600 |
    | `slurm` | `<host>-slurm` and a shared label (from RUN-9), opt-in (14.2) | one batch job on a Slurm cluster's `target` (14.3) | up to the target's `max_cards` | `none` | none on its host | ≤ the target's `max_minutes` |
 
@@ -1903,7 +1939,7 @@ classes of the 3090 hosts (15.8).
 | 3090b | `part` | 3 | `3090b-cpu` | CPU parts, pinned to the inventory's `cpus` |
 | 3090b | `gpu` | 2 | `3090b-gpu`, `3090b-gpu<N>` | one-card parts on card N |
 | 3090b | `multi` | 1 | `3090b-multi` | two-card parts, after the P2P self-test (12.6) |
-| 3090b | `compile` | 1 | `3090b-compile` | exclusive timing parts on `compile_cpus` (12.7) |
+| 3090b | `compile` | 1 | `3090b-compile` | timing parts on `compile_cpus`, held exclusively, the host lock shared (12.7, 15.10) |
 | 3090b | `slurm` | 8 | `3090b-slurm`, `3090-slurm` | cluster parts: one batch job each, no CI slot or card of the host (14.3) |
 | 3090a | `light` | 6 | `3090a-light`, `3090-light`, `ci-light` | as on 3090b |
 | 3090a | `part` | 3 | `3090a-cpu` | CPU parts |
@@ -2106,8 +2142,9 @@ On 3090b and 3090a the executor of §4.3 adds:
    runner holds them all, after every CI slot, whatever its `gpus`; its command gets the
    `gpus` lowest-numbered cool cards with `gpu-mem-mib` free, and it waits while fewer
    have (decision 12.8).
-3. **The host lock**: held for the whole command when `lock` says so (`x` on `compile`),
-   through `ci-lock`, after the slot and the leases; released when the scope ends.
+3. **The host lock**: held for the whole command when `lock` says so, through `ci-lock`,
+   after the slot and the leases; released when the scope ends. On `compile` (decision
+   15.10): the compile CPUs' lock exclusively, then the host lock shared.
 4. **Run**: in the scope of §4.3, with its cards in `CUDA_VISIBLE_DEVICES` and `taskset`
    to `CI_CPUS`: the inventory's `cpus`, or `compile_cpus` on `compile`.
 5. **Sample**: every 30 s, each leased card's temperature and use, and our compute PIDs,
@@ -2230,7 +2267,7 @@ fails meanwhile.
 
 Shared resources, per host:
 
-- **CI slots**: CPU and `compile` parts take one of the host's slots (inventory `slots`,
+- **CI slots**: CPU parts take one of the host's slots (inventory `slots`,
   2 on each host), in the files the inventory's `files` names: under `state/` on h100,
   brainspike's slot files on the 3090 hosts (decision 12.9), which its local runs take
   through `ci_slot.sh` too. Each card is its own slot: a GPU part takes its card's lease
@@ -2242,8 +2279,9 @@ Shared resources, per host:
 - **Host lock** (3090 hosts): brainspike's `host_lock.sh` protocol, in `ci-lock`
   (decision 12.9). An `-x` request waits for the shared holders already in, so every
   project keeps a shared hold to about 15 min and takes the lock per step for longer
-  commands (as brainspike does), and a `compile` part's whole-command `x` waits at most
-  that long. A request made under a hold is covered by it (the nesting variable).
+  commands (as brainspike does). A `compile` part holds it shared, beside them, and its
+  CPUs exclusively (decision 15.10); it waits only for an `-x` holder. A request made under
+  a hold is covered by it (the nesting variable).
 - **Memory**: each part's cap (§4.3); `ci.slice` and `ci-<project>.slice` where the user
   manager has a memory controller (decision 11.11).
 
@@ -2935,7 +2973,7 @@ takes from here:
 | a plan job and a parts matrix | a `part` on `3090b-light`, then one `part` per matrix leg (§4.8) |
 | live NEST | the env spec's `conda` table (§4.9) |
 | upstreams at their `main` | `env refresh`, `refresh = true` (§4.9) |
-| compile gates on pinned CPUs of the reference host | `3090b-compile`, `compile_cpus`, the host lock (12.7, 12.9) |
+| compile gates on pinned CPUs of the reference host | `3090b-compile`, `compile_cpus` held exclusively, the host lock shared (12.7, 12.9, 15.10) |
 | two-card gates | `<host>-multi` with the P2P self-test (12.6) |
 | the nightly | `3090a-nightly` (12.8) |
 | local performance and CI runs beside the runners | `ci-lock` and `ci-slot` on its files (12.9) |

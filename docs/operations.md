@@ -34,7 +34,7 @@
    它会装到 `<data>/ci-runners/releases/vX.Y.Z/`，并把 `releases/hook` 指向它（只会往前移，回退要加 `--rollback`）。
 3. **写 inventory。** 写 `<data>/ci-runners/etc/inventory.toml`（`etc/` 的权限为 700）。格式见 `setup/inventory.example.toml`：
    - `this` 为角色名；
-   - `[hosts.<role>]` 填账户、路径、槽位、卡、`max_temp_c`、`cpus`、`python`；
+   - `[hosts.<role>]` 填账户、路径、槽位、卡、`max_temp_c`、`cpus`、`python`；有 `compile` 池的主机还要填 `compile_cpus`，且与 `cpus` 不相交（design 决定 15.10）：`cpus` 同时写进各服务单元的 `CPUAffinity=`，改了它要重新 plan/apply，并在排空后重启 runner；
    - `pools` 给出每个池子的 `labels`，不要用 `light`/`part` 这种裸类名；
    - 需要隧道时加 `[hosts.<role>.tunnel]`，并把密钥、`ssh_config`、`known_hosts` 放进 `etc/tunnel/`。
 

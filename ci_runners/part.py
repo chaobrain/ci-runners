@@ -50,7 +50,7 @@ ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 #: (design §4.3 ``record``): a retry on another host takes its attempt from the name (13.3)
 RECORD_REF = re.compile(r'[a-z0-9][a-z0-9-]{0,30}:[^/:]+/[^/:]+/[0-9]+-[0-9]+/'
                         r'(?P<id>[A-Za-z0-9][A-Za-z0-9_.-]{0,63})-(?P<n>[1-9][0-9]{0,2})')
-SLOT_CLASSES = ('part', 'compile')  # the classes whose parts take one host CI slot (design §4.3, §7)
+SLOT_CLASSES = ('part',)  # the classes whose parts take one host CI slot (design §4.3, §7); not compile (15.10)
 EVERY_SLOT = 'nightly'  # the class whose parts take every slot and every card lease (decision 12.8)
 LOCKS = ('none', 's', 'x', 'l')  # the ``lock`` input: hold the host lock for the command, or not
 #: what each class's ``part`` accepts (design §4.8): ``(least cards, most cards, locks,
@@ -256,6 +256,26 @@ def cpu_list(cpus: Iterable[int]) -> str:
     return ','.join(out)
 
 
+def cpu_set(text: str) -> frozenset[int]:
+    """The CPUs of a cpuset list (the inventory's ``cpus``, ``compile_cpus``): ``0-3,16``
+    is ``{0, 1, 2, 3, 16}``. Raises ValueError on a malformed list. Pure."""
+    out: set[int] = set()
+    for item in text.split(','):
+        lo, _, hi = item.strip().partition('-')
+        a, b = int(lo), int(hi or lo)
+        if a < 0 or b < a:
+            raise ValueError(f'cpu list {text!r}: bad range {item!r}')
+        out.update(range(a, b + 1))
+    return frozenset(out)
+
+
+def cpu_lock_path(data: str, cpus: str) -> str:
+    """The lock of a CPU set (decision 15.10): ``<data>/ci-runners/state/cpus/<list>.lock``,
+    the list's commas as ``_``. A compile part holds it exclusively for its whole command,
+    and hands it to the command as its host lock. Pure."""
+    return os.path.join(data, 'ci-runners', 'state', 'cpus', cpus.replace(',', '_') + '.lock')
+
+
 def command_argv(command: str, *, cpus: str = '', nice: int = 10) -> list[str]:
     """What the supervisor runs: ``taskset`` to the inventory's ``cpus`` where it gives
     them (``compile_cpus`` on ``compile``, design §5.5), nice (0 on
@@ -272,7 +292,9 @@ def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, p
     then the project's variables, then ours, which nothing overrides. On a host with the
     host lock its path (``CI_HOST_LOCK``, and ``LOCAL_CI_HOST_LOCK`` for brainspike's
     ``host_lock.sh``), and ``held``, the mode the part holds it in (``s`` or ``x``), as
-    the protocol's cover ``BRAINSPIKE_HOST_LOCK`` (decision 12.9). Pure."""
+    the protocol's cover ``BRAINSPIKE_HOST_LOCK`` (decision 12.9). A compile part passes
+    its CPU set's lock as ``files['host_lock']``, held ``x`` (decision 15.10), so the
+    command's own requests are covered by its CPUs, not the host. Pure."""
     env = {k: v for k, v in base.items() if not k.startswith('CI_') and k not in STEP_FILES
            and k not in (locks.ENV, 'LOCAL_CI_HOST_LOCK')}
     env.update(project.variables)
@@ -978,8 +1000,12 @@ class Executor:
         why = class_refusal(cls, gpus=a.gpus, lock=lock, cards=len(h['gpus']), host_lock=bool(h['files'].get('host_lock')))
         if why:
             return why
-        if cls == 'compile' and not h.get('compile_cpus'):
-            return 'this host has no compile_cpus for compile parts'
+        if cls == 'compile':
+            if not h.get('compile_cpus'):
+                return 'this host has no compile_cpus for compile parts'
+            # the compile CPUs are the part's alone (decision 15.10): every other part runs on cpus
+            if not h.get('cpus') or cpu_set(str(h['cpus'])) & cpu_set(str(h['compile_cpus'])):
+                return 'compile parts need the inventory\'s cpus, disjoint from compile_cpus (decision 15.10)'
         return ''
 
     def shared_state(self, record: str) -> str:
@@ -1148,6 +1174,7 @@ class Executor:
         nightly = cls == EVERY_SLOT
         lock = a.lock or ('x' if cls == 'compile' else 'none')  # the class's row checks it (gate)
         hold: locks.HostLock | None = None  # the host lock, held for the whole command (design §5.5 item 3)
+        cpu_hold: locks.HostLock | None = None  # a compile part's CPU set, held x instead of the host (15.10)
         rec['lock'] = lock
         try:
             free = shutil.disk_usage(h['data']).free / (1 << 30)
@@ -1263,18 +1290,31 @@ class Executor:
                 # Last, after the slots and the leases, as every holder takes them (§5.5 item 3): a part
                 # holds the host lock only once it waits for nothing else, so a nightly part holding
                 # every slot and a compile part holding x never wait for each other.
+                host_mode = lock
+                if cls == 'compile':  # its CPUs exclusively, then the host shared (decision 15.10)
+                    path = cpu_lock_path(str(h['data']), str(h['compile_cpus']))
+                    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+                    cpu_hold = locks.HostLock(path, held='', timeout=max(0.0, deadline - time.monotonic()))
+                    try:
+                        cpu_hold.acquire('x')
+                    except locks.LockTimeout:
+                        return self._end(record, rec, a, unavailable='queue timeout: no compile CPUs')
+                    if self.stopped:
+                        return self._end(record, rec, a, stopped=True)
+                    host_mode = rec['host_lock'] = 's'
+                    rec['cpu_lock_wait_seconds'] = round(cpu_hold.waited)
                 hold = locks.HostLock(str(h['files']['host_lock']), held='',
                                       timeout=max(0.0, deadline - time.monotonic()))
                 try:
                     with self.shared_access(record, []):
-                        hold.acquire(lock)
+                        hold.acquire(host_mode)
                 except locks.LockTimeout:
-                    return self._end(record, rec, a, unavailable=f'queue timeout: no host lock ({lock})')
+                    return self._end(record, rec, a, unavailable=f'queue timeout: no host lock ({host_mode})')
                 except locks.MissingSharedFile as e:
                     return self._end(record, rec, a, unavailable=f'host lock: {e}')
                 if self.stopped:
                     return self._end(record, rec, a, stopped=True)
-                rec['lock_wait_seconds'] = round(hold.waited)
+                rec['lock_wait_seconds'] = round(hold.waited + (cpu_hold.waited if cpu_hold else 0.0))
             rec.update(queue_seconds=round(time.monotonic() - t0), cards=cards, slot=slot_path, run_epoch=time.time())
             pin = str((h.get('compile_cpus') if cls == 'compile' else h.get('cpus')) or '')  # design §5.5 item 4
             cpus = pin or cpu_list(os.sched_getaffinity(0))  # a list, as the inventory's
@@ -1283,8 +1323,10 @@ class Executor:
                 rec['env_build'] = os.path.basename(build)  # the one env this part runs in (design 12.11)
             env = part_env(self.env, role=self.inv.this, project=dataclasses.replace(proj, env=build), part_dir=work,
                            results=results, cards=cards,
-                           cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume,
-                           held=hold.mode if hold else '')
+                           cpus=cpus, slot=slot_path, resume=a.resume,
+                           # a compile part's command takes its CPUs' lock as its host lock (15.10)
+                           files=dict(h['files'], host_lock=cpu_hold.path) if cpu_hold else h['files'],
+                           held=(cpu_hold or hold).mode if hold else '')
             inner = command_argv(a.command, cpus=pin, nice=0 if cls == 'compile' else 10)
             cap = registry.memory_bytes(memory) if self.caps_memory() else 0
             p2p = self.p2p if cls in P2P_CLASSES else []
@@ -1305,7 +1347,8 @@ class Executor:
                 return self._away(record, rec, a, why, cls)
             # the supervisor keeps the host lock with the slot: the command's own requests find it
             # held by an ancestor (the cover), and it is let go when the scope ends
-            held = tuple(fd for fd in {slot_fd, env_fd, *every, *leases.fds, *(hold.fds if hold else ())}
+            held = tuple(fd for fd in {slot_fd, env_fd, *every, *leases.fds, *(hold.fds if hold else ()),
+                                               *(cpu_hold.fds if cpu_hold else ())}
                          if fd is not None)
             self.proc = self.spawn(argv, cwd=self.env.get('GITHUB_WORKSPACE') or os.getcwd(), env=env, pass_fds=held)
             if nightly:  # the supervisor keeps the slots and leases, so it keeps the hold too
@@ -1338,6 +1381,8 @@ class Executor:
                 every_drop(str(h['data']))  # a supervisor that outlives us keeps the record live
             if hold is not None:
                 hold.close()  # not release: a supervisor that outlives us keeps the hold
+            if cpu_hold is not None:
+                cpu_hold.close()
             if leases is not None:
                 leases.release()
             for fd in {slot_fd, env_fd, *every} - {None}:

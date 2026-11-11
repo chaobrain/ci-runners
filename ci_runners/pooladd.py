@@ -110,7 +110,7 @@ def probe_machine(python: str, work: str, lock: str, count: int, cache: str) -> 
         if r.returncode == 0:
             out['cards'] = [[a.strip(), int(b)] for a, b in (x.rsplit(',', 1) for x in r.stdout.splitlines() if x.strip())]
             h = subprocess.run(['nvidia-smi'], capture_output=True, text=True, timeout=60)
-            m = re.search(r'CUDA Version:\s*(\d+)', h.stdout)
+            m = re.search(r'CUDA (?:UMD )?Version:\s*(\d+)', h.stdout)  # 'CUDA UMD Version' from driver 610
             out['cuda_major'] = int(m.group(1)) if m else 0
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
@@ -127,13 +127,14 @@ def probe_machine(python: str, work: str, lock: str, count: int, cache: str) -> 
     return out
 
 
-def probe(access: str, ssh: str, args: Mapping, run: pool.Runner = subprocess.run) -> dict:
-    """``probe_machine`` on the machine: through ssh, or here for ``local``."""
+def probe(access: str, ssh: str, args: Mapping, run: pool.Runner = subprocess.run, host_python: str = '') -> dict:
+    """``probe_machine`` on the machine, run by ``host_python`` (default ``pool.HOST_PYTHON``):
+    through ssh, or here for ``local``."""
     src = (inspect.getsource(probe_machine) + '\nimport json\nprint(json.dumps(probe_machine('
            f'{args["python"]!r}, {args["work"]!r}, {args["lock"]!r}, {int(args["count"])}, {args["cache"]!r})))\n')
     m = pool.Machine('probe', access, ssh=ssh)
     try:
-        r = run(pool._remote(m, ['/usr/bin/python3', '-I', '-']), input=src, capture_output=True, text=True,
+        r = run(pool._remote(m, [host_python or pool.HOST_PYTHON, '-I', '-']), input=src, capture_output=True, text=True,
                 timeout=120)
     except (OSError, subprocess.SubprocessError) as e:
         raise AddError(f'probe failed: {type(e).__name__}') from None
@@ -156,7 +157,7 @@ def gpu_model(name: str) -> str:
 
 
 def entry(access: str, ssh: str, p: Mapping, *, python: str, work: str, lock: str, count: int, queue: str = '',
-          labels: Mapping[str, str] | None = None, cache: str = '') -> dict:
+          labels: Mapping[str, str] | None = None, cache: str = '', host_python: str = '') -> dict:
     """The ``[machine.KEY]`` table of a host from its probe ``p``, not ready. Pure."""
     e: dict = {'access': access}
     if access == 'ssh':
@@ -169,7 +170,7 @@ def entry(access: str, ssh: str, p: Mapping, *, python: str, work: str, lock: st
         e.update(gpu_model=models.pop(), gpu_mib=min(int(mib) for _, mib in p['cards']))
         if p.get('cuda_major'):
             e['cuda'] = f'cuda{int(p["cuda_major"])}'
-    e.update(p2p=False, python=python, work=work,
+    e.update(p2p=False, python=python, **({'host_python': host_python} if host_python else {}), work=work,
              slots={'lock': lock, 'count': int(count), **({'queue': queue} if queue else {})})
     if labels:
         e['labels'] = dict(labels)
@@ -505,7 +506,7 @@ def _root(d: str) -> str:
 
 
 def add(etc: str, key: str, access: str, ssh: str, *, python: str, work: str, lock: str, count: int, queue: str = '',
-        labels: Mapping[str, str] | None = None, cache: str = '', dry_run: bool = False,
+        labels: Mapping[str, str] | None = None, cache: str = '', host_python: str = '', dry_run: bool = False,
         run: pool.Runner = subprocess.run) -> pool.Registry:
     """Probe the machine and write its entry (not ready); returns the new registry."""
     path = os.path.join(etc, 'pool.toml')
@@ -520,9 +521,10 @@ def add(etc: str, key: str, access: str, ssh: str, *, python: str, work: str, lo
             raise AddError(f'{path}: no registry (write its top level, schema, project and repository, first)') from None
         if key in pool.load(text).machines:  # before the probe: a refusal costs no ssh
             raise AddError(f'machine {key} is in the registry already')
-        p = probe(access, ssh, {'python': python, 'work': work, 'lock': lock, 'count': count, 'cache': cache}, run)
+        p = probe(access, ssh, {'python': python, 'work': work, 'lock': lock, 'count': count, 'cache': cache}, run,
+                  host_python)
         e = entry(access, ssh, p, python=python, work=work, lock=lock, count=count, queue=queue, labels=labels,
-                  cache=cache)
+                  cache=cache, host_python=host_python)
         new = add_text(text, key, e)
         for x in p.get('missing', []):
             _say(f'not there yet: {x}')
@@ -546,6 +548,8 @@ def main(argv: Sequence[str], etc: str, run: pool.Runner = subprocess.run, pool_
     acc.add_argument('--local', action='store_true', help='this host')
     a_.add_argument('--python', required=True, help='the env a command runs in there')
     a_.add_argument('--work', required=True, help='where a run stages its tree there')
+    a_.add_argument('--host-python', default='', help=f'the host side\'s python there, 3.11 or later '
+                    f'(default: {pool.HOST_PYTHON})')
     a_.add_argument('--slots-lock', required=True)
     a_.add_argument('--slots-count', type=int, required=True)
     a_.add_argument('--slots-queue', default='')
@@ -575,7 +579,7 @@ def main(argv: Sequence[str], etc: str, run: pool.Runner = subprocess.run, pool_
         if a.cmd == 'add':
             reg = add(etc, a.key, 'local' if a.local else 'ssh', a.ssh, python=a.python, work=a.work, lock=a.slots_lock,
                       count=a.slots_count, queue=a.slots_queue, labels=_labels(a.labels), cache=a.cache,
-                      dry_run=a.dry_run, run=run)
+                      host_python=a.host_python, dry_run=a.dry_run, run=run)
         else:
             reg = pool.load_file(os.path.join(etc, 'pool.toml'))
             if a.key not in reg.machines:

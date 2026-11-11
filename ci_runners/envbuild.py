@@ -46,6 +46,13 @@ The token is the maintainer's ``GH_TOKEN``, set for the one run and never stored
 host; it needs Contents: read on the repository and its private upstreams. It reaches git through its environment,
 never through an argv.
 
+``env build <project> --kept FILE`` (decision 15.8; ``-`` reads standard input) builds
+from the record another host's env of the project kept (its ``ci-env.json``: the spec, the
+requirement files and the repository's commit that host read with a token), checked as a
+refresh checks its own record, and holds no token: its upstreams are cloned without
+credentials. It is for a host whose account others share (h100), where a token in the
+build's environment would be readable by them.
+
 ``env refresh <project>`` (or ``--all``: each project whose registry entry sets
 ``refresh = true``) holds no token. The env keeps the spec and requirement files it was
 built from (``ci-env.json``) and the commit of each upstream. When an upstream's branch
@@ -510,22 +517,69 @@ def kept(link: str, repository: str) -> tuple[str, Spec, dict[str, str], dict[st
             rec = json.load(f)
     except (OSError, ValueError):
         raise SpecError(f'{link}: no readable ci-env.json: run env build once') from None
+    return kept_record(rec, repository, link)
+
+
+def kept_record(rec: object, repository: str, where: str) -> tuple[str, Spec, dict[str, str], dict[str, str]]:
+    """:func:`kept` of a parsed ``ci-env.json`` (``where`` names it in errors): the record
+    must be of ``repository``, its spec must parse, its requirement files be text under
+    the repository's paths and its upstreams those of the spec, each with a commit. Pure."""
     if not isinstance(rec, dict) or rec.get('repository') != repository or not isinstance(rec.get('spec'), str) \
             or not isinstance(rec.get('files'), dict) or not isinstance(rec.get('sha'), str) \
             or not github.SHA.fullmatch(rec['sha']) or not isinstance(rec.get('upstream'), list):
-        raise SpecError(f'{link}: the env kept no spec: run env build once')
+        raise SpecError(f'{where}: the env kept no spec: run env build once')
     spec = parse_spec(rec['spec'])
     files = {_path('files', k): v for k, v in rec['files'].items()}
     if not all(isinstance(v, str) for v in files.values()):
-        raise SpecError(f'{link}: a kept requirement file is not text')
+        raise SpecError(f'{where}: a kept requirement file is not text')
+    if len(files) > MAX_FILES or any(len(v.encode('utf-8')) > MAX_FILE for v in files.values()):
+        raise SpecError(f'{where}: more than {MAX_FILES} requirement files, or one larger than {MAX_FILE} bytes')
+    todo, named = list(spec.requirements), []  # the files the spec names, as fetch follows them
+    while todo:
+        q = todo.pop(0)
+        if q in named:
+            continue
+        if q not in files:
+            raise SpecError(f'{where}: the kept spec names {q}, which the record does not hold')
+        named.append(q)
+        todo += nested(q, files[q])  # each -r and -c target inside the repository, or a SpecError
+    if set(named) != set(files):
+        raise SpecError(f'{where}: the record holds requirement files the kept spec does not name')
     commits = {}
     for u in rec['upstream']:
-        if not isinstance(u, dict) or not isinstance(u.get('commit'), str) or not github.SHA.fullmatch(u['commit']):
-            raise SpecError(f'{link}: a kept upstream has no commit: run env build once')
+        if not isinstance(u, dict) or not isinstance(u.get('commit'), str) or not github.SHA.fullmatch(u['commit']) \
+                or not isinstance(u.get('repository'), str) or not isinstance(u.get('branch'), str):
+            raise SpecError(f'{where}: a kept upstream has no commit: run env build once')
         commits[(u.get('repository'), u.get('branch'))] = u['commit']
     if set(commits) != {(u.repository, u.branch) for u in spec.upstream}:
-        raise SpecError(f'{link}: the kept upstreams do not match the kept spec')
+        raise SpecError(f'{where}: the kept upstreams do not match the kept spec')
     return rec['sha'], spec, files, {u.name: commits[(u.repository, u.branch)] for u in spec.upstream}
+
+
+#: the most a kept record given to ``--kept`` may hold: its files and the spec, with room for JSON
+MAX_KEPT = (MAX_FILES + 2) * MAX_FILE
+
+
+def read_kept(path: str, repository: str, stdin=None) -> tuple[str, Spec, dict[str, str]]:
+    """The commit, spec and requirement files of the kept record at ``path`` (``-``:
+    ``stdin``), another host's ``ci-env.json`` (decision 15.8). Its upstream commits are
+    not used: the build clones each upstream's branch as it is now."""
+    try:
+        if path == '-':
+            text = (stdin or sys.stdin).read(MAX_KEPT + 1)
+        else:
+            with open(path, encoding='utf-8') as f:
+                text = f.read(MAX_KEPT + 1)
+    except (OSError, UnicodeDecodeError) as e:
+        raise SpecError(f'--kept {path}: {e}') from None
+    if len(text) > MAX_KEPT:
+        raise SpecError(f'--kept {path}: larger than {MAX_KEPT} bytes')
+    try:
+        rec = json.loads(text)
+    except (ValueError, RecursionError):
+        raise SpecError(f'--kept {path}: not JSON, or nested too deep') from None
+    sha, spec, files, _ = kept_record(rec, repository, f'--kept {path}')
+    return sha, spec, files
 
 
 def head_of(run: Callable, u: Upstream, env: dict[str, str]) -> str:
@@ -573,9 +627,11 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, call: Callable | N
                    help='the conda executable (default: $CI_RUNNERS_CONDA, else conda on PATH)')
     p.add_argument('--memory', default='32G', help='MemoryMax of the build\'s scope')
     p.add_argument('--dry-run', action='store_true', help='build: print the steps, run none')
+    p.add_argument('--kept', metavar='FILE', help="build: from another host's kept record of the project's env "
+                   '(its ci-env.json; - reads stdin), with no token (decision 15.8)')
     a = p.parse_args(argv)
-    if a.verb == 'refresh' and (a.dry_run or bool(a.project) == a.all):
-        p.error('refresh takes a project or --all, and no --dry-run')
+    if a.verb == 'refresh' and (a.dry_run or a.kept is not None or bool(a.project) == a.all):
+        p.error('refresh takes a project or --all, and no --dry-run or --kept')
     if a.verb == 'build' and (not a.project or a.all):
         p.error('build takes a project')
     envs = os.path.join(inv.host['data'], 'ci-runners', 'envs')
@@ -584,8 +640,14 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, call: Callable | N
     try:
         proj = registry.load_file(etc, a.project, inv.this)
         registry.memory_bytes(a.memory)
-        token = _token(etc)
-        sha, spec, files = fetch(call or github.api, token, proj.repository)
+        if a.kept is not None:  # no token at all: the record was read with one on another host (decision 15.8)
+            if os.environ.get('GH_TOKEN', '').strip():  # every build step would inherit it
+                raise SpecError('--kept holds no token: unset GH_TOKEN for this build')
+            token = ''
+            sha, spec, files = read_kept(a.kept, proj.repository)
+        else:
+            token = _token(etc)
+            sha, spec, files = fetch(call or github.api, token, proj.repository)
         return _build(proj, spec, files, sha, role=inv.this, token=token, envs=envs, conda=a.conda, memory=a.memory,
                       run=run, dry_run=a.dry_run)
     except Busy as e:

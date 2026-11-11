@@ -674,6 +674,40 @@ class Probe(unittest.TestCase):
             with unittest.mock.patch.object(pool, 'runners_alive', lambda root: None):  # hidden: not known, not 0
                 self.assertIsNone(pool.probe(lock, 1, '', runners='/x')['runners'])
 
+    def test_the_host_side_runs_the_entrys_host_python(self):
+        """h100's system python is 3.10, without tomllib (decision 15.8, item 9): the status
+        probe and a run's host side run the entry's ``host_python``, the system's by default."""
+        self.assertEqual(reg().machines['hosta'].host_python, '/usr/bin/python3')
+        text = REGISTRY.replace('python = "/opt/env/bin/python"\n',
+                                'python = "/opt/env/bin/python"\nhost_python = "/opt/py/bin/python3"\n', 1)
+        r = pool.load(text)
+        m = r.machines['hosta']
+        self.assertEqual(m.host_python, '/opt/py/bin/python3')
+        tokens = pool.deny_tokens({'machine': {'hosta': {'host_python': m.host_python}}})  # inventory, as python
+        self.assertEqual(tokens, pool.deny_tokens({'machine': {'hosta': {'python': m.host_python}}}))
+        self.assertTrue(tokens)
+        with self.assertRaisesRegex(pool.RegistryError, 'host_python must be an absolute path'):
+            pool.load(text.replace('"/opt/py/bin/python3"', '"python3"'))
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'slots_free': 2, 'load': 0, 'cpus': 16}) + '\n', '')
+        pool.probe_host(m, run)
+        self.assertEqual(seen[-1][-1], '/opt/py/bin/python3 -I -')
+        launched = []
+        run = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, '{"numpy": "2.0"}\n', '')  # noqa: E731
+
+        class Proc:
+            def wait(self, timeout=None):
+                return 0
+        with unittest.mock.patch.object(pool, 'git_dir', lambda root, dest: ''), \
+                unittest.mock.patch.object(pool, 'bundle', lambda *a, **k: b''):
+            rc = pool.run_host(r, m, pool.RunArgs('true', ROOT, pool.Ask()), [], run,
+                               lambda argv, **kw: launched.append(argv) or Proc(), run_id='r1')
+        self.assertEqual(rc, 0)
+        self.assertIn(' /opt/py/bin/python3 -I -c ', launched[0][-1])
+
     def test_probe_host_runs_the_probe_through_ssh(self):
         m = reg().machines['hosta']
         seen = {}
@@ -1284,6 +1318,26 @@ class CIAccount(unittest.TestCase):
                                          etc=self.etc)['problems'], ['unreachable (exit 255)'])
         os.unlink(self.key)
         self.assertEqual(pool.probe_host(m, run, etc=self.etc)['problems'], ['no key etc/pool/keys/hosta'])
+
+    def test_a_shared_account_names_its_aliases_in_its_own_ssh_config(self):
+        """etc/pool/ssh_config, where it is a file, is the forced probe's ssh configuration (15.8)."""
+        m = self.reg.machines['hosta']
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'slots_free': 1, 'load': 0, 'cpus': 16}) + '\n', '')
+        pool.probe_host(m, run, etc=self.etc)
+        self.assertNotIn('-F', seen[-1])  # none there: the account's own
+        cfg = os.path.join(self.etc, 'pool', 'ssh_config')
+        os.mkdir(cfg)
+        pool.probe_host(m, run, etc=self.etc)
+        self.assertNotIn('-F', seen[-1])  # not a file
+        os.rmdir(cfg)
+        open(cfg, 'w').close()
+        pool.probe_host(m, run, etc=self.etc)
+        self.assertEqual(seen[-1][seen[-1].index('-F') + 1], cfg)
+        self.assertEqual(seen[-1][-2:], ['alias-a', 'ci-run pool probe'])
 
     def test_the_cluster_through_the_gates_capacity(self):
         m = self.reg.machines['cl']

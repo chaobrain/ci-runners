@@ -237,6 +237,11 @@ class LeaseDir:
     parts: int = 1  # leases per card (the parts' max_parts)
 
 
+#: the interpreter the host side (the probe, ``remote``) runs on a host whose entry names no
+#: ``host_python``: the system's, 3.11 or later on the 3090 hosts (h100's is 3.10, decision 15.8)
+HOST_PYTHON = '/usr/bin/python3'
+
+
 @dataclasses.dataclass(frozen=True)
 class Machine:
     key: str
@@ -253,6 +258,7 @@ class Machine:
     billed: bool = False
     price: float = 0.0
     python: str = ''
+    host_python: str = HOST_PYTHON  # the host side's interpreter, 3.11 or later (decision 15.8)
     work: str = ''
     slots: Slots | None = None
     max_slots: int | None = None  # the project's cap on the host's slot queue (None: the slot count)
@@ -325,7 +331,7 @@ def _labels(t: Mapping, where: str) -> dict[str, str]:
 
 
 _MACHINE = {'access', 'ssh', 'hostname', 'cpus', 'memory_gib', 'gpus', 'gpu_model', 'gpu_mib', 'cuda', 'p2p', 'billed',
-            'price', 'python', 'work', 'slots', 'labels', 'numerics_ok', 'cache', 'gate', 'targets', 'ready',
+            'price', 'python', 'host_python', 'work', 'slots', 'labels', 'numerics_ok', 'cache', 'gate', 'targets', 'ready',
             'max_slots', 'drain', 'leases', 'site', 'account', 'probe', 'runners'}
 _TARGET = {'partition', 'cpus', 'memory_gib', 'max_minutes', 'variant', 'price', 'numerics_ok', 'labels', 'gpu_model',
            'cards', 'max_cards', 'gpu_mib', 'cuda'}
@@ -410,7 +416,8 @@ def _machine(key: str, t: Mapping) -> Machine:
              gpus=gpus, gpu_model=_get(t, 'gpu_model', str, where, '', required=bool(gpus)),
              gpu_mib=_get(t, 'gpu_mib', int, where, 0), cuda=_get(t, 'cuda', str, where, ''),
              p2p=_get(t, 'p2p', bool, where, False), python=_abs(t, 'python', where, required=True),
-             work=_abs(t, 'work', where, required=True), slots=slots)
+             host_python=_abs(t, 'host_python', where) or HOST_PYTHON, work=_abs(t, 'work', where, required=True),
+             slots=slots)
     return Machine(**m)
 
 
@@ -445,7 +452,7 @@ def load_file(path: str) -> Registry:
 #: the keys whose values are inventory (``deny``); the rest are capabilities and role names. The
 #: slot files are not: they are the shared files brainspike's scripts name (a home-directory
 #: path among them is still the lint's). ``drain`` and the leases' ``dir`` are the CI account's
-PRIVATE_KEYS = ('ssh', 'hostname', 'python', 'work', 'gate', 'cache', 'partition', 'drain', 'dir', 'runners')
+PRIVATE_KEYS = ('ssh', 'hostname', 'python', 'host_python', 'work', 'gate', 'cache', 'partition', 'drain', 'dir', 'runners')
 
 
 def deny_tokens(doc: Mapping) -> set[str]:
@@ -811,9 +818,11 @@ def target_row(m: Machine, t: Target, nodes: Sequence[Node], assoc: Mapping[str,
 Runner = Callable[..., subprocess.CompletedProcess]
 
 
-def _ssh(alias: str, key: str = '') -> list[str]:
-    """ssh to ``alias`` in batch mode; with ``key``, that key only."""
+def _ssh(alias: str, key: str = '', config: str = '') -> list[str]:
+    """ssh to ``alias`` in batch mode; with ``key``, that key only; with ``config``, that
+    file for the account's ssh configuration."""
     only = ['-o', 'IdentitiesOnly=yes', '-i', key] if key else []
+    only += ['-F', config] if config else []
     return ['ssh', '-o', 'BatchMode=yes', *only, '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', alias]
 
 
@@ -832,6 +841,13 @@ def probe_key(etc: str, key: str) -> str:
     return os.path.join(_etc(etc), 'pool', 'keys', key)
 
 
+def probe_config(etc: str) -> str:
+    """``etc/pool/ssh_config`` where it is a file, else '': the forced probes' aliases and
+    pinned host keys on a shared account, whose ``~/.ssh`` is not ours (decision 15.8)."""
+    path = os.path.join(_etc(etc), 'pool', 'ssh_config')
+    return path if os.path.isfile(path) else ''
+
+
 def _remote(m: Machine, argv: Sequence[str]) -> list[str]:
     """``argv`` run on ``m``: through ssh as one quoted command line, or here for a local machine."""
     return list(argv) if m.access == 'local' else [*_ssh(m.ssh), shlex.join(argv)]
@@ -845,12 +861,12 @@ def probe_host(m: Machine, run: Runner = subprocess.run, here: str = '', etc: st
         key = probe_key(etc, m.key)
         if not os.path.isfile(key):
             return host_row(m, None, f'no key etc/pool/keys/{m.key}', here)
-        argv, kw = [*_ssh(m.ssh, key), FORCED_PROBE], {'stdin': subprocess.DEVNULL}
+        argv, kw = [*_ssh(m.ssh, key, probe_config(etc)), FORCED_PROBE], {'stdin': subprocess.DEVNULL}
     else:
         lz = m.leases or LeaseDir('', 1)
         src = _probe_src() + (f'\nimport json; print(json.dumps(probe({m.slots.lock!r}, {m.slots.count}, '
                               f'{m.slots.queue!r}, {m.drain!r}, {lz.dir!r}, {lz.parts}, {m.gpus}, {m.runners!r})))\n')
-        argv, kw = _remote(m, ['/usr/bin/python3', '-I', '-']), {'input': src}
+        argv, kw = _remote(m, [m.host_python, '-I', '-']), {'input': src}
     try:
         r = run(argv, capture_output=True, text=True, timeout=HOST_TIMEOUT, **kw)
     except (OSError, subprocess.SubprocessError) as e:
@@ -1562,7 +1578,7 @@ def run_host(reg: Registry, m: Machine, a: RunArgs, files: Sequence[str], run: R
     spec = host_spec(reg, m, a, wait)
     launch = ('import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.pool import remote; '
               'sys.exit(remote(sys.argv[1:]))')
-    argv = ['sh', '-c', 'cd "$1/ws" && shift && exec "$@"', 'sh', d, '/usr/bin/python3', '-I', '-c', launch,
+    argv = ['sh', '-c', 'cd "$1/ws" && shift && exec "$@"', 'sh', d, m.host_python, '-I', '-c', launch,
             f'{d}/pkg', d, json.dumps(spec)]
     p = popen(_remote(m, argv), stdin=subprocess.PIPE)  # stdin stays open: its close tells the host we are gone
     try:

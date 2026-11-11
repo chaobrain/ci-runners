@@ -680,15 +680,18 @@ def stale_entries(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid,
     return out
 
 
-def authorized_keys_text(old: str, key: str, *, etc: str, python: str, base: str, probe_key: str = '') -> str:
+def authorized_keys_text(old: str, key: str, *, etc: str, python: str, base: str,
+                         probe_key: str | list[str] = '') -> str:
     """The account's ``authorized_keys`` with the push key's line (decision 12.4): the key
     may only run ``org-sync --receive`` of the installed release, with nothing else
-    (``restrict``); with ``probe_key``, the other host's pool probe key's line, which may
-    only run ``pool probe`` (decision 15.1, item 8). The lines of ours from before are
-    replaced (a key no longer given loses its line), every other line kept. Pure."""
+    (``restrict``); with ``probe_key``, a line for each other host's pool probe key (one,
+    or a list from decision 15.8), which may only run ``pool probe`` (decision 15.1, item
+    8). The lines of ours from before are replaced (a key no longer given loses its line),
+    every other line kept. Pure."""
     ours = []
+    probes = [probe_key] if isinstance(probe_key, str) else list(probe_key)
     for name, k, verb, mark in (('push_key', key, 'org-sync --receive', PUSH_MARK),
-                                ('probe_key', probe_key, 'pool probe', PROBE_MARK)):
+                                *(('probe_key', p, 'pool probe', PROBE_MARK) for p in probes)):
         if not k:
             continue
         if not inventory.PUSH_KEY.fullmatch(k):
@@ -696,11 +699,14 @@ def authorized_keys_text(old: str, key: str, *, etc: str, python: str, base: str
         kind, b64 = k.split()[:2]
         ours.append((kind, b64, verb, mark))
     if len({b64 for _, b64, _, _ in ours}) < len(ours):  # sshd takes a key's first line: one key, one command
-        raise ValueError('probe_key must not be the push_key')
+        raise ValueError('probe_key must not be the push_key, nor name a key twice')
     for v in (etc, python, base):
         if not PATH.fullmatch(v):
             raise ValueError(f'{v!r} must be an absolute path matching {PATH.pattern}')
     keep = [line for line in old.splitlines() if line.split()[-1:] not in ([PUSH_MARK], [PROBE_MARK])]
+    for line in keep:  # sshd takes a key's first line: another line of one of our keys would win over ours
+        if any(b64 in line.split() for _, b64, _, _ in ours):
+            raise ValueError('a line of authorized_keys that is not ours holds the push_key or a probe_key: remove it first')
     cmd = f'CI_RUNNERS_ETC={etc} CI_RUNNERS_PYTHON={python} exec {base}/releases/hook/bin/ci-run'
     return '\n'.join([*keep, *(f'restrict,command="{cmd} {verb}" {kind} {b64} {mark}'
                                for kind, b64, verb, mark in ours)]) + '\n'

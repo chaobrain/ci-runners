@@ -4,6 +4,7 @@ tree; the systemctl commands are recorded, not run."""
 from __future__ import annotations
 
 import contextlib
+import errno
 import glob
 import hashlib
 import http.server
@@ -1283,6 +1284,80 @@ class Shared(unittest.TestCase):
             self.assertIn(f'  warn   {queue}: default ACL entry for uid {old}, which has no account', plan.text())
             self.assertEqual(plan.blocked, '')
             self.assertEqual(self.apply(plan.text()), 0)
+
+    def test_the_accounts_own_access_at_job_time(self):
+        """Decision 15.2: ``own_access`` checks one uid, the part's own, on every shared path,
+        with no subprocess: a renumbered account's new uid lacks every entry; then each
+        fault on its own. What the parts make may be missing; who owns a path is not its
+        concern; an error other than a missing or unreachable path is raised."""
+        if not shutil.which('setfacl'):
+            self.skipTest('no setfacl')
+        if os.getuid() == 0:
+            self.skipTest('root reaches every path')
+        h, me, other, old = self._with_leases(), os.getuid(), 65534, 3999011
+        mine = f'uid {me}'
+        lease = f'{self.p}-leases'
+        queue, card = f'{lease}/queue', f'{lease}/card0.0.lock'
+        _, acl = self._acl_state(h, {})
+        files, dirs = self._shared_made(h, acl, (old, other))  # the entries kept the account's old uid
+        self.assertEqual(setup.own_access(h, me), [(f, f'no rw ACL entry for {mine}') for f in files] + [
+            x for d in dirs for x in ((d, f'no rwx ACL entry for {mine}'), (d, f'no default rwx ACL entry for {mine}'))])
+        os.mkdir(queue)  # made by a part: the lease directory's default entries, the old uid's
+        pathlib.Path(card).touch()
+        with mock.patch.object(setup.subprocess, 'run', side_effect=AssertionError('a subprocess')), \
+                mock.patch.object(setup.subprocess, 'Popen', side_effect=AssertionError('a subprocess')):
+            got = setup.own_access(h, me)
+        self.assertEqual(got[-3:], [(queue, f'no rwx ACL entry for {mine}'),
+                                    (queue, f'no default rwx ACL entry for {mine}'), (card, f'no rw ACL entry for {mine}')])
+        self.assertEqual(setup.own_access(h, old), [])
+        for f in (*files, card):  # mended: the access needs no root-owned path (the tests' are the test's)
+            acl('-m', f'u:{me}:rw', f)
+        for d in (*dirs, queue):
+            acl('-m', f'u:{me}:rwx,d:u:{me}:rwx', d)
+        self.assertEqual(setup.own_access(h, me), [])
+        acl('-m', 'm::r', files[1])  # the mask takes the entry's w away
+        self.assertEqual(setup.own_access(h, me), [(files[1], f'no rw ACL entry for {mine}')])
+        acl('-m', 'm::rw', files[1])
+        acl('-x', f'd:u:{me}', queue)
+        self.assertEqual(setup.own_access(h, me), [(queue, f'no default rwx ACL entry for {mine}')])
+        acl('-m', f'd:u:{me}:rwx', queue)
+        os.unlink(files[0])
+        self.assertEqual(setup.own_access(h, me), [(files[0], 'missing')])
+        os.symlink(files[1], files[0])  # a link, even to a good file
+        self.assertEqual(setup.own_access(h, me), [(files[0], 'not a regular file')])
+        os.unlink(files[0])
+        pathlib.Path(files[0]).touch()
+        acl('-m', f'u:{me}:rw', files[0])
+        os.unlink(card)
+        os.rmdir(queue)
+        self.assertEqual(setup.own_access(h, me), [])  # not made yet: the first part makes them
+        pathlib.Path(queue).touch()
+        self.assertEqual(setup.own_access(h, me), [(queue, 'not a directory')])
+        os.unlink(queue)
+        os.mkdir(queue)
+        os.chmod(lease, 0)  # its mask too: the entries give nothing, the queue is out of reach
+        try:
+            self.assertEqual(setup.own_access(h, me), [(lease, f'no rwx ACL entry for {mine}'), (queue, 'not reachable')])
+        finally:
+            os.chmod(lease, 0o770)
+        with mock.patch.object(setup.os, 'lstat', side_effect=OSError(5, 'Input/output error')):
+            with self.assertRaises(OSError):
+                setup.own_access(h, me)  # no proven miss
+        with mock.patch.object(setup.os, 'getxattr', side_effect=OSError(errno.EIO, 'Input/output error')):
+            with self.assertRaises(OSError):
+                setup.own_access(h, me)  # an ACL unread is no ACL missing
+            self.assertNotEqual(setup.shared_state(h, uid_of=lambda a: me), [])  # the plan's read is not strict
+        with mock.patch.object(setup.os, 'getxattr', side_effect=OSError(errno.ENODATA, 'No data available')):
+            self.assertEqual(len(setup.own_access(h, me)), len(files) + 2 * 3)  # no ACL: no entry
+        shutil.rmtree(queue)
+        os.rmdir(lease)
+        pathlib.Path(lease).touch()  # a file in the lease directory's place: its queue is out of reach
+        self.assertEqual(setup.own_access(h, me), [(lease, 'not a directory'), (queue, 'not reachable')])
+        self.assertIn((queue, 'not reachable'), setup.shared_state(h, uid_of=lambda a: me))  # the plan too
+        os.unlink(lease)
+        os.symlink(lease, lease)  # a link loop
+        self.assertEqual(setup.own_access(h, me), [(lease, 'not a directory'), (queue, 'not reachable')])
+        os.unlink(lease)
 
     def test_no_fixed_uid(self):
         """Issue #125: every uid comes from the account's name when the plan is made, so a

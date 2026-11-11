@@ -42,6 +42,7 @@ records what it made in ``state/setup.json``; a second run is a no-op.
 from __future__ import annotations
 
 import difflib
+import errno
 import glob
 import hashlib
 import json
@@ -56,7 +57,6 @@ import sys
 import tarfile
 import time
 import tomllib
-import urllib.request
 
 from ci_runners import hookcopy, inventory, locks, slots
 
@@ -447,14 +447,17 @@ def namespace_faults(h: dict, table: str, here: str) -> list[str]:
 ACL_USER, ACL_MASK = 0x02, 0x10
 
 
-def acl_users(path: str, default: bool = False) -> dict[int, int] | None:
+def acl_users(path: str, default: bool = False, strict: bool = False) -> dict[int, int] | None:
     """``{uid: perm}`` of the named-user entries of ``path``'s access (or default) ACL,
     with the mask applied; None if it has no such ACL. Read from the xattr, so no
-    ``getfacl`` is needed."""
+    ``getfacl`` is needed. ``strict``: an error other than no such ACL (or none on this
+    file system) is raised, not taken for no ACL."""
     try:
         raw = os.getxattr(path, 'system.posix_acl_default' if default else 'system.posix_acl_access',
                           follow_symlinks=False)
-    except OSError:
+    except OSError as e:
+        if strict and e.errno not in (errno.ENODATA, errno.EOPNOTSUPP):
+            raise
         return None
     entries = [(int.from_bytes(raw[i:i + 2], 'little'), int.from_bytes(raw[i + 2:i + 4], 'little'),
                 int.from_bytes(raw[i + 4:i + 8], 'little')) for i in range(4, len(raw) - 7, 8)]
@@ -483,29 +486,64 @@ def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None)
             uids[a] = uid_of(a)
         except KeyError:
             todo.append((a, 'no such account'))
+    return todo + _path_faults(h, uids, root=True)
+
+
+def _shared_paths(h: dict) -> list[tuple[str, bool, bool]]:
+    """``(path, a directory, the parts make it)`` for each shared path of ``h``: the files
+    and directories of ``shared_files``, then the lock files the parts left in the lease
+    directory (``lease_files``). Reads the lease directory."""
     files, dirs, inner = shared_files(h)
-    made = lease_files(h)
-    for path in [*files, *dirs, *inner, *made]:
-        is_dir = path in dirs or path in inner
+    return [*((p, False, False) for p in files),
+            *((p, True, False) for p in dirs),
+            *((p, True, True) for p in inner),
+            *((p, False, True) for p in lease_files(h))]
+
+
+def _path_faults(h: dict, uids: dict[str, int], root: bool, strict: bool = False) -> list[tuple[str, str]]:
+    """``(path, what is missing)`` for each shared path (``_shared_paths``): there (what
+    the parts make may not be yet), reachable, of its kind and not a link, root-owned with
+    ``root`` (what the parts make is its maker's), with a named-user access entry for each
+    uid of ``uids`` (named by its key) with ``rw`` (``rwx`` on a directory) after the mask,
+    and on a directory a default entry with ``rwx``. An error other than a missing or an
+    unreachable path is raised, and with ``strict`` one reading an ACL (``acl_users``).
+    Reads the files, their ACLs by xattr."""
+    out = []
+    for path, is_dir, theirs in _shared_paths(h):
         try:
             st = os.lstat(path)
-        except OSError:
-            if path not in inner and path not in made:  # the parts make those
-                todo.append((path, 'missing'))
+        except FileNotFoundError:
+            if not theirs:  # the parts make those
+                out.append((path, 'missing'))
+            continue
+        except OSError as e:  # on its way: a directory that denies its x, a file, a link loop
+            if e.errno not in (errno.EACCES, errno.ENOTDIR, errno.ELOOP):
+                raise
+            out.append((path, 'not reachable'))
             continue
         if not (stat.S_ISDIR if is_dir else stat.S_ISREG)(st.st_mode):
-            todo.append((path, 'not a directory' if is_dir else 'not a regular file'))
+            out.append((path, 'not a directory' if is_dir else 'not a regular file'))
             continue
-        if st.st_uid != 0 and path not in inner and path not in made:  # those are their maker's
-            todo.append((path, 'not root-owned'))
+        if root and st.st_uid != 0 and not theirs:  # those are their maker's
+            out.append((path, 'not root-owned'))
             continue
         need, kind = (7, 'rwx') if is_dir else (6, 'rw')  # a directory: x to reach its tickets
         for default in ((False, True) if is_dir else (False,)):
-            got = acl_users(path, default) or {}
+            got = acl_users(path, default, strict) or {}
             short = [a for a, u in uids.items() if got.get(u, 0) & need != need]
             if short:
-                todo.append((path, f'no {"default " if default else ""}{kind} ACL entry for {", ".join(short)}'))
-    return todo
+                out.append((path, f'no {"default " if default else ""}{kind} ACL entry for {", ".join(short)}'))
+    return out
+
+
+def own_access(h: dict, uid: int) -> list[tuple[str, str]]:
+    """``(path, what is missing)`` for ``uid``'s own access to each shared path of ``h`` at
+    job time (decision 15.2, issue #125): ``shared_state``'s checks of the paths for that
+    one uid (``uid <n>`` in what is missing), but not who owns them. Empty when the uid
+    has all it needs. No subprocess: the ACLs are read by xattr. An error other than a
+    missing or unreachable path, or than no ACL, is raised, so the caller never takes it
+    for a miss."""
+    return _path_faults(h, {f'uid {uid}': uid}, root=False, strict=True)
 
 
 def _has_account(uid: int) -> bool:
@@ -906,6 +944,7 @@ def _unpack(path: str, cache: str, port: int) -> None:
         os.makedirs(os.path.dirname(cache), exist_ok=True)
         if port:
             wait_port(port)
+        import urllib.request  # here: each part imports this module (own_access, decision 15.2)
         proxies = {'https': f'http://127.0.0.1:{port}', 'http': f'http://127.0.0.1:{port}'} if port else {}
         opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
         with opener.open(RUNNER_URL, timeout=600) as r, open(cache + '.part', 'wb') as f:

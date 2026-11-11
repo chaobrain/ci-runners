@@ -5,7 +5,9 @@ null>, "pools": {<pool key>: <epoch>}}``, replaced whole (a rename) under
 ``state/drain.lock``, so it survives a restart. A missing file is "not drained"; an
 unreadable or malformed one drains the host (fail closed). ``part`` reads it in its gate
 and again just before the command (``refusal``); ``claim``, ``salvage`` and ``verdict``
-never read it.
+never read it. A part that finds the CI account's access to the shared files missing
+drains the host itself (``part.Executor.shared_state``, decision 15.2); nothing undrains
+but ``drain off``.
 
 Each change also writes a world-readable copy, ``<data>/ci-runners/drain.json`` (mode
 644, ``public_path``), for the pool runs of other accounts, which cannot read ``state/``

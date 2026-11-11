@@ -764,15 +764,15 @@ class Kept(Base):
                 self.assertFalse(any(k.startswith('GIT_CONFIG_KEY') for k in env))  # no credentials at all
                 self.assertEqual(env['GIT_CONFIG_GLOBAL'], os.devnull)
 
-    def test_a_token_in_the_environment_is_not_used(self):
+    def test_a_token_in_the_environment_refuses_the_build(self):
+        """Every build step would inherit it (pip, the build backends, the upstreams' setup)."""
         code, _ = self.main('--kept', str(self.file), token=True)
-        self.assertEqual(code, 0, self.err)
+        self.assertEqual(code, 2)
+        self.assertIn('unset GH_TOKEN', self.err)
+        self.assertEqual((self.calls, self.host.calls), ([], []))
+        self.assertEqual(self.main('--kept', '', token=True)[0], 2)  # an empty value is a path, not no --kept
+        self.assertIn('unset GH_TOKEN', self.err)
         self.assertEqual(self.calls, [])
-        gits = [env for cmd, env in self.host.calls if cmd[0] == 'git']
-        self.assertTrue(gits)
-        self.assertFalse(any(k.startswith('GIT_CONFIG_KEY') for env in gits for k in env))  # no extraheader
-        self.assertFalse(any('SECRET-TKN-9' in ' '.join(cmd) + ' '.join((env or {}).values())
-                             for cmd, env in self.host.calls))
 
     def test_the_record_on_standard_input(self):
         with mock.patch.object(sys, 'stdin', io.StringIO(self.record)):
@@ -790,13 +790,20 @@ class Kept(Base):
         rec = json.loads(self.record)
         bad = [dict(rec, repository='Org/Other'), dict(rec, sha='x'), dict(rec, spec='schema = 9\n'),
                dict(rec, files={'../x.txt': 'a\n'}), dict(rec, files={'r.txt': 1}), dict(rec, upstream=rec['upstream'][:1]),
-               dict(rec, files={f'r{i}.txt': 'a\n' for i in range(envbuild.MAX_FILES + 1)}),
-               dict(rec, files={'r.txt': 'a' * (envbuild.MAX_FILE + 1)}), [rec]]
+               dict(rec, files={'requirements-dev.txt': ''.join(f'-r r{i}.txt\n' for i in range(envbuild.MAX_FILES)),
+                                **{f'r{i}.txt': 'a\n' for i in range(envbuild.MAX_FILES)}}),  # all named, one too many
+               dict(rec, files={'requirements-dev.txt': 'a' * (envbuild.MAX_FILE + 1)}), [rec],
+               dict(rec, files={**rec['files'], 'extra.txt': 'a\n'}),  # a file the spec does not name
+               dict(rec, files={k: v for k, v in rec['files'].items() if k != 'requirements-dev.txt'}),  # one it names
+               dict(rec, files={'requirements-dev.txt': '-r ../../outside.txt\npytest\n'}),  # -r out of the tree
+               dict(rec, upstream=[dict(rec['upstream'][0], repository=['x']), rec['upstream'][1]])]
         for b in bad:
             self.file.write_text(json.dumps(b))
             code, _ = self.main('--kept', str(self.file), token=False)
             self.assertEqual(code, 2, (b if isinstance(b, list) else {k: str(v)[:40] for k, v in b.items()}))
         self.file.write_text('{not json')
+        self.assertEqual(self.main('--kept', str(self.file), token=False)[0], 2)
+        self.file.write_text('[' * 100000)
         self.assertEqual(self.main('--kept', str(self.file), token=False)[0], 2)
         self.assertEqual(self.main('--kept', str(self.file) + '.missing', token=False)[0], 2)
         self.file.write_text(' ' * (envbuild.MAX_KEPT + 1))

@@ -1602,6 +1602,9 @@ class Shared(unittest.TestCase):
             setup.authorized_keys_text('', KEY, etc='/e', python='/p', base='/b', probe_key=[a, KEY])
         with self.assertRaisesRegex(ValueError, 'probe_key must be'):
             setup.authorized_keys_text('', '', etc='/e', python='/p', base='/b', probe_key=[a, 'ssh-rsa AAAA x'])
+        for line in (a, f'no-pty {b} someone'):  # sshd would take that line, not ours: refused
+            with self.assertRaisesRegex(ValueError, 'that is not ours holds'):
+                setup.authorized_keys_text(line + '\n', '', etc='/e', python='/p', base='/b', probe_key=[a, b])
         self.inv.write_text(self.inv.read_text().replace('local_accounts = ["localuser"]\n', f'probe_key = ["{a}", "{b}"]\n'))
         self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
         ak = (self.home / '.ssh' / 'authorized_keys').read_text().splitlines()

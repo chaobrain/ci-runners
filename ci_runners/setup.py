@@ -704,6 +704,9 @@ def authorized_keys_text(old: str, key: str, *, etc: str, python: str, base: str
         if not PATH.fullmatch(v):
             raise ValueError(f'{v!r} must be an absolute path matching {PATH.pattern}')
     keep = [line for line in old.splitlines() if line.split()[-1:] not in ([PUSH_MARK], [PROBE_MARK])]
+    for line in keep:  # sshd takes a key's first line: another line of one of our keys would win over ours
+        if any(b64 in line.split() for _, b64, _, _ in ours):
+            raise ValueError('a line of authorized_keys that is not ours holds the push_key or a probe_key: remove it first')
     cmd = f'CI_RUNNERS_ETC={etc} CI_RUNNERS_PYTHON={python} exec {base}/releases/hook/bin/ci-run'
     return '\n'.join([*keep, *(f'restrict,command="{cmd} {verb}" {kind} {b64} {mark}'
                                for kind, b64, verb, mark in ours)]) + '\n'

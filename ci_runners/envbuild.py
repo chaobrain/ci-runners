@@ -534,9 +534,21 @@ def kept_record(rec: object, repository: str, where: str) -> tuple[str, Spec, di
         raise SpecError(f'{where}: a kept requirement file is not text')
     if len(files) > MAX_FILES or any(len(v.encode('utf-8')) > MAX_FILE for v in files.values()):
         raise SpecError(f'{where}: more than {MAX_FILES} requirement files, or one larger than {MAX_FILE} bytes')
+    todo, named = list(spec.requirements), []  # the files the spec names, as fetch follows them
+    while todo:
+        q = todo.pop(0)
+        if q in named:
+            continue
+        if q not in files:
+            raise SpecError(f'{where}: the kept spec names {q}, which the record does not hold')
+        named.append(q)
+        todo += nested(q, files[q])  # each -r and -c target inside the repository, or a SpecError
+    if set(named) != set(files):
+        raise SpecError(f'{where}: the record holds requirement files the kept spec does not name')
     commits = {}
     for u in rec['upstream']:
-        if not isinstance(u, dict) or not isinstance(u.get('commit'), str) or not github.SHA.fullmatch(u['commit']):
+        if not isinstance(u, dict) or not isinstance(u.get('commit'), str) or not github.SHA.fullmatch(u['commit']) \
+                or not isinstance(u.get('repository'), str) or not isinstance(u.get('branch'), str):
             raise SpecError(f'{where}: a kept upstream has no commit: run env build once')
         commits[(u.get('repository'), u.get('branch'))] = u['commit']
     if set(commits) != {(u.repository, u.branch) for u in spec.upstream}:
@@ -564,8 +576,8 @@ def read_kept(path: str, repository: str, stdin=None) -> tuple[str, Spec, dict[s
         raise SpecError(f'--kept {path}: larger than {MAX_KEPT} bytes')
     try:
         rec = json.loads(text)
-    except ValueError:
-        raise SpecError(f'--kept {path}: not JSON') from None
+    except (ValueError, RecursionError):
+        raise SpecError(f'--kept {path}: not JSON, or nested too deep') from None
     sha, spec, files, _ = kept_record(rec, repository, f'--kept {path}')
     return sha, spec, files
 
@@ -618,7 +630,7 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, call: Callable | N
     p.add_argument('--kept', metavar='FILE', help="build: from another host's kept record of the project's env "
                    '(its ci-env.json; - reads stdin), with no token (decision 15.8)')
     a = p.parse_args(argv)
-    if a.verb == 'refresh' and (a.dry_run or a.kept or bool(a.project) == a.all):
+    if a.verb == 'refresh' and (a.dry_run or a.kept is not None or bool(a.project) == a.all):
         p.error('refresh takes a project or --all, and no --dry-run or --kept')
     if a.verb == 'build' and (not a.project or a.all):
         p.error('build takes a project')
@@ -628,7 +640,9 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, call: Callable | N
     try:
         proj = registry.load_file(etc, a.project, inv.this)
         registry.memory_bytes(a.memory)
-        if a.kept:  # no token at all: the record was read with one on another host (decision 15.8)
+        if a.kept is not None:  # no token at all: the record was read with one on another host (decision 15.8)
+            if os.environ.get('GH_TOKEN', '').strip():  # every build step would inherit it
+                raise SpecError('--kept holds no token: unset GH_TOKEN for this build')
             token = ''
             sha, spec, files = read_kept(a.kept, proj.repository)
         else:

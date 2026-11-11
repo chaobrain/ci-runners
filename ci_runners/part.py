@@ -20,6 +20,7 @@ A part's record is ``state/parts/<owner>/<repo>/<run>-<run attempt>/<id>-<attemp
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import datetime
 import fcntl
@@ -638,6 +639,8 @@ NIGHTLY_BUSY = 'busy: nightly holds every slot and card'
 #: the shared state (decision 15.2): what GitHub shows names no path, account or uid (§3.3)
 SHARED_DRAINED = 'drained: shared state'
 SHARED_UNKNOWN = 'shared state unknown'
+SHARED_DENIED = ("ci-run part: a shared path refused this account; its owner and ACL entries are in the host's "
+                 'shared-state log (issue #124)')
 SHARED_FIX = ('as root, while no local job holds the shared files: systemd-tmpfiles --create {tmpfiles} (the root '
               'step), or the ACL entries for {account}; then, once setup/plan.sh shows the root steps done, '
               'ci-run drain off')
@@ -1016,6 +1019,33 @@ class Executor:
         shared_log(data, line)
         return SHARED_DRAINED
 
+    @contextlib.contextmanager
+    def shared_access(self, record: str, paths: Sequence[str]):
+        """Around a use of the shared files after the gate (issue #124): a
+        ``PermissionError`` is re-raised as it is, once ``denied`` has logged its cause."""
+        try:
+            yield
+        except PermissionError as e:
+            self.denied(record, e, paths)
+            raise
+
+    def denied(self, record: str, e: OSError, paths: Sequence[str]) -> None:
+        """A shared path refused the CI account after the gate (issue #124): the owner,
+        mode and ACL entries of the path ``e`` names and of ``paths``
+        (``setup.path_state``) go to the host's ``logs/shared-<date>.log`` (decision 15.2),
+        and ``e`` gains a note that says so; the error still ends the part, and nothing
+        here replaces it. The note names no path, account or uid (§3.3)."""
+        h = self.inv.host
+        try:
+            named = [e.filename] if isinstance(e.filename, str) else []
+            line = {'part': record_ref(record), 'runner': self.env.get('RUNNER_NAME', ''), 'account': h['account'],
+                    'uid': os.getuid(), 'error': f'{type(e).__name__}: {e}',
+                    'state': [setup_mod.path_state(p) for p in dict.fromkeys([*named, *paths])]}
+        except Exception as x:  # noqa: BLE001 - the part's own error stands
+            line = {'error': f'{type(e).__name__}: {e}', 'state': f'unread: {type(x).__name__}'}
+        shared_log(str(h['data']), line)
+        e.add_note(SHARED_DENIED)
+
     def cool_elsewhere(self, exclude: Sequence[int]) -> int | None:
         """The coolest card of this per-card host outside ``exclude`` that passes the
         health gate, or None (and None on any other host)."""
@@ -1145,8 +1175,10 @@ class Executor:
                 return self._away(record, rec, a, why, cls)
             # the inventory's lease_dir, shared with the pool runs of other accounts (decision 15.1), else state/leases
             lease_dir = str(h['files'].get('lease_dir') or '')
-            leases = Leases(lease_dir or os.path.join(h['data'], 'ci-runners', 'state', 'leases'),
-                            shared=bool(lease_dir))
+            lease_path = lease_dir or os.path.join(h['data'], 'ci-runners', 'state', 'leases')
+            lease_paths = [os.path.join(lease_path, 'queue'), lease_path]  # issue #124: named when one refuses us
+            with self.shared_access(record, lease_paths):
+                leases = Leases(lease_path, shared=bool(lease_dir))
             if nightly:  # from its first ticket to its end, first attempts go elsewhere (13.6)
                 every_hold(str(h['data']), [os.getpid()], record)
             if cls in SLOT_CLASSES or nightly:
@@ -1156,16 +1188,18 @@ class Executor:
                 # a retry queues past the cap, which still counts it (13.6): it has nowhere else to go
                 if not a.attempt_of and slots.queue_full(mine, proj.max_waiting):
                     return self._end(record, rec, a, unavailable='project queue full')
-                q.take_ticket(proj.name, f'part {a.id}', every=nightly)
+                with self.shared_access(record, [q.queue]):
+                    q.take_ticket(proj.name, f'part {a.id}', every=nightly)
                 every = q.every  # the slots it holds so far, closed at the end
                 try:
                     caps = registry.slot_caps(self.etc, self.inv.this)
                     caps.setdefault(proj.name, proj.max_slots)
                     while slot_fd is None:
-                        if nightly:
-                            slot_fd = (q.try_take_every(proj.name, caps) or [None])[0]
-                        else:
-                            slot_fd = q.try_take(proj.name, caps)
+                        with self.shared_access(record, [q.queue]):
+                            if nightly:
+                                slot_fd = (q.try_take_every(proj.name, caps) or [None])[0]
+                            else:
+                                slot_fd = q.try_take(proj.name, caps)
                         if slot_fd is None:
                             if self.stopped:
                                 return self._end(record, rec, a, stopped=True)
@@ -1200,15 +1234,16 @@ class Executor:
                     hot = set(use) - set(cool)
                     free = smi_free(self.run)
                     got = None
-                    if nightly:
-                        # every lease, whatever the cards hold; gpu-mem-mib only on the cards its command
-                        # gets: the lowest cool ones with that much free (lead, 2026-11-07; §4.8, §5.5)
-                        fit = sorted(c for c in cool if free.get(c, 0) >= need)[:a.gpus]
-                        if len(fit) == a.gpus:
-                            got = leases.try_take(n, mine, free, 0, every=True)
-                    else:
-                        fit = []
-                        got = leases.try_take(n, mine, {c: m for c, m in free.items() if c not in hot}, need)
+                    with self.shared_access(record, lease_paths):
+                        if nightly:
+                            # every lease, whatever the cards hold; gpu-mem-mib only on the cards its command
+                            # gets: the lowest cool ones with that much free (lead, 2026-11-07; §4.8, §5.5)
+                            fit = sorted(c for c in cool if free.get(c, 0) >= need)[:a.gpus]
+                            if len(fit) == a.gpus:
+                                got = leases.try_take(n, mine, free, 0, every=True)
+                        else:
+                            fit = []
+                            got = leases.try_take(n, mine, {c: m for c, m in free.items() if c not in hot}, need)
                     if got is not None:
                         cards = fit if nightly else got
                         rec['leased'] = sorted(got)
@@ -1231,7 +1266,8 @@ class Executor:
                 hold = locks.HostLock(str(h['files']['host_lock']), held='',
                                       timeout=max(0.0, deadline - time.monotonic()))
                 try:
-                    hold.acquire(lock)
+                    with self.shared_access(record, []):
+                        hold.acquire(lock)
                 except locks.LockTimeout:
                     return self._end(record, rec, a, unavailable=f'queue timeout: no host lock ({lock})')
                 except locks.MissingSharedFile as e:

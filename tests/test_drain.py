@@ -482,6 +482,58 @@ class SharedState(Host):
         finally:
             os.close(reader)
 
+    def test_a_lease_queue_denied_after_the_gate_names_its_cause(self):
+        """Issue #124: the lease directory refuses the account after the gate passed (its
+        ACL replaced in between): the part still fails, but the host's log holds the owner,
+        mode and ACL entries of the ``queue`` and of the lease directory, the stale uid as
+        one with no account, and the error's note says so and names no account or uid."""
+        self.make((self.me, self.OTHER))
+        self.acl('-x', f'u:{self.me},d:u:{self.me}', self.lease)
+        self.acl('-m', f'u:{self.OLD}:rwx,d:u:{self.OLD}:rwx', self.lease)
+        os.chmod(self.lease, 0o070)  # its owner (this test's account) refused too
+        queue = f'{self.lease}/queue'
+        with mock.patch.object(part.setup_mod, 'own_access', return_value=[]), \
+                self.assertRaises(PermissionError) as cm:
+            self.execute()
+        (note,) = cm.exception.__notes__
+        self.assertEqual(note, part.SHARED_DENIED)
+        for secret in ('acct-x', 'localuser', str(self.OLD), '/tmp/'):  # GitHub shows it
+            self.assertNotIn(secret, note)
+        self.assertNotRegex(note, rf'(?<![0-9.]){self.me}(?![0-9.])')
+        (line,) = self.logged()
+        self.assertEqual({k: line[k] for k in ('part', 'runner', 'account', 'uid')},
+                         {'part': 'org/repo/77-1/unit-1', 'runner': 'hb-part-1', 'account': 'acct-x', 'uid': self.me})
+        self.assertTrue(line['error'].startswith('PermissionError: '), line['error'])
+        q, d = line['state']
+        self.assertEqual(q, {'path': queue, 'error': 'PermissionError: Permission denied'})
+        name = setup._account_of(self.me)
+        self.assertEqual({k: d[k] for k in ('path', 'owner', 'mode', 'kind')},
+                         {'path': self.lease, 'owner': [self.me, name], 'mode': '0070', 'kind': 'directory'})
+        other = [self.OTHER, 'rwx', setup._account_of(self.OTHER)]
+        self.assertEqual(d['acl'], [other, [self.OLD, 'rwx', None]])  # by uid
+        self.assertEqual(d['default_acl'], [other, [self.OLD, 'rwx', None]])
+        self.assertEqual(drain.read(str(self.data)), {'host': None, 'pools': {}})  # an error, no drain
+
+    def test_the_state_of_a_path(self):
+        self.make((self.me, self.OTHER))
+        f, d = self.files[0], self.dirs[0]
+        self.acl('-m', 'm::r', f)  # the mask applies
+        mine = [self.me, 'rw-', setup._account_of(self.me)]
+        self.assertEqual(setup.path_state(f)['acl'], [[self.me, 'r--', mine[2]],
+                                                      [self.OTHER, 'r--', setup._account_of(self.OTHER)]])
+        self.assertNotIn('default_acl', setup.path_state(f))  # a file has none
+        self.assertEqual(setup.path_state(d)['kind'], 'directory')
+        plain = pathlib.Path(self.tmp.name, 'plain')
+        plain.touch(0o640)
+        os.chmod(plain, 0o640)
+        self.assertEqual({k: v for k, v in setup.path_state(str(plain)).items() if k != 'path'},
+                         {'owner': [self.me, setup._account_of(self.me)], 'mode': '0640', 'kind': 'file', 'acl': None})
+        self.assertEqual(setup.path_state(str(plain) + '.x')['error'], 'FileNotFoundError: No such file or directory')
+        with mock.patch.object(setup.os, 'getxattr', side_effect=OSError(5, 'Input/output error')):
+            self.assertEqual(setup.path_state(d)['default_acl'], 'unread: OSError: Input/output error')
+        with mock.patch.object(setup.pwd, 'getpwuid', side_effect=KeyError(1)):
+            self.assertEqual(setup.path_state(str(plain))['owner'], [self.me, None])
+
     def test_no_check_without_local_accounts(self):
         self.inv = inventory.load(self.plain)
         with mock.patch.object(part.setup_mod, 'own_access', side_effect=AssertionError('checked')):

@@ -966,6 +966,11 @@ runs only when someone runs it.
    logs): each path, the account and its uid, what is missing, the stale uids, and the
    fix: the root step (`systemd-tmpfiles --create` on the `tmpfiles.d` file, while no
    local job holds the files) or the ACL, then `ci-run drain off`.
+   A shared path that refuses the CI account after the gate (issue #124: the slot queue's
+   or the lease directory's files, the host lock) still fails the part as before, an
+   error; its line in the same log holds the error and each path's owner, mode and
+   named-user ACL entries (`setup.path_state`), and the error gains a note that names no
+   path, account or uid.
 4. Only a proven miss drains. A check that cannot run (an unexpected error) ends the part
    `unavailable` (`shared state unknown`) without draining. Nothing undrains by itself:
    the operator runs `ci-run drain off` once the plan shows the root steps done.
@@ -1027,7 +1032,45 @@ quiet one needs a clock that is not GitHub's.
   12.2 rules out. (C) No timer, only the gate's event wakes and a dispatch by hand: costs
   nothing, but leaves a quiet stalled evening without a night.
 
-## Lead decision (proposed, 2026-11-11): the runners come back by themselves (decision 15.4, issue #134)
+## Lead decision (draft, 2026-11-11): a cancel its run outlives is retried (decision 15.4, issue #110)
+
+Draft for the lead. On 2026-11-10 at about 01:05 UTC the 3090 hosts' runners briefly lost
+their connection to GitHub (`ECONNRESET`, "lost communication with the server"). GitHub
+cancelled the running jobs one by one, each runner sent its part the signal, and the parts
+ended `stopped`. `stopped` asks for no retry, so the verdicts of chaobrain/brainspike#496
+and #497 were `error` (infrastructure: `cpu stopped`, `gpu-multi stopped`) and both heads
+waited for a person to dispatch them again. brainspike's CI contract §4.2 retries an
+infrastructure end once and keeps `stopped` for a cancel by a newer push.
+
+1. **Who cancelled is not known where the part ends.** A newer run of the job's concurrency
+   group, a person's cancel and GitHub's own cancel of one job (its runner lost the
+   connection, or the job ran past its `timeout-minutes`) all reach the executor as the
+   runner's signal: before the command (the executor ends `stopped` itself) or during it
+   (the job-completed hook stops the scope, and the record's exit is `signalled`). The run
+   knows: an owner's cancel cancels the whole run (GitHub cancels runs, never one job), and
+   a cancelled run starts no later job that checks `!cancelled()`. GitHub's own cancel of a
+   job leaves its run going (brainspike run 42730362031: its parts' jobs `cancelled` at
+   01:05, its `!cancelled()` salvage jobs ran at 01:37).
+2. **So `stopped` asks for a retry**, once, on the part's own pool (`next: retry`, as
+   `lost`), and the consumer's graph decides: its retry job, like its verdict, is skipped
+   on a cancelled run (§4.8 rules 4 and 5). An owner's cancel retries nothing; a cancel the
+   run outlives runs the part once more. A second `stopped` is final (attempt 2 of at most
+   2), and the verdict is `error`, as for any second infrastructure end. The outcome keeps
+   its name and precedence: it says what the executor saw, a cancel.
+3. **Nothing else changes:** no action's input or output, no label, no outcome kind. A
+   consumer whose retry job has no `!cancelled()` retries a cancelled run's parts (rule 4
+   now says so). It takes effect with the next release, once the hosts install it and `v1`
+   moves (§9; the lead).
+- *Options weighed.* (B) The readers, `salvage` and the verdict, report a signalled record
+  as `lost`, since they run only on a run that goes on (rule 5): the name fits, but a part
+  cancelled before its command keeps the executor's own `stopped`, which a consumer reads
+  in the cancelled job itself (brainspike's retry), so half the cases stay unretried. (C)
+  The executor asks GitHub whether its run was cancelled: a token on the host, and an API
+  call at the moment the connection is what failed. (D) Only the consumer's sweeper
+  dispatches the head again: every part runs again, much later, and that is the consumer's
+  (brainspike's CI contract §5.2), not the outcome's.
+
+## Lead decision (proposed, 2026-11-11): the runners come back by themselves (decision 15.5, issue #134)
 
 Proposed for the lead's approval. On 2026-11-11 the lab's UID migration stopped 3090a's CI
 account's user manager at 01:01 and started it again at 01:03. At that start
@@ -1429,7 +1472,7 @@ nonzero exit with an OOM kill is `oom`, not `red`.
 | unavailable (`drained`, `busy`) | the drain (decision 13.1), the shared state missing for the CI account (15.2), or a busy host on a first attempt (13.2), or a `nightly` part's hold of the host on a first attempt (13.6) | fallback: once, on the other host's pool of the class (13.3); `none` for a drained part of a class with no such pool |
 | unavailable (`p2p`) | the P2P self-test of a `multi` part failed, errored or ran over its bound (decision 12.6) | none: a host fault, which the verdict reports as error |
 | lost | the job ended without outputs: the runner stopped (`systemctl show` timestamps after the part's start), or the tunnel dropped the job's connection | the verdict salvages the record (§4.5) |
-| stopped | cancelled (concurrency group, TERM) | none |
+| stopped | cancelled: the job's signal, before or during the command (a newer run of the concurrency group, a person's cancel, or GitHub's own cancel of the job: a runner that lost its connection, the job's `timeout-minutes`) | retry once on the same pool; a cancelled run runs no retry (§4.8 rule 4), so only a cancel its run outlives is retried (decision 15.4) |
 
 A part is retried at most once (the registry may set 0). A second infrastructure end
 is an error in the verdict.
@@ -1496,7 +1539,9 @@ hosts, a coverage job). These rules are the consumer's:
 4. **Retries.** A part whose `next` is `retry` or `fallback` runs again at most once, with
    `attempt-of` its first record and `resume` as the hint says, on the labels `retry-on`
    names or on a pool the consumer chooses (another host's, for a `fallback`). A retry on
-   another host names the first host's record in `attempt-of` (decision 13.3).
+   another host names the first host's record in `attempt-of` (decision 13.3). The retry
+   job is skipped on a cancelled run (`!cancelled()`), so a `stopped` part is retried only
+   when GitHub cancelled its job alone and the run went on (decision 15.4).
 5. **The verdict** runs last, on the light pool of one host that ran parts, after a
    `salvage` job on every other host that did (§4.5), unless the run was cancelled (a
    newer head's run posts instead). It reads the parts' `ci-part-<id>-<attempt>`
@@ -1601,7 +1646,7 @@ All are idempotent and run as the runner account. None needs sudo.
 - `setup/plan.sh <host>` reads the inventory and prints every change it would make:
   files with their diffs, units, `.env` lines and runner directories. It changes
   nothing. It also checks linger for the account (a root step) and each enabled unit's link,
-  and prints the runners not running now on standard error (15.4). The lead approves this output. Save only its standard output as the plan.
+  and prints the runners not running now on standard error (15.5). The lead approves this output. Save only its standard output as the plan.
 - `setup/apply.sh <host> --plan <file>` applies exactly an approved plan. It refuses if
   the plan's text differs from a fresh `plan.sh` output, or while a root step the plan
   lists (§5.3) is not done. It writes a state file, and a
@@ -1681,8 +1726,8 @@ refreshed from a546b92f (T17):
 | runner app | the pinned release, checked by sha256, into 9 runner directories on 3090b and 8 on 3090a (§5.1) |
 | `.env` per runner | as on h100; `CI_RUNNER_CARD=<N>` on a `gpu` runner; `https_proxy` at the tunnel; from `v1.5` the two hook variables name the copies in `/tmp/ci-runners-hooks/` (decision 13.5) |
 | the hooks (`v1.5`) | `hooks/job-started.sh` and `job-completed.sh` under `data` gain the line `base=<data>/ci-runners`, from which they find `releases/hook` (13.5) |
-| `ci-runner@.service`, `ci-tunnel.service`, `ci-reaper.timer` | as on h100; from `v1.5` the runner's unit also has `After=ci-hooks.service` and an `ExecStartPre=` that checks both hook copies are executable files (13.5); from 15.4 `Wants=` (not `Requires=`) `ci-hooks.service`, a first `ExecStartPre=` that it is active, and `StartLimitIntervalSec=0` |
-| `ci-hooks.service` (`v1.5`) | oneshot, `RemainAfterExit=yes`: `ci-run hooks copy` into the private `/tmp` (13.5); enabled; started before the runners, and reloaded (`ExecReload=`, the same copy) by `apply` when a hook changes; from 15.4 `Restart=on-failure` after 30 s, `StartLimitIntervalSec=0` |
+| `ci-runner@.service`, `ci-tunnel.service`, `ci-reaper.timer` | as on h100; from `v1.5` the runner's unit also has `After=ci-hooks.service` and an `ExecStartPre=` that checks both hook copies are executable files (13.5); from 15.5 `Wants=` (not `Requires=`) `ci-hooks.service`, a first `ExecStartPre=` that it is active, and `StartLimitIntervalSec=0` |
+| `ci-hooks.service` (`v1.5`) | oneshot, `RemainAfterExit=yes`: `ci-run hooks copy` into the private `/tmp` (13.5); enabled; started before the runners, and reloaded (`ExecReload=`, the same copy) by `apply` when a hook changes; from 15.5 `Restart=on-failure` after 30 s, `StartLimitIntervalSec=0` |
 | `ci-hostload.{service,timer}` (`v1.5`) | every 60 s, `ci-run hostload sample`: one line of the load record (decision 13.2); `Nice=10`, bounded at 30 s |
 | `ci-envrefresh.{service,timer}` | every 30 min, `ci-run env refresh` for each project whose registry sets `refresh` (decision 12.11) |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 120G of 188 GiB on 3090b, 80G of 125 GiB on 3090a) and `ci-<project>.slice` |
@@ -1920,8 +1965,8 @@ Rules:
 |---|---|---|
 | runner offline mid-part | GitHub fails the job without outputs | `lost`: the verdict salvages the record |
 | host reboot | running parts end; with linger the units start again, the tunnel first | `reboot` (as thermal); the reaper cleans up |
-| the user manager stopped and started again (15.4) | running parts end; the units start again with the manager | a runner whose start fails (the hooks' copy not yet done) is retried every 30 s, and the copy too, with no start limit |
-| no runner of a host online (15.4) | jobs labelled for that host wait in GitHub's queue | `pool status` shows `no runner online`, and brainspike's plan places no part there; the plan prints the runners not running |
+| the user manager stopped and started again (15.5) | running parts end; the units start again with the manager | a runner whose start fails (the hooks' copy not yet done) is retried every 30 s, and the copy too, with no start limit |
+| no runner of a host online (15.5) | jobs labelled for that host wait in GitHub's queue | `pool status` shows `no runner online`, and brainspike's plan places no part there; the plan prints the runners not running |
 | thermal kill or early stop | the part's processes die, or we stop them | `thermal`: one retry on a cool card |
 | OOM | the scope's processes are killed | `oom`: one retry with `resume` |
 | h100's tunnel down | the runners go offline for its length (their own traffic goes through it, decision 11.10); a running part goes on, but its job cannot report and may end `lost`, then is salvaged | ssh's keep-alive ends a dead link in 90 s, and systemd restarts it after 10 s; the runner app retries its connection on its own. The egress proxy answers 502 when its own connection fails |
@@ -1957,7 +2002,7 @@ Rules:
 | reaper | every 10 min, which also checks the hook copies (13.5) |
 | load record | a sample every 60 s, bounded at 30 s; kept 2 days; busy window 10 min (inventory) |
 | busy markers | 14 days |
-| runner restart | 30 s after a failure, a failed start included; never given up (15.4) |
+| runner restart | 30 s after a failure, a failed start included; never given up (15.5) |
 | GitHub | queued 24 h fails a job; a job lasts at most 5 days; offline 14 days removes a runner |
 
 ## 9. Versioning and rollout

@@ -2,6 +2,7 @@
 Description=ci-runners: the org snapshot (members, private repositories)
 
 [Service]
+@CPU_AFFINITY@
 Type=oneshot
 ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run org-sync
 Environment=CI_RUNNERS_ETC=@CI_ETC@

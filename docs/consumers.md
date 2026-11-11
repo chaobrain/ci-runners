@@ -158,7 +158,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 
 ## 6. 主机锁
 
-`part` 的 `lock` 输入可以是 `s`、`x`、`l` 或 `none`，表示整条命令执行期间持有主机锁（brainspike 的 `host_lock.sh` 协议，design 决定 12.9）。`compile` 默认 `x`，其他类默认 `none`。`none` 时命令按需自己加锁，比如 brainspike 的 `local_ci.sh` 每一步单独加锁。持锁时，命令能读到 `CI_HOST_LOCK` 和 `LOCAL_CI_HOST_LOCK`（锁文件路径）以及 `BRAINSPIKE_HOST_LOCK`（所持的模式）。命令里再调用 `host_lock.sh`，已持有的锁能覆盖的请求就不再等待：在 `x` 下的任何请求，或在 `s` 下的 `-s`。在 `s` 下请求 `-x` 会失败（状态 3），因为它要等的正是自己。部件先拿槽位和卡，最后才拿锁，拿锁的等待也计入 `queue-timeout-minutes`，超时就是 `unavailable`。
+`part` 的 `lock` 输入可以是 `s`、`x`、`l` 或 `none`，表示整条命令执行期间持有主机锁（brainspike 的 `host_lock.sh` 协议，design 决定 12.9）。`compile` 默认 `x`，其他类默认 `none`。`none` 时命令按需自己加锁，比如 brainspike 的 `local_ci.sh` 每一步单独加锁。持锁时，命令能读到 `CI_HOST_LOCK` 和 `LOCAL_CI_HOST_LOCK`（锁文件路径）以及 `BRAINSPIKE_HOST_LOCK`（所持的模式）。命令里再调用 `host_lock.sh`，已持有的锁能覆盖的请求就不再等待：在 `x` 下的任何请求，或在 `s` 下的 `-s`。在 `s` 下请求 `-x` 会失败（状态 3），因为它要等的正是自己。部件先拿槽位和卡，最后才拿锁，拿锁的等待也计入 `queue-timeout-minutes`，超时就是 `unavailable`。`compile` 的 `x` 不再独占整台主机（design 决定 15.10）：它独占自己的 CPU（`compile_cpus`）的锁，主机锁只持共享，所以和别的部件的 `-s` 并行，只等 `-x`；命令拿到的 `CI_HOST_LOCK`、`LOCAL_CI_HOST_LOCK` 是这组 CPU 的锁，`BRAINSPIKE_HOST_LOCK=x`，命令里的 `-x`、`-s` 都被覆盖。`compile` 不占 CI 槽位；其他部件、runner 和定时任务都绑在 inventory 的 `cpus` 上，不碰 `compile_cpus`。
 
 ## 7. Slurm 集群（design 决定 14，RUN-9 起）
 

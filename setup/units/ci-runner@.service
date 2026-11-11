@@ -3,6 +3,7 @@
 # starts after the CI proxy where the host has one, and on a 3090 host only with the
 # hooks' copies in the account's private /tmp (decision 13.5). A failed start (the copy
 # not done yet) is retried every 30 s, never given up (decision 15.5).
+# It runs on the inventory's cpus (CPUAffinity), off a compile part's (decision 15.10).
 [Unit]
 Description=ci-runners: GitHub Actions runner %i
 StartLimitIntervalSec=0
@@ -10,6 +11,7 @@ StartLimitIntervalSec=0
 @HOOKS_ORDER@
 
 [Service]
+@CPU_AFFINITY@
 WorkingDirectory=@CI_DATA@/actions-runner/%i
 @HOOKS_CHECK@
 ExecStart=@CI_DATA@/actions-runner/%i/run.sh

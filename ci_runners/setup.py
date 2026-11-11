@@ -204,6 +204,20 @@ def check_python(path: str, run=subprocess.run) -> None:
         raise ValueError(f'python {path} is not Python 3.11 or later')
 
 
+def cpu_affinity(h: dict) -> str:
+    """The service units' ``CPUAffinity=`` line from the inventory's ``cpus``, or ``''``
+    without them (decision 15.10): the runners, their light and cluster jobs and the timers
+    run there, and so off ``compile_cpus``; a part's command is pinned again by ``taskset``
+    (a compile part's to ``compile_cpus``: an affinity, not a cpuset, so it may widen).
+    Pure."""
+    cpus = h.get('cpus')
+    if not cpus:
+        return ''
+    if not isinstance(cpus, str) or not inventory._CPUS.match(cpus):
+        raise ValueError(f'cpus must be a cpu list such as 0-3,16-27, not {cpus!r}')
+    return 'CPUAffinity=' + cpus.replace(',', ' ')
+
+
 def render(template: str, subs: dict[str, str]) -> str:
     for k, v in subs.items():
         if not v:  # an empty value takes its line with it
@@ -824,7 +838,9 @@ def build(etc: str, adopt: bool = False) -> Plan:
             'HOOKS_CHECK': hooks_check() if hookcopy.used(h) else '',
             # the forward's ports are in its unit: a changed port changes the unit, which restarts it
             'TUNNEL_HTTP': str(h['tunnel']['http_port']) if 'tunnel' in h else '',
-            'TUNNEL_EGRESS': str(h['tunnel']['egress_port']) if 'tunnel' in h else ''}
+            'TUNNEL_EGRESS': str(h['tunnel']['egress_port']) if 'tunnel' in h else '',
+            # every process of ours runs on the inventory's cpus, off a compile part's (decision 15.10)
+            'CPU_AFFINITY': cpu_affinity(h)}
     ours = _ours(os.path.join(base, 'state', 'setup.json'))
     planned: set[str] = set()
 

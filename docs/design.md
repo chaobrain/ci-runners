@@ -933,13 +933,14 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    once their inventories gain `probe_key`, which `v1.8.0` refuses: that waits until `v1`
    has moved (§9).
 
-## Proposed (2026-11-11): the shared state at job time (decision 15.2, issue #125)
+## Lead decision (2026-11-11): the shared state at job time (decision 15.2, issue #125)
 
-A draft for the lead. On 2026-11-11 a host's CI account was renumbered; the shared files
-kept named-user ACL entries for its old uid, and every part that took a GPU lease there
-failed in 0.1 s inside `part.Leases` (`Permission denied` on the lease directory's
-`queue`), retries included. `setup`'s plan would have shown it, but runs only when someone
-runs it.
+Approved by the lead on 2026-11-11 (option (c) below, the part's gate). Built here
+(`part.Executor.shared_state`, `setup.own_access`). On 2026-11-11 a host's CI account was
+renumbered; the shared files kept named-user ACL entries for its old uid, and every part
+that took a GPU lease there failed in 0.1 s inside `part.Leases` (`Permission denied` on
+the lease directory's `queue`), retries included. `setup`'s plan would have shown it, but
+runs only when someone runs it.
 
 1. **Where.** In the part's gate (§4.3), on a host whose inventory has `local_accounts`:
    every job that uses the shared state is a part, and the part already holds the

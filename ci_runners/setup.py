@@ -56,7 +56,6 @@ import sys
 import tarfile
 import time
 import tomllib
-import urllib.request
 
 from ci_runners import hookcopy, inventory, locks, slots
 
@@ -483,29 +482,60 @@ def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None)
             uids[a] = uid_of(a)
         except KeyError:
             todo.append((a, 'no such account'))
+    return todo + _path_faults(h, uids, root=True)
+
+
+def _shared_paths(h: dict) -> list[tuple[str, bool, bool]]:
+    """``(path, a directory, the parts make it)`` for each shared path of ``h``: the files
+    and directories of ``shared_files``, then the lock files the parts left in the lease
+    directory (``lease_files``). Reads the lease directory."""
     files, dirs, inner = shared_files(h)
-    made = lease_files(h)
-    for path in [*files, *dirs, *inner, *made]:
-        is_dir = path in dirs or path in inner
+    return [*((p, False, False) for p in files),
+            *((p, True, False) for p in dirs),
+            *((p, True, True) for p in inner),
+            *((p, False, True) for p in lease_files(h))]
+
+
+def _path_faults(h: dict, uids: dict[str, int], root: bool) -> list[tuple[str, str]]:
+    """``(path, what is missing)`` for each shared path (``_shared_paths``): there (what
+    the parts make may not be yet), reachable, of its kind and not a link, root-owned with
+    ``root`` (what the parts make is its maker's), with a named-user access entry for each
+    uid of ``uids`` (named by its key) with ``rw`` (``rwx`` on a directory) after the mask,
+    and on a directory a default entry with ``rwx``. An error other than a missing or an
+    unreachable path is raised. Reads the files, their ACLs by xattr."""
+    out = []
+    for path, is_dir, theirs in _shared_paths(h):
         try:
             st = os.lstat(path)
-        except OSError:
-            if path not in inner and path not in made:  # the parts make those
-                todo.append((path, 'missing'))
+        except FileNotFoundError:
+            if not theirs:  # the parts make those
+                out.append((path, 'missing'))
+            continue
+        except PermissionError:  # a directory on its way denies this account its x
+            out.append((path, 'not reachable'))
             continue
         if not (stat.S_ISDIR if is_dir else stat.S_ISREG)(st.st_mode):
-            todo.append((path, 'not a directory' if is_dir else 'not a regular file'))
+            out.append((path, 'not a directory' if is_dir else 'not a regular file'))
             continue
-        if st.st_uid != 0 and path not in inner and path not in made:  # those are their maker's
-            todo.append((path, 'not root-owned'))
+        if root and st.st_uid != 0 and not theirs:  # those are their maker's
+            out.append((path, 'not root-owned'))
             continue
         need, kind = (7, 'rwx') if is_dir else (6, 'rw')  # a directory: x to reach its tickets
         for default in ((False, True) if is_dir else (False,)):
             got = acl_users(path, default) or {}
             short = [a for a, u in uids.items() if got.get(u, 0) & need != need]
             if short:
-                todo.append((path, f'no {"default " if default else ""}{kind} ACL entry for {", ".join(short)}'))
-    return todo
+                out.append((path, f'no {"default " if default else ""}{kind} ACL entry for {", ".join(short)}'))
+    return out
+
+
+def own_access(h: dict, uid: int) -> list[tuple[str, str]]:
+    """``(path, what is missing)`` for ``uid``'s own access to each shared path of ``h`` at
+    job time (decision 15.2, issue #125): ``shared_state``'s checks of the paths for that
+    one uid (``uid <n>`` in what is missing), but not who owns them. Empty when the uid
+    has all it needs. No subprocess: the ACLs are read by xattr. An error other than a
+    missing or unreachable path is raised, so the caller never takes it for a miss."""
+    return _path_faults(h, {f'uid {uid}': uid}, root=False)
 
 
 def _has_account(uid: int) -> bool:
@@ -906,6 +936,7 @@ def _unpack(path: str, cache: str, port: int) -> None:
         os.makedirs(os.path.dirname(cache), exist_ok=True)
         if port:
             wait_port(port)
+        import urllib.request  # here: each part imports this module (own_access, decision 15.2)
         proxies = {'https': f'http://127.0.0.1:{port}', 'http': f'http://127.0.0.1:{port}'} if port else {}
         opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
         with opener.open(RUNNER_URL, timeout=600) as r, open(cache + '.part', 'wb') as f:

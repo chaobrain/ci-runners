@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import datetime
 import fcntl
 import json
 import os
@@ -39,6 +40,7 @@ from ci_runners import drain as drain_mod
 from ci_runners import hostload
 from ci_runners import envuse, inventory, locks, outcome, registry, slots
 from ci_runners import p2p as p2p_mod
+from ci_runners import setup as setup_mod
 from ci_runners import sampler as sampler_mod
 from ci_runners import slurmpart, slurmsite
 
@@ -633,6 +635,32 @@ def smi_apps(run: Callable = subprocess.run) -> list[tuple[int, str]]:
 
 #: why a first attempt goes to the other host while a nightly part has this host (decision 13.6)
 NIGHTLY_BUSY = 'busy: nightly holds every slot and card'
+#: the shared state (decision 15.2): what GitHub shows names no path, account or uid (§3.3)
+SHARED_DRAINED = 'drained: shared state'
+SHARED_UNKNOWN = 'shared state unknown'
+SHARED_FIX = ('as root, while no local job holds the shared files: systemd-tmpfiles --create {tmpfiles} (the root '
+              'step), or the ACL entries for {account}; then, once setup/plan.sh shows the root steps done, '
+              'ci-run drain off')
+
+
+def shared_log(data: str, line: Mapping[str, object]) -> None:
+    """Append ``line`` as JSON to ``<data>/ci-runners/logs/shared-<UTC date>.log``, for the
+    host only (decision 15.2; the reaper drops a day's file after 14 days): never through
+    a link or into a FIFO. A line that cannot be written is lost, the part's end stands."""
+    try:
+        logs = os.path.join(data, 'ci-runners', 'logs')
+        os.makedirs(logs, mode=0o700, exist_ok=True)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        fd = os.open(os.path.join(logs, f'shared-{now:%Y-%m-%d}.log'),
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                os.write(fd, (json.dumps({'time': now.isoformat(timespec='seconds'), **line}, sort_keys=True)
+                              + '\n').encode())
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def every_path(data: str) -> str:
@@ -951,6 +979,41 @@ class Executor:
             return 'this host has no compile_cpus for compile parts'
         return ''
 
+    def shared_state(self, record: str) -> str:
+        """The shared state at job time (decision 15.2, issue #125), on a host whose
+        inventory has ``local_accounts``: the CI account's own uid's access to every shared
+        path (``setup.own_access``). Empty when it has it all. A miss drains the host (as
+        ``ci-run drain on``) and gives ``SHARED_DRAINED``; a check that cannot run gives
+        ``SHARED_UNKNOWN`` and drains nothing. The details (each path, the account and its
+        uid, what is missing, the stale entries, the fix) go to the host's
+        ``logs/shared-<date>.log`` only. Nothing here undrains."""
+        h = self.inv.host
+        if not h.get('local_accounts'):
+            return ''
+        data, uid = str(h['data']), os.getuid()
+        line: dict[str, object] = {'part': record_ref(record), 'runner': self.env.get('RUNNER_NAME', ''),
+                                   'account': h['account'], 'uid': uid}
+        try:
+            missing = setup_mod.own_access(h, uid)
+        except Exception as e:  # noqa: BLE001 - no proven miss: the part ends, the host stays as it is
+            shared_log(data, {**line, 'error': f'{type(e).__name__}: {e}', 'drained': False})
+            return SHARED_UNKNOWN
+        if not missing:
+            return ''
+        line['missing'] = [list(m) for m in missing]
+        try:  # the uids with no account (a renumbering) are reported next to a miss only
+            line['stale'] = [list(m) for m in setup_mod.stale_entries(h)]
+        except Exception as e:  # noqa: BLE001 - the miss is proven: drain all the same
+            line['stale'] = f'unread: {type(e).__name__}'
+        try:
+            drain_mod.change(data, True)
+            line['drained'] = True
+        except (OSError, ValueError) as e:  # ValueError: an unreadable state, drained already
+            line['drained'] = f'not written: {e}'
+        line['fix'] = SHARED_FIX.format(tmpfiles=setup_mod.TMPFILES, account=h['account'])
+        shared_log(data, line)
+        return SHARED_DRAINED
+
     def cool_elsewhere(self, exclude: Sequence[int]) -> int | None:
         """The coolest card of this per-card host outside ``exclude`` that passes the
         health gate, or None (and None on any other host)."""
@@ -1047,9 +1110,7 @@ class Executor:
             signal.signal(sig, self._on_signal)
         t0 = time.monotonic()
         deadline = t0 + a.queue_timeout_minutes * 60
-        # the inventory's lease_dir, shared with the pool runs of other accounts (decision 15.1), else state/leases
-        lease_dir = str(h['files'].get('lease_dir') or '')
-        leases = Leases(lease_dir or os.path.join(h['data'], 'ci-runners', 'state', 'leases'), shared=bool(lease_dir))
+        leases: Leases | None = None  # made once the gate is passed: the shared state is checked first (15.2)
         slot_fd, slot_path, env_fd = None, '', None
         every: list[int] = []  # a nightly part's slots, every one of them (decision 12.8)
         nightly = cls == EVERY_SLOT
@@ -1065,6 +1126,11 @@ class Executor:
             why = self.gate(a, cls, lock)
             if why:
                 return self._end(record, rec, a, unavailable=why)
+            why = self.shared_state(record)  # decision 15.2: a miss drains the host
+            if why == SHARED_UNKNOWN:
+                return self._end(record, rec, a, unavailable=why)
+            if why:
+                return self._away(record, rec, a, why, cls)
             try:  # the pool runs' copy of the drain (15.1), from before it existed or lost
                 drain_mod.publish(str(h['data']))
             except OSError:
@@ -1075,6 +1141,10 @@ class Executor:
             why = self.busy(a, cls, proj.retries)  # decisions 13.2, 13.6
             if why:
                 return self._away(record, rec, a, why, cls)
+            # the inventory's lease_dir, shared with the pool runs of other accounts (decision 15.1), else state/leases
+            lease_dir = str(h['files'].get('lease_dir') or '')
+            leases = Leases(lease_dir or os.path.join(h['data'], 'ci-runners', 'state', 'leases'),
+                            shared=bool(lease_dir))
             if nightly:  # from its first ticket to its end, first attempts go elsewhere (13.6)
                 every_hold(str(h['data']), [os.getpid()], record)
             if cls in SLOT_CLASSES or nightly:
@@ -1230,7 +1300,8 @@ class Executor:
                 every_drop(str(h['data']))  # a supervisor that outlives us keeps the record live
             if hold is not None:
                 hold.close()  # not release: a supervisor that outlives us keeps the hold
-            leases.release()
+            if leases is not None:
+                leases.release()
             for fd in {slot_fd, env_fd, *every} - {None}:
                 os.close(fd)
 

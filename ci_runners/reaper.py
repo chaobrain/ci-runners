@@ -1,6 +1,7 @@
 """The reaper (design §5.3, ``ci-reaper.timer``): what stopped jobs leave behind.
 
-RUN-1b removes the dated hook logs (``logs/hook-<date>.log``) and the part records of
+RUN-1b removes the dated hook logs (``logs/hook-<date>.log``, and the shared state's
+``logs/shared-<date>.log`` of decision 15.2) and the part records of
 runs (``state/parts/<owner>/<repo>/<run>/``) that nothing touched for 14 days: a run
 counts by the newest change anywhere under it, so a run still writing is never reaped.
 RUN-1b-3 adds the part scopes of gone jobs and stale leases. RUN-8 adds the load record's
@@ -16,6 +17,7 @@ from ci_runners import hostload
 
 KEEP_DAYS = 14
 RUN_DEPTH = 3  # state/parts/<owner>/<repo>/<run>
+LOGS = ('hook-', 'shared-')  # the dated logs under logs/: the hook's, the shared state's (15.2)
 
 
 def newest(path: str) -> float:
@@ -69,7 +71,8 @@ def _remove(p: str) -> None:
 def reap(data: str, now: float | None = None) -> str:
     now = time.time() if now is None else now
     base = os.path.join(data, 'ci-runners')
-    gone = [p for p in old_entries(os.path.join(base, 'logs'), now) if os.path.basename(p).startswith('hook-')]
+    # the hook's dated logs and the shared state's (decision 15.2)
+    gone = [p for p in old_entries(os.path.join(base, 'logs'), now) if os.path.basename(p).startswith(LOGS)]
     parts = os.path.join(base, 'state', 'parts')
     gone += old_entries(parts, now, depth=RUN_DEPTH)
     load = os.path.join(base, 'state', 'hostload')  # the load record and its markers (decision 13.2)

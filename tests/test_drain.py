@@ -3,19 +3,23 @@ retry on another host (13.3)."""
 from __future__ import annotations
 
 import contextlib
+import datetime
 import fcntl
+import glob
 import io
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
+import uuid
 from unittest import mock
 
-from ci_runners import drain, inventory, part
+from ci_runners import drain, inventory, part, setup
 from tests.test_part import Host
 
 PEER = 'peer_labels = { part = ["hz-cpu"], light = ["hz-light"] }\n'
@@ -297,6 +301,185 @@ class Gate(Host):
         self.assertEqual(out['outcome'], 'pass')
         self.assertTrue(self.ran(out))
         self.assertEqual(drain.read(str(self.data))['host'] is not None, True)
+
+
+class SharedState(Host):
+    """The shared state at job time (decision 15.2, issue #125): on a host with
+    ``local_accounts``, the part's gate checks the CI account's own uid on every shared
+    path; a proven miss drains the host and sends the part to the peer's pool, and names
+    no path, account or uid but in the host's log."""
+
+    OLD, OTHER = 3999011, 65534  # the account's uid before it was renumbered; another account's
+
+    def setUp(self):
+        super().setUp()
+        if not shutil.which('setfacl'):
+            self.skipTest('no setfacl')
+        if os.getuid() == 0:
+            self.skipTest('root reaches every path')
+        self.p = s = f'/tmp/cirt{uuid.uuid4().hex[:12]}'  # with local_accounts, plain names in /tmp
+        self.addCleanup(self.clean)
+        self.plain = self.inv_text
+        self.inv_text = self.inv_text.replace(
+            f'files = {{ slot_lock = "{self.slot}", slot_queue = "{self.tmp.name}/locks/s.queue" }}',
+            f'local_accounts = ["localuser"]\nfiles = {{ host_lock = "{s}-host.lock", slot_lock = "{s}-ci.lock", '
+            f'slot_queue = "{s}-ci.queue", lease_dir = "{s}-leases" }}').replace('max_temp_c = 80\n',
+                                                                               'max_temp_c = 80\n' + PEER)
+        self.inv = inventory.load(self.inv_text)
+        self.files, self.dirs, _ = setup.shared_files(self.inv.host)
+        self.lease = f'{s}-leases'
+        self.me = os.getuid()
+
+    def clean(self):
+        for f in glob.glob(self.p + '*'):
+            if os.path.isdir(f) and not os.path.islink(f):
+                os.chmod(f, 0o700)
+                shutil.rmtree(f)
+            else:
+                os.unlink(f)
+
+    def acl(self, *args):
+        r = subprocess.run(['setfacl', *args], capture_output=True, text=True)
+        if r.returncode:
+            self.skipTest(f'no ACL support here: {r.stderr.strip()}')
+
+    def make(self, uids):
+        """Every shared file and directory, with the entries for ``uids``, as the root step
+        makes them (but the test's own)."""
+        rw, rwx = ','.join(f'u:{u}:rw' for u in uids), ','.join(f'u:{u}:rwx' for u in uids)
+        for f in self.files:
+            pathlib.Path(f).touch()
+            self.acl('-m', f'{rw},m::rw', f)
+        for d in self.dirs:
+            os.mkdir(d)
+            self.acl('-m', f'{rwx},m::rwx,' + ','.join(f'd:u:{u}:rwx' for u in uids) + ',d:m::rwx', d)
+
+    def logged(self):
+        return [json.loads(line) for p in sorted((self.data / 'ci-runners/logs').glob('shared-*.log'))
+                for line in p.read_text().splitlines()]
+
+    def ran(self, out):
+        return pathlib.Path(self.path(out), 'work', 'ran').exists()
+
+    def test_a_renumbered_account_drains_the_host(self):
+        """Issue #125: the account's old uid kept the entries, its own has none: the part
+        ends drained (to the peer's pool) before it takes anything, the host is drained,
+        and only the host's log names the paths, the account, its uid, the stale entries
+        and the fix. Nothing undrains by itself."""
+        self.make((self.OLD, self.OTHER))
+        queue, card = f'{self.lease}/queue', f'{self.lease}/card0.0.lock'
+        os.mkdir(queue)  # a part's, with the lease directory's default entries
+        pathlib.Path(card).touch()
+        temp = pathlib.Path(self.tmp.name, 'runner-temp')
+        code, out = self.execute(env={**self.env, 'RUNNER_TEMP': str(temp)}, command='touch "$CI_PART_DIR/ran"')
+        self.assertEqual((code, out['outcome'], out['reason'], out['next'], out['retry-on']),
+                         (0, 'unavailable', 'drained: shared state', 'fallback', ['self-hosted', 'hz-cpu']))
+        self.assertFalse(self.ran(out))
+        self.assertIsNotNone(drain.read(str(self.data))['host'])
+        self.assertIsNotNone(drain.read_path(drain.public_path(str(self.data)))['host'])  # pool runs stop too
+        public = self.out.read_text() + json.dumps(out) + ''.join(p.read_text() for p in temp.rglob('*') if p.is_file())
+        self.assertIn('drained: shared state', public)
+        for secret in (self.p, '/tmp/', 'acct-x', 'localuser', 'tmpfiles', str(self.OLD), str(self.OTHER)):
+            self.assertNotIn(secret, public)
+        self.assertNotRegex(public, rf'(?<![0-9.]){self.me}(?![0-9.])')
+        (line,) = self.logged()
+        mine = f'uid {self.me}'
+        self.assertEqual({k: line[k] for k in ('part', 'runner', 'account', 'uid', 'drained')},
+                         {'part': 'org/repo/77-1/unit-1', 'runner': 'hb-part-1', 'account': 'acct-x', 'uid': self.me,
+                          'drained': True})
+        self.assertEqual(line['missing'], [[f, f'no rw ACL entry for {mine}'] for f in self.files] + [
+            [d, f'no {k} ACL entry for {mine}'] for d in (*self.dirs, queue) for k in ('rwx', 'default rwx')] + [
+            [card, f'no rw ACL entry for {mine}']])
+        gone = f'ACL entry for uid {self.OLD}, which has no account (a renumbered account?)'
+        self.assertIn([self.files[0], gone], line['stale'])
+        self.assertIn([queue, f'default {gone}'], line['stale'])
+        self.assertIn(f'systemd-tmpfiles --create {setup.TMPFILES}', line['fix'])
+        self.assertIn('ci-run drain off', line['fix'])
+        self.assertRegex(line['time'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$')
+        logs = self.data / 'ci-runners/logs'
+        self.assertEqual([p.name for p in logs.iterdir()],
+                         [f'shared-{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%d}.log'])
+        self.assertEqual((logs.stat().st_mode & 0o777, next(logs.iterdir()).stat().st_mode & 0o777), (0o700, 0o600))
+        for f in (*self.files, card):  # the root step done
+            self.acl('-m', f'u:{self.me}:rw', f)
+        for d in (*self.dirs, queue):
+            self.acl('-m', f'u:{self.me}:rwx,d:u:{self.me}:rwx', d)
+        _, out = self.execute(id='again', command='touch "$CI_PART_DIR/ran"')
+        self.assertEqual(out['reason'], 'drained: host')  # until the operator undrains it
+        self.assertEqual(len(self.logged()), 1)
+        drain.change(str(self.data), False)
+        _, out = self.execute(id='after', command='touch "$CI_PART_DIR/ran"')
+        self.assertEqual(out['outcome'], 'pass')
+        self.assertTrue(self.ran(out))
+
+    def test_a_stale_entry_beside_the_accounts_own_is_no_miss(self):
+        self.make((self.OLD, self.me, self.OTHER))
+        _, out = self.execute(command='touch "$CI_PART_DIR/ran"')
+        self.assertEqual(out['outcome'], 'pass')
+        self.assertEqual(drain.read(str(self.data)), {'host': None, 'pools': {}})
+        self.assertEqual(self.logged(), [])
+
+    def test_a_missing_lease_directory_drains_before_the_leases(self):
+        """The check comes before the leases are made: a missing lease directory is a miss,
+        not an error of the part."""
+        self.make((self.me, self.OTHER))
+        os.rmdir(self.lease)
+        _, out = self.execute()
+        self.assertEqual(out['reason'], 'drained: shared state')
+        self.assertEqual(self.logged()[0]['missing'], [[self.lease, 'missing']])
+        self.assertFalse(os.path.lexists(self.lease))
+
+    def test_a_check_that_cannot_run_drains_nothing(self):
+        self.make((self.me, self.OTHER))
+        with mock.patch.object(part.setup_mod, 'own_access', side_effect=OSError(5, 'Input/output error')):
+            _, out = self.execute()
+        self.assertEqual((out['outcome'], out['reason'], out['retry-on']),
+                         ('unavailable', 'shared state unknown', ['self-hosted', 'part', 'other']))
+        self.assertEqual(drain.read(str(self.data)), {'host': None, 'pools': {}})
+        (line,) = self.logged()
+        self.assertEqual((line['error'], line['drained'], 'missing' in line),
+                         ('OSError: [Errno 5] Input/output error', False, False))
+
+    def test_a_proven_miss_drains_whatever_else_fails(self):
+        """The stale entries unread, the drain state unreadable (a drained host already):
+        the part ends drained all the same."""
+        self.make((self.OLD, self.OTHER))
+        state = pathlib.Path(drain.state_path(str(self.data)))
+        state.parent.mkdir(parents=True)
+        state.write_text('not json')
+        with mock.patch.object(part.setup_mod, 'stale_entries', side_effect=RuntimeError('no')):
+            _, out = self.execute()
+        self.assertEqual(out['reason'], 'drained: shared state')
+        (line,) = self.logged()
+        self.assertEqual(line['stale'], 'unread: RuntimeError')
+        self.assertTrue(line['drained'].startswith('not written: '), line['drained'])
+        self.assertIsNone(drain.read(str(self.data)))  # unreadable: drained
+
+    def test_the_log_is_never_written_through_a_link_or_into_a_fifo(self):
+        self.make((self.OLD, self.OTHER))
+        logs = self.data / 'ci-runners/logs'
+        logs.mkdir(parents=True)
+        name = logs / f'shared-{datetime.datetime.now(datetime.timezone.utc):%Y-%m-%d}.log'
+        target = pathlib.Path(self.tmp.name, 'target')
+        name.symlink_to(target)
+        _, out = self.execute(id='link')
+        self.assertEqual(out['reason'], 'drained: shared state')
+        self.assertFalse(target.exists())
+        name.unlink()
+        os.mkfifo(name)
+        reader = os.open(name, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            _, out = self.execute(id='fifo')
+            self.assertEqual(out['reason'], 'drained: shared state')  # checked before the drain, each time
+            self.assertEqual(os.read(reader, 1 << 16), b'')
+        finally:
+            os.close(reader)
+
+    def test_no_check_without_local_accounts(self):
+        self.inv = inventory.load(self.plain)
+        with mock.patch.object(part.setup_mod, 'own_access', side_effect=AssertionError('checked')):
+            _, out = self.execute()
+        self.assertEqual(out['outcome'], 'pass')
 
 
 class AcrossHosts(Host):

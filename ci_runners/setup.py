@@ -238,15 +238,19 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
     return '\n'.join(lines) + '\n'
 
 
-def shared_files(h: dict) -> tuple[list[str], list[str]]:
+def shared_files(h: dict) -> tuple[list[str], list[str], list[str]]:
     """The files the CI account shares with the local accounts (decision 12.9): the host
     lock with its turnstile, shared marker and probe file (issue #69), when the host has
-    one, and every slot file; and the directories: the slot queue, and the GPU leases'
-    ``lease_dir`` where the inventory names one (decision 15.1). Pure."""
+    one, and every slot file; the directories: the slot queue, and the GPU leases'
+    ``lease_dir`` where the inventory names one (decision 15.1); and the directories made
+    inside those: the lease directory's ``queue`` (``part.Leases``). The root step makes
+    and binds the first two kinds; the third the parts make, the root step's recursive
+    ``A+`` entry covers and the lease directory's bind holds (issue #125). Pure."""
     lock = h['files'].get('host_lock')
     files = [*locks.paths(lock), locks.probe_path(lock)] if lock else []
     files += slots.slot_paths(h['files']['slot_lock'], h['slots'])
-    return files, [h['files']['slot_queue'], *([h['files']['lease_dir']] if h['files'].get('lease_dir') else [])]
+    lease = h['files'].get('lease_dir')
+    return files, [h['files']['slot_queue'], *([lease] if lease else [])], [os.path.join(lease, 'queue')] if lease else []
 
 
 def tmpfiles_text(h: dict) -> str:
@@ -256,7 +260,7 @@ def tmpfiles_text(h: dict) -> str:
     queue directory (and the lease directory) with the same entries, recursively, and as
     default entries, so what either account creates in it the other can use; all of them
     out of age cleaning. Pure."""
-    files, dirs = shared_files(h)
+    files, dirs, _ = shared_files(h)
     accounts = [h['account'], *h['local_accounts']]
     for x in [*files, *dirs]:
         if not inventory.shared_path(x):
@@ -292,7 +296,7 @@ def private_text(h: dict) -> str:
         raise ValueError(f'data must lie below a data-disk root, not directly in /: {data!r}')
     if home == '/home' or root == home or root.startswith(home + '/'):
         raise ValueError('home must not be /home, and the data-disk root (the parent of data) must not be in home')
-    files, dirs = shared_files(h)
+    files, dirs, _ = shared_files(h)
     for x in [*files, *dirs]:
         if not inventory.shared_path(x):
             raise ValueError(f'shared file {x!r} must be a plain name directly in /tmp')
@@ -416,7 +420,7 @@ def namespace_faults(h: dict, table: str, here: str) -> list[str]:
     reach = reacher(mounts)
 
     root = os.path.dirname(h['data'])
-    files, dirs = shared_files(h)
+    files, dirs, _ = shared_files(h)
     binds = [h['home'], h['data'], *files, *dirs]
     bad = [f'no tmpfs at {p}' for p in ('/home', root) if reach(p).get('type') != 'tmpfs' or reach(p)['point'] != p]
     shm, host = reach('/dev/shm'), reacher(parse(here))('/dev/shm')
@@ -461,7 +465,11 @@ def acl_users(path: str, default: bool = False) -> dict[int, int] | None:
 def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None) -> list[tuple[str, str]]:
     """``(path, what is missing)`` for each root step not done: the ``tmpfiles.d`` file as
     planned, and each shared file root-owned with ``rw`` for every account (the queue with
-    its default entries too). Empty when all are done. Reads the files."""
+    its default entries too); a directory made inside one (the lease directory's
+    ``queue``), once there, a directory with the same entries as the one it is in; and
+    the lock files the parts left in the lease directory (``lease_files``) with ``rw``.
+    Each uid by the account's name, now (issue #125). Empty when all are done. Reads the
+    files."""
     todo = []
     try:
         with open(TMPFILES if read is None else read, encoding='utf-8') as f:
@@ -475,18 +483,20 @@ def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None)
             uids[a] = uid_of(a)
         except KeyError:
             todo.append((a, 'no such account'))
-    files, dirs = shared_files(h)
-    for path in [*files, *dirs]:
-        is_dir = path in dirs
+    files, dirs, inner = shared_files(h)
+    made = lease_files(h)
+    for path in [*files, *dirs, *inner, *made]:
+        is_dir = path in dirs or path in inner
         try:
             st = os.lstat(path)
         except OSError:
-            todo.append((path, 'missing'))
+            if path not in inner and path not in made:  # the parts make those
+                todo.append((path, 'missing'))
             continue
         if not (stat.S_ISDIR if is_dir else stat.S_ISREG)(st.st_mode):
             todo.append((path, 'not a directory' if is_dir else 'not a regular file'))
             continue
-        if st.st_uid != 0:
+        if st.st_uid != 0 and path not in inner and path not in made:  # those are their maker's
             todo.append((path, 'not root-owned'))
             continue
         need, kind = (7, 'rwx') if is_dir else (6, 'rw')  # a directory: x to reach its tickets
@@ -496,6 +506,61 @@ def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None)
             if short:
                 todo.append((path, f'no {"default " if default else ""}{kind} ACL entry for {", ".join(short)}'))
     return todo
+
+
+def _has_account(uid: int) -> bool:
+    try:
+        pwd.getpwuid(uid)
+    except KeyError:
+        return False
+    return True
+
+
+def lease_files(h: dict) -> list[str]:
+    """The regular files directly in the inventory's lease directory: the lock files the
+    parts and the pool runs make there (``part.Leases``: ``.lock`` and the cards'), which
+    keep the ACL entries they were made with. Empty without one. Reads the directory."""
+    d = h['files'].get('lease_dir')
+    if not d:
+        return []
+    try:
+        with os.scandir(d) as it:
+            return sorted(e.path for e in it if e.is_file(follow_symlinks=False))
+    except OSError:
+        return []
+
+
+def stale_entries(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid,
+                  has_account=_has_account) -> list[tuple[str, str]]:
+    """``(path, what)`` for each named-user ACL entry, access or default, of a shared file
+    or directory (``shared_files``, ``lease_files``) whose uid has no account, the mark of
+    a renumbered account whose old uid kept its entries, or belongs to none of the
+    inventory's accounts (a reused uid); and for each of those owned by a uid with no
+    account (issue #125). A warning, never a step: such an entry is harmless to the
+    accounts once their own are there (``shared_state``). Reads the files."""
+    ours = set()
+    for a in [h['account'], *h['local_accounts']]:
+        try:
+            ours.add(uid_of(a))
+        except KeyError:
+            pass  # shared_state reports it
+    out = []
+    files, dirs, inner = shared_files(h)
+    for path in [*files, *dirs, *inner, *lease_files(h)]:
+        try:
+            owner = os.lstat(path).st_uid
+        except OSError:
+            continue
+        if not has_account(owner):
+            out.append((path, f'owned by uid {owner}, which has no account (a renumbered account?)'))
+        for default in ((False, True) if path in dirs or path in inner else (False,)):
+            for uid in sorted(acl_users(path, default) or {}):
+                what = f'{"default " if default else ""}ACL entry for uid {uid}'
+                if not has_account(uid):
+                    out.append((path, f'{what}, which has no account (a renumbered account?)'))
+                elif uid not in ours:
+                    out.append((path, f'{what}, which is none of the accounts\' (a reused uid?)'))
+    return out
 
 
 def authorized_keys_text(old: str, key: str, *, etc: str, python: str, base: str, probe_key: str = '') -> str:
@@ -716,6 +781,8 @@ def build(etc: str, adopt: bool = False) -> Plan:
                  '(while no local job holds them: under host_lock.sh -x, with ci_slot.sh\'s queue empty)')
         for path, why in todo:
             plan.add(f'         {path}: {why}')
+        for path, why in stale_entries(h):  # not a step: apply goes ahead with them
+            plan.add(f'  warn   {path}: {why}')
         uid = account_uid(h['account'])
         text, path = private_text(h), DROPIN.format(uid='<uid>' if uid is None else uid)
         check_private_paths(h)

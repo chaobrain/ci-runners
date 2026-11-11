@@ -9,6 +9,7 @@
 | 角色 | 跑什么 | 以谁的身份 |
 |---|---|---|
 | **3090b**、**3090a** | 各自的 runner 池（`<host>-light`、`-cpu`、`-gpu<N>`、`-multi`，3090b 另有 `-compile`，3090a 另有 `-nightly`，design §5.1）；`ci-tunnel.service`（到 egress 的 ssh 转发）；`ci-reaper.timer`、`ci-envrefresh.timer` | 专用 CI 账户的 systemd user 单元，文件都在 `<data>` 下 |
+| **h100** | 自己的 runner 池（`h100-light` 8 个、`h100-cpu` 9 个、`h100-gpu<N>` 5 个，design 决定 15.8）；`ci-tunnel.service`；`ci-reaper.timer`、`ci-envrefresh.timer`、`ci-hostload.timer` | 共享账户的 systemd user 单元，文件都在我们的子目录 `<data>` 下（决定 11.3；12.17 退出，15.8 回来）。没有私有 `/tmp`，没有根步骤 |
 | **egress 主机** | `ci-egress.service`：HTTP CONNECT 代理，只放行允许清单里的域名的 443 端口 | root 安装，DynamicUser 运行 |
 | **工作站** | `ci-orgsync-push.timer`：每 10 分钟用维护者的 gh 登录拉 org 快照，经 ssh 推到每台主机 | 维护者本人的 user 单元 |
 | **3090b 上的维护者账户** | `ci-nightly-backstop.timer`：UTC 21:00–22:45 每 15 分钟一次，外加 22:59，用维护者的 gh 登录、经主机的代理包装，在 brainspike 的主 checkout 里跑 `merge_gate.py --backstop`：当晚 20:00 UTC 以来没有 nightly、也没有排队或在跑的，就在 `main` 上派发一次（§12） | 维护者本人的 user 单元 |
@@ -16,7 +17,8 @@
 
 数据流：
 
-- GitHub 把任务派给主机的 runner。（h100 已于 2026-11-07 退出 CI，design 决定 12.17。）
+- GitHub 把任务派给主机的 runner。（h100 于 2026-11-07 退出 CI（design 决定 12.17），2026-11-11 以共享账户回来（决定 15.8）。）
+- light runner 共约 20 个（3090b 6、3090a 6、h100 8），每个都带共享标签 `ci-light`；3090 主机的 `3090-light` 等 brainspike 的工作流都改用 `ci-light` 后再去掉（决定 15.8）。
 - runner 自己的流量和任务的外网流量都走 `https_proxy=127.0.0.1:<http_port>`，经 ssh 隧道到 egress 主机的代理，再出去。只有 `tunnel.direct`（localhost 和一个直连可用的包镜像）不走代理。
 - hook 只读本地文件：inventory、policy、`etc/org.json`。
 
@@ -97,6 +99,13 @@
      - 构建结果放在 `envs/<project>-<时间戳>/`，全部成功后 `envs/<project>` 才切过去，并保留前两次构建。
      - 命令会打印要写进 registry 的 `env` 和 `variables`。可以先用 `--dry-run` 看步骤。
   3. 让仓库推一个 head，看金丝雀结果。
+
+- **共享账户的主机（h100）不放令牌**（design 决定 15.8 第 7 条）。令牌放在构建进程的环境里，同账户的其他人构建期间就能读到。改用另一台主机上这个项目的环境保存的记录来建：
+  ```
+  cat <3090 主机的 data>/ci-runners/envs/<project>/ci-env.json \
+    | ssh <h100> '<导入 .env 的代理变量>; <data>/ci-runners/releases/hook/bin/ci-run env build <project> --kept - --conda <conda 路径>'
+  ```
+  记录里的规格、requirements 文件和仓库 commit 是那台主机用令牌读的；`--kept` 按刷新的规则检查它（仓库要和 registry 一致、规格能解析、upstream 和规格对得上），upstream 不带凭据按分支现在的 head clone（私有 upstream 会失败）。之后 `env refresh` 照常跟着 upstream 走。默认分支改了规格，要先在 3090 主机上 `env build`，再用它的新记录在 h100 上 `--kept` 建一次。
 
 - **conda 表。** 规格里的 `[conda]` 表（见 [consumers.md](consumers.md) §3）和 `python` 在同一次 `conda create` 里求解，在任何 pip 步骤之前。表格式不对就什么都不建，错误写在 stderr。`--dry-run` 会打印 `conda create` 那一行，先看一眼。
 - **环境刷新**（design §4.9）。`ci-run env refresh <project>` 不要令牌：它读环境里保存的 `ci-env.json`（规格、requirements 文件、每个 upstream 的 commit），用 `git ls-remote` 看分支动没动，动了才重建，建好后一次 rename 换上。有 upstream 读不了（私有，或者没有路由）就拒绝，什么都不建；任何一步失败都保留旧环境。在 v1.4 之前建的环境没有保存规格，要先用 `env build` 重建一次。`ci-run env refresh --all` 处理这台主机上 registry 里写了 `refresh = true` 的每个项目，一个失败不影响其他项目，只要有失败，退出码就是 2。同一个项目同一时刻只有一个 build 或 refresh 在跑（`envs/.<project>.lock`），撞上的刷新等下一轮。
@@ -238,6 +247,12 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 - h100 的 9 个 runner 已在 org 注销；工作站的快照推送不再推到 h100；
 - `h100-test.yml` 已删除，它唯一的调用方是金丝雀仓库；之后只能自己组合 action（[consumers.md](consumers.md) §3）。
+
+**2026-11-11 h100 以共享账户回来**（design 决定 15.8）：
+
+- 22 个 runner（light 8、part 9、每卡一个 gpu 共 5）重新在 org 注册；旧 runner 目录里的凭据（包括 runner 迁移留下的 `.runner_migrated`）先挪到 `retired-20261111/`，否则 `config.sh` 认为已经配置过；
+- 工作站的快照推送和 runner 监视都加回 h100；
+- 三台主机的 CI 注册表互相用强制探测读对方（`probe_key` 可以是列表）；h100 上不放集群密钥，所以在 h100 上跑的 plan 看不到集群目标。
 
 ## 10. Slurm 集群（design 决定 14，RUN-9 起）
 

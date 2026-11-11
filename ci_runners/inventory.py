@@ -155,8 +155,9 @@ HOST_KEYS = {
                        and all(isinstance(x, str) and ACCOUNT.fullmatch(x) for x in v), False),
     # the org snapshot's push key (decision 12.4): its line in the account's authorized_keys
     'push_key': (lambda v: isinstance(v, str) and bool(PUSH_KEY.fullmatch(v)), False),
-    # the other host's CI account's pool probe key (decision 15.1, item 8): its line, forced to pool probe
-    'probe_key': (lambda v: isinstance(v, str) and bool(PUSH_KEY.fullmatch(v)), False),
+    # the other hosts' CI accounts' pool probe keys (decision 15.1, item 8): one key, or from 15.8 a
+    # list of them, one per calling host; each its line, forced to pool probe
+    'probe_key': (lambda v: bool(probe_keys(v)) and all(PUSH_KEY.fullmatch(k) for k in probe_keys(v)), False),
     # the other host's pool of each runner class: where a drained or busy part goes (decision 13.3)
     'peer_labels': (lambda v: _peer_labels(v), False),
     # the busy rule's thresholds (decision 13.2); each optional, with the rule's defaults
@@ -258,6 +259,16 @@ def pool_class(host: Mapping[str, object], pool: str) -> str:
 def pool_of(host: Mapping[str, object], cls: str) -> str | None:
     """The pool of ``host`` whose runners have class ``cls`` (one at most), or None. Pure."""
     return next((p for p, v in host['pools'].items() if _class(p, v) == cls), None)
+
+
+def probe_keys(v: object) -> list[str]:
+    """The inventory's ``probe_key`` as a list (decision 15.8): one key is a list of one; a
+    value of neither form, or a list holding a non-string, is an empty list. Pure."""
+    if isinstance(v, str):
+        return [v] if v else []
+    if isinstance(v, list) and all(isinstance(k, str) and k for k in v):
+        return list(v)
+    return []
 
 
 def pool_labels(inv: 'Inventory', cls: str) -> list[str] | None:

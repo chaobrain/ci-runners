@@ -1586,6 +1586,29 @@ class Shared(unittest.TestCase):
                               f'{self.data}/ci-runners/releases/hook/bin/ci-run pool probe" {other} {setup.PROBE_MARK}'])
         self.assertEqual(setup.build(str(self.etc)).actions, [])
 
+    def test_a_line_for_each_probe_key_of_a_list(self):
+        """Decision 15.8: three hosts, so a host takes the probe keys of the two others."""
+        a, b = KEY[:-5] + 'Aaaaa', KEY[:-5] + 'Bbbbb'
+        cmd = 'CI_RUNNERS_ETC=/e CI_RUNNERS_PYTHON=/p exec /b/releases/hook/bin/ci-run pool probe'
+        old = f'ssh-ed25519 AAAA mine\nrestrict,command="old" {b} {setup.PROBE_MARK}\n'
+        got = setup.authorized_keys_text(old, '', etc='/e', python='/p', base='/b', probe_key=[a + ' x', b]).splitlines()
+        self.assertEqual(got, ['ssh-ed25519 AAAA mine', f'restrict,command="{cmd}" {a} {setup.PROBE_MARK}',
+                               f'restrict,command="{cmd}" {b} {setup.PROBE_MARK}'])
+        one = setup.authorized_keys_text('\n'.join(got), '', etc='/e', python='/p', base='/b', probe_key=[b]).splitlines()
+        self.assertEqual(one, ['ssh-ed25519 AAAA mine', f'restrict,command="{cmd}" {b} {setup.PROBE_MARK}'])
+        with self.assertRaisesRegex(ValueError, 'nor name a key twice'):
+            setup.authorized_keys_text('', '', etc='/e', python='/p', base='/b', probe_key=[a, a + ' again'])
+        with self.assertRaisesRegex(ValueError, 'must not be the push_key'):
+            setup.authorized_keys_text('', KEY, etc='/e', python='/p', base='/b', probe_key=[a, KEY])
+        with self.assertRaisesRegex(ValueError, 'probe_key must be'):
+            setup.authorized_keys_text('', '', etc='/e', python='/p', base='/b', probe_key=[a, 'ssh-rsa AAAA x'])
+        self.inv.write_text(self.inv.read_text().replace('local_accounts = ["localuser"]\n', f'probe_key = ["{a}", "{b}"]\n'))
+        self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+        ak = (self.home / '.ssh' / 'authorized_keys').read_text().splitlines()
+        self.assertEqual([line.split()[-2:] for line in ak], [[a.split()[1], setup.PROBE_MARK], [b.split()[1], setup.PROBE_MARK]])
+        self.assertTrue(all(line.startswith('restrict,command="') and ' pool probe" ' in line for line in ak))
+        self.assertEqual(setup.build(str(self.etc)).actions, [])
+
     def test_the_egress_accounts_line_for_the_tunnel_key(self):
         self.assertEqual(setup.EGRESS_LINE.format(port=18443, key=KEY),
                          'restrict,port-forwarding,permitopen="127.0.0.1:18443",permitlisten="127.0.0.1:9",'

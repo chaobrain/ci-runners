@@ -12,6 +12,8 @@ import io
 import json
 import os
 import re
+import shutil
+import sys
 import pathlib
 import tempfile
 import types
@@ -727,6 +729,85 @@ class Refresh(Base):
         self.assertTrue(registry.load_file(str(self.etc), 'p', 'hb').refresh)
         self.entry('p', 'Org/Repo')
         self.assertFalse(registry.load_file(str(self.etc), 'p', 'hb').refresh)
+
+
+class Kept(Base):
+    """``env build --kept``: an env built from another host's kept record, with no token (decision 15.8)."""
+
+    def setUp(self):
+        super().setUp()
+        self.api = Api({HEAD: {'.github/ci-runners.toml': RICH, 'requirements-dev.txt': 'pytest\n'}})
+        self.assertEqual(self.main()[0], 0, self.err)  # the other host's build, with a token
+        self.record = (self.envs / 'p' / 'ci-env.json').read_text()
+        shutil.rmtree(self.envs)
+        self.host.calls.clear()
+        self.host.cloned.clear()
+        self.host.pip_files.clear()
+        self.host.heads['chaobrain/brainstate'] = NEW_BRAINSTATE  # the upstream moved since
+        self.file = pathlib.Path(self.tmp.name) / 'kept.json'
+        self.file.write_text(self.record)
+        self.calls = []
+        self.api = lambda *a, **k: self.calls.append(a)  # never called: no contents API read
+
+    def test_a_build_from_a_kept_record_needs_no_token_and_clones_the_upstreams_now(self):
+        code, _ = self.main('--kept', str(self.file), '--conda', '/c/conda', token=False)
+        self.assertEqual(code, 0, self.err)
+        self.assertEqual(self.calls, [])
+        rec = json.loads((self.envs / 'p' / 'ci-env.json').read_text())
+        self.assertEqual((rec['sha'], rec['spec'], rec['files']), (HEAD, RICH, {'requirements-dev.txt': 'pytest\n'}))
+        self.assertEqual({u['repository']: u['commit'] for u in rec['upstream']},
+                         {'chaobrain/brainstate': NEW_BRAINSTATE, 'chaobrain/brainevent': 'd' * 40})  # as they are now
+        self.assertTrue({'python=3.13', 'nest-simulator=3.10'} <= set(self.host.ran(is_conda)[0]))
+        self.assertEqual([t for _, t in self.host.pip_files], ['pytest\n'])
+        for cmd, env in self.host.calls:
+            if cmd[0] == 'git':
+                self.assertFalse(any(k.startswith('GIT_CONFIG_KEY') for k in env))  # no credentials at all
+                self.assertEqual(env['GIT_CONFIG_GLOBAL'], os.devnull)
+
+    def test_a_token_in_the_environment_is_not_used(self):
+        code, _ = self.main('--kept', str(self.file), token=True)
+        self.assertEqual(code, 0, self.err)
+        self.assertEqual(self.calls, [])
+        gits = [env for cmd, env in self.host.calls if cmd[0] == 'git']
+        self.assertTrue(gits)
+        self.assertFalse(any(k.startswith('GIT_CONFIG_KEY') for env in gits for k in env))  # no extraheader
+        self.assertFalse(any('SECRET-TKN-9' in ' '.join(cmd) + ' '.join((env or {}).values())
+                             for cmd, env in self.host.calls))
+
+    def test_the_record_on_standard_input(self):
+        with mock.patch.object(sys, 'stdin', io.StringIO(self.record)):
+            code, _ = self.main('--kept', '-', token=False)
+        self.assertEqual(code, 0, self.err)
+        self.assertTrue((self.envs / 'p').is_symlink())
+
+    def test_a_private_upstream_fails_the_build(self):
+        self.host.private.add('chaobrain/brainevent')
+        code, _ = self.main('--kept', str(self.file), token=False)
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.lexists(self.envs / 'p'))
+
+    def test_a_record_that_does_not_fit_builds_nothing(self):
+        rec = json.loads(self.record)
+        bad = [dict(rec, repository='Org/Other'), dict(rec, sha='x'), dict(rec, spec='schema = 9\n'),
+               dict(rec, files={'../x.txt': 'a\n'}), dict(rec, files={'r.txt': 1}), dict(rec, upstream=rec['upstream'][:1]),
+               dict(rec, files={f'r{i}.txt': 'a\n' for i in range(envbuild.MAX_FILES + 1)}),
+               dict(rec, files={'r.txt': 'a' * (envbuild.MAX_FILE + 1)}), [rec]]
+        for b in bad:
+            self.file.write_text(json.dumps(b))
+            code, _ = self.main('--kept', str(self.file), token=False)
+            self.assertEqual(code, 2, (b if isinstance(b, list) else {k: str(v)[:40] for k, v in b.items()}))
+        self.file.write_text('{not json')
+        self.assertEqual(self.main('--kept', str(self.file), token=False)[0], 2)
+        self.assertEqual(self.main('--kept', str(self.file) + '.missing', token=False)[0], 2)
+        self.file.write_text(' ' * (envbuild.MAX_KEPT + 1))
+        self.assertEqual(self.main('--kept', str(self.file), token=False)[0], 2)
+        self.assertIn('larger than', self.err)
+        self.assertEqual(self.host.calls, [])
+        self.assertFalse(os.path.lexists(self.envs / 'p'))
+
+    def test_a_refresh_takes_no_kept_record(self):
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            envbuild.main(['refresh', 'p', '--kept', str(self.file)], self.inv, str(self.etc))
 
 
 class Held(Base):

@@ -87,6 +87,13 @@ class Load(unittest.TestCase):
         for bad in (key[:-1], 'ssh-rsa ' + key[12:], ''):
             with self.assertRaises(inv.InventoryError, msg=bad):
                 inv.load(PLAIN.replace('slots = 2', f'probe_key = "{bad}"\nslots = 2', 1))
+        other = key[:-1] + 'B'
+        i = inv.load(PLAIN.replace('slots = 2', f'probe_key = ["{key} 3090a", "{other} 3090b"]\nslots = 2', 1))  # 15.8
+        self.assertEqual(inv.probe_keys(i.host['probe_key']), [key + ' 3090a', other + ' 3090b'])
+        self.assertEqual(inv.probe_keys(key), [key])
+        for bad in ('[]', f'["{key}", "{key[:-1]}"]', f'["{key}", 1]', f'["{key}", ""]', '1'):
+            with self.assertRaises(inv.InventoryError, msg=bad):
+                inv.load(PLAIN.replace('slots = 2', f'probe_key = {bad}\nslots = 2', 1))
         self.assertEqual(inv.deny_tokens({'hosts': {'h': {'local_accounts': ['acct7'], 'push_key': key}}}),
                          {'acct7', inv.normalise(key[12:])})  # the type word is the code's: not a token
 

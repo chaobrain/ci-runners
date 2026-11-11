@@ -1,9 +1,11 @@
 # One GitHub Actions runner, <data>/actions-runner/%i (design §5.3). The pre-job hook,
 # set in the runner's .env, is the boundary; NoNewPrivileges makes sudo fail (D4). It
 # starts after the CI proxy where the host has one, and on a 3090 host only with the
-# hooks' copies in the account's private /tmp (decision 13.5).
+# hooks' copies in the account's private /tmp (decision 13.5). A failed start (the copy
+# not done yet) is retried every 30 s, never given up (decision 15.5).
 [Unit]
 Description=ci-runners: GitHub Actions runner %i
+StartLimitIntervalSec=0
 @PROXY_ORDER@
 @HOOKS_ORDER@
 

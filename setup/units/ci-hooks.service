@@ -1,8 +1,11 @@
 # The hooks' copies in the CI account's private /tmp (design decision 13.5): the runners'
-# .env names them, and each runner requires this unit. A reload copies them again (apply,
-# when a hook changes) without restarting the runners; the reaper rewrites a missing copy.
+# .env names them, and each runner starts only while this unit is active. A reload copies
+# them again (apply, when a hook changes) without restarting the runners; the reaper
+# rewrites a missing copy. A failed copy is tried again every 30 s, with no start limit,
+# so the runners come back by themselves (decision 15.5).
 [Unit]
 Description=ci-runners: copy the hooks into the account's private /tmp
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -13,6 +16,8 @@ Environment=CI_RUNNERS_ETC=@CI_ETC@
 Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
 NoNewPrivileges=yes
 TimeoutStartSec=60s
+Restart=on-failure
+RestartSec=30
 
 [Install]
 WantedBy=default.target

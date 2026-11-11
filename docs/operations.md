@@ -41,7 +41,7 @@
    ```
    setup/plan.sh <role> > plan.txt
    ```
-   只保存 stdout，不要把 stderr 混进去：`apply` 会逐字比对计划文本。逐行检查要写哪些文件、单元和 `.env`。在共享账户上，计划不得碰我们子目录以外的东西，`ci-*` 单元除外。
+   只保存 stdout，不要把 stderr 混进去：`apply` 会逐字比对计划文本。逐行检查要写哪些文件、单元和 `.env`。计划还检查 CI 账户的 linger（根步骤 `loginctl enable-linger <account>`，没做时 `apply` 拒绝）和每个要启用的单元在 `default.target.wants`、`timers.target.wants` 里的链接（缺了就重新 `enable`）；stderr 的最后一行是现在有几个 runner 进程活着、哪些没有（design 决定 15.5，不进计划文本）。在共享账户上，计划不得碰我们子目录以外的东西，`ci-*` 单元除外。
 6. **应用。** 运行 `setup/apply.sh <role> --plan plan.txt`。如果旧版本留下了没有记录的单元，`plan.sh` 和 `apply.sh` 都要加 `--adopt`，并逐个确认那些文件是我们的。
 7. **注册 runner。** 需要 gh 临时拥有 `admin:org`，用完立即收回（§7）。所有 runner 都停着的时候才能注册：
    ```
@@ -279,6 +279,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 - **集群**：项里不写 `ssh` 和 `gate`，改写站点配置的 `site` 和 `account`（`etc/slurm/<site>.toml` 里的站点名和账户别名）。`pool status` 像部件一样经账户的 CI 密钥（`etc/slurm/keys/<account>`）调用 gate 的只读动词 `capacity`：它对账户各目标的分区跑那三个查询（`sinfo`、`sacctmgr`、`squeue`），中间用 `===` 隔开。这个动词随账户的 `ci-run slurm apply` 到集群上；还没 apply 的账户，或者某个查询失败时，表里的问题是 `the gate refused capacity`（用 `ci-run slurm check <site> <account>` 看原因）。注册表要放在 `<data>/ci-runners/etc` 里：gate 的 ssh 控制连接放在 `<data>/ci-runners/state` 下。
 - **另一台主机**：项里写 `probe = "forced"`。`pool status` 不发送代码，只用 `etc/pool/keys/<项名>`（私钥 600）登录，对方 CI 账户 `authorized_keys` 里这把公钥的那一行是 `restrict`，强制运行 `ci-run pool probe`：不带参数、不读 stdin，打印对方自己注册表里唯一的 `local` 机器的探测结果（JSON）。那一行由对方主机的 setup 计划写：把公钥写进对方 inventory 的 `probe_key`，`plan.sh` 列出这一行（标记 `ci-runners-pool-probe`），批准后 `apply`；删掉 `probe_key` 再 apply（`push_key` 还在时），这一行就没了。`probe_key` 不能和 `push_key` 是同一把钥匙。别名写在 CI 账户的 `~/.ssh/config` 里（`HostName`、`User`、`Port`），对方的主机密钥固定在 `known_hosts` 里。
+- **本机的 runner**：CI 账户注册表里 `local` 那一项写 `runners = "<data>/actions-runner"`（私有路径，和 `drain` 一样）。`pool status` 数这个目录下有活进程（`Runner.Listener` 或它的 `run-helper.sh`）的 runner，写进行的 `runners` 字段；一个都没有时问题是 `no runner online`，brainspike 的 plan 就不往这台主机放部件。对方经强制探测读的也是这一项。`pool run` 不看这个问题（它只占 slot，不用 runner）。数的是进程，不是 GitHub 看到的在线状态：隧道断了时进程还在，照样算（design 决定 15.5）。
 - 这两种项只给 `pool status` 用，`pool run` 不会选它们。每个探测有自己的上限（主机 60 秒，集群 90 秒），并行运行，所以整张表在 plan 那一步的 120 秒之内出来。
 - 紧急关闭：以每个 CI 账户运行 `ci-run drain on --pool slurm`，或者把注册表移走（plan 会退回静态池并留一条说明）。
 

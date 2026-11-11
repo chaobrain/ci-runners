@@ -147,6 +147,24 @@ class Registry(unittest.TestCase):
         self.assertIn('data/ci-runners/drain.json', toks)
         self.assertIn('tmp/leases', toks)
 
+    def test_the_runners_key(self):
+        """A host's ``runners`` (decision 15.5): absolute, private, and passed to the probe of a
+        local machine (what a forced probe's caller reads)."""
+        text = REGISTRY.replace('slots = { lock = "/tmp/x.lock", count = 2 }\n',
+                                'slots = { lock = "/tmp/x.lock", count = 2 }\nrunners = "/data/ci/actions-runner"\n')
+        self.assertEqual(pool.load(text).machines['hosta'].runners, '/data/ci/actions-runner')
+        self.assertEqual(reg().machines['hostb'].runners, '')
+        with self.assertRaisesRegex(pool.RegistryError, 'absolute'):
+            pool.load(text.replace('"/data/ci/actions-runner"', '"actions-runner"'))
+        import tomllib
+        self.assertIn('data/ci/actions-runner', pool.deny_tokens(tomllib.loads(text)))
+        local = CI_REGISTRY.replace('slots = { lock = "/tmp/x.lock", count = 1 }',
+                                    'slots = { lock = "/tmp/x.lock", count = 1 }\nrunners = "/data/ci/actions-runner"')
+        seen = []
+        with unittest.mock.patch.object(pool, 'probe', lambda *a: seen.append(a) or {}):
+            pool.local_probe(pool.load(local))
+        self.assertEqual(seen[0][-1], '/data/ci/actions-runner')
+
     def test_a_registry_others_may_write_is_refused(self):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, 'pool.toml')
@@ -565,6 +583,96 @@ class Probe(unittest.TestCase):
         self.assertEqual(row['gpu_free'], {0: 20000})  # card 1's one lease is held
         self.assertIn('drained', pool.fits(row, pool.Ask(), m, 0))
 
+    @staticmethod
+    def fake_proc(d, procs, mount='proc rw'):
+        """A /proc with one directory per process, its cmdline the given argv, and a
+        mountinfo whose /proc line ends with ``mount``."""
+        proc = os.path.join(d, 'proc')
+        os.makedirs(os.path.join(proc, 'self'))
+        with open(os.path.join(proc, 'self', 'mountinfo'), 'w') as f:
+            f.write(f'22 1 0:21 / /proc rw,nosuid shared:12 - {mount}\n'
+                    '23 22 0:22 / /proc/sys/fs/binfmt_misc rw - binfmt_misc binfmt_misc rw,hidepid=2\n')
+        for pid, argv in enumerate(procs, 100):
+            os.makedirs(os.path.join(proc, str(pid)))
+            with open(os.path.join(proc, str(pid), 'cmdline'), 'wb') as f:
+                f.write(b'\0'.join(a.encode() for a in argv) + b'\0')
+        os.makedirs(os.path.join(proc, '999'))  # gone before its cmdline was read
+        return proc
+
+    def test_the_runners_with_a_live_process(self):
+        """Decision 15.5: a runner is alive with its listener (argv[0]) or its run-helper.sh
+        (argv[1], after its shell), right under the runners' directory; nothing else counts."""
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, 'actions-runner')
+            os.makedirs(root)
+            proc = self.fake_proc(d, [
+                [f'{root}/hx-gpu0/bin/Runner.Listener', 'run'],
+                ['/bin/bash', f'{root}/hx-light-1/run-helper.sh'],
+                ['/bin/bash', f'{root}/hx-gpu0/run-helper.sh'],  # the same runner twice
+                [f'{root}/hx-part-1/bin/Runner.Worker', 'spawnclient'],  # a worker is no listener
+                [f'{root}2/hx-part-2/bin/Runner.Listener', 'run'],  # another directory with the same prefix
+                [f'{root}/hx-part-3/x/bin/Runner.Listener', 'run'],  # not right under it
+                [f'{root}//bin/Runner.Listener', 'run'],  # no name
+                ['/bin/sh', '-c', f'{root}/hx-part-4/run-helper.sh'],  # argv[2]: a command line naming it
+                ['python3', f'{root}/hx-part-5/bin/Runner.Listener'],  # a listener's path at argv[1]: not one
+                [f'{root}/hx-part-6/run-helper.sh'],  # a helper's path at argv[0]: not one
+            ])
+            for r in (root, root + '/'):
+                self.assertEqual(pool.runners_alive(r, proc), {'hx-gpu0', 'hx-light-1'})
+            link = os.path.join(d, 'link')  # the runners start from their real path: a linked root still counts
+            os.symlink(root, link)
+            real = self.fake_proc(os.path.join(d, 'r'), [[f'{os.path.realpath(root)}/hx-gpu1/bin/Runner.Listener']])
+            self.assertEqual(pool.runners_alive(link, real), {'hx-gpu1'})
+            st = os.stat(root)  # another account's process naming the path does not count
+            with unittest.mock.patch('os.stat', lambda p, _s=os.stat: _s(p) if p == root else
+                                     os.stat_result((st.st_mode, 0, 0, 0, st.st_uid + 1, 0, 0, 0, 0, 0))):
+                self.assertEqual(pool.runners_alive(root, proc), set())
+            self.assertEqual(pool.runners_alive(root, os.path.join(d, 'none')), None)  # no /proc: not known
+            empty = self.fake_proc(os.path.join(d, 'e'), [])
+            self.assertEqual(pool.runners_alive(root, empty), set())
+
+    def test_a_proc_that_hides_other_accounts_processes(self):
+        """With hidepid, only the account that owns the runners' directory can count them;
+        anyone else gets None (not known), never 0 (decision 15.5: no false alarm)."""
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, 'actions-runner')
+            os.makedirs(root)
+            argv = [[f'{root}/hx-gpu0/bin/Runner.Listener', 'run']]
+            for mount, ours, want in (('proc rw,hidepid=invisible', True, {'hx-gpu0'}),
+                                      ('proc rw,hidepid=2', False, None), ('proc rw,hidepid=1', False, None),
+                                      ('proc rw,hidepid=0', False, {'hx-gpu0'}), ('proc rw,hidepid=off', False, {'hx-gpu0'}),
+                                      ('proc rw', False, {'hx-gpu0'})):
+                with tempfile.TemporaryDirectory() as e:
+                    proc = self.fake_proc(e, argv, mount)
+                    with unittest.mock.patch('os.getuid', return_value=os.stat(root).st_uid + (0 if ours else 1)):
+                        self.assertEqual(pool.runners_alive(root, proc), want, msg=mount)
+            with tempfile.TemporaryDirectory() as e:
+                proc = self.fake_proc(e, argv, 'proc rw,hidepid=invisible')
+                self.assertIsNone(pool.runners_alive(os.path.join(d, 'missing'), proc))  # owner unknown
+
+    def test_a_host_with_no_runner_online(self):
+        """The probe's count becomes the row's ``runners``; 0 is a problem brainspike's plan
+        reads, which a pool run ignores (it takes a slot, not a runner); unknown or not
+        asked is none."""
+        m = reg().machines['hosta']
+        base = {'slots_free': 1, 'load': 0.0, 'cpus': 16}
+        down = pool.host_row(m, {**base, 'runners': 0})
+        self.assertEqual((down['runners'], down['problems']), (0, ['no runner online']))
+        self.assertEqual(pool.fits(down, pool.Ask(), m, 0), '')
+        self.assertEqual(pool.fits(dict(down, problems=['drained', 'no runner online']), pool.Ask(), m, 0), 'drained')
+        up = pool.host_row(m, {**base, 'runners': 3})
+        self.assertEqual((up['runners'], up['problems']), (3, []))
+        for p in ({**base, 'runners': None}, base):
+            row = pool.host_row(m, p)
+            self.assertEqual((row.get('runners'), row['problems']), (None, []))
+        with tempfile.TemporaryDirectory() as d:
+            lock = os.path.join(d, 's.lock')
+            open(lock, 'w').close()
+            self.assertEqual(pool.probe(lock, 1, '', runners=os.path.join(d, 'actions-runner'))['runners'], 0)
+            self.assertNotIn('runners', pool.probe(lock, 1, ''))
+            with unittest.mock.patch.object(pool, 'runners_alive', lambda root: None):  # hidden: not known, not 0
+                self.assertIsNone(pool.probe(lock, 1, '', runners='/x')['runners'])
+
     def test_probe_host_runs_the_probe_through_ssh(self):
         m = reg().machines['hosta']
         seen = {}
@@ -574,7 +682,7 @@ class Probe(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, json.dumps({'slots_free': 2, 'load': 0, 'cpus': 16}) + '\n', '')
         row = pool.probe_host(m, run)
         self.assertEqual(seen['argv'][-2:], ['alias-a', '/usr/bin/python3 -I -'])
-        self.assertIn("probe('/tmp/x.lock', 2, '', '', '', 1, 2)", seen['input'])
+        self.assertIn("probe('/tmp/x.lock', 2, '', '', '', 1, 2, '')", seen['input'])
         self.assertEqual(row['slots_free'], 2)
         self.assertEqual(pool.probe_host(m, lambda a, **k: subprocess.CompletedProcess(a, 255, '', ''))['problems'],
                          ['unreachable (exit 255)'])

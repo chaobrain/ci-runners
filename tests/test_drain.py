@@ -314,7 +314,7 @@ class SharedState(Host):
     def setUp(self):
         super().setUp()
         if not shutil.which('setfacl'):
-            self.skipTest('no setfacl')
+            self.no_acls('no setfacl')
         if os.getuid() == 0:
             self.skipTest('root reaches every path')
         self.p = s = f'/tmp/cirt{uuid.uuid4().hex[:12]}'  # with local_accounts, plain names in /tmp
@@ -338,10 +338,17 @@ class SharedState(Host):
             else:
                 os.unlink(f)
 
+    def no_acls(self, why):
+        """Skip where there are no ACLs, but fail on the hosted runners, which have them:
+        these tests must run in this repository's CI."""
+        if os.environ.get('GITHUB_ACTIONS') == 'true':
+            self.fail(why)
+        self.skipTest(why)
+
     def acl(self, *args):
         r = subprocess.run(['setfacl', *args], capture_output=True, text=True)
         if r.returncode:
-            self.skipTest(f'no ACL support here: {r.stderr.strip()}')
+            self.no_acls(f'no ACL support here: {r.stderr.strip()}')
 
     def make(self, uids):
         """Every shared file and directory, with the entries for ``uids``, as the root step

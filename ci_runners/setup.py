@@ -42,6 +42,7 @@ records what it made in ``state/setup.json``; a second run is a no-op.
 from __future__ import annotations
 
 import difflib
+import errno
 import glob
 import hashlib
 import json
@@ -446,14 +447,17 @@ def namespace_faults(h: dict, table: str, here: str) -> list[str]:
 ACL_USER, ACL_MASK = 0x02, 0x10
 
 
-def acl_users(path: str, default: bool = False) -> dict[int, int] | None:
+def acl_users(path: str, default: bool = False, strict: bool = False) -> dict[int, int] | None:
     """``{uid: perm}`` of the named-user entries of ``path``'s access (or default) ACL,
     with the mask applied; None if it has no such ACL. Read from the xattr, so no
-    ``getfacl`` is needed."""
+    ``getfacl`` is needed. ``strict``: an error other than no such ACL (or none on this
+    file system) is raised, not taken for no ACL."""
     try:
         raw = os.getxattr(path, 'system.posix_acl_default' if default else 'system.posix_acl_access',
                           follow_symlinks=False)
-    except OSError:
+    except OSError as e:
+        if strict and e.errno not in (errno.ENODATA, errno.EOPNOTSUPP):
+            raise
         return None
     entries = [(int.from_bytes(raw[i:i + 2], 'little'), int.from_bytes(raw[i + 2:i + 4], 'little'),
                 int.from_bytes(raw[i + 4:i + 8], 'little')) for i in range(4, len(raw) - 7, 8)]
@@ -496,13 +500,14 @@ def _shared_paths(h: dict) -> list[tuple[str, bool, bool]]:
             *((p, False, True) for p in lease_files(h))]
 
 
-def _path_faults(h: dict, uids: dict[str, int], root: bool) -> list[tuple[str, str]]:
+def _path_faults(h: dict, uids: dict[str, int], root: bool, strict: bool = False) -> list[tuple[str, str]]:
     """``(path, what is missing)`` for each shared path (``_shared_paths``): there (what
     the parts make may not be yet), reachable, of its kind and not a link, root-owned with
     ``root`` (what the parts make is its maker's), with a named-user access entry for each
     uid of ``uids`` (named by its key) with ``rw`` (``rwx`` on a directory) after the mask,
     and on a directory a default entry with ``rwx``. An error other than a missing or an
-    unreachable path is raised. Reads the files, their ACLs by xattr."""
+    unreachable path is raised, and with ``strict`` one reading an ACL (``acl_users``).
+    Reads the files, their ACLs by xattr."""
     out = []
     for path, is_dir, theirs in _shared_paths(h):
         try:
@@ -511,7 +516,9 @@ def _path_faults(h: dict, uids: dict[str, int], root: bool) -> list[tuple[str, s
             if not theirs:  # the parts make those
                 out.append((path, 'missing'))
             continue
-        except PermissionError:  # a directory on its way denies this account its x
+        except OSError as e:  # on its way: a directory that denies its x, a file, a link loop
+            if e.errno not in (errno.EACCES, errno.ENOTDIR, errno.ELOOP):
+                raise
             out.append((path, 'not reachable'))
             continue
         if not (stat.S_ISDIR if is_dir else stat.S_ISREG)(st.st_mode):
@@ -522,7 +529,7 @@ def _path_faults(h: dict, uids: dict[str, int], root: bool) -> list[tuple[str, s
             continue
         need, kind = (7, 'rwx') if is_dir else (6, 'rw')  # a directory: x to reach its tickets
         for default in ((False, True) if is_dir else (False,)):
-            got = acl_users(path, default) or {}
+            got = acl_users(path, default, strict) or {}
             short = [a for a, u in uids.items() if got.get(u, 0) & need != need]
             if short:
                 out.append((path, f'no {"default " if default else ""}{kind} ACL entry for {", ".join(short)}'))
@@ -534,8 +541,9 @@ def own_access(h: dict, uid: int) -> list[tuple[str, str]]:
     job time (decision 15.2, issue #125): ``shared_state``'s checks of the paths for that
     one uid (``uid <n>`` in what is missing), but not who owns them. Empty when the uid
     has all it needs. No subprocess: the ACLs are read by xattr. An error other than a
-    missing or unreachable path is raised, so the caller never takes it for a miss."""
-    return _path_faults(h, {f'uid {uid}': uid}, root=False)
+    missing or unreachable path, or than no ACL, is raised, so the caller never takes it
+    for a miss."""
+    return _path_faults(h, {f'uid {uid}': uid}, root=False, strict=True)
 
 
 def _has_account(uid: int) -> bool:

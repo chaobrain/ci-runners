@@ -4,6 +4,7 @@ tree; the systemctl commands are recorded, not run."""
 from __future__ import annotations
 
 import contextlib
+import errno
 import glob
 import hashlib
 import http.server
@@ -1342,6 +1343,21 @@ class Shared(unittest.TestCase):
         with mock.patch.object(setup.os, 'lstat', side_effect=OSError(5, 'Input/output error')):
             with self.assertRaises(OSError):
                 setup.own_access(h, me)  # no proven miss
+        with mock.patch.object(setup.os, 'getxattr', side_effect=OSError(errno.EIO, 'Input/output error')):
+            with self.assertRaises(OSError):
+                setup.own_access(h, me)  # an ACL unread is no ACL missing
+            self.assertNotEqual(setup.shared_state(h, uid_of=lambda a: me), [])  # the plan's read is not strict
+        with mock.patch.object(setup.os, 'getxattr', side_effect=OSError(errno.ENODATA, 'No data available')):
+            self.assertEqual(len(setup.own_access(h, me)), len(files) + 2 * 3)  # no ACL: no entry
+        shutil.rmtree(queue)
+        os.rmdir(lease)
+        pathlib.Path(lease).touch()  # a file in the lease directory's place: its queue is out of reach
+        self.assertEqual(setup.own_access(h, me), [(lease, 'not a directory'), (queue, 'not reachable')])
+        self.assertIn((queue, 'not reachable'), setup.shared_state(h, uid_of=lambda a: me))  # the plan too
+        os.unlink(lease)
+        os.symlink(lease, lease)  # a link loop
+        self.assertEqual(setup.own_access(h, me), [(lease, 'not a directory'), (queue, 'not reachable')])
+        os.unlink(lease)
 
     def test_no_fixed_uid(self):
         """Issue #125: every uid comes from the account's name when the plan is made, so a

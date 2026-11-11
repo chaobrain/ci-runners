@@ -986,7 +986,9 @@ class Executor:
         ``ci-run drain on``) and gives ``SHARED_DRAINED``; a check that cannot run gives
         ``SHARED_UNKNOWN`` and drains nothing. The details (each path, the account and its
         uid, what is missing, the stale entries, the fix) go to the host's
-        ``logs/shared-<date>.log`` only. Nothing here undrains."""
+        ``logs/shared-<date>.log`` only. Nothing here undrains. A drain that cannot be
+        written (an unreadable state is drained already) is logged, and the part still goes
+        to the peer's pool: each later part checks again and goes there too."""
         h = self.inv.host
         if not h.get('local_accounts'):
             return ''

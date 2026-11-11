@@ -2670,6 +2670,17 @@ Rules:
      `success` on the context before its run; the claim ran (`no verdict on this head`) and the run was green, and a
      rerun of it skipped (`green`, every part skipped). The red head was red on compile, cpu, gpu, multi-a and
      multi-b.
+- **`v1.14.1`** (patch, stamped 2026-11-12; #161, #165; lead-approved, #161): the verdict and `salvage` read every
+  attempt of a part. Where a part's artifacts stop, the attempt after its last artifact is read from its record
+  whatever that artifact said in `next`, and so is each one after it while records exist (§4.5, §4.8 rule 5): a
+  consumer's own fallback job after a retry that did not start (brainspike's CI contract §4.2) is the part's attempt
+  3, after an attempt 2 that said `none`, and its lost job's record is now salvaged instead of attempt 2's
+  `unavailable` deciding. Until then only a retry the last artifact asked for, up to attempt 2, was read. No
+  action's input or output, label, outcome kind, inventory or registry key, hook decision, setup, slurm or egress
+  code changes. Its notes:
+  1. **Salvage** takes this host's records of the attempt after the last artifact and of each later one,
+     consecutively; a part whose next attempt this host did not record is left alone, as before.
+  2. No setup change: a host's plan at `v1.14.1` is `v1.14.0`'s, so the install restarts no runner.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

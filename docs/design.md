@@ -2129,6 +2129,23 @@ Rules:
      (`authorized_keys` only: no unit changes and no runner restarts). Then each CI account's registry (mode 600).
   4. No setup change without `probe_key`: a host's plan at `v1.9.0` is `v1.8.0`'s (3090b's and 3090a's plans from
      the code PR's head have the same sha256 as from `v1.8.0`), so the install restarts no runner.
+- **`v1.10.0`** (minor, stamped 2026-11-11; decision 15.2, #125 items 1-4: #126, #127 and #129; with #123 and
+  #128): the shared state at job time. On a host whose inventory has `local_accounts`, the part's gate checks the CI
+  account's own access to every shared file (`part.Executor.shared_state`, `setup.own_access`); a proven miss drains
+  the host and ends the part `unavailable` (`drained: shared state`), a check that cannot run ends it `unavailable`
+  (`shared state unknown`) without draining. `setup`'s plan also checks the lease directory's `queue` and lock files
+  and warns of stale ACL entries without blocking `apply`. A verdict whose success description passes 140 characters
+  reads `passed: all N parts` (#123). No action's input or output changes, no label, slurm or egress code changes.
+  Its notes:
+  1. **When each side runs it.** The reaper's removal of `logs/shared-<date>.log` after 14 days holds from the
+     install (`releases/hook`); the gate's check and the verdict's description hold for every part once `v1` moves.
+  2. **No host drains at the move.** Before `v1` moves, each 3090 host's `setup.own_access` as its CI account shows
+     no miss (3090b and 3090a at `fcfdd35`: 0 misses, 0 root steps to do), so the new gate does not drain them.
+  3. No inventory key and no setup change: a host's plan at `v1.10.0` is `v1.9.0`'s (3090b's and 3090a's plans from
+     the stamp are byte-identical to those from `v1.9.0`, plan sha256 `8f8f13ab` and `2cf73c29`; on 3090a once the
+     stale ACL entries of a uid in no account, which the new warning listed, were removed), so the install restarts
+     no runner. The hosted unit tests run
+     on one Python, the hosts' 3.12 (#128).
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

@@ -339,6 +339,9 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
             lines = u.read_text().splitlines()
             self.assertIn('CPUAffinity=0-3 16-27', lines, u.name)
             self.assertEqual(lines[lines.index('CPUAffinity=0-3 16-27') - 1], '[Service]', u.name)
+        for t in sorted((ROOT / 'setup' / 'units').glob('*.service')):  # the units this host does not render too
+            lines = t.read_text().splitlines()
+            self.assertEqual(lines[lines.index('[Service]') + 1], '@CPU_AFFINITY@', t.name)
         self.assertEqual(setup.cpu_affinity({'cpus': '5'}), 'CPUAffinity=5')
         self.assertEqual(setup.cpu_affinity({}), '')
         with self.assertRaises(ValueError):

@@ -1004,7 +1004,11 @@ class Executor:
             if not h.get('compile_cpus'):
                 return 'this host has no compile_cpus for compile parts'
             # the compile CPUs are the part's alone (decision 15.10): every other part runs on cpus
-            if not h.get('cpus') or cpu_set(str(h['cpus'])) & cpu_set(str(h['compile_cpus'])):
+            try:
+                overlap = not h.get('cpus') or bool(cpu_set(str(h['cpus'])) & cpu_set(str(h['compile_cpus'])))
+            except ValueError:  # a range the schema's pattern lets through, such as 3-1
+                overlap = True
+            if overlap:
                 return 'compile parts need the inventory\'s cpus, disjoint from compile_cpus (decision 15.10)'
         return ''
 

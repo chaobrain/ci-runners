@@ -417,7 +417,7 @@ class Classes(ClassHost):
         """Decision 15.10: the compile CPUs are the part's alone, so the inventory's ``cpus``,
         where every other part runs, must be given and disjoint from ``compile_cpus``."""
         why = "compile parts need the inventory's cpus, disjoint from compile_cpus (decision 15.10)"
-        for n, cpus in enumerate(('0', '0-1', '1,0', '')):
+        for n, cpus in enumerate(('0', '0-1', '1,0', '', '3-1')):
             text = self.inv_text.replace('cpus = "1"\ncompile', f'cpus = "{cpus}"\ncompile' if cpus else 'compile')
             self.inv = inventory.load(text)
             _, out = self.go('compile', id=f'o{n}')
@@ -473,6 +473,7 @@ class Classes(ClassHost):
         self.assertEqual(self.work(out, 'sh').count("covered by the caller's x hold"), 2)
         rec = json.loads(pathlib.Path(self.path(out), 'record.json').read_text())
         self.assertEqual((rec['lock'], rec['host_lock']), ('x', 's'))
+        self.assertGreaterEqual(rec['lock_wait_seconds'], rec['cpu_lock_wait_seconds'])
         for p in (self.hl, cpu_lock):
             self.assertEqual(subprocess.run(['flock', '-n', '-x', str(p), 'true'], timeout=10).returncode, 0, p)
         _, out = self.go('part', command=probe, id='s', lock='s')  # a shared hold of the host: its -x fails (3)

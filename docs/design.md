@@ -1446,7 +1446,9 @@ max +11.4 %). These amend §4.3, §4.8, §5.1, §5.5 and §7:
    is pinned to `cpus` (as before, §5.5 item 4), and every service unit of ours (the runners,
    so their light, salvage and cluster jobs, and the timers' services) has `CPUAffinity=`
    set to `cpus`: an affinity, not a cpuset, so a compile part's `taskset` to `compile_cpus`
-   still works. On 3090b: `cpus` 0–3,16–27, `compile_cpus` 4–15.
+   still works. On 3090b: `cpus` 0–3,16–27, `compile_cpus` 4–15. Not pinned (open, brainspike's
+   D-0121): a `pool run` and the local accounts' own jobs. They hold the host lock shared, so
+   they may run on the compile CPUs beside a compile part, which the old `x` kept out.
 5. **A minor release.** No input, output or label changes; the change is the host layer's
    and the host's inventory and units. Between the inventory edit and the move of `v1` the
    old release runs on the new `cpus` as before (it pins the other parts to them).

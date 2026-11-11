@@ -1758,14 +1758,28 @@ pools went with it (12.17), and its `h100` class with 13.4.
 | 3090b | `gpu` | 2 | `3090b-gpu`, `3090b-gpu<N>` | one-card parts on card N |
 | 3090b | `multi` | 1 | `3090b-multi` | two-card parts, after the P2P self-test (12.6) |
 | 3090b | `compile` | 1 | `3090b-compile` | exclusive timing parts on `compile_cpus` (12.7) |
+| 3090b | `slurm` | 8 | `3090b-slurm`, `3090-slurm` | cluster parts: one batch job each, no CI slot or card of the host (14.3) |
 | 3090a | `light` | 1 | `3090a-light` | as on 3090b |
 | 3090a | `part` | 3 | `3090a-cpu` | CPU parts |
 | 3090a | `gpu` | 2 | `3090a-gpu`, `3090a-gpu<N>` | one-card parts on card N |
 | 3090a | `multi` | 1 | `3090a-multi` | two-card parts, after the P2P self-test |
 | 3090a | `nightly` | 1 | `3090a-nightly` | a consumer's nightly, up to 600 min, holding the host (12.8) |
+| 3090a | `slurm` | 8 | `3090a-slurm`, `3090-slurm` | as on 3090b |
 
 A pool's size is the host's slots (or cards) plus one waiting seat per project allowed on
 it (§7); the 3090 hosts have 2 CI slots each, the count of brainspike's `ci_slot.sh`.
+**The `slurm` pools** (lead, 2026-11-11): 8 runners per 3090 host, up from 2, and the
+site config's `max_parts` (cluster parts per driver host) 8, up from 4, so that a runner
+never waits for a driver slot. With 2 per host, at most 4 cluster parts ran at once: a
+batch of 8 concurrent brainspike kernel PR runs had a part queue p90 of 19 min with 1
+part on the cluster. The bound is the account's CPU headroom: 16 runners × 32 cores
+(the largest part, a CPU part) = 512 ≤ 784, the association's `GrpTRES` CPU limits
+summed over the partitions of the enabled targets (CPU 72, v100 200, a100 128, a40 128,
+l40 64, h100 192; read on 2026-11-11 by the gate's `capacity`). The CPU partition alone
+holds 2 CPU parts at once (72 cores); a CPU part past those pends, and ends `unavailable`
+(`pending: … AssocGrpCpuLimit`) once its bound passes, so placement reads the CPU
+target's `start_now` in `pool status` before it sends a CPU part there. The GPU targets
+have room for the rest.
 Runner names are `<host role>-<pool>-<i>`, except the per-card pools'. All are org-level
 in Default (decision 1).
 
@@ -2422,6 +2436,28 @@ Rules:
   1. **When it holds.** Both changes are in the part and the readers (`salvage`, the verdict), so they hold for a
      consumer's parts once `v1` moves.
   2. No setup change: a host's plan at `v1.10.1` is `v1.10.0`'s, so the install restarts no runner.
+- **`v1.11.0`** (minor, stamped 2026-11-11; decision 15.5, #134: #135 and #137; with decision 15.6, #142: #143 and
+  #146, and decision 15.2's amendment, #124: #141 and #145; all lead-approved): the runners come back by themselves.
+  The runner unit wants (no longer requires) the hooks' copy and checks it in `ExecStartPre`; `ci-hooks.service`
+  retries a failed copy every 30 s; both units set `StartLimitIntervalSec=0`. `setup`'s plan checks the CI account's
+  linger (a root step) and each enabled unit's `.wants` link on every host, and prints the runners alive now on
+  standard error. A registry's host entry may name `runners`, and `pool status` reports `no runner online` for a host
+  with none alive. The runner watch (`ci-run runner-watch`, `setup/workstation/ci-runner-watch.{service,timer}`)
+  opens an issue when a host has had no runner online at GitHub for two checks. The shared-state checks (plan and
+  job time) cover the slot queue's `seq.lock` and `take.lock`. No action's input or output changes, no label,
+  outcome kind, inventory key, slurm or egress code changes. Its notes:
+  1. **When each side runs it.** The units take effect at each user manager's next start after the host's `apply`
+     (which restarts nothing). `pool status` and the forced probe run `releases/hook`, so the `runners` row holds
+     from the install once the registry names it; the queue locks' job-time check holds for a consumer's parts once
+     `v1` moves. The runner watch runs only once the lead enables its timer.
+  2. **The registry's `runners` after the install.** Releases before `v1.11.0` refuse the key (`unknown keys`), so
+     each CI account's registry gains it on its `local` entry only once both 3090 hosts' `releases/hook` is
+     `v1.11.0`; a host whose hook goes back to an older release loses the key first.
+  3. **The plan.** On each 3090 host the plan from this release rewrites `ci-runner@.service` and
+     `ci-hooks.service`, runs `daemon-reload` and `enable` (`--now` only for units already active), and restarts
+     nothing; linger is on (`done`) on both. Its plan differs from `v1.10.1`'s, so the lead approves it and applies.
+  4. **No host drains at the move.** Each 3090 host's `setup.own_access` as its CI account, with the queue locks,
+     shows no miss (3090b and 3090a at `6241cdd`: 0 misses).
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

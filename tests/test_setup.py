@@ -1150,12 +1150,12 @@ class Shared(unittest.TestCase):
         os.rmdir(files[0])
         pathlib.Path(files[0]).touch()
         acl('-m', f'u:{me}:rw,u:{other}:rw,m::rw', files[0])
-        os.rmdir(queue)  # a file in the queue's place
+        os.rmdir(queue)  # a file in the queue's place: its lock files out of reach
         pathlib.Path(queue).touch()
-        self.assertEqual(state(), [(queue, 'not a directory')])
+        self.assertEqual(state(), [(queue, 'not a directory'), *((f, 'not reachable') for f in setup.queue_files(self.h))])
         os.unlink(queue)
         os.symlink(files[1], queue)
-        self.assertEqual(state(), [(queue, 'not a directory')])
+        self.assertEqual(state(), [(queue, 'not a directory'), *((f, 'not reachable') for f in setup.queue_files(self.h))])
         os.unlink(queue)
         os.mkdir(queue)
         acl('-m', f'u:{me}:rwx,u:{other}:rwx,m::rwx,d:u:{me}:rwx,d:u:{other}:rwx,d:m::rwx', queue)
@@ -1224,6 +1224,38 @@ class Shared(unittest.TestCase):
         os.rmdir(queue)
         os.symlink(f'{self.p}-ci.queue', queue)  # a link to a good directory is not one
         self.assertEqual(state()[0], [(queue, 'not a directory')])
+
+    def test_the_slot_queues_lock_files_are_checked(self):
+        """Issue #124: the slot queue's ``seq.lock`` and ``take.lock``, opened in place, keep
+        the entries they were made with: once there, each is checked as the lease
+        directory's lock files are (``rw`` for every account, a regular file, not a link,
+        the maker's own), in the plan, at job time and for stale entries; the rest of the
+        queue (``seq``, the tickets), written new and renamed, is not."""
+        if not shutil.which('setfacl'):
+            self.skipTest('no setfacl')
+        me, other, old = os.getuid(), 65534, 3999011
+        q = f'{self.p}-ci.queue'
+        seq, take = f'{q}/seq.lock', f'{q}/take.lock'
+        self.assertEqual(setup.queue_files(self.h), [seq, take])
+        state, acl = self._acl_state(self.h, {'acct-x': me, 'localuser': other}, has_account=lambda uid: uid != old,
+                                     mine={seq: old, take: other})
+        self._shared_made(self.h, acl, (me, other))
+        self.assertEqual(state(), ([], []))  # not made yet: the first part makes them
+        for f, uids in ((seq, (old, other)), (take, (me, other)), (f'{q}/seq', (old,)), (f'{q}/000000000001.ticket', (old,))):
+            pathlib.Path(f).touch()
+            acl('-b', f)
+            acl('-m', ','.join(f'u:{u}:rw' for u in uids) + ',m::rw', f)
+        gone = 'which has no account (a renumbered account?)'
+        self.assertEqual(state(), ([(seq, 'no rw ACL entry for acct-x')],
+                                   [(seq, f'owned by uid {old}, {gone}'), (seq, f'ACL entry for uid {old}, {gone}')]))
+        if os.getuid() != 0:
+            self.assertEqual(setup.own_access(self.h, me), [(seq, f'no rw ACL entry for uid {me}')])
+        acl('-m', f'u:{me}:rw', seq)
+        acl('-x', f'u:{other}', take)
+        self.assertEqual(state()[0], [(take, 'no rw ACL entry for localuser')])
+        os.unlink(take)
+        os.symlink(seq, take)  # a link, even to a good file
+        self.assertEqual(state()[0], [(take, 'not a regular file')])
 
     def test_a_renumbered_account(self):
         """Issue #125: the CI account renumbered, its old uid's entries left: the account's

@@ -504,7 +504,8 @@ def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None)
     planned, and each shared file root-owned with ``rw`` for every account (the queue with
     its default entries too); a directory made inside one (the lease directory's
     ``queue``), once there, a directory with the same entries as the one it is in; and
-    the lock files the parts left in the lease directory (``lease_files``) with ``rw``.
+    the slot queue's lock files (``queue_files``) and the lock files the parts left in
+    the lease directory (``lease_files``), once there, with ``rw``.
     Each uid by the account's name, now (issue #125). Empty when all are done. Reads the
     files."""
     todo = []
@@ -525,12 +526,14 @@ def shared_state(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid, read=None)
 
 def _shared_paths(h: dict) -> list[tuple[str, bool, bool]]:
     """``(path, a directory, the parts make it)`` for each shared path of ``h``: the files
-    and directories of ``shared_files``, then the lock files the parts left in the lease
-    directory (``lease_files``). Reads the lease directory."""
+    and directories of ``shared_files``, then the slot queue's lock files
+    (``queue_files``) and the lock files the parts left in the lease directory
+    (``lease_files``). Reads the lease directory."""
     files, dirs, inner = shared_files(h)
     return [*((p, False, False) for p in files),
             *((p, True, False) for p in dirs),
             *((p, True, True) for p in inner),
+            *((p, False, True) for p in queue_files(h)),
             *((p, False, True) for p in lease_files(h))]
 
 
@@ -588,6 +591,14 @@ def _has_account(uid: int) -> bool:
     return True
 
 
+def queue_files(h: dict) -> list[str]:
+    """The slot queue's lock files (``slots.QUEUE_LOCKS``: ``seq.lock`` and ``take.lock``),
+    which the parts and the local accounts' scripts make and open in place, so they keep
+    the ACL entries they were made with (decision 15.2, issue #124); the rest of the queue
+    is written new and renamed. Each may be missing until the first part makes it. Pure."""
+    return [os.path.join(h['files']['slot_queue'], n) for n in slots.QUEUE_LOCKS]
+
+
 def lease_files(h: dict) -> list[str]:
     """The regular files directly in the inventory's lease directory: the lock files the
     parts and the pool runs make there (``part.Leases``: ``.lock`` and the cards'), which
@@ -605,7 +616,7 @@ def lease_files(h: dict) -> list[str]:
 def stale_entries(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid,
                   has_account=_has_account) -> list[tuple[str, str]]:
     """``(path, what)`` for each named-user ACL entry, access or default, of a shared file
-    or directory (``shared_files``, ``lease_files``) whose uid has no account, the mark of
+    or directory (``shared_files``, ``queue_files``, ``lease_files``) whose uid has no account, the mark of
     a renumbered account whose old uid kept its entries, or belongs to none of the
     inventory's accounts (a reused uid); and for each of those owned by a uid with no
     account (issue #125). A warning, never a step: such an entry is harmless to the
@@ -618,7 +629,7 @@ def stale_entries(h: dict, *, uid_of=lambda a: pwd.getpwnam(a).pw_uid,
             pass  # shared_state reports it
     out = []
     files, dirs, inner = shared_files(h)
-    for path in [*files, *dirs, *inner, *lease_files(h)]:
+    for path in [*files, *dirs, *inner, *queue_files(h), *lease_files(h)]:
         try:
             owner = os.lstat(path).st_uid
         except OSError:

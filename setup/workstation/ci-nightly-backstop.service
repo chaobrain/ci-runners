@@ -1,0 +1,19 @@
+# brainspike's nightly backstop (design decision 15.3): a user unit of the maintainer's
+# account on 3090b, not of a CI account. Placeholders: @RELEASE@, the release directory
+# (setup/install.sh with CI_RUNNERS_ETC under a directory of the maintainer's); @CHECKOUT@,
+# brainspike's main checkout; @PYTHON@, an interpreter of 3.10 or later; @NET_WRAP@, the
+# host's proxy wrapper. Copy to ~/.config/systemd/user/, fill in, then enable
+# ci-nightly-backstop.timer. The unit runs without a login session, so it needs linger for
+# the maintainer's account, gh's login in its config file, not in a keyring locked without a
+# session, and gh on the user manager's PATH. Rehearse under the user manager, not a login
+# shell: `systemd-run --user --wait --pipe <release>/setup/workstation/nightly-backstop.sh
+# --report-only <checkout> <python> <wrapper>`. A failed run dispatches nothing, and the next
+# tick tries again: check `journalctl --user -u ci-nightly-backstop` after setup.
+[Unit]
+Description=ci-runners: brainspike's nightly backstop
+
+[Service]
+Type=oneshot
+ExecStart=@RELEASE@/setup/workstation/nightly-backstop.sh @CHECKOUT@ @PYTHON@ @NET_WRAP@
+NoNewPrivileges=yes
+TimeoutStartSec=5min

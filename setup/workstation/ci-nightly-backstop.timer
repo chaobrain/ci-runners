@@ -1,0 +1,14 @@
+# Every quarter hour of brainspike's backstop window, 20:50 to 23:00 UTC inclusive (design
+# decision 15.3): 21:00 to 22:45, then 22:59, since a tick at 23:00:00 starts past the window's
+# end. In UTC whatever the host's zone; exact (no random delay); a host that was down does not
+# catch up (not Persistent).
+[Unit]
+Description=ci-runners: brainspike's nightly backstop, 21:00-22:59 UTC
+
+[Timer]
+OnCalendar=*-*-* 21,22:00,15,30,45:00 UTC
+OnCalendar=*-*-* 22:59:00 UTC
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

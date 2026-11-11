@@ -978,6 +978,55 @@ runs only when someone runs it.
   in the check refuses every job (§6.3: any error refuses). The gate does the same with
   neither.
 
+## Lead decision (2026-11-11): the nightly's backstop timer (decision 15.3)
+
+Approved by the lead on 2026-11-11 (brainspike's D-0112, its credential ruling: option A
+below). On 2026-11-10 GitHub created no `schedule` event for about six hours: brainspike's
+nightly cron fired 4 h late, and its merge gate's quarter-hourly wake, the nightly's
+backstop (brainspike's CI contract §6), did not run either. The gate now also runs the
+backstop on its event wakes (a status, a CI run, a label), which covers a busy evening; a
+quiet one needs a clock that is not GitHub's.
+
+1. **Where, and as whom.** User units of the maintainer's account on 3090b, brainspike's
+   reference host (12.1), beside the snapshot push (11.9):
+   `setup/workstation/ci-nightly-backstop.{service,timer}` and `nightly-backstop.sh`. Not
+   a CI account's: the CI accounts hold no GitHub credential (12.2), since every job such
+   an account accepts could read one.
+2. **When.** At 21:00, 21:15, …, 22:45 and 22:59 UTC: every quarter hour of the backstop's
+   window, 20:50 to 23:00 UTC inclusive. The last tick is 22:59, since one at 23:00:00
+   starts past the window's end and does nothing. `OnCalendar` is in UTC whatever the
+   host's zone; `AccuracySec=1s`, no random delay, not `Persistent` (a host that was down
+   does not catch up: the window may be over). The service is a oneshot, so a tick that comes
+   while a run is still going is skipped (with the 5-min bound, none can).
+3. **What.** `nightly-backstop.sh [--report-only] CHECKOUT PYTHON NET_WRAP` runs `PYTHON
+   -I scripts/merge_gate.py --backstop` in CHECKOUT, brainspike's main checkout: the same
+   tested check as the gate's own wakes. It dispatches `nightly.yml` on `main` only when
+   no nightly run was created since 20:00 UTC and none is queued, pending or in progress,
+   and it cancels a delayed schedule that duplicates a night. Its network goes through
+   NET_WRAP, the host's proxy wrapper, which fails rather than go direct. The script
+   prints the checkout's branch and commit, then the gate prints its line. With
+   `--report-only` the gate decides and prints and changes nothing (the dry run). Each
+   argument is an absolute path of one plain word; anything else, or a checkout without
+   `scripts/merge_gate.py`, exits 2 before the login is read.
+4. **The login.** The maintainer's own `gh` login, read at each run (`gh auth token`) and
+   passed to the gate in its environment only (`GH_TOKEN`), never on a command line or in
+   a file. The script unsets `GITHUB_TOKEN`, `GITHUB_REPOSITORY` and `GITHUB_ACTIONS`,
+   which the gate would read first. No new token.
+5. **Bounds and failures.** `TimeoutStartSec=5min`. A failed run (no login, the proxy
+   down, a GitHub error) ends with the gate's status in the journal and dispatches
+   nothing; the next tick tries again, and the gate's event wakes and a dispatch by hand
+   stay (§8). The units hold no host name: the checkout, the interpreter and the wrapper
+   are the unit's placeholders, filled in the maintainer's `~/.config/systemd/user/`
+   (§3.3).
+6. **Setup.** The lead applies the units (a timer: AGENTS.md, high-impact actions), from a
+   release installed by `setup/install.sh` under a directory of the maintainer's, as the
+   push's (§5.3).
+- *Options weighed.* (B) A fine-grained token (brainspike only, Actions write) in 3090b's
+  CI account, mode 600, as `etc/orgsync.token`: a new long-lived token that every job of
+  that account could read, to dispatch, cancel or delete brainspike's runs; the exposure
+  12.2 rules out. (C) No timer, only the gate's event wakes and a dispatch by hand: costs
+  nothing, but leaves a quiet stalled evening without a night.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -1091,8 +1140,11 @@ setup/egress/         ci-egress.service and allow: the egress host's proxy unit 
                       allowlist (11.10), installed by root there
 setup/inventory.example.toml  setup/policy.org.example.toml   placeholders only
 setup/slurm/          site.example.toml: a Slurm site config, placeholders only (14.6)
-setup/workstation/    orgsync-push.sh and ci-orgsync-push.{service,timer}: the snapshot
-                      push from the maintainer's workstation (decision 11.9)
+setup/workstation/    the maintainer's own user units: orgsync-push.sh and
+                      ci-orgsync-push.{service,timer}, the snapshot push from the
+                      workstation (decision 11.9); nightly-backstop.sh and
+                      ci-nightly-backstop.{service,timer}, brainspike's nightly backstop
+                      on 3090b (decision 15.3)
 actions/              claim/, part/, salvage/, verdict/ (composite, action.yml);
                       lib/ci-run.sh, the launcher; RELEASE, the release stamp
 .github/workflows/    test.yml (this repository's tests, hosted only)
@@ -1140,7 +1192,7 @@ defaults to `/usr/bin/python3`.
 The egress host, as root: `/opt/ci-runners/releases/<tag>/` (mode 555),
 `/opt/ci-runners/etc/egress-allow` and `/etc/systemd/system/ci-egress.service`
 (§5.3). The workstation, as the maintainer: a checkout of a release and the push units
-(§5.3).
+(§5.3). 3090b, as the maintainer: a checkout of a release and the backstop units (15.3).
 
 ### 3.3 Inventory: where it lives, what is secret
 
@@ -1157,6 +1209,8 @@ The egress host, as root: `/opt/ci-runners/releases/<tag>/` (mode 555),
 | the tunnel key, its `ssh_config` and the egress host's pinned key (decision 11.10) | `etc/tunnel/` on h100, the key mode 600; the egress host, its address and account are inventory | yes: it opens the one forward to the egress proxy, which passes only its allowlist (T15) |
 | the egress allowlist | `setup/egress/allow` in the repository (public names only), installed root-owned on the egress host | no |
 | the workstation's push units (decision 11.9): the ssh alias of each host and its paths | the maintainer's `~/.config/systemd/user/` on the workstation | no, but never published |
+| the nightly backstop's login (decision 15.3) | the maintainer's own GitHub login on 3090b, read by the backstop timer at each run and passed to the gate in its environment; nothing in a CI account | yes |
+| the backstop units (decision 15.3): the path of brainspike's checkout, the interpreter and the proxy wrapper | the maintainer's `~/.config/systemd/user/` on 3090b | no, but never published |
 | the push key's line on a 3090 host (decision 12.4) | the CI account's `authorized_keys`, `restrict` and forced to `org-sync --receive` | no, but never published |
 
 Each host holds its own `policy.toml` and `projects/`. Each hook log line carries the
@@ -1587,6 +1641,15 @@ account:
 | `ci-orgsync-push.{service,timer}` | user units of the maintainer's account, every 10 min: `ci-run org-sync --fetch` from a checkout of a release, with the login from `gh auth token`, piped to `ssh <host> <release>/bin/ci-run org-sync --receive` for each host in turn (h100, and from decision 12.4 3090b and 3090a, with the push key): the snapshot is fetched once, and each host, named by three words (ssh host, data root, interpreter), is bounded on its own (120 s); a host that fails is reported and does not hold up the others, and the run then ends with status 1; `TimeoutStartSec=10min` |
 | unchanged | the maintainer's gh login and ssh access to h100 (both exist); nothing is stored |
 
+**The maintainer's account on 3090b** (decision 15.3), as the maintainer, not as the CI
+account:
+
+| change | detail |
+|---|---|
+| prerequisites | linger for the maintainer's account; gh's login in its config file, not a keyring that needs a session, and gh on the user manager's PATH; brainspike's main checkout (the gate runs from it as it is, and each run prints its commit); the host's proxy wrapper |
+| `ci-nightly-backstop.{service,timer}` | user units of the maintainer's account: at 21:00, 21:15, …, 22:45 and 22:59 UTC, `nightly-backstop.sh CHECKOUT PYTHON NET_WRAP` from a checkout of a release runs `merge_gate.py --backstop` in the checkout under the wrapper, with the login from `gh auth token` in its environment; `TimeoutStartSec=5min` |
+| unchanged | the CI account and its units; the maintainer's gh login; nothing is stored |
+
 ### 5.4 *The h100 executor* (retired by 12.17 and 13.4)
 
 Its steps that still hold are in §5.5; the rest (the watchdog, D7, a reboot counted as
@@ -1644,6 +1707,7 @@ On 3090b and 3090a the executor of §4.3 adds:
 | 3090b, 3090a | a dedicated CI account per host, runners on it (decision 12.2) | the CI account's files: the runner credentials, the hook, the policy, the envs, each job's `GITHUB_TOKEN` while it runs, the checkout of a private repository, the shared lock and slot files (a job can hold them and stall local runs); nothing of the local accounts (T18), no sudo, no GitHub credential | private repositories only, of org members only; `NoNewPrivileges`; the account's own mount namespace (decision 12.16); `GITHUB_TOKEN` as on h100; per-job directories; the tunnel key opens only allowlisted HTTPS; the push key only `--receive` | a root-owned host layer with system units (§5.3, T13) |
 | egress host | a dynamic user of `ci-egress.service` | nothing of a job's: it sees only the names a job connects to | hardened system unit; root-owned release and allowlist | — |
 | workstation | the maintainer | nothing: no job runs there | the push reads the login at each run and stores nothing | — |
+| 3090b, the maintainer's account (15.3) | the maintainer | nothing: no job runs as the maintainer, and the CI account reaches nothing of the local accounts (T18) | the backstop reads the login at each run and stores nothing | — |
 
 ### 6.2 Per repository class
 
@@ -1787,6 +1851,7 @@ Rules:
 | thermal kill or early stop | the part's processes die, or we stop them | `thermal`: one retry on a cool card |
 | OOM | the scope's processes are killed | `oom`: one retry with `resume` |
 | h100's tunnel down | the runners go offline for its length (their own traffic goes through it, decision 11.10); a running part goes on, but its job cannot report and may end `lost`, then is salvaged | ssh's keep-alive ends a dead link in 90 s, and systemd restarts it after 10 s; the runner app retries its connection on its own. The egress proxy answers 502 when its own connection fails |
+| the backstop timer failing, or 3090b down, on an evening whose schedule stalls (15.3) | no dispatch from the host | the gate's event wakes dispatch the night on a busy evening; else the maintainer dispatches it by hand; a failed run is in the maintainer's journal and the next tick tries again |
 | the workstation down, or its push failing | the snapshot ages | every job of a host whose push fails refused `stale` after 60 min, until the push is back; the other hosts are not held up |
 | a 3090 host's tunnel down | as h100's | as h100's |
 | a local run holds the host lock or a slot | parts wait | their queue timeout, then `unavailable`; an exclusive hold of `busy.lock_minutes` or more sends a first attempt to the other host (13.2) |

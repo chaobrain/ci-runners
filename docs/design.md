@@ -2376,7 +2376,8 @@ Rules:
      consumer's parts once `v1` moves.
   2. No setup change: a host's plan at `v1.10.1` is `v1.10.0`'s, so the install restarts no runner.
 - **`v1.11.0`** (minor, stamped 2026-11-11; decision 15.5, #134: #135 and #137; with decision 15.6, #142: #143 and
-  #146, and decision 15.2's amendment, #124: #141 and #145; all lead-approved): the runners come back by themselves.
+  #146, and decision 15.2's amendment, #124: #141 and #145; all lead-approved; `v1` moved to it after the slurm and
+  3090 canaries at `@v1.11.0`, 2026-11-11): the runners come back by themselves.
   The runner unit wants (no longer requires) the hooks' copy and checks it in `ExecStartPre`; `ci-hooks.service`
   retries a failed copy every 30 s; both units set `StartLimitIntervalSec=0`. `setup`'s plan checks the CI account's
   linger (a root step) and each enabled unit's `.wants` link on every host, and prints the runners alive now on
@@ -2394,7 +2395,9 @@ Rules:
      `v1.11.0`; a host whose hook goes back to an older release loses the key first.
   3. **The plan.** On each 3090 host the plan from this release rewrites `ci-runner@.service` and
      `ci-hooks.service`, runs `daemon-reload` and `enable` (`--now` only for units already active), and restarts
-     nothing; linger is on (`done`) on both. Its plan differs from `v1.10.1`'s, so the lead approves it and applies.
+     nothing; linger is on (`done`) on both. Its plan differs from `v1.10.1`'s, so the lead approves it and applies
+     (applied on 3090b and 3090a after the install, plan sha256 `465075bd` and `e26c1903`, 8 changes each, no runner
+     restarted).
   4. **No host drains at the move.** Each 3090 host's `setup.own_access` as its CI account, with the queue locks,
      shows no miss (3090b and 3090a at `6241cdd`: 0 misses).
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an

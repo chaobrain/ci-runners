@@ -881,6 +881,112 @@ class NoHostLock(Host):
         self.assertEqual(pathlib.Path(self.path(out), 'work', 'c').read_text().strip(), 'unset unset')
 
 
+class Denied(Host):
+    """Issue #124: a shared path that refuses the account at the slot ticket or the leases
+    fails the part as before, but the host's log names its owner, mode and ACL entries."""
+
+    def setUp(self):
+        super().setUp()
+        if os.getuid() == 0:
+            self.skipTest('root opens every file')
+
+    def logged(self):
+        return [json.loads(line) for p in sorted((self.data / 'ci-runners/logs').glob('shared-*.log'))
+                for line in p.read_text().splitlines()]
+
+    def test_a_slot_queue_lock_that_refuses_the_account(self):
+        if part.setup_mod.acl_users(self.tmp.name, True) is not None:
+            self.skipTest('the temporary directory has default ACL entries')
+        q = pathlib.Path(self.tmp.name, 'locks', 's.queue')
+        q.mkdir()
+        os.chmod(q, 0o770)
+        (q / 'seq.lock').touch()
+        os.chmod(q / 'seq.lock', 0)
+        with self.assertRaises(PermissionError) as cm:
+            self.execute()
+        self.assertEqual(cm.exception.__notes__, [part.SHARED_DENIED])
+        (line,) = self.logged()
+        me = [os.getuid(), part.setup_mod._account_of(os.getuid())]
+        self.assertEqual(line['state'], [
+            {'path': str(q / 'seq.lock'), 'owner': me, 'mode': '0000', 'kind': 'file', 'acl': None},
+            {'path': str(q), 'owner': me, 'mode': '0770', 'kind': 'directory', 'acl': None, 'default_acl': None}])
+        self.assertEqual((line['account'], line['runner']), ('acct-x', 'hb-part-1'))
+
+    def test_a_private_lease_directory_that_refuses_the_account(self):
+        leases = self.data / 'ci-runners/state/leases'
+        leases.mkdir(parents=True)
+        os.chmod(leases, 0)
+        with self.assertRaises(PermissionError) as cm:
+            self.execute()
+        self.assertEqual(cm.exception.__notes__, [part.SHARED_DENIED])
+        (line,) = self.logged()
+        self.assertEqual([s['path'] for s in line['state']], [str(leases / 'queue'), str(leases)])
+        self.assertEqual(line['state'][1]['mode'], '0000')
+
+    def test_a_slot_take_lock_that_refuses_the_account(self):
+        q = pathlib.Path(self.tmp.name, 'locks', 's.queue')
+        q.mkdir()
+        (q / 'take.lock').touch()
+        os.chmod(q / 'take.lock', 0)
+        with self.assertRaises(PermissionError) as cm:
+            self.execute()
+        self.assertEqual(cm.exception.__notes__, [part.SHARED_DENIED])
+        self.assertEqual([s['path'] for s in self.logged()[0]['state']], [str(q / 'take.lock'), str(q)])
+
+    def test_a_card_lock_that_refuses_the_account(self):
+        leases = self.data / 'ci-runners/state/leases'
+        leases.mkdir(parents=True)
+        for c in (0, 1):
+            (leases / f'card{c}.0.lock').touch()
+            os.chmod(leases / f'card{c}.0.lock', 0)
+
+        def run(argv, **kw):
+            if argv[0] == 'nvidia-smi':
+                return subprocess.CompletedProcess(argv, 0, '0, 24576, 576\n1, 24576, 576\n', '')
+            return subprocess.run(argv, **kw)
+        ex = part.Executor(self.inv, str(self.etc), {**self.env, 'CI_RUNNER_CLASS': 'gpu'}, release=str(ROOT),
+                           scope=False, poll=0.1, run=run)
+        with self.assertRaises(PermissionError) as cm:
+            ex.execute(part.Inputs(project='p', id='g', timeout_minutes=1, queue_timeout_minutes=0.02, gpus=1,
+                                   command='true'))
+        self.assertEqual(cm.exception.__notes__, [part.SHARED_DENIED])
+        self.assertEqual([s['path'] for s in self.logged()[0]['state']][1:], [str(leases / 'queue'), str(leases)])
+        self.assertRegex(self.logged()[0]['state'][0]['path'], r'/card[01]\.0\.lock$')
+
+    def test_a_host_lock_that_refuses_the_account(self):
+        h = pathlib.Path(self.tmp.name, 'locks', 'h.lock')
+        self.inv = inventory.load(self.inv_text.replace('files = {', f'files = {{ host_lock = "{h}",'))
+        for f in part.locks.paths(str(h)):
+            pathlib.Path(f).touch()
+        os.chmod(h, 0)
+        with self.assertRaises(PermissionError) as cm:
+            self.execute(lock='s')
+        self.assertEqual(cm.exception.__notes__, [part.SHARED_DENIED])
+        self.assertEqual([s['path'] for s in self.logged()[0]['state']], [str(h)])
+
+    def test_the_part_error_stands_when_its_cause_cannot_be_read(self):
+        q = pathlib.Path(self.tmp.name, 'locks', 's.queue')
+        q.mkdir()
+        (q / 'seq.lock').touch()
+        os.chmod(q / 'seq.lock', 0)
+        with unittest.mock.patch.object(part.setup_mod, 'path_state', side_effect=ValueError('embedded null byte')), \
+                self.assertRaises(PermissionError) as cm:
+            self.execute()
+        self.assertEqual(cm.exception.__notes__, [part.SHARED_DENIED])
+        (line,) = self.logged()
+        self.assertEqual(line['state'], 'unread: ValueError')
+        self.assertTrue(line['error'].startswith('PermissionError: '), line['error'])
+
+    def test_another_error_is_not_logged(self):
+        for where, name in ((part.Leases, '__init__'), (slots.SlotQueue, 'take_ticket'),
+                            (slots.SlotQueue, 'try_take')):
+            with unittest.mock.patch.object(where, name, side_effect=OSError(5, 'Input/output error')), \
+                    self.assertRaises(OSError, msg=name) as cm:
+                self.execute(id=f'x{name}')
+            self.assertFalse(hasattr(cm.exception, '__notes__'), name)
+        self.assertEqual(self.logged(), [])
+
+
 class SharedLeases(Host):
     """The inventory's ``files.lease_dir``: the leases the CI account shares with the pool
     runs of other accounts (decision 15.1)."""

@@ -966,6 +966,11 @@ runs only when someone runs it.
    logs): each path, the account and its uid, what is missing, the stale uids, and the
    fix: the root step (`systemd-tmpfiles --create` on the `tmpfiles.d` file, while no
    local job holds the files) or the ACL, then `ci-run drain off`.
+   A shared path that refuses the CI account after the gate (issue #124: the slot queue's
+   or the lease directory's files, the host lock) still fails the part as before, an
+   error; its line in the same log holds the error and each path's owner, mode and
+   named-user ACL entries (`setup.path_state`), and the error gains a note that names no
+   path, account or uid.
 4. Only a proven miss drains. A check that cannot run (an unexpected error) ends the part
    `unavailable` (`shared state unknown`) without draining. Nothing undrains by itself:
    the operator runs `ci-run drain off` once the plan shows the root steps done.

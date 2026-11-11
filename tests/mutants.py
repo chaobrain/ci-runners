@@ -2681,7 +2681,7 @@ MUTANTS = [
      [f'{TRW}.Watch.test_a_failed_read_writes_nothing']),
     (RWP, "out += [i for i in got if 'pull_request' not in i]", 'out += got',
      [f'{TRW}.Watch.test_an_open_issue_with_the_title_is_adopted_and_pull_requests_are_not']),
-    (RWP, "consecutive = prev['offline'] > 0 and 0 < now - prev['last'] <= GAP", "consecutive = prev['offline'] > 0",
+    (RWP, "elif prev['offline'] > 0 and now - prev['last'] <= GAP:", "elif prev['offline'] > 0:",
      [f'{TRW}.Watch.test_a_gap_of_more_than_40_min_starts_the_count_again']),
     (RWP, 'GAP = 40 * 60', 'GAP = 60 * 60',
      [f'{TRW}.Watch.test_a_gap_of_more_than_40_min_starts_the_count_again']),

@@ -14,6 +14,7 @@ Decision 14 (2026-11-08, RUN-9) adds a time-billed Slurm cluster as a remote tar
 3090 hosts' runners: the `slurm` class, the gate, the site config and the install commands.
 Decision 15.8 (2026-11-11) brings h100 back as a full runner host on its shared account and
 raises the light pool to about 20 runners on the three hosts, with one shared label.
+Decision 15.9 (2026-11-11) makes `claim` count only the runners' own statuses.
 
 Guides, in Chinese: [consumers.md](consumers.md) for the repositories that use the CI,
 [operations.md](operations.md) for the maintainer of the hosts. This file is the contract;
@@ -1386,6 +1387,35 @@ amend 12.2 and §5.1.
   copied onto the shared account. (d) A capacity-only cluster key on h100 (item 5): a gate
   change and a line from the cluster account's owner, for a later decision.
 
+## Lead decision (2026-11-11): `claim` counts only the runners' statuses (decision 15.9)
+
+Approved by the lead on 2026-11-11 (brainspike's task ci-one-verdict-path, D-0116; its CI
+contract decision 2, *Retired*: "a local run posts no status, takes no claim and gives no
+verdict, and the runners run every final head"). brainspike's local runs no longer post a
+status, and its claim waits 0 s with lapse 0. But `claim` still counted a status posted by
+an allowlisted person: an unmerged branch that still runs an old-style local run could post
+pending (holding the head for the lapse) or success (skipping it, and with it the runners'
+verdict) until the branch's next push. These amend §4.1, §6.4's T11 and §6.5:
+
+1. **Only the runners' identity counts.** A status of the context counts only if the
+   policy's `bot` posted it: the workflow bot, `github-actions[bot]` by default, the login
+   of the job token that `claim` and the verdict post with. A person's status, of any
+   state and however fresh, neither holds nor skips a head, whether or not the hook's
+   allowlist or the org snapshot names the person.
+2. **The rule.** On the newest counted status: success skips ("green"); anything else
+   (pending, failure, error, or none) runs and posts pending. So a head the runners found
+   green is still never run twice (decision 6); a head they found red, or whose run they
+   left pending, runs again on a new trigger, as before.
+3. **The inputs go.** `wait-seconds` (how long to wait for another's claim) and
+   `local-lapse-minutes` (when a person's pending lapsed) have nothing left to act on, and
+   `ci-run claim` loses `--wait-seconds` and `--local-lapse-minutes`. `claim` reads only
+   `policy.toml`'s `bot`: no actor list, no org snapshot (`policy.actors_for` goes with it).
+   The hook's allowlist and its merge with the snapshot (§6.3, §6.5) do not change.
+4. **A minor release, not `v2`** (lead, 2026-11-11). A composite action given an input it
+   does not declare logs a warning (`Unexpected input(s)`) and runs, so a caller that still
+   passes either input gets the same claim. brainspike, the only caller (the org's
+   repositories searched, §9), passes both, and drops them in a PR of its own.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -1609,30 +1639,25 @@ A consumer calls the actions `chaobrain/ci-runners/actions/<name>@v1` in its own
 workflow (§4.8, decision 12.12; the reusable workflow `h100-test.yml` was retired by 12.17). Each action calls the host layer of its own
 release (§9). Inputs that the project registry already holds may be left out.
 
-### 4.1 `claim`: skip a head that already has a verdict
+### 4.1 `claim`: skip a head the runners already found green
 
 | input | default | meaning |
 |---|---|---|
 | `context` | required | the project's status context, e.g. `myproj/ci` |
 | `sha` | the PR head, else `github.sha` | |
-| `wait-seconds` | 0 | how long to wait for a claim by another actor to appear |
-| `local-lapse-minutes` | 45 | a pending status by an allowlisted actor older than this has lapsed |
 | `pending-description` | "queued on the runners" | posted when the runners take the head |
 
 Output `run` is `true` or `false`, with `reason`. Pure rule, on the newest status of
-`context` for the sha:
+`context` for the sha that the runners' own identity posted: the policy's `bot`, the
+workflow bot by default (decision 15.9):
 
-1. success, posted by the workflow bot or by an allowlisted actor: skip, "green";
-2. failure posted by an allowlisted actor (a run outside these runners): skip, since
-   the fix is a new push;
-3. pending posted by an allowlisted actor within the lapse (a live claim elsewhere):
-   skip;
-4. anything else: run, and post pending.
+1. success: skip, "green";
+2. anything else (pending, failure, error, or no such status): run, and post pending.
 
-The allowlist is the hook's, merged with the org snapshot (§6.5). A run whose pending
-the bot posted is therefore claimed again by a later run of the same head; one that
-ended green is skipped. To run a green head again, push a new head. Permissions:
-`statuses: write`.
+A status any other login posted, an allowlisted person's included, does not count. A run
+whose pending the bot posted is therefore claimed again by a later run of the same head;
+one that ended green is skipped. To run a green head again, push a new head. The inputs
+`wait-seconds` and `local-lapse-minutes` went with 15.9. Permissions: `statuses: write`.
 
 ### 4.2 *`place`* (retired by 11.12)
 
@@ -2146,7 +2171,7 @@ bound).
 | T8 | *Secrets leak to h100 through an ssh environment.* Retired with the driver (11.12). | — |
 | T9 | The hook's output leaks inventory in logs. | a reason code only; the inventory lint |
 | T10 | A hostile event payload targets the hook. | JSON parsing in `python -I`; no shell interpolation; fixtures with hostile strings |
-| T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the bot's and allowlisted actors' statuses; consumers audit merges |
+| T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the statuses of the runners' identity, the policy's `bot` (15.9); consumers audit merges |
 | T12 | A burst of refused jobs blocks our runners. | refusal in under 10 s; the lead can pause a repository in the policy |
 | T13 | (also any co-user of h100's account, an accepted gap; on the 3090 hosts the CI account's own jobs only) An accepted job (or its dependency) edits the host layer it owns: the hook (or its copy in `/tmp`, 13.5), the policy, `.env`, the units, the drain file or the load record (13.1, 13.2), so later jobs pass unchecked. | private consumers only (§5.3); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs; `ci-run hooks copy` checks its `/tmp` directory through a descriptor (no link, the account's, mode 700) and then writes the copies by path, which only the account itself could race in its private `/tmp` (accepted, 13.5) |
 | T14 | A co-user of h100's shared account reads the org-sync token, or edits the snapshot. | no token on h100 (decision 11.9): the snapshot arrives over the maintainer's ssh access, checked by `--receive` (§6.5). A host that syncs itself holds a fine-grained read-only token (members, metadata): it shows the member list and the private repositories' names, nothing else. An edited snapshot is T13's case. |
@@ -2190,8 +2215,8 @@ private ones, and a snapshot entry already listed as public is ignored.
 
 The hook refuses every job (`stale`) when the snapshot is older than `max_age_minutes`,
 and refuses with `policy` when the snapshot is missing, too large or malformed. It
-prints the hash of the policy and of the snapshot. `claim` takes its allowlist from the
-same merge.
+prints the hash of the policy and of the snapshot. `claim` reads neither the actors nor
+the snapshot: it counts the runners' own statuses only (15.9).
 
 Org members are humans; a bot or an outside collaborator is not one, so both stay
 refused. A member who leaves the org is refused within 10 min, or 60 min if the push
@@ -2275,7 +2300,7 @@ Rules:
 | bound | value |
 |---|---|
 | job-started hook, job-completed hook | 60 s, 120 s |
-| `claim` API calls | 30 s each, 3 tries; the wait as input |
+| `claim` API calls | 30 s each, 3 tries; no wait (15.9) |
 | slot or lease wait | 60 min (input) |
 | sampler; early stop | every 30 s; 85 °C for 3 min |
 | the supervisor's memory cap | checked every 2 s |

@@ -1,14 +1,15 @@
 """The ``claim`` decision: does a head still need the runners (design §4.1, lead decision 6)?
 
-A head whose status context already holds a verdict, or a live claim by a local run, is
-skipped. Only statuses posted by the workflow bot or by an allowlisted actor count (T11):
-anyone with write access can post a status on GitHub Free.
+A head whose status context already holds the runners' green verdict is skipped. Only
+statuses posted by the runners' own identity, the workflow bot (the job token's login), count
+(T11, decision 15.9): anyone with write access can post a status on GitHub Free, and a
+person's pending or success, such as an old local run's, neither holds nor skips a head.
 """
 from __future__ import annotations
 
 import dataclasses
 import datetime
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 
 
 @dataclasses.dataclass(frozen=True)
@@ -52,34 +53,22 @@ def parse_statuses(api: object, context: str) -> list[Status]:
     return out
 
 
-def decide(statuses: Sequence[Status], *, actors: Iterable[str], bot: str, now: float,
-           lapse_minutes: float = 45) -> Claim:
-    """The rule of design §4.1, on the newest status that counts.
+def decide(statuses: Sequence[Status], *, bot: str) -> Claim:
+    """The rule of design §4.1, on the newest status the runners posted.
 
-    A status counts if the bot posted it, or an allowlisted actor (``actors``). Then:
+    A status counts only if the bot posted it. Then:
 
     1. success: skip, the head is green;
-    2. failure by an allowlisted actor (a local run): skip, the fix is a new push;
-    3. pending by an allowlisted actor less than ``lapse_minutes`` old: skip, a live
-       local claim;
-    4. anything else: run.
+    2. anything else (pending, failure, error, or none): run.
 
     Among statuses with the same time, the first in ``statuses`` (the API's newest
     first) wins. Pure.
     """
     bot = bot.lower()
-    people = frozenset(a.lower() for a in actors) - {bot}
-    counted = [s for s in statuses if s.creator.lower() == bot or s.creator.lower() in people]
+    counted = [s for s in statuses if s.creator.lower() == bot]
     if not counted:
         return Claim(True, 'no verdict on this head')
     newest = max(counted, key=lambda s: s.time)  # max keeps the first of equal times
-    local = newest.creator.lower() in people
     if newest.state == 'success':
         return Claim(False, 'green')
-    if newest.state == 'failure' and local:
-        return Claim(False, 'red in a local run')
-    if newest.state == 'pending' and local:
-        if now - newest.time < lapse_minutes * 60:
-            return Claim(False, 'claimed by a local run')
-        return Claim(True, 'a local claim lapsed')
-    return Claim(True, f'{newest.state} by the runners' if not local else f'{newest.state} in a local run')
+    return Claim(True, f'{newest.state} by the runners')

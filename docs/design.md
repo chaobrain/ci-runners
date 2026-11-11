@@ -2130,7 +2130,7 @@ Rules:
   4. No setup change without `probe_key`: a host's plan at `v1.9.0` is `v1.8.0`'s (3090b's and 3090a's plans from
      the code PR's head have the same sha256 as from `v1.8.0`), so the install restarts no runner.
 - **`v1.10.0`** (minor, stamped 2026-11-11; decision 15.2, #125 items 1-4: #126, #127 and #129; with #123 and
-  #128): the shared state at job time. On a host whose inventory has `local_accounts`, the part's gate checks the CI
+  #128; `v1` moved to it after the slurm and 3090 canaries at `@v1.10.0`, 2026-11-11): the shared state at job time. On a host whose inventory has `local_accounts`, the part's gate checks the CI
   account's own access to every shared file (`part.Executor.shared_state`, `setup.own_access`); a proven miss drains
   the host and ends the part `unavailable` (`drained: shared state`), a check that cannot run ends it `unavailable`
   (`shared state unknown`) without draining. `setup`'s plan also checks the lease directory's `queue` and lock files

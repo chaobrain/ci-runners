@@ -24,10 +24,36 @@ import unittest
 import uuid
 from unittest import mock
 
-from ci_runners import inventory, setup
+from ci_runners import hookcopy, inventory, setup
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SYSTEM_DIRS = setup.SYSTEM_DIRS  # before any test patches it
+LINGER_ON = setup.linger_on  # before setUpModule patches it
+_linger = mock.patch.object(setup, 'linger_on', lambda account: True)
+
+
+def setUpModule():
+    _linger.start()  # every fake host's account lingers, but in the tests of linger itself
+
+
+def tearDownModule():
+    _linger.stop()
+
+
+def fake_enable(home, argv):
+    """What ``systemctl --user enable [--now] UNIT...`` leaves: each unit's link in the
+    ``.wants`` directory of the target its ``[Install]`` names (the timers', or
+    ``default.target``)."""
+    if argv[:3] != ['systemctl', '--user', 'enable']:
+        return
+    units = pathlib.Path(home) / '.config' / 'systemd' / 'user'
+    for u in argv[3:]:
+        if u.startswith('--'):
+            continue
+        wants = units / ('timers.target.wants' if u.endswith('.timer') else 'default.target.wants')
+        wants.mkdir(parents=True, exist_ok=True)
+        if not os.path.lexists(wants / u):
+            (wants / u).symlink_to(units / (u.split('@')[0] + '@.service' if '@' in u else u))
 
 
 class Setup(unittest.TestCase):
@@ -66,6 +92,7 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
 
     def run_(self, argv, **_kw):
         self.ran.append(argv)
+        fake_enable(self.home, argv)
 
     def apply(self, text):
         f = pathlib.Path(self.tmp.name) / 'plan.txt'
@@ -93,7 +120,7 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         self.assertEqual(len(state['applied']), 1)
         again = setup.build(str(self.etc))
         self.assertEqual(again.actions, [])  # a second run is a no-op
-        self.assertNotIn('run    ', again.text())
+        self.assertNotIn('\n  run    ', again.text())  # no command (a root step's line is not one)
         self.ran.clear()
         self.assertEqual(self.apply(text), 0)  # the approved plan again: nothing left to do
         self.assertEqual(self.ran, [])
@@ -289,7 +316,7 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         got = (self.home / '.config' / 'systemd' / 'user' / 'ci-runner@.service').read_text()
         d = self.data
         self.assertEqual([x for x in got.splitlines() if not x.startswith('#')], [
-            '[Unit]', 'Description=ci-runners: GitHub Actions runner %i', '', '[Service]', f'WorkingDirectory={d}/actions-runner/%i',
+            '[Unit]', 'Description=ci-runners: GitHub Actions runner %i', 'StartLimitIntervalSec=0', '', '[Service]', f'WorkingDirectory={d}/actions-runner/%i',
             f'ExecStart={d}/actions-runner/%i/run.sh', 'NoNewPrivileges=yes', 'KillMode=mixed', 'KillSignal=SIGTERM',
             'TimeoutStopSec=5min', 'Restart=always', 'RestartSec=30', 'Slice=ci.slice', '', '[Install]',
             'WantedBy=default.target'])
@@ -341,6 +368,7 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
 
     def run_(self, argv, **_kw):
         self.ran.append(argv)
+        fake_enable(self.home, argv)
 
     def test_no_root_steps_without_local_accounts(self):
         plan = setup.build(str(self.etc))  # h100: its own host layer (§5.3), no drop-in, nothing blocked
@@ -412,7 +440,7 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
                      'ci-hostload.timer\n'):
             self.assertIn(want, text)
         self.assertEqual(self.apply(text), 0)
-        self.assertEqual(sorted(p.name for p in self.units.iterdir()),
+        self.assertEqual(sorted(p.name for p in self.units.iterdir() if not p.name.endswith('.wants')),
                          ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-hostload.service', 'ci-hostload.timer',
                           'ci-orgsync.service', 'ci-orgsync.timer', 'ci-reaper.service', 'ci-reaper.timer',
                           'ci-runner@.service', 'ci.slice'])
@@ -436,7 +464,7 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
         runner = (self.units / 'ci-runner@.service').read_text()
         self.assertNotIn('ci-hooks', runner)
         self.assertNotIn('ci-proxy', runner)
-        self.assertIn('Description=ci-runners: GitHub Actions runner %i\n\n[Service]', runner)
+        self.assertIn('Description=ci-runners: GitHub Actions runner %i\nStartLimitIntervalSec=0\n\n[Service]', runner)
         self.assertIn(f'ExecStart={self.data}/actions-runner/%i/run.sh\n', runner)
         reaper = (self.units / 'ci-reaper.service').read_text()
         self.assertIn(f'Environment=CI_RUNNERS_PYTHON={sys.executable}\n', reaper)
@@ -517,6 +545,73 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
                 self.assertEqual(setup.main(['apply', '--plan', 'f', '--other']), 2)
         self.assertEqual([c.kwargs.get('adopt') for c in a.call_args_list], [True, False])
 
+    def test_linger_is_a_root_step_apply_waits_for(self):
+        """Decision 15.5: the plan shows linger for the account as a root step, on every host;
+        apply refuses while it is off, and goes ahead once logind marks it."""
+        self.unpacked = []
+        linger = pathlib.Path(self.tmp.name) / 'linger'
+        linger.mkdir()
+        with mock.patch.object(setup, 'linger_on', LINGER_ON), mock.patch.object(setup, 'LINGER_DIR', str(linger)):
+            self.assertFalse(setup.linger_on('acct-x'))
+            plan = setup.build(str(self.etc))
+            self.assertIn('  to do  run    loginctl enable-linger acct-x  (', plan.text())
+            self.assertEqual(plan.blocked, 'linger is off for the account')
+            self.assertEqual(self.apply(plan.text()), 1)
+            self.assertFalse((self.data / 'ci-runners' / 'state' / 'setup.json').exists())
+            self.assertEqual(self.ran, [])
+            (linger / 'acct-x').touch()
+            self.assertTrue(setup.linger_on('acct-x'))
+            plan = setup.build(str(self.etc))
+            self.assertIn('  done   run    loginctl enable-linger acct-x  (', plan.text())
+            self.assertEqual(plan.blocked, '')
+            self.assertEqual(self.apply(plan.text()), 0)
+
+    def test_a_unit_no_longer_enabled_is_enabled_again(self):
+        """Decision 15.5: on every host (this one has no local accounts), each unit the plan
+        enables keeps its link in its target's .wants; a missing one, and nothing else
+        changed, plans the enable again."""
+        self.unpacked = []
+        self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+        self.assertEqual(setup.build(str(self.etc)).actions, [])  # all written and enabled: a no-op
+        for gone, cmd in (('timers.target.wants/ci-hostload.timer',
+                           ['systemctl', '--user', 'enable', '--now', 'ci-reaper.timer', 'ci-orgsync.timer',
+                            'ci-envrefresh.timer', 'ci-hostload.timer']),
+                          ('default.target.wants/ci-runner@hx-gpu3.service',
+                           ['systemctl', '--user', 'enable', 'ci-runner@hx-light-1.service', 'ci-runner@hx-part-1.service',
+                            'ci-runner@hx-gpu0.service', 'ci-runner@hx-gpu3.service'])):
+            with self.subTest(gone):
+                (self.units / gone).unlink()
+                plan = setup.build(str(self.etc))
+                self.assertIn(f'  not enabled now: {os.path.basename(gone)}\n', plan.text())
+                self.assertIn(cmd, [a.get('argv') for a in plan.actions])
+                self.ran.clear()
+                self.assertEqual(self.apply(plan.text()), 0)
+                self.assertIn(cmd, self.ran)
+                self.assertTrue(os.path.lexists(self.units / gone))
+                self.assertEqual(setup.build(str(self.etc)).actions, [])
+
+    def test_the_plan_prints_the_runners_now_outside_its_text(self):
+        """Decision 15.5: how many of the inventory's runners have a live process, on standard
+        error: a state that changes would otherwise make apply refuse the approved plan."""
+        names = ['hx-light-1', 'hx-part-1', 'hx-gpu0', 'hx-gpu3']
+        root = str(self.data / 'actions-runner')
+        seen = []
+        for alive, want in ((set(names), '# runners now: 4 of 4 with a live process'),
+                            ({'hx-part-1', 'other'}, '# runners now: 1 of 4 with a live process; none for hx-light-1, '
+                                                    'hx-gpu0, hx-gpu3'),
+                            (None, '# runners now: not known (/proc hides them here)')):
+            with mock.patch('ci_runners.pool.runners_alive', lambda r, _a=alive: seen.append(r) or _a):
+                plan = setup.build(str(self.etc))
+                err, out = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                        mock.patch.dict(os.environ, {'CI_RUNNERS_ETC': str(self.etc)}):
+                    self.assertEqual(setup.main(['plan']), 0)
+            self.assertEqual(plan.note, want)
+            self.assertEqual(err.getvalue().splitlines()[-1], want)
+            self.assertNotIn('runners now', out.getvalue())
+            self.assertEqual(out.getvalue(), plan.text())
+        self.assertEqual(set(seen), {root})
+
     def test_the_python_must_be_3_11_or_later(self):
         old = pathlib.Path(self.tmp.name) / 'py310'
         old.write_text('#!/bin/sh\nexit 1\n')  # what a 3.10 answers to the version check
@@ -581,6 +676,16 @@ direct = ["localhost", "127.0.0.1", "::1"]
             (self.tun / name).write_text('Host egress\n  HostName egress.example\n' if name == 'ssh_config' else 'x\n')
             os.chmod(self.tun / name, 0o600)
 
+    def test_the_tunnel_no_longer_enabled_is_enabled_again(self):
+        """Decision 15.5: a missing tunnel link alone plans its enable --now again."""
+        self.unpacked = []
+        self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+        self.assertEqual(setup.build(str(self.etc)).actions, [])
+        (self.units / 'default.target.wants' / 'ci-tunnel.service').unlink()
+        plan = setup.build(str(self.etc))
+        self.assertIn(['systemctl', '--user', 'enable', '--now', 'ci-tunnel.service'], [a.get('argv') for a in plan.actions])
+        self.assertIn('  not enabled now: ci-tunnel.service\n', plan.text())
+
     def test_plan_with_a_tunnel(self):
         self.unpacked = []
         text = setup.build(str(self.etc)).text()
@@ -597,7 +702,7 @@ direct = ["localhost", "127.0.0.1", "::1"]
         self.assertNotIn('  remove ', text)  # nothing recorded: nothing to remove
         self.assertNotIn('egress.example', text)  # the lead's files are not shown
         self.assertEqual(self.apply(text), 0)
-        self.assertEqual(sorted(p.name for p in self.units.iterdir()),
+        self.assertEqual(sorted(p.name for p in self.units.iterdir() if not p.name.endswith('.wants')),
                          ['ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-hostload.service', 'ci-hostload.timer',
                           'ci-reaper.service', 'ci-reaper.timer', 'ci-runner@.service', 'ci-tunnel.service', 'ci.slice'])
         tunnel = (self.units / 'ci-tunnel.service').read_text()
@@ -906,17 +1011,25 @@ class Shared(unittest.TestCase):
                 mock.patch.object(setup, 'account_uid', lambda a: 4242), \
                 mock.patch.object(setup, 'private_state', lambda h, uid: []):
             self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
-            plan = setup.build(str(self.etc))  # all written, but no runner enabled (the mock ran nothing)
-            self.assertIn(enable, [a.get('argv') for a in plan.actions])
-            wants.mkdir(parents=True)
-            for n in names:
-                (wants / f'ci-runner@{n}.service').symlink_to('../ci-runner@.service')
+            self.assertIn(enable, self.ran)
             self.assertEqual(setup.build(str(self.etc)).actions, [])  # all enabled: a no-op
             (wants / 'ci-runner@hx-gpu0.service').unlink()  # disabled by the root step
             plan = setup.build(str(self.etc))
             self.assertIn(enable, [a.get('argv') for a in plan.actions])
             self.assertEqual(self.apply(plan.text()), 0)
             self.assertIn(enable, self.ran)
+
+    def test_the_hooks_copy_no_longer_enabled_is_enabled_again(self):
+        """Decision 15.5: the hooks' copy is wanted by default.target as the runners are."""
+        with mock.patch.object(setup, 'shared_state', lambda h: []), \
+                mock.patch.object(setup, 'account_uid', lambda a: 4242), \
+                mock.patch.object(setup, 'private_state', lambda h, uid: []):
+            self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+            self.assertEqual(setup.build(str(self.etc)).actions, [])
+            (self.home / '.config/systemd/user/default.target.wants/ci-hooks.service').unlink()
+            plan = setup.build(str(self.etc))
+            self.assertIn('  not enabled now: ci-hooks.service\n', plan.text())
+            self.assertIn(['systemctl', '--user', 'enable', '--now', 'ci-hooks.service'], [a.get('argv') for a in plan.actions])
 
     def test_the_runners_run_the_hooks_copies(self):
         """Decision 13.5: on a host with the private namespace the runners' .env names the
@@ -940,9 +1053,16 @@ class Shared(unittest.TestCase):
             self.assertIn(f'ExecStart={self.data}/ci-runners/releases/hook/bin/ci-run hooks copy\n', hooks)
             self.assertIn(f'ExecReload={self.data}/ci-runners/releases/hook/bin/ci-run hooks copy\n', hooks)
             self.assertIn('RemainAfterExit=yes\n', hooks)
+            for line in ('Restart=on-failure\n', 'RestartSec=30\n', '[Unit]\nDescription=ci-runners: copy the hooks into '
+                         "the account's private /tmp\nStartLimitIntervalSec=0\n"):  # it retries, never gives up (15.5)
+                self.assertIn(line, hooks)
             runner = (self.units / 'ci-runner@.service').read_text()
-            self.assertIn('[Unit]\nDescription=ci-runners: GitHub Actions runner %i\n'
-                          'Requires=ci-hooks.service\nAfter=ci-hooks.service\n', runner)
+            self.assertIn('[Unit]\nDescription=ci-runners: GitHub Actions runner %i\nStartLimitIntervalSec=0\n'
+                          'Wants=ci-hooks.service\nAfter=ci-hooks.service\n', runner)
+            self.assertNotIn('Requires=', runner)  # a failed copy fails the start, which Restart= retries (15.5)
+            pre = [x for x in runner.splitlines() if x.startswith('ExecStartPre=')]
+            self.assertEqual(pre[0], 'ExecStartPre=/usr/bin/systemctl --user is-active --quiet ci-hooks.service')
+            self.assertEqual(len(pre), 1 + len(hookcopy.NAMES))  # then each copy's check (13.5)
             for n in ('job-started.sh', 'job-completed.sh'):
                 self.assertIn(f'\nExecStartPre=/usr/bin/test -f /tmp/ci-runners-hooks/{n} -a -x '
                               f'/tmp/ci-runners-hooks/{n}\n', runner)
@@ -953,6 +1073,13 @@ class Shared(unittest.TestCase):
             self.assertIn(f'\nbase={self.data}/ci-runners\n', hook)
             argv = [a['argv'] for a in setup.build(str(self.etc)).actions if a['kind'] == 'run']
             self.assertNotIn(reload, argv)  # the hooks unchanged: no copy again
+            units = self.units / 'ci-runner@.service'
+            kept = units.read_text()
+            units.write_text(kept + '# changed\n')  # a unit to write, the hooks unchanged: still no copy again
+            argv = [a['argv'] for a in setup.build(str(self.etc)).actions if a['kind'] == 'run']
+            self.assertIn(start, argv)
+            self.assertNotIn(reload, argv)
+            units.write_text(kept)
             (self.data / 'ci-runners' / 'hooks' / 'job-started.sh').write_text('#!/bin/sh\nexit 1\n')
             argv = [a['argv'] for a in setup.build(str(self.etc)).actions if a['kind'] == 'run']
             self.assertIn(reload, argv)

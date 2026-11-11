@@ -2606,6 +2606,20 @@ Rules:
      node limit (`AssocGrpNodeLimit`) while the account's own CPU job held the partition, a capacity condition (the
      release changes no slurm part code; the GPU part passed). `v1` moved then; the rerun, once the partition was
      free, was green.
+- **`v1.13.0`** (minor, stamped 2026-11-11; decision 15.8, #158; lead-approved, brainspike's D-0116): h100 back on its
+  shared account and the light pool to about 20. An inventory's `probe_key` may be a list (one forced line per key);
+  `ci-run env build <project> --kept FILE` builds from another host's kept record with no token; a pool entry may
+  name `host_python`, the interpreter of its host side (the status probe and `pool run`'s remote half), for a host
+  whose system python is older than 3.11; a forced probe reads `etc/pool/ssh_config` where it exists; `pool add`
+  reads driver 610's `CUDA UMD Version`. All additive: a single `probe_key`, a build without `--kept`, an entry
+  without `host_python` and no `etc/pool/ssh_config` behave as in `v1.12.0`. No action's input or output, label,
+  outcome kind, hook, policy, gate, slurm part or egress code changes. Its notes:
+  1. **Order.** A host's inventory takes a `probe_key` list, and a registry `host_python`, only once its
+     `releases/hook` is `v1.13.0` (`v1.12.0` refuses both as malformed or unknown keys): install everywhere first,
+     then edit. The maintainer's registry and brainspike's `scripts/pool.sh` (which runs the ci-runners checkout)
+     take `host_python` once the checkout is at `v1.13.0` or later.
+  2. **Setup.** A host whose `probe_key` becomes a list gets one more marked line in its account's
+     `authorized_keys` from its plan; on the 3090 hosts and h100 the plan changes nothing else, so no runner restarts.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

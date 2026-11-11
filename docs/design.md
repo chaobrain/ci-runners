@@ -2710,7 +2710,8 @@ Rules:
      `success` on the context before its run; the claim ran (`no verdict on this head`) and the run was green, and a
      rerun of it skipped (`green`, every part skipped). The red head was red on compile, cpu, gpu, multi-a and
      multi-b.
-- **`v1.14.1`** (patch, stamped 2026-11-12; #161, #165; lead-approved, #161): the verdict and `salvage` read every
+- **`v1.14.1`** (patch, stamped 2026-11-12; #161, #165; lead-approved, #161; `v1` moved to it after the 3090
+  canary at `@v1.14.1`, green and red, 2026-11-12): the verdict and `salvage` read every
   attempt of a part. Where a part's artifacts stop, the attempt after its last artifact is read from its record
   whatever that artifact said in `next`, and so is each one after it while records exist (§4.5, §4.8 rule 5): a
   consumer's own fallback job after a retry that did not start (brainspike's CI contract §4.2) is the part's attempt
@@ -2721,6 +2722,9 @@ Rules:
   1. **Salvage** takes this host's records of the attempt after the last artifact and of each later one,
      consecutively; a part whose next attempt this host did not record is left alone, as before.
   2. No setup change: a host's plan at `v1.14.1` is `v1.14.0`'s, so the install restarts no runner.
+  3. **The canary** (`canary-3090-v1141`): the green head passed every part, with salvage on 3090a and the verdict
+     on 3090b (`passed: compile, cpu, gpu, multi-a, multi-b, oom, slow`); the red head was red on compile, cpu,
+     gpu, multi-a and multi-b.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 

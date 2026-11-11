@@ -1697,14 +1697,28 @@ pools went with it (12.17), and its `h100` class with 13.4.
 | 3090b | `gpu` | 2 | `3090b-gpu`, `3090b-gpu<N>` | one-card parts on card N |
 | 3090b | `multi` | 1 | `3090b-multi` | two-card parts, after the P2P self-test (12.6) |
 | 3090b | `compile` | 1 | `3090b-compile` | exclusive timing parts on `compile_cpus` (12.7) |
+| 3090b | `slurm` | 8 | `3090b-slurm`, `3090-slurm` | cluster parts: one batch job each, no CI slot or card of the host (14.3) |
 | 3090a | `light` | 1 | `3090a-light` | as on 3090b |
 | 3090a | `part` | 3 | `3090a-cpu` | CPU parts |
 | 3090a | `gpu` | 2 | `3090a-gpu`, `3090a-gpu<N>` | one-card parts on card N |
 | 3090a | `multi` | 1 | `3090a-multi` | two-card parts, after the P2P self-test |
 | 3090a | `nightly` | 1 | `3090a-nightly` | a consumer's nightly, up to 600 min, holding the host (12.8) |
+| 3090a | `slurm` | 8 | `3090a-slurm`, `3090-slurm` | as on 3090b |
 
 A pool's size is the host's slots (or cards) plus one waiting seat per project allowed on
 it (§7); the 3090 hosts have 2 CI slots each, the count of brainspike's `ci_slot.sh`.
+**The `slurm` pools** (lead, 2026-11-11): 8 runners per 3090 host, up from 2, and the
+site config's `max_parts` (cluster parts per driver host) 8, up from 4, so that a runner
+never waits for a driver slot. With 2 per host, at most 4 cluster parts ran at once: a
+batch of 8 concurrent brainspike kernel PR runs had a part queue p90 of 19 min with 1
+part on the cluster. The bound is the account's CPU headroom: 16 runners × 32 cores
+(the largest part, a CPU part) = 512 ≤ 784, the association's `GrpTRES` CPU limits
+summed over the partitions of the enabled targets (CPU 72, v100 200, a100 128, a40 128,
+l40 64, h100 192; read on 2026-11-11 by the gate's `capacity`). The CPU partition alone
+holds 2 CPU parts at once (72 cores); a CPU part past those pends, and ends `unavailable`
+(`pending: … AssocGrpCpuLimit`) once its bound passes, so placement reads the CPU
+target's `start_now` in `pool status` before it sends a CPU part there. The GPU targets
+have room for the rest.
 Runner names are `<host role>-<pool>-<i>`, except the per-card pools'. All are org-level
 in Default (decision 1).
 

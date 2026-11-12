@@ -4282,7 +4282,7 @@ MUTANTS = [
      "artifacts[3].name }}-${{ fromJSON(inputs.part).id }}-2",
      [f'{TRU}.Structure.test_each_attempt_gets_the_files_the_queue_bound_and_uploads_its_artifacts']),
     (CIW, "    if: github.event.repository.visibility == 'public'", "    if: github.event.repository.private",
-     [f'{TRU}.Structure.test_a_public_caller_is_refused_on_a_hosted_runner']),
+     [f'{TRU}.Structure.test_a_public_caller_goes_to_public_yml_and_a_private_one_never']),
     (CIW, "          parts: ${{ needs.plan.outputs.ids }}\n", "          parts: ${{ needs.plan.outputs.ids }}\n          wait-seconds: '120'\n",
      [f'{TRU}.Structure.test_the_verdict_runs_unless_cancelled_or_posted']),
     (FLW, "        elif arts and 'ci' in arts:", "        elif False:", [f'{TFL}.Plan.test_bad_options_are_named']),

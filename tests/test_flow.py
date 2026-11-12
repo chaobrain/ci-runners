@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -295,6 +296,17 @@ class Plan(unittest.TestCase):
                              'files: sub/none is an empty directory (the upload carries files)')
             os.rmdir(os.path.join(ws, 'plain', 'sub', 'none'))
             os.rmdir(os.path.join(ws, 'plain', 'sub'))
+            os.makedirs(os.path.join(ws, 'plain', 'clone', '.git'))  # a clone may hold the plan's token
+            with open(os.path.join(ws, 'plain', 'clone', '.git', 'config'), 'w') as f:
+                f.write('x')
+            self.assertEqual(flow.check_files(ws, 'plain'), 'files: clone/.git is a git directory (it may hold a credential)')
+            shutil.rmtree(os.path.join(ws, 'plain', 'clone'))
+            bad = os.path.join(os.fsencode(ws), b'plain', b'\xff')
+            with open(bad, 'w') as f:
+                f.write('x')
+            self.assertEqual(flow.check_files(ws, 'plain'),
+                             "files: '\\udcff' is not a UTF-8 name (the upload cannot name it)")
+            os.remove(bad)
             os.makedirs(os.path.join(ws, 'empty'))
             self.assertEqual(flow.check_files(ws, 'empty'), 'files: empty is an empty directory (the upload carries files)')
             os.mkfifo(os.path.join(ws, 'plain', 'pipe'))

@@ -260,9 +260,10 @@ class Structure(unittest.TestCase):
         self.assertTrue(cond.startswith('!cancelled() && '))  # a status function: no implicit success()
         self.assertIn("needs.plan.outputs.routed == 'true'", cond)
         self.assertIn("needs.plan.outputs.run == 'true'", cond)
-        self.assertIn("needs.plan.outputs.files != 'failure'", cond)
+        # #227: only files uploaded (or none named) hand on; failed, timed out or skipped do not
+        self.assertIn("(needs.plan.outputs.files == 'none' || needs.plan.outputs.files == 'success')", cond)
         plan = load('ci.yml')['jobs']['plan']
-        self.assertEqual(plan['outputs']['files'], '${{ steps.files.outcome }}')
+        self.assertEqual(plan['outputs']['files'], "${{ steps.plan.outputs.files == '' && 'none' || steps.files.outcome }}")
         self.assertEqual(plan['steps'][0]['id'], 'project')  # before anything reads it
         text = (WF / 'ci.yml').read_text()
         self.assertNotIn('github.event.repository.name', text)  # absent on a schedule
@@ -312,13 +313,19 @@ class Structure(unittest.TestCase):
         post, lost, files, verd = v['steps']
         self.assertEqual((post['if'], lost['if'], files['if'], verd['if']),
                          ("needs.plan.outputs.state != ''", "needs.plan.outputs.state == '' && needs.plan.outputs.routed != 'true'",
-                          "needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' && needs.plan.outputs.files == 'failure'",
-                          "needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' && needs.plan.outputs.files != 'failure'"))
+                          "needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' && "
+                          "needs.plan.outputs.files != 'none' && needs.plan.outputs.files != 'success'",
+                          "needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' && "
+                          "(needs.plan.outputs.files == 'none' || needs.plan.outputs.files == 'success')"))
+        # a plan job whose runner was lost has no outputs: its sha too, so each post names the run's own head
+        for st in (post, lost, files):
+            self.assertEqual(st['with']['sha'], '${{ needs.plan.outputs.sha || inputs.sha || github.event.pull_request.head.sha || github.sha }}', st['if'])
         self.assertEqual(lost['with']['state'], 'error')
         # #227: a plan job that ended after the route (its files not uploaded) is the plan's end,
         # never every part read as lost: the verdict action does not run, no part started
         self.assertEqual((files['with']['command'], files['with']['state']), ('status', 'error'))
-        self.assertEqual(files['with']['description'], "plan: the upload of the plan's files failed after the route; no part ran")
+        self.assertEqual(files['with']['description'],
+                         "plan: the plan's files did not upload after the route (${{ needs.plan.outputs.files || 'lost' }}); no part ran")
         self.assertEqual(v['outputs']['state'], "${{ needs.plan.outputs.state || (needs.plan.outputs.routed == 'true' && "
                                                 "steps.verdict.outputs.state) || 'error' }}")
         self.assertEqual((post['with']['command'], post['with']['state']), ('status', '${{ needs.plan.outputs.state }}'))

@@ -291,7 +291,8 @@ def check_files(workspace: str, rel: str) -> str:
     the parts, or ''. The plan job uploads it hidden entries and all (``.name``, a hidden
     directory too), so it refuses here what that upload cannot carry: a link on its path or
     inside it, an entry that is neither a file nor a directory, a name with a character the
-    upload refuses (``UNCARRIED``), an empty directory (the upload keeps files alone; the
+    upload refuses (``UNCARRIED``) or not in UTF-8, a ``.git`` (a clone's config may hold the
+    plan command's token, which no part may get), an empty directory (the upload keeps files alone; the
     whole directory empty fails it), and more than the bounds."""
     root = os.path.join(workspace, rel)
     if os.path.realpath(root) != os.path.join(os.path.realpath(workspace), rel.rstrip('/')):
@@ -307,6 +308,12 @@ def check_files(workspace: str, rel: str) -> str:
             count += 1
             if os.path.islink(f):
                 return f'files: {os.path.relpath(f, root)} is a link'
+            if n == '.git':  # a clone's config may hold the plan command's token (plan-token)
+                return f'files: {os.path.relpath(f, root)} is a git directory (it may hold a credential)'
+            try:
+                n.encode('utf-8')
+            except UnicodeEncodeError:
+                return f'files: {os.path.relpath(f, root)!a} is not a UTF-8 name (the upload cannot name it)'
             if UNCARRIED & set(n):
                 return f'files: {os.path.relpath(f, root)!r} has a character the upload refuses (" : < > | * ? or a line break)'
             if n in names:

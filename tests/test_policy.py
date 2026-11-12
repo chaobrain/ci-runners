@@ -36,7 +36,7 @@ P_COMPILE = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nclasses = ["co
 
 REPOS = {'chaobrain/brainkit': '1001', 'chaobrain/brainevent': '2002'}
 #: the public repository, as a payload names it
-PUBLIC = {'id': 2002, 'full_name': 'chaobrain/brainevent'}
+PUBLIC = {'id': 2002, 'full_name': 'chaobrain/brainevent', 'private': False}
 
 
 def event(name: str) -> dict:
@@ -249,6 +249,150 @@ class Refused(unittest.TestCase):
         ev = event('push')
         ev['repository'] = {'id': 3003, 'full_name': 'chaobrain/paused-one'}
         self.assertEqual(reason(P, env('chaobrain/paused-one', 'push', rid='3003'), ev), 'paused')
+
+
+#: brainevent opted in to the public pool by the lead (decision 16.7, 18.7)
+P_PUB = policy.load(POLICY.replace('id = 2002\n', 'id = 2002\npublic_runners = true\n'))
+
+
+def pub_env(event='pull_request', actor='alice', cls='gpu', audience='public', protected=None, **kw):
+    """The environment of a job of the opted-in public repository on a runner of its pool."""
+    e = env('chaobrain/brainevent', event, actor, cls=cls, **kw)
+    if audience is not None:
+        e['CI_RUNNER_AUDIENCE'] = audience
+    if protected is not None:
+        e['GITHUB_REF_PROTECTED'] = protected
+    return e
+
+
+class Public(unittest.TestCase):
+    """Decision 16.7 as amended by 18.7 (C2): P1's event fixtures on an opted-in public
+    repository, and the runner audience."""
+
+    def test_a_same_repository_pull_request_and_a_protected_push_on_a_public_gpu_runner(self):
+        self.assertEqual(reason(P_PUB, pub_env(), public('pr_same_repo')), 'ok')
+        self.assertEqual(reason(P_PUB, pub_env('push', protected='true'), public('push')), 'ok')
+
+    def test_p1_s_event_fixtures_are_refused_with_their_reason(self):
+        cases = {  # fixture: (event name, actor, reason)
+            'pr_fork': ('pull_request', 'mallory', 'fork'),
+            'pr_fork_by_member': ('pull_request', 'alice', 'fork'),
+            'pr_head_repo_deleted': ('pull_request', 'alice', 'fork'),
+            'pr_target_fork': ('pull_request_target', 'mallory', 'event'),
+            'pr_target_same_repo': ('pull_request_target', 'alice', 'event'),
+            'dispatch_bot': ('workflow_dispatch', 'github-actions[bot]', 'event'),
+            'dispatch_member': ('workflow_dispatch', 'alice', 'event'),
+            'schedule': ('schedule', 'alice', 'event'),
+            'workflow_run_fork': ('workflow_run', 'alice', 'event'),
+            'workflow_run_same': ('workflow_run', 'alice', 'event'),
+            'issue_comment': ('issue_comment', 'alice', 'event'),
+        }
+        forks = ('pr_fork', 'pr_fork_by_member', 'pr_target_fork', 'pr_head_repo_deleted')
+        for fixture, (name, actor, why) in cases.items():
+            ev = event(fixture)
+            if 'repository' in ev:
+                ev['repository'] = dict(PUBLIC)
+            if fixture in forks:  # the public repository is the base; the head stays the fork's
+                ev['pull_request']['base']['repo'] = dict(PUBLIC)
+            elif 'pull_request' in ev:
+                ev = public(fixture)
+            self.assertEqual(reason(P_PUB, pub_env(name, actor), ev), why, fixture)
+            # the same on a protected ref: the event decides, not the ref
+            self.assertEqual(reason(P_PUB, pub_env(name, actor, protected='true'), ev), why, fixture)
+
+    def test_a_push_to_a_ref_that_is_not_protected(self):
+        for protected in (None, 'false', '', 'True', 'true ', '1'):
+            self.assertEqual(reason(P_PUB, pub_env('push', protected=protected), public('push')), 'unprotected',
+                             protected)
+
+    def test_a_bot_or_a_non_member_never_runs_there(self):
+        self.assertEqual(reason(P_PUB, pub_env(actor='mallory'), public('pr_same_repo')), 'actor')
+        self.assertEqual(reason(P_PUB, pub_env(triggering='mallory'), public('pr_same_repo')), 'actor')  # a re-run
+        for bot in ('github-actions[bot]', 'dependabot[bot]'):
+            self.assertEqual(reason(P_PUB, pub_env(actor=bot), public('pr_same_repo')), 'bot', bot)
+            self.assertEqual(reason(P_PUB, pub_env(triggering=bot), public('pr_same_repo')), 'bot', bot)
+            self.assertEqual(reason(P_PUB, pub_env('push', bot, protected='true'), public('push')), 'bot', bot)
+        ev = public('pr_same_repo')
+        ev['pull_request']['user']['login'] = 'mallory'  # its author counts
+        self.assertEqual(reason(P_PUB, pub_env(), ev), 'actor')
+        # the bot switch never opens it, even on an entry the loader would refuse
+        repo = dataclasses.replace(P_PUB.repos['chaobrain/brainevent'], bot_dispatch=True)
+        p = dataclasses.replace(P_PUB, repos={**P_PUB.repos, 'chaobrain/brainevent': repo})
+        self.assertEqual(reason(p, pub_env(actor='github-actions[bot]'), public('pr_same_repo')), 'bot')
+
+    def test_only_the_gpu_class_of_the_public_audience(self):
+        for cls in sorted(policy.CLASSES - {'gpu'}):
+            self.assertEqual(reason(P_PUB, pub_env(cls=cls), public('pr_same_repo')), 'runner-class', cls)
+            self.assertEqual(reason(P_PUB, pub_env('push', cls=cls, protected='true'), public('push')),
+                             'runner-class', cls)
+        for audience in (None, 'private'):  # a private runner, whatever its class
+            for cls in sorted(policy.CLASSES):
+                self.assertEqual(reason(P_PUB, pub_env(cls=cls, audience=audience), public('pr_same_repo')),
+                                 'audience', (audience, cls))
+
+    def test_a_private_repository_is_refused_on_a_public_runner(self):
+        for cls in sorted(policy.CLASSES):
+            e = env(cls=cls)
+            e['CI_RUNNER_AUDIENCE'] = 'public'
+            self.assertEqual(reason(P_BOTH, e, event('pr_same_repo')), 'audience', cls)
+        e = env(cls='part')
+        e['CI_RUNNER_AUDIENCE'] = 'private'  # said, as unset
+        self.assertEqual(reason(P, e, event('pr_same_repo')), 'ok')
+
+    def test_an_audience_that_is_neither_is_refused(self):
+        for audience in ('', 'Public', 'public ', 'all', 'privat'):
+            e = env(cls='gpu')
+            e['CI_RUNNER_AUDIENCE'] = audience
+            self.assertEqual(reason(P_PUB, e, event('pr_same_repo')), 'audience', audience)
+            self.assertEqual(reason(P_PUB, pub_env(audience=audience), public('pr_same_repo')), 'audience', audience)
+            e = env('chaobrain/nowhere', cls='gpu')  # the runner's own fault, said before the repository's
+            e['CI_RUNNER_AUDIENCE'] = audience
+            self.assertEqual(reason(P_PUB, e, event('pr_same_repo')), 'audience', audience)
+
+    def test_a_public_repository_not_opted_in_is_refused_as_before(self):
+        for audience in (None, 'public'):
+            self.assertEqual(reason(P, pub_env(audience=audience), public('pr_same_repo')), 'repository', audience)
+        paused = policy.load(POLICY.replace('id = 2002\n', 'id = 2002\npublic_runners = true\npaused = true\n'))
+        self.assertEqual(reason(paused, pub_env(), public('pr_same_repo')), 'paused')
+
+    def test_the_payload_must_name_the_public_repository(self):
+        for private in (True, None, 'false', 0):  # its payload must say it is public
+            ev = public('pr_same_repo')
+            ev['repository'] = {**ev['repository'], 'private': private}
+            if private is None:
+                del ev['repository']['private']
+            self.assertEqual(reason(P_PUB, pub_env(), ev), 'repository', private)
+        ev = public('pr_same_repo')
+        ev['repository'] = {'id': 1001, 'full_name': 'chaobrain/brainkit'}
+        self.assertEqual(reason(P_PUB, pub_env(), ev), 'repository-id')
+        self.assertEqual(reason(P_PUB, pub_env(rid='1001'), public('pr_same_repo')), 'repository-id')
+
+    def test_the_opt_in_is_the_policy_s_alone(self):
+        """Nothing of the job or its payload opts a repository in: only the policy's entry."""
+        ev = public('pr_same_repo')
+        ev['repository']['public_runners'] = True
+        ev['repository']['visibility'] = 'private'
+        ev['repository']['private'] = True
+        e = pub_env()
+        e['CI_RUNNER_PUBLIC_RUNNERS'] = 'true'
+        self.assertEqual(reason(P, e, ev), 'repository')
+        self.assertEqual(reason(P, env('chaobrain/brainevent', cls='gpu'), ev), 'repository')
+
+    def test_the_entry_s_key(self):
+        self.assertTrue(P_PUB.repos['chaobrain/brainevent'].public_runners)
+        self.assertFalse(P.repos['chaobrain/brainevent'].public_runners)
+        for bad in ('public_runners = "true"', 'public_runners = 1'):
+            with self.assertRaises(policy.PolicyError, msg=bad):
+                policy.load(POLICY.replace('id = 2002\n', f'id = 2002\n{bad}\n'))
+        with self.assertRaises(policy.PolicyError):  # a private repository is never opted in
+            policy.load(POLICY.replace('id = 1001\n', 'id = 1001\npublic_runners = true\n'))
+        policy.load(POLICY.replace('id = 1001\n', 'id = 1001\npublic_runners = false\n'))
+
+    def test_the_reasons_the_hook_may_print(self):
+        for why in ('audience', 'unprotected'):
+            self.assertIn(why, policy.REASONS)
+            self.assertLess(policy.REASONS.index(why), policy.REASONS.index('stale'))  # a decision, not an infra end
+            self.assertEqual(policy.line(policy.Decision(False, why), ''), f'ci-runners: refused {why} policy=none')
 
 
 class Load(unittest.TestCase):

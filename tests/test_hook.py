@@ -52,6 +52,29 @@ class Started(unittest.TestCase):
         self.assertEqual([r['reason'] for r in self.log()], ['ok', 'fork'])
         self.assertEqual(self.log()[0]['runner'], 'r-part-1')
 
+    def test_the_public_pool_by_the_runner_s_audience(self):
+        """C2 (decision 16.7, 18.7): the runner's ``CI_RUNNER_AUDIENCE`` from its environment;
+        an opted-in public repository on its pool's GPU runners only, with its reason logged."""
+        (self.etc / 'policy.toml').write_text(POLICY + '[repositories."chaobrain/brainevent"]\nid = 2002\n'
+                                              'visibility = "public"\npublic_runners = true\n')
+        ev = json.loads((EVENTS / 'pr_same_repo.json').read_text())
+        pub = {'id': 2002, 'full_name': 'chaobrain/brainevent', 'private': False}
+        ev['repository'] = ev['pull_request']['head']['repo'] = ev['pull_request']['base']['repo'] = pub
+        path = self.base / 'public.json'
+        path.write_text(json.dumps(ev))
+        env = {**self.env, 'GITHUB_REPOSITORY': 'chaobrain/brainevent', 'GITHUB_REPOSITORY_ID': '2002',
+               'GITHUB_EVENT_PATH': str(path), 'CI_RUNNER_CLASS': 'gpu', 'CI_RUNNER_AUDIENCE': 'public'}
+        cases = [(env, 'ok'), ({**env, 'CI_RUNNER_CLASS': 'light'}, 'runner-class'),
+                 ({**env, 'CI_RUNNER_CLASS': 'part'}, 'runner-class'),
+                 ({k: v for k, v in env.items() if k != 'CI_RUNNER_AUDIENCE'}, 'audience'),
+                 ({**self.env, 'CI_RUNNER_AUDIENCE': 'public'}, 'audience'), (self.env, 'ok')]
+        for e, why in cases:
+            code, line = hook.started(e)
+            self.assertEqual((code, line.split()[2]), (0 if why == 'ok' else 1, why), e)
+        got = self.log()
+        self.assertEqual([r['reason'] for r in got], [why for _, why in cases])
+        self.assertEqual([r['audience'] for r in got], ['public', 'public', 'public', '', 'public', ''])
+
     def test_errors_refuse(self):
         cases = {
             'no etc': ({**self.env, 'CI_RUNNERS_ETC': ''}, 'error'),

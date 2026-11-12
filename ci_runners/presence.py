@@ -11,8 +11,8 @@ network) and, per runner of the host, its *causes*:
   hosts: at or above ``max_temp_c``, or unread);
 - no free CI slot for it: the host's CI slots minus those held by processes that are not
   ours (a local run's, a pool run's) minus those our busy part runners hold or wait for,
-  shared among the idle part runners, the online ones first (16.2: no more part runners
-  online than free slots); or its slot's CPUs kept busy by processes that are not ours (one
+  shared among the idle part runners, one of each pool first, the online ones first (16.2:
+  no more part runners online than free slots); or its slot's CPUs kept busy by processes that are not ours (one
   load sample of ``LOAD_SECONDS``; the cause holds at half its CPUs and clears below a quarter);
 - the host or its pool is drained (13.1, 15.2), or the host's health gate fails (its free
   disk below ``disk_min_gib``, or the CI account's access to the shared files, 15.2);
@@ -26,7 +26,9 @@ part scope of the runner. A runner is stopped (``systemctl --user stop``) only a
 just before the stop; one that presence stopped (or that the unit's ``ExecCondition=``
 held back, ``Result=exec-condition``) is started after ``TICKS`` ticks without one. A runner
 that is not idle is never stopped; nor is the host's light runner without a ``ci-`` label
-(the ``home`` pool of §5.1, for the host's salvage legs). The runner unit's
+(the ``home`` pool of §5.1, for the host's salvage legs; until a host's light pool carries
+``ci-light``, 16.1, every light runner there is such a runner). One tick runs at a time
+(``state/presence.json.lock``). The runner unit's
 ``ExecCondition=`` runs ``ci-run presence check <runner>``, the same causes now, so that a
 restart (15.5) does not bring back a runner whose resource is still taken.
 
@@ -48,6 +50,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import fcntl
 import json
 import os
 import re
@@ -388,6 +391,10 @@ def causes(inv: inventory.Inventory, rs: Sequence[Runner], f: Facts, units: Mapp
         free = 0 if any(r.cls == EVERY_SLOT and r.name in busy for r in rs) else max(0, n - theirs - ours)
         idle = [r for r in part if r.name not in busy and not out[r.name]]
         idle.sort(key=lambda r: units.get(r.unit, ('', ''))[0] not in RUNNING)  # stable: online first, then by order
+        # one runner of each pool first (a timing runner is not starved by idle part runners), then the rest
+        first = list({r.pool: r for r in reversed(idle)}.values())[::-1]
+        first.sort(key=idle.index)
+        idle = first + [r for r in idle if r not in first]
         for r in idle[free:]:
             out[r.name].append(f'slot: no free CI slot ({theirs} of {n} held by others, {ours} by our parts)')
     for r in rs:
@@ -483,6 +490,24 @@ def tick(inv: inventory.Inventory, probe: Probe, *, dry_run: bool = False, now: 
     drain."""
     h = inv.host
     data = str(h['data'])
+    if dry_run:
+        return _tick(inv, probe, data, dry_run=True, now=now, out=out)
+    os.makedirs(os.path.dirname(state_path(data)), mode=0o700, exist_ok=True)
+    fd = os.open(state_path(data) + '.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:  # another tick (the timer's, or one by hand) runs: this one does nothing
+            out('presence: another tick runs; nothing done')
+            return 0
+        return _tick(inv, probe, data, dry_run=False, now=now, out=out)
+    finally:
+        os.close(fd)
+
+
+def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, now: Callable[[], float],
+          out: Callable[[str], None]) -> int:
+    h = inv.host
     enabled = config(h)
     rs = runners(inv)
     st, read_ok = read_state(data)
@@ -544,11 +569,15 @@ def tick(inv: inventory.Inventory, probe: Probe, *, dry_run: bool = False, now: 
                 rst['stop_ticks'] = 0
                 log(data, {'runner': r.name, 'action': 'kept', 'cause': cause, 'why': 'a job started'}, t)
                 continue
+            rst['stopped'] = t  # on disk before the stop: a tick that dies after it still owns the runner
+            write_state(data, st)
             p = probe.systemctl('--no-block', 'stop', r.unit)
             if p is not None and p.returncode == 0:
-                rst['stopped'], rst['stop_ticks'] = t, 0
+                rst['stop_ticks'] = 0
                 log(data, {'runner': r.name, 'action': 'stop', 'cause': cause}, t)
                 _count(st, r.name, 'stop')
+            else:  # not stopped: a running unit clears the mark at the next tick anyway
+                rst['stopped'] = None
         else:
             p = probe.systemctl('--no-block', 'start', r.unit)
             if p is not None and p.returncode == 0:

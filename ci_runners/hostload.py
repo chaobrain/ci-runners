@@ -322,6 +322,18 @@ def load_snapshot(uid: int | None = None, *, read: Callable[[str], str] = _read,
     uid = os.getuid() if uid is None else uid
     t, cpus = now(), cpu_jiffies(read('/proc/stat'))
     procs = {}
+    # every unit of ours together, short-lived processes included (cgroup v2): ci.slice holds the
+    # runners and the parts, app.slice the timers' services; None where it cannot be read
+    mgr = manager_cgroup(read('/proc/self/cgroup'))
+    usec: float | None = None
+    if mgr:
+        base = f'/sys/fs/cgroup{mgr}'
+        try:
+            apps = [f'app.slice/{d}' for d in listdir(f'{base}/app.slice') if OUR_UNIT.match(d)]
+        except OSError:
+            apps = []
+        vals = [keyed(read(f'{base}/{d}/cpu.stat'), 'usage_usec') for d in ['ci.slice', *apps]]
+        usec = None if vals[0] is None else float(sum(v for v in vals if v is not None))
     try:
         pids = [p for p in listdir('/proc') if p.isdigit()]
     except OSError:
@@ -332,7 +344,7 @@ def load_snapshot(uid: int | None = None, *, read: Callable[[str], str] = _read,
         st = proc_ticks(read(f'/proc/{pid}/stat'))
         if st is not None:
             procs[int(pid)] = (st[0], st[1], allowed_cpus(read(f'/proc/{pid}/status')))
-    return {'t': t, 'cpu': cpus, 'ours': procs}
+    return {'t': t, 'cpu': cpus, 'ours': procs, 'units_usec': usec}
 
 
 def load_between(a: Mapping, b: Mapping, hz: int) -> dict | None:
@@ -348,17 +360,24 @@ def load_between(a: Mapping, b: Mapping, hz: int) -> dict | None:
         old = a['ours'].get(pid)
         if old is not None and old[0] == start and ticks >= old[1]:
             mine.append(((ticks - old[1]) / hz / dt, cpus))
-    return {'cpu': cpu, 'ours': mine}
+    total = None
+    if a.get('units_usec') is not None and b.get('units_usec') is not None and b['units_usec'] >= a['units_usec']:
+        total = max(0.0, sum(cpu.values()) - (b['units_usec'] - a['units_usec']) / 1e6 / dt)
+    return {'cpu': cpu, 'ours': mine, 'foreign': total}
 
 
 def foreign_cores(sample: Mapping, cpus: frozenset[int]) -> float:
     """The cores of ``cpus`` kept busy by processes that are not ours in a load sample: their
     busy time, minus each of our processes' share on them (its cores times the part of its
-    allowed CPUs that are in ``cpus``; a part pinned to another slot adds nothing). Pure."""
+    allowed CPUs that are in ``cpus``; a part pinned to another slot adds nothing), and never
+    more than the host's busy time minus every unit of ours (``foreign``, where read: our
+    processes that start or end within the sample count as ours there). Pure."""
     busy = sum(v for c, v in sample['cpu'].items() if c in cpus)
     for cores, allowed in sample['ours']:
         if allowed:
             busy -= cores * len(allowed & cpus) / len(allowed)
+    if sample.get('foreign') is not None:
+        busy = min(busy, sample['foreign'])
     return max(0.0, busy)
 
 

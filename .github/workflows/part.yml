@@ -41,7 +41,7 @@ jobs:
     outputs:
       outcome: ${{ steps.part.outputs.outcome }}
       # its outcome reached an artifact: the part step's own upload, or the second try below
-      uploaded: ${{ steps.part.outcome == 'success' || steps.again.outcome == 'success' }}
+      uploaded: ${{ steps.part.outcome == 'success' || steps.part.outputs.uploaded == 'success' || steps.again.outcome == 'success' }}
       # the decision below, or none where the attempt's end asks for no retry (no step decides
       # it then): a known outcome is never read as lost, whatever its upload did
       retry: ${{ steps.retry.outputs.retry || (steps.part.outputs.next == 'none' && 'none') || '' }}
@@ -82,8 +82,11 @@ jobs:
           results: ${{ fromJSON(inputs.part).results }}
           target: ${{ fromJSON(inputs.part).target }}
       # the part step fails on red and on a failed upload: upload once more (the same file)
+      # where its own upload did not succeed; a red part's is done (issue #242)
       - id: again
-        if: always() && steps.part.outcome == 'failure' && steps.part.outputs.outcome != ''
+        if: >-
+          always() && steps.part.outcome == 'failure' && steps.part.outputs.outcome != '' &&
+          steps.part.outputs.uploaded != 'success'
         uses: actions/upload-artifact@v4
         with:
           name: ci-part-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '1' }}
@@ -242,7 +245,10 @@ jobs:
           target: ${{ fromJSON(env.RETRY).target }}
           resume: ${{ fromJSON(env.RETRY).resume }}
           attempt-of: ${{ fromJSON(env.RETRY).attempt_of }}
-      - if: always() && steps.part.outcome == 'failure' && steps.part.outputs.outcome != ''
+      # as the first attempt's: once more only where the part action's own upload did not succeed
+      - if: >-
+          always() && steps.part.outcome == 'failure' && steps.part.outputs.outcome != '' &&
+          steps.part.outputs.uploaded != 'success'
         uses: actions/upload-artifact@v4
         with:
           name: ci-part-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '2' }}

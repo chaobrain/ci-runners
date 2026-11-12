@@ -86,6 +86,9 @@ outputs:
   cool-card:
     description: "the card of this host a thermal retry goes to (one that passes the health gate); empty where none (decision 19.5)"
     value: ${{ steps.part.outputs.cool-card }}
+  uploaded:
+    description: "success where the outcome artifact uploaded; a red part's step fails with its upload done (issue #242)"
+    value: ${{ steps.upload.outcome }}
 runs:
   using: composite
   steps:
@@ -110,7 +113,8 @@ runs:
         --timeout-minutes "$IN_TIMEOUT" --gpus "$IN_GPUS" --gpu-mem-mib "$IN_GPU_MEM" --memory "$IN_MEMORY"
         --queue-timeout-minutes "$IN_QUEUE" --results "$IN_RESULTS"
         --resume "$IN_RESUME" --attempt-of "$IN_ATTEMPT_OF" --lock "$IN_LOCK" --target "$IN_TARGET"
-    - if: always() && steps.part.outputs.outcome != '' && inputs.upload != 'false'
+    - id: upload
+      if: always() && steps.part.outputs.outcome != '' && inputs.upload != 'false'
       uses: actions/upload-artifact@v4
       with:
         name: ci-part-${{ inputs.id }}-${{ steps.part.outputs.attempt || '1' }}

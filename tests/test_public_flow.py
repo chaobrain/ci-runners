@@ -18,6 +18,7 @@ from ci_runners import flow, hosted, policy, verdict
 from ci_runners import route as rt
 from tests.test_flow import REPO, SHA, Api, Env, run
 from tests.test_route import part
+from tests.test_verdict import zipped
 
 PUB = {'CIRUNNERS_PUBLIC': 'true'}
 
@@ -251,25 +252,43 @@ class Legs(unittest.TestCase):
             self.assertEqual(code, 2)  # a private caller's claim reads the policy's bot, as before
 
     def test_the_verdict_reads_artifacts_and_never_a_host(self):
+        listing = {'artifacts': [{'id': 9, 'name': 'ci-part-a-1', 'created_at': '2026-11-13T10:00:00Z'}]}
+        made = []
+
+        class Client:  # the verdict's own client (issue #242): the listing, the zip and the post
+            opened = 1
+
+            def __init__(self):
+                made.append(self)
+                self.calls, self.seconds = [], {}
+
+            def api(self, method, url, token, body=None):
+                self.calls.append((method, url, body))
+                return listing if method == 'GET' else {}
+
+            def artifact(self, url, token, limit):
+                self.calls.append(('ZIP', url, None))
+                return zipped({'outcome.json': json.dumps({'outcome': 'pass', 'run-attempt': 1})})
+
+            def close(self):
+                pass
         with tempfile.TemporaryDirectory() as d:
             e = Env(d)
-            arts = os.path.join(d, 'arts')
-            os.makedirs(os.path.join(arts, 'ci-part-a-1'))
-            with open(os.path.join(arts, 'ci-part-a-1', 'outcome.json'), 'w') as f:
-                json.dump({'outcome': 'pass', 'run-attempt': 1}, f)
-            api = Api()
             with mock.patch.dict(os.environ, {**e.env, **PUB}, clear=True), \
                     mock.patch.object(verdict.part, 'salvage', side_effect=AssertionError('salvaged')), \
-                    mock.patch('ci_runners.github.api', api):
-                code, _, err = run(['verdict', '--context', 'p/ci', '--sha', SHA, '--parts', 'a b', '--artifacts', arts],
-                                   {**e.env, **PUB}, api)
+                    mock.patch.object(verdict.client, 'Client', Client):
+                code, _, err = run(['verdict', '--context', 'p/ci', '--sha', SHA, '--parts', 'a b'], {**e.env, **PUB},
+                                   Api())
             self.assertEqual(code, 1, err)  # b has no artifact: lost, no record read
-            [posted] = api.posted()
+            main, zips = made  # the listing's and the post's; the zips' worker
+            self.assertEqual([m for m, _, _ in main.calls], ['GET', 'POST'])
+            self.assertEqual([m for m, _, _ in zips.calls], ['ZIP'])
+            self.assertTrue(zips.calls[0][1].endswith('/actions/artifacts/9/zip'))
+            posted = main.calls[1][2]
             self.assertEqual(posted['state'], 'error')
             self.assertIn('b lost', posted['description'])
             with mock.patch.dict(os.environ, e.env, clear=True):
-                code, _, err = run(['verdict', '--context', 'p/ci', '--sha', SHA, '--parts', 'a', '--artifacts', arts],
-                                   e.env, Api())
+                code, _, err = run(['verdict', '--context', 'p/ci', '--sha', SHA, '--parts', 'a'], e.env, Api())
             self.assertEqual(code, 2)  # not a public caller's: actions/verdict is ci.yml's
             self.assertIn("verdict is a public caller's", err)
 

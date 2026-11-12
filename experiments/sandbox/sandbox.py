@@ -236,6 +236,12 @@ def build_root(root: str, a, groups_line: str) -> None:
     os.makedirs(os.path.join(root, 'tmp'))
     mount('tmpfs', os.path.join(root, 'tmp'), 'tmpfs', MS_NOSUID | MS_NODEV, f'mode=1777,size={a.tmp_size}')
     os.makedirs(os.path.join(root, 'proc'))
+    os.makedirs(os.path.join(root, 'sys'))
+    # a fresh sysfs (this network namespace's view), read-only: the NVIDIA user-space driver
+    # reads /sys/module/nvidia/initstate and runs nvidia-modprobe when it is missing
+    mount('sysfs', os.path.join(root, 'sys'), 'sysfs', MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC)
+    os.makedirs(os.path.join(root, 'run'))
+    mount('tmpfs', os.path.join(root, 'run'), 'tmpfs', MS_NOSUID | MS_NODEV | MS_NOEXEC, 'mode=0755,size=1m')
 
 
 def _chown_tree(path: str, uid: int, gid: int) -> None:
@@ -386,10 +392,50 @@ def _ambient_supported() -> bool:
         return False
 
 
+def _mask_nvidia_proc(root: str, card: int) -> None:
+    """What libnvidia-container does for a container: the driver's parameters say
+    ``ModifyDeviceFiles: 0`` (else the user-space driver, seeing device nodes it cannot
+    check or fix inside a user namespace, refuses: CUDA error 304, NVML "GPU access
+    blocked by the operating system"), and ``/proc/driver/nvidia/gpus`` lists only the
+    leased card."""
+    nv = os.path.join(root, 'proc', 'driver', 'nvidia')
+    run = os.path.join(root, 'run')
+    with open(os.path.join(nv, 'params')) as f:
+        params = f.read()
+    patched = os.path.join(run, 'nvidia-params')
+    with open(patched, 'w') as f:
+        f.write(params.replace('ModifyDeviceFiles: 1', 'ModifyDeviceFiles: 0'))
+    bind(patched, os.path.join(nv, 'params'), ro=True)
+    gpus = os.path.join(nv, 'gpus')
+    keep = None
+    for bus in sorted(os.listdir(gpus)):
+        try:
+            with open(os.path.join(gpus, bus, 'information')) as f:
+                if any(ln.split(':', 1)[0].strip() == 'Device Minor' and ln.split(':', 1)[1].strip() == str(card)
+                       for ln in f):
+                    keep = bus
+        except OSError:
+            pass
+    stash = os.path.join(run, 'gpu')
+    if keep:
+        os.makedirs(stash)
+        mount(os.path.join(gpus, keep), stash, None, MS_BIND)
+    mount('tmpfs', gpus, 'tmpfs', MS_NOSUID | MS_NODEV | MS_NOEXEC, 'mode=0555,size=16k')
+    if keep:
+        os.makedirs(os.path.join(gpus, keep))
+        mount(stash, os.path.join(gpus, keep), None, MS_BIND | MS_REC)
+        _check(_libc.umount2(os.fsencode(stash), MNT_DETACH), 'umount stash')
+        os.rmdir(stash)
+    mount(None, gpus, None, MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC)
+    mount(None, run, None, MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC)
+
+
 def _init(a, root: str) -> int:
     """pid 1 of the sandbox: finish the root, run the job, reap, give the tree back."""
     pdeathsig()
     mount('proc', os.path.join(root, 'proc'), 'proc', MS_NOSUID | MS_NODEV | MS_NOEXEC)
+    if a.card is not None:
+        _mask_nvidia_proc(root, a.card)
     os.chdir(root)
     _check(_libc.syscall(SYS_PIVOT_ROOT, b'.', b'.'), 'pivot_root')
     _check(_libc.umount2(b'.', MNT_DETACH), 'umount old root')

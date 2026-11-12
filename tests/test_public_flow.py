@@ -33,7 +33,8 @@ def payload(name='pull_request', head=REPO, base=REPO, user='alice', pusher='ali
 
 
 def env(name='pull_request', actor='alice', triggering=None, protected=None, repo=REPO):
-    e = {'GITHUB_REPOSITORY': repo, 'GITHUB_EVENT_NAME': name, 'GITHUB_ACTOR': actor,
+    e = {'GITHUB_REPOSITORY': repo, 'GITHUB_REPOSITORY_OWNER': repo.split('/')[0], 'GITHUB_EVENT_NAME': name,
+         'GITHUB_ACTOR': actor,
          'GITHUB_TRIGGERING_ACTOR': triggering or actor, **PUB}
     if protected is not None:
         e['GITHUB_REF_PROTECTED'] = protected
@@ -41,20 +42,26 @@ def env(name='pull_request', actor='alice', triggering=None, protected=None, rep
 
 
 class Admit(unittest.TestCase):
-    def setUp(self):
-        p = mock.patch.object(flow, 'PUBLIC_CALLERS', frozenset({REPO}))
-        p.start()
-        self.addCleanup(p.stop)
-
     def test_a_same_repository_pull_request_and_a_protected_push(self):
         self.assertEqual(flow.admit(env(), payload()), '')
         self.assertEqual(flow.admit(env('push', protected='true'), payload('push')), '')
         self.assertEqual(flow.admit(env(repo='Chaobrain/MyProj'), payload()), '')  # GitHub's case
 
-    def test_a_repository_the_lead_did_not_opt_in(self):
-        for repo, opted in (('chaobrain/other', {REPO}), (REPO, set()), (policy.SELF, {policy.SELF})):
-            with mock.patch.object(flow, 'PUBLIC_CALLERS', frozenset(opted)):
-                self.assertIn('not opted in', flow.admit(env(repo=repo), payload(head=repo, base=repo)), repo)
+    def test_any_repository_of_this_organisation_and_no_other(self):
+        self.assertEqual(flow.PUBLIC_CALLERS, frozenset())  # the hosted legs need no opt-in (2026-11-13)
+        for repo in (REPO, 'chaobrain/other', policy.SELF):
+            self.assertEqual(flow.admit(env(repo=repo), payload(head=repo, base=repo)), '', repo)
+        for repo in ('mallory/myproj', 'chaobrainx/myproj', 'mallory/chaobrain', ''):
+            self.assertIn('of the chaobrain organisation only', flow.admit(env(repo=repo), payload(head=repo, base=repo)),
+                          repo)
+        e = env()
+        e['GITHUB_REPOSITORY_OWNER'] = 'mallory'  # both must name it
+        self.assertIn('organisation only', flow.admit(e, payload()))
+        del e['GITHUB_REPOSITORY_OWNER']
+        self.assertIn('organisation only', flow.admit(e, payload()))
+        e = env(repo='mallory/myproj')
+        e['GITHUB_REPOSITORY_OWNER'] = 'chaobrain'
+        self.assertIn('organisation only', flow.admit(e, payload(head='mallory/myproj', base='mallory/myproj')))
 
     def test_every_other_event(self):
         for name in ('workflow_dispatch', 'schedule', 'pull_request_target', 'workflow_run', 'issue_comment',
@@ -110,8 +117,13 @@ class Callers(unittest.TestCase):
 
 
 class Route(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(flow, 'PUBLIC_CALLERS', frozenset({REPO}))
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_cpu_and_light_hosted_gpu_on_its_own_pool(self):
-        got = flow.route_public([part('a', 'cpu', 10), part('b', 'gpu', 20), part('c', 'light', 5)])
+        got = flow.route_public([part('a', 'cpu', 10), part('b', 'gpu', 20), part('c', 'light', 5)], 'Chaobrain/MyProj')
         self.assertEqual([p['labels'] for p in got], [['ubuntu-latest'], ['self-hosted', 'ci-pub-gpu'], ['ubuntu-latest']])
         self.assertEqual([(p['where'], p['target']) for p in got], [('host', '')] * 3)  # never the cluster
         self.assertEqual(got[1]['timeout_minutes'], 20 + rt.GRACE_MIN)
@@ -119,7 +131,15 @@ class Route(unittest.TestCase):
     def test_gpu2_and_timing_are_red_at_plan_time(self):
         for need in ('gpu2', 'timing'):
             with self.assertRaisesRegex(rt.PlanError, f"b: needs '{need}': a public repository runs"):
-                flow.route_public([part('a', 'cpu', 10), part('b', need, 10)])
+                flow.route_public([part('a', 'cpu', 10), part('b', need, 10)], REPO)
+
+    def test_a_gpu_part_only_for_a_repository_opted_in_to_the_pool(self):
+        cpu = [part('a', 'cpu', 10), part('c', 'light', 5)]
+        for repo, opted in (('chaobrain/other', {REPO}), (REPO, set()), (policy.SELF, {policy.SELF})):
+            with mock.patch.object(flow, 'PUBLIC_CALLERS', frozenset(opted)):
+                with self.assertRaisesRegex(rt.PlanError, f"\\Ab: needs 'gpu': {repo} is not opted in to the public GPU pool"):
+                    flow.route_public([*cpu, part('b', 'gpu', 10)], repo)
+                self.assertEqual(len(flow.route_public(cpu, repo)), 2, repo)  # a CPU-only plan needs no entry
 
     def test_the_public_plan_reads_no_host_and_ends_red_for_gpu2_timing(self):
         for need in ('gpu2', 'timing'):
@@ -153,11 +173,18 @@ class Route(unittest.TestCase):
             self.assertEqual((a['labels'], a['gpus'], b['labels'], b['gpus']),
                              (['ubuntu-latest'], 0, ['self-hosted', 'ci-pub-gpu'], 1))
             self.assertIn('| `a` | cpu | ubuntu-latest |', e.summary())
+            with mock.patch.object(flow, 'PUBLIC_CALLERS', frozenset()):
+                code, _, _ = run(['plan', '--context', 'p/ci', '--sha', SHA, '--project', 'p', '--plan-file', pf],
+                                 {**e.env, **PUB}, Api())
+            o = e.outputs()
+            self.assertEqual((code, o['state']), (flow.EXIT_PLAN, 'failure'))
+            self.assertIn('not opted in to the public GPU pool', o['description'])
 
 
 class Retry(unittest.TestCase):
     def routed(self, need='cpu'):
-        return flow.entry(flow.route_public([part('p', need, 10)])[0])
+        with mock.patch.object(flow, 'PUBLIC_CALLERS', frozenset({REPO})):
+            return flow.entry(flow.route_public([part('p', need, 10)], REPO)[0])
 
     def test_every_row_is_the_part_s_own_labels(self):
         for need in ('cpu', 'gpu'):

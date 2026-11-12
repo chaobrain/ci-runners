@@ -43,8 +43,8 @@ on:
 
 jobs:
   # a public caller's run (decision 18.7): public.yml, its plan, claim, verdict and CPU parts on
-  # GitHub-hosted runners and its gpu parts on its own confined pool; it refuses there, on a
-  # hosted runner, a repository the lead did not opt in. The jobs below are a private caller's
+  # GitHub-hosted runners and its gpu parts on its own confined pool (a repository opted in to
+  # it only); it refuses there, on a hosted runner, another owner's. The jobs below are a private caller's
   public:
     name: public
     if: github.event.repository.visibility == 'public'

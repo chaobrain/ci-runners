@@ -17,14 +17,15 @@ host's files (the capacity, the registry) but change nothing there.
 ``ci-run flow locate``    the host of a part's first attempt, from its job's ``runner_name``
                           (§2): the salvage leg's labels, ``[self-hosted, <role>-light]``.
 ``ci-run flow status``    post a state on the context (a red part's fail-fast status).
-``ci-run flow admit``     a public caller (decision 18.7, ``public.yml``): the lead's opt-in
-                          (``PUBLIC_CALLERS``) and its events; prints the refusal and exits 1.
+``ci-run flow admit``     a public caller (decision 18.7, ``public.yml``): a repository of this
+                          organisation and its events; prints the refusal and exits 1.
 ``ci-run flow verdict``   a public caller's verdict on a hosted runner: ``verdict`` without
                           the salvage (a public part's tree goes with its job).
 
 A public caller's commands run with ``CIRUNNERS_PUBLIC=true`` (``public.yml`` sets it on its
 steps): they read nothing of a host (no capacity, registry or policy), its plan is routed by
-``route_public`` (hosted CPU, its own pool's ``gpu``) and its retry by ``retry_public``.
+``route_public`` (hosted CPU; its own pool's ``gpu``, for a repository opted in to the public
+GPU pool only) and its retry by ``retry_public``.
 
 Every command reads ``GITHUB_*`` from its environment and writes ``GITHUB_OUTPUT`` and
 ``GITHUB_STEP_SUMMARY`` where they are set. Stdlib only.
@@ -187,13 +188,15 @@ PRIVATE_ON_PUBLIC = 'a private repository: its run is ci.yml\'s own, not public.
 
 # ------------------------------------------------------------------ a public caller (18.7)
 
-#: the public repositories the lead opted in (decision 16.7, 18.7), as their policy entries'
-#: ``public_runners = true`` name them on the hosts. ``public.yml`` serves a public caller only
-#: if it is here, and its ``admit`` job refuses every other one on a hosted runner, before
-#: anything of the head runs, as ci.yml's ``public`` job refused every public caller before C2.
-#: The gate is the hosts' policy (the hook) and the runners registered on the repository
-#: alone (18.6); this list only makes the refusal early and clear. It changes with the lead's
-#: entry, by a release; never this repository (policy.SELF).
+#: the organisation whose public repositories the hosted legs serve (decided 2026-11-13: they
+#: touch nothing of ours, so they need no opt-in; ``admit`` refuses every other owner)
+ORG = policy.SELF.split('/')[0]
+#: the public repositories the lead opted in to the public GPU pool (decision 16.7, 18.7), as
+#: their policy entries' ``public_runners = true`` name them on the hosts: a plan with a
+#: ``gpu`` part from any other is red at plan time; a CPU-only plan needs no entry. The gate
+#: for the cards is the hosts' policy (the hook) and the issuer (C3); this list only makes
+#: the refusal early and clear. It changes with the lead's entry, by a release; never this
+#: repository (policy.SELF).
 PUBLIC_CALLERS: frozenset[str] = frozenset()
 #: the events a public caller's run takes (16.7, 18.7): a same-repository pull request, a push
 #: to a protected ref; every other one is refused in ``admit``, as the hook refuses it
@@ -218,9 +221,9 @@ def admit(env: Mapping[str, str], event: object) -> str:
     """Why a public caller's run is refused, or '' (decision 16.7, 18.7). ``event`` is the
     parsed ``GITHUB_EVENT_PATH``. Pure."""
     repo = str(env.get('GITHUB_REPOSITORY') or '').lower()
-    if repo not in PUBLIC_CALLERS or repo == policy.SELF:
-        return (f'{repo or "this repository"} is public and not opted in: ci-runners serves the public '
-                'repositories the lead opts in only (decision 18)')
+    if repo.split('/')[0] != ORG or str(env.get('GITHUB_REPOSITORY_OWNER') or '').lower() != ORG:
+        return (f'{repo or "this repository"}: ci-runners serves the public repositories of the {ORG} '
+                'organisation only (decision 18.7)')
     name = env.get('GITHUB_EVENT_NAME', '')
     if name not in PUBLIC_EVENTS:
         return f'{name or "an event"}: a public repository runs on a same-repository pull_request or a protected push only'
@@ -260,13 +263,18 @@ def run_admit(env: Mapping[str, str]) -> int:
     return 0
 
 
-def route_public(parts: Sequence[Mapping]) -> list[dict]:
+def route_public(parts: Sequence[Mapping], repo: str) -> list[dict]:
     """A public caller's route (decision 18.7): ``cpu`` and ``light`` parts on GitHub's hosted
-    runners, ``gpu`` parts on its own pool's runners, nothing else and never an overflow to
-    the cluster. Raises ``route.PlanError`` naming each part it cannot run. Pure."""
+    runners, ``gpu`` parts on its own pool's runners where ``repo`` is opted in to the public
+    GPU pool, nothing else and never an overflow to the cluster. Raises ``route.PlanError``
+    naming each part it cannot run. Pure."""
     bad = [f'{p.get("id")}: needs {p.get("needs")!r}: a public repository runs cpu and light parts on '
            'hosted runners and gpu parts on its own pool only (decision 18.7)'
            for p in parts if p.get('needs') not in PUBLIC_LABELS]
+    repo = repo.lower()
+    if repo not in PUBLIC_CALLERS or repo == policy.SELF:
+        bad += [f'{p.get("id")}: needs \'gpu\': {repo or "this repository"} is not opted in to the public GPU pool '
+                '(decision 18.7)' for p in parts if p.get('needs') == 'gpu']
     if bad:
         raise rt.PlanError('; '.join(bad))
     return [{**p, 'labels': list(PUBLIC_LABELS[p['needs']]), 'where': 'host', 'target': '',
@@ -523,7 +531,7 @@ def run_plan(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc:
     public = is_public(env)
     rows, unread = (None, 'a public caller') if public else _rows(a.rows, etc)
     try:
-        routed = route_public(parts) if public else rt.route(parts, rows, unread)
+        routed = route_public(parts, env.get('GITHUB_REPOSITORY', '')) if public else rt.route(parts, rows, unread)
     except rt.PlanError as e:
         return fail('failure', f'plan: {e}', EXIT_PLAN)
     except rt.RouteError as e:

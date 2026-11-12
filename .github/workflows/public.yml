@@ -1,10 +1,11 @@
 # A public caller's run of the reusable workflow (decision 18.7), called by ci.yml's public job:
-# *admit*, on a hosted runner, refuses a repository the lead did not opt in and every event but
-# a same-repository pull request or a protected push, before anything of the head runs, as
-# ci.yml's public job refused every public caller before C2. Then the same three pickups as
+# *admit*, on a hosted runner, refuses a repository of another owner than this organisation and
+# every event but a same-repository pull request or a protected push, before anything of the
+# head runs (decided 2026-11-13: the hosted legs need no opt-in). Then the same three pickups as
 # ci.yml's own: *plan* with a read-only token, *parts* (public-part.yml: CPU parts on hosted
 # runners, gpu parts on the repository's own confined pool, [self-hosted, ci-pub-gpu]) with
-# *pending* beside them, and *verdict*. Every job but a gpu part runs on GitHub's hosted
+# *pending* beside them, and *verdict*; a gpu part only for a repository the lead opted in to the
+# public GPU pool (flow.PUBLIC_CALLERS; else the plan is red). Every job but a gpu part runs on GitHub's hosted
 # runners and reads nothing of our hosts. workflow_call only; each job's permissions narrow
 # the caller's grant, and no secret is taken or passed.
 name: ci-runners public
@@ -38,7 +39,7 @@ on:
         value: ${{ jobs.verdict.outputs.state }}
 
 jobs:
-  # the lead's opt-in (flow.PUBLIC_CALLERS) and the events of 16.7: the run ends here otherwise
+  # this organisation's repositories and the events of 16.7: the run ends here otherwise
   admit:
     name: admit
     runs-on: ubuntu-latest

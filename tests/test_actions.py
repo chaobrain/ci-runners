@@ -55,8 +55,8 @@ class Actions(unittest.TestCase):
     def test_the_action_refs_follow_the_release_stamp(self):
         """Design §9: a canary pinning a workflow at @vX.Y.Z runs that release's actions only
         if the workflow names them so. On main (stamp ``hook``) a workflow's refs read @v1; a
-        stamped release names itself. This repository's own workflows call no action since
-        ``h100-test.yml`` went (decision 12.17), so the docs' examples are checked too: they
+        stamped release names itself (the reusable ``ci.yml`` and ``part.yml``, decision 16.6;
+        ``ci.yml``'s ref to ``part.yml`` in ``tests/test_reusable.py``). The docs' examples
         always read @v1, the tag consumers pin."""
         stamp = (ROOT / 'actions' / 'RELEASE').read_text().strip()
         want = 'v1' if stamp == 'hook' else stamp

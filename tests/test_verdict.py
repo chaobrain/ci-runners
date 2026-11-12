@@ -546,6 +546,22 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
                          [1, 2, 3, 5])
         self.assertEqual(verdict.records(str(self.parts.parent.parent), 'org/repo', '79-1', 'cpu'), {})
 
+    def test_an_earlier_run_attempts_artifact_hides_no_record_of_this_one(self):
+        """A re-run of failed jobs: run attempt 1 left ``ci-part-cpu-1``; in run attempt 2
+        the part's first attempt ran here, ended red and lost its runner before its upload.
+        Its record is salvaged (red stays red), not shadowed by the old artifact; a re-run
+        of the retry alone (attempt 2 here, attempt 1 from run attempt 1) is salvaged too."""
+        self.env['GITHUB_RUN_ATTEMPT'] = '2'
+        art(self.arts, 'ci-part-cpu-1', {'outcome': 'oom', 'next': 'retry', 'run-attempt': 1})
+        self.record('77-2', 'cpu', 1, outcome='red')
+        art(self.arts, 'ci-part-gpu-1', {'outcome': 'oom', 'next': 'retry', 'run-attempt': 1})
+        self.record('77-2', 'gpu', 2)
+        art(self.arts, 'ci-part-ok-1', {'outcome': 'pass', 'next': 'none', 'run-attempt': 2})
+        self.record('77-2', 'ok', 1)  # this run attempt's own artifact holds it: nothing to do
+        self.assertEqual(self.main('cpu gpu ok'), 0)
+        self.assertEqual(self.uploaded(), ['ci-part-cpu-1', 'ci-part-gpu-2'])
+        self.assertEqual(json.loads((self.outdir / 'ci-part-cpu-1' / 'outcome.json').read_text())['outcome'], 'red')
+
     def test_a_retry_that_ran_elsewhere_is_left_alone(self):
         art(self.arts, 'ci-part-cpu-1', {'outcome': 'thermal', 'next': 'retry'})
         self.record('77-1', 'cpu', 1)  # attempt 1 ran here and uploaded; attempt 2 ran on another host

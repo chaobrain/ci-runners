@@ -18,6 +18,7 @@ import unittest
 import unittest.mock
 
 from ci_runners import github, hook, orgsync, policy
+from tests.test_hook import INVENTORY
 from tests.test_policy import EVENTS, event, reason
 
 NOW = 1_800_000_000.0
@@ -274,9 +275,10 @@ class Hook(unittest.TestCase):
         self.etc = pathlib.Path(self.tmp.name) / 'etc'
         self.etc.mkdir()
         (self.etc / 'policy.toml').write_text(POLICY2)
+        (self.etc / 'inventory.toml').write_text(INVENTORY)
         self.ev = pathlib.Path(self.tmp.name) / 'event.json'
         self.ev.write_text(json.dumps(push()))
-        self.env = {**env(), 'CI_RUNNERS_ETC': str(self.etc), 'GITHUB_EVENT_PATH': str(self.ev)}
+        self.env = {**env(), 'CI_RUNNERS_ETC': str(self.etc), 'GITHUB_EVENT_PATH': str(self.ev), 'RUNNER_NAME': 'r-part-1'}
 
     def tearDown(self):
         self.tmp.cleanup()

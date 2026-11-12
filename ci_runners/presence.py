@@ -46,8 +46,9 @@ whose resource is still taken.
 *Black holes.* ``presence.infra_failures`` (3) infrastructure ends within 15 min drain the
 host as 15.2's miss does (``drained: infra`` in the host's log): a part's ``unavailable``
 other than busy, drained or a full queue (and other than a cluster part's, which is the
-cluster's); a ``lost`` part on a host that stayed up; a hook refusal ``stale``, ``policy``,
-``timeout`` or ``error``. Ends before the last self-drain or the last undrain do not count.
+cluster's); a ``lost`` part on a host that stayed up; a hook refusal ``stale``, ``runner``
+(a runner directory the inventory does not know), ``policy``, ``inventory``, ``timeout`` or
+``error``. Ends before the last self-drain or the last undrain do not count.
 Nothing undrains by itself.
 
 *Rollback*: ``presence = { enabled = false }`` (or no table): the tick starts every runner
@@ -121,7 +122,7 @@ DOWN = ('inactive', 'failed')
 #: the class's row refuses (the caller's ``gpus``, ``lock`` or class, not the host)
 NOT_INFRA = ('busy', 'drained', 'project queue full', drain_mod.UNREADABLE, 'queue timeout', 'gpus ', 'lock ',
              'this host has no compile_cpus')
-HOOK_INFRA = ('stale', 'policy', 'timeout', 'error')  # the hook's refusals that are infrastructure ends
+HOOK_INFRA = ('stale', 'runner', 'policy', 'inventory', 'timeout', 'error')  # the hook's refusals that are infrastructure ends
 CLUSTER = 'slurm'  # a cluster part's unavailable is the cluster's, not the host's
 YIELD_CLASSES = ('part', 'gpu', 'multi')  # the classes whose runners yield to an earlier tier (19.2)
 YIELD_FRESH_S = 45  # s: an earlier tier's row older than this offers nothing (two of its ticks and a margin)

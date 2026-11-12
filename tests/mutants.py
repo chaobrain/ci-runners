@@ -3234,7 +3234,7 @@ MUTANTS = [
     (SET, "'ci-capacity.timer',\n          'ci-presence.timer')", "'ci-capacity.timer')", [f'{TU}.Setup.test_the_presence_tick_is_the_inventorys']),
     (REA, "LOGS = ('hook-', 'shared-', 'presence-')", "LOGS = ('hook-', 'shared-')",
      [f'{TE}.Reap.test_dated_logs_go_after_14_days_and_nothing_else_there']),
-    (PRS, "    publish_capacity(data, probe, t)  # 16.5", "    pass  # 16.5", [f'{TPR}.Tick.test_the_capacity_file_is_rewritten_after_the_ticks_actions']),
+    (PRS, "    publish_capacity(data, probe, t)\n    return 0", "    return 0", [f'{TPR}.Tick.test_the_capacity_file_is_rewritten_after_the_ticks_actions']),
     (PRS, "        if not os.path.isfile(path):\n            return False", "        if False:\n            return False", [f'{TPR}.Tick.test_the_capacity_file_is_rewritten_after_the_ticks_actions']),
     (PRS, "    except Exception as e:  # noqa: BLE001 - the capacity file never stops a tick",
      "    except OSError as e:  # noqa: BLE001 - the capacity file never stops a tick", [f'{TPR}.Tick.test_the_capacity_file_is_rewritten_after_the_ticks_actions']),

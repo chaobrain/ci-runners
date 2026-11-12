@@ -287,6 +287,24 @@ class Structure(unittest.TestCase):
                     self.assertFalse([st for st in job['steps'] if st.get('uses', '').startswith(
                         ('actions/checkout@', 'chaobrain/ci-runners/actions/part@'))], f'{name}: {jid}')
 
+    def test_the_retry_is_decided_where_the_end_asks_and_before_the_parts_artifacts(self):
+        """#239: an end whose ``next`` is none (pass, red) has no retry, so no step decides
+        it, and the job still hands on ``none``: a known outcome is never read as lost, even
+        where its upload failed and the salvage leg runs. The decision comes before the
+        part's own artifacts, so its log goes up while they do."""
+        first = load('part.yml')['jobs']['first']
+        self.assertEqual(first['outputs']['retry'],
+                         "${{ steps.retry.outputs.retry || (steps.part.outputs.next == 'none' && 'none') || '' }}")
+        sts = first['steps']
+        ids = [st.get('id') for st in sts]
+        retry = sts[ids.index('retry')]
+        self.assertEqual(retry['if'], "always() && steps.part.outputs.outcome != '' && steps.part.outputs.next != 'none'")
+        self.assertEqual(ids.index('retry'), ids.index('again') + 1)
+        arts = [i for i, st in enumerate(sts) if '.artifacts[' in st.get('if', '')]
+        self.assertLess(ids.index('retry'), min(arts))
+        # the next the condition reads is the part action's output, the executor's own
+        self.assertIn('  next:\n', (ROOT / 'actions' / 'part' / 'action.yml').read_text())
+
     def test_the_first_attempts_decision_comes_first(self):
         """A known outcome is never read as lost: where the first attempt decided, its
         decision is the retry's, whatever the lost path found (§4.10)."""
@@ -344,6 +362,13 @@ class Structure(unittest.TestCase):
         # what the upload cannot carry, and an upload that finds nothing fails the plan's files
         self.assertEqual((up[0]['with']['include-hidden-files'], up[0]['with']['if-no-files-found']), (True, 'error'))
         self.assertIn("steps.plan.outputs.routed == 'true'", up[0]['if'])
+        # #239: the plan command's outcome is its step's output; its artifact (5 s through the
+        # egress, read by no verdict) is not uploaded, but every part's is
+        cmd = [st for st in sts if st.get('id') == 'command'][0]
+        self.assertEqual(cmd['with']['upload'], 'false')
+        for jid in ('first', 'retry'):
+            part = [st for st in load('part.yml')['jobs'][jid]['steps'] if st.get('id') == 'part'][0]
+            self.assertNotIn('upload', part['with'], jid)
         self.assertTrue(up[0]['if'].startswith('${{ !cancelled() && '))  # a failed plan part's upload skips it not
         env = [st for st in sts if st.get('id') == 'command'][0]['env']
         self.assertLessEqual({'CIRUNNERS_PLAN', 'CIRUNNERS_EVENT', 'CIRUNNERS_PR_LABELS', 'CIRUNNERS_BASE_SHA',

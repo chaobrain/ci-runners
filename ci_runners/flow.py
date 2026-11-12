@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import json
 import math
 import os
@@ -352,9 +353,16 @@ def check_contract(default: str | None, head: str | None, branch: str) -> tuple[
 
 def run_contract(a: argparse.Namespace, env: Mapping[str, str], call: Callable) -> int:
     try:
-        branch, private = repository(env, call)
-        branch = a.default_branch or branch
-        state, text = check_contract(contents(env, call, SPEC, branch), contents(env, call, SPEC, a.sha), branch)
+        # the three reads at once (#239: about 2 s one after another through the egress); the
+        # default branch's spec waits for the repository only where the event names no branch
+        with concurrent.futures.ThreadPoolExecutor(3) as pool:
+            repo = pool.submit(repository, env, call)
+            head = pool.submit(contents, env, call, SPEC, a.sha)
+            named = pool.submit(contents, env, call, SPEC, a.default_branch) if a.default_branch else None
+            branch, private = repo.result()
+            branch = a.default_branch or branch
+            default = named.result() if named else contents(env, call, SPEC, branch)
+            state, text = check_contract(default, head.result(), branch)
         if private == is_public(env):  # each caller its own legs (18.7): the workflow's guard misses some events
             state, text = 'error', PRIVATE_ON_PUBLIC if private else PUBLIC
     except github.ApiError as e:

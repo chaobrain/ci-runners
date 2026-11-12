@@ -36,13 +36,22 @@ class Actions(unittest.TestCase):
 
     def test_inputs_reach_their_flags(self):
         modules = {'claim': 'github', 'part': 'part', 'salvage': 'verdict', 'verdict': 'verdict'}
-        skip = {'token'}  # claim's token travels as GITHUB_TOKEN
+        skip = {'token', 'upload'}  # claim's token travels as GITHUB_TOKEN; part's upload gates its own upload step
         for name in ACTIONS:
             text = (ROOT / 'actions' / name / 'action.yml').read_text()
             passed = set(re.findall(r'(--[a-z-]+) "\$IN_', text)) | set(re.findall(r'\((--[a-z-]+) "\$IN_', text))
             want = {f'--{i}' for i in declared(text, 'inputs') if i not in skip}
             self.assertEqual(passed, want, name)
             self.assertLessEqual(passed, flags(modules[name], name), name)
+
+    def test_the_part_action_uploads_its_outcome_unless_told_not_to(self):
+        """#239: ``upload: 'false'`` (ci.yml's plan command) skips the outcome artifact;
+        anything else, the default included, uploads it."""
+        text = (ROOT / 'actions' / 'part' / 'action.yml').read_text()
+        self.assertIn("  upload:\n    description: \"false: no outcome artifact", text)
+        self.assertTrue(text.split('  upload:\n', 1)[1].split('\noutputs:', 1)[0].endswith("    default: 'true'"))
+        self.assertIn("    - id: upload\n      if: always() && steps.part.outputs.outcome != '' && inputs.upload != 'false'\n"
+                      "      uses: actions/upload-artifact@v4\n", text)
 
     def test_no_flow_mappings(self):
         """A flow mapping (``{description: a, b, value: ...}``) reads a comma in the text as

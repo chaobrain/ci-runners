@@ -102,9 +102,9 @@ class Contract(unittest.TestCase):
             o = e.outputs()
             self.assertEqual((o['ok'], o['state']), ('false', 'failure'))
             self.assertIn('merge origin/main', o['description'])
-            self.assertTrue(api.calls[0][1].endswith(f'/repos/{REPO}'))  # private or not
-            self.assertIn('/contents/.github/ci-runners.toml?ref=main', api.calls[1][1])
-            self.assertIn(f'?ref={SHA}', api.calls[2][1])
+            urls = sorted(u.split('/repos/')[1] for _, u, _ in api.calls)  # at once (#239): in any order
+            self.assertEqual(urls, [REPO, f'{REPO}/contents/.github/ci-runners.toml?ref={SHA}',
+                                    f'{REPO}/contents/.github/ci-runners.toml?ref=main'])  # private or not, and both specs
 
     def test_a_head_that_keeps_up_posts_nothing(self):
         with tempfile.TemporaryDirectory() as d:
@@ -114,7 +114,52 @@ class Contract(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(api.posted(), [])
             self.assertEqual(e.outputs(), {'ok': 'true'})
-            self.assertTrue(api.calls[0][1].endswith(f'/repos/{REPO}'))  # no default branch given: read
+            urls = [u for _, u, _ in api.calls]
+            repo = [i for i, u in enumerate(urls) if u.endswith(f'/repos/{REPO}')]
+            main = [i for i, u in enumerate(urls) if u.endswith('?ref=main')]
+            self.assertEqual((len(urls), len(repo), len(main)), (3, 1, 1))
+            self.assertLess(repo[0], main[0])  # no default branch given: read from the repository first
+
+    def test_the_three_reads_overlap(self):
+        """#239: the repository and both specs are read at once, not one after another
+        (each read is a round trip through the egress, about 0.7 s): every read here waits
+        until all three have started, and fails where they would run in turn."""
+        import threading
+        gate = threading.Barrier(3, timeout=5)
+
+        class Slow(Api):
+            def __call__(self, *a, **k):
+                try:
+                    gate.wait()
+                except threading.BrokenBarrierError:
+                    raise github.ApiError('GET x: the reads ran one after another') from None
+                return super().__call__(*a, **k)
+
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            api = Slow({'main': 'contract = 2\n', SHA: 'contract = 2\n'})
+            code, _, err = run(['contract', '--context', 'myproj/ci', '--sha', SHA, '--default-branch', 'main'], e.env, api)
+            self.assertEqual((code, e.outputs()), (0, {'ok': 'true'}), err)
+            self.assertEqual(len(api.calls), 3)
+
+    def test_the_first_failed_read_is_the_one_reported(self):
+        """Read at once, a failure still names the read the order gives: the repository's,
+        then the default branch's spec, then the head's."""
+        for fail, want in ((f'/repos/{REPO}?', f'/repos/{REPO}'), ('ref=main', 'contents'), (f'ref={SHA}', 'contents')):
+            with tempfile.TemporaryDirectory() as d:
+                e = Env(d)
+
+                class One(Api):
+                    def __call__(self, method, url, token, body=None):
+                        if fail in url + '?':
+                            self.calls.append((method, url, body))
+                            raise github.ApiError(f'{method} {url.split("?")[0]}: HTTP 502')
+                        return super().__call__(method, url, token, body)
+
+                api = One({'main': 'contract = 2\n', SHA: 'contract = 2\n'})
+                code, _, _ = run(['contract', '--context', 'c/ci', '--sha', SHA, '--default-branch', 'main'], e.env, api)
+                self.assertEqual((code, e.outputs()['state']), (1, 'error'), fail)
+                self.assertIn(want, e.outputs()['description'], fail)
 
     def test_a_public_repository_is_refused_before_anything_of_its_head_runs(self):
         with tempfile.TemporaryDirectory() as d:

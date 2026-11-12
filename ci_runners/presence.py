@@ -767,7 +767,9 @@ def hold_path(data: str) -> str:
 def read_holds(data: str, now: float) -> dict[str, dict]:
     """The unexpired holds of the host, by holder key: ``{"until", "by", "set_at"}``. A
     missing, unreadable or malformed file holds nothing (the yield's facts decide). An
-    entry is kept only with a numeric ``until`` after ``now``."""
+    entry is kept only with a finite ``until`` after ``now`` and at most ``HOLD_MAX_MIN``
+    (and a minute) beyond it: a hand-edited or junk marker, or a clock set back, holds no
+    longer than the command could set."""
     try:
         with open(hold_path(data), encoding='utf-8') as f:
             doc = json.load(f)
@@ -777,7 +779,8 @@ def read_holds(data: str, now: float) -> dict[str, dict]:
     if not isinstance(holders, dict):
         return {}
     return {str(k): dict(v) for k, v in holders.items() if isinstance(v, dict)
-            and type(v.get('until')) in (int, float) and v['until'] > now}
+            and type(v.get('until')) in (int, float)
+            and now < v['until'] <= now + 60 * (HOLD_MAX_MIN + 1)}  # also not inf or NaN
 
 
 def hold_until(data: str, now: float) -> float | None:
@@ -801,7 +804,8 @@ def holder(inv: inventory.Inventory, env: Mapping[str, str], etc: str = '') -> t
     maintainer outside a job (``GITHUB_ACTIONS`` not ``true``), key ``maintainer``; a job
     only on this host's ``home`` runner (``RUNNER_NAME``, a runner presence never stops),
     for a repository whose entry in this host's policy is not paused, has the job's
-    repository id, and lists ``HOLD_CLASS``; its key is the repository, run id and attempt.
+    repository id (a job without one is refused), and lists ``HOLD_CLASS``; its key is the
+    repository, run id and attempt (one hold per run: its jobs share it).
     ``why not`` is empty when the caller may hold."""
     if env.get('GITHUB_ACTIONS') != 'true':
         return 'maintainer', 'maintainer', ''
@@ -814,14 +818,17 @@ def holder(inv: inventory.Inventory, env: Mapping[str, str], etc: str = '') -> t
     from ci_runners import policy, pool
     try:
         with open(os.path.join(pool._etc(etc), 'policy.toml'), 'rb') as f:
-            pol = policy.load(f.read(pool.POLICY_MAX + 1))
+            raw = f.read(pool.POLICY_MAX + 1)
+        if len(raw) > pool.POLICY_MAX:
+            raise policy.PolicyError('too large')
+        pol = policy.load(raw)
     except (OSError, policy.PolicyError) as e:
         return key, repo, f'this host\'s policy does not load ({type(e).__name__})'
     entry = pol.repos.get(repo)
     if entry is None or entry.paused:
         return key, repo, f'{repo or "no repository"} has no entry in force in this host\'s policy'
     rid = str(env.get('GITHUB_REPOSITORY_ID') or '')
-    if rid and rid != str(entry.id):
+    if rid != str(entry.id):
         return key, repo, f'{repo}: the job\'s repository id is not the policy\'s'
     if HOLD_CLASS not in entry.classes:
         return key, repo, f'{repo}: its entry in this host\'s policy lacks the class {HOLD_CLASS}'
@@ -831,8 +838,9 @@ def holder(inv: inventory.Inventory, env: Mapping[str, str], etc: str = '') -> t
 def hold(inv: inventory.Inventory, argv: Sequence[str], *, env: Mapping[str, str] | None = None, etc: str = '',
          now: Callable[[], float] = time.time, out: Callable[[str], None] = print) -> int:
     """``ci-run presence hold [--minutes N | --release]`` (decision 19.8): set or extend the
-    caller's hold to now + N minutes (1 to ``HOLD_MAX_MIN``), end it, or print the holds.
-    Exit 0; 1 refused; 2 usage. Every write drops the expired entries and is logged."""
+    caller's hold to now + N minutes (1 to ``HOLD_MAX_MIN``; a hold already later is kept),
+    end it, or print the holds. Exit 0; 1 refused; 2 usage; 3 the marker not written.
+    Every write drops the expired entries and is logged."""
     env = os.environ if env is None else env
     data = str(inv.host['data'])
     t = now()
@@ -859,23 +867,28 @@ def hold(inv: inventory.Inventory, argv: Sequence[str], *, env: Mapping[str, str
     if why:
         out(f'presence: hold refused: {why}')
         return 1
-    os.makedirs(os.path.dirname(hold_path(data)), mode=0o700, exist_ok=True)
-    fd = os.open(hold_path(data) + '.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        held = read_holds(data, t)
-        if minutes is None:
-            held.pop(key, None)
-            action = {'hold': 'released', 'by': key}
-        else:
-            if key not in held and len(held) >= HOLD_ENTRIES:
-                out(f'presence: hold refused: {HOLD_ENTRIES} holds already')
-                return 1
-            held[key] = {'until': round(t + 60 * minutes, 3), 'by': by, 'set_at': round(t, 3)}
-            action = {'hold': 'set', 'by': key, 'until': _utc(held[key]['until'])}
-        _write_holds(data, held)
-    finally:
-        os.close(fd)
+        os.makedirs(os.path.dirname(hold_path(data)), mode=0o700, exist_ok=True)
+        fd = os.open(hold_path(data) + '.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            held = read_holds(data, t)
+            if minutes is None:
+                held.pop(key, None)
+                action = {'hold': 'released', 'by': key}
+            else:
+                if key not in held and len(held) >= HOLD_ENTRIES:
+                    out(f'presence: hold refused: {HOLD_ENTRIES} holds already')
+                    return 1
+                until = max(round(t + 60 * minutes, 3), held.get(key, {}).get('until', 0))
+                held[key] = {'until': until, 'by': by, 'set_at': round(t, 3)}
+                action = {'hold': 'set', 'by': key, 'until': _utc(until)}
+            _write_holds(data, held)
+        finally:
+            os.close(fd)
+    except OSError as e:
+        out(f'presence: hold not written: {type(e).__name__}')
+        return 3
     log(data, action, t)
     return 0
 
@@ -960,8 +973,8 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
     held = {n for n, v in st['runners'].items() if v.get('load')}
     why = causes(inv, rs, f, units, held)
     tiers = None
-    held = hold_until(data, t)  # 19.8: a hold suspends the cause, and no row is read
-    if held is None and any(r.cls in YIELD_CLASSES for r in rs):  # 19.2: read the earlier tiers' rows now
+    hold_end = hold_until(data, t)  # 19.8: a hold suspends the cause, and no row is read
+    if hold_end is None and any(r.cls in YIELD_CLASSES for r in rs):  # 19.2: read the earlier tiers' rows now
         try:
             tiers = probe.tiers()
         except Exception as e:  # noqa: BLE001 - not read: nothing yields
@@ -994,8 +1007,8 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
         else:  # down by someone else's hand, or between states: not presence's
             rst['stop_ticks'] = rst['start_ticks'] = 0
     if dry_run:
-        if held is not None:
-            out(f'presence: held until {_utc(held)}: no runner yields to an earlier tier (19.8)')
+        if hold_end is not None:
+            out(f'presence: held until {_utc(hold_end)}: no runner yields to an earlier tier (19.8)')
         try:
             ends: list[dict] | None = black_hole(inv, st, f, t, limit, ends=_ends(probe, data, t), dry_run=True)
         except Exception:  # noqa: BLE001 - the report without the count
@@ -1105,7 +1118,12 @@ def main(argv: list[str], inv_loader: Callable[[], inventory.Inventory]) -> int:
             return 0
         return check(inv, Probe(inv), argv[1])
     if argv[:1] == ['hold']:
-        return hold(inv_loader(), argv[1:])
+        try:
+            inv = inv_loader()
+        except Exception as e:  # noqa: BLE001 - one line, not a traceback
+            print(f'presence: hold: inventory unread: {type(e).__name__}', file=sys.stderr)
+            return 3
+        return hold(inv, argv[1:])
     if argv not in ([], ['--dry-run']):
         print(usage, file=sys.stderr)
         return 2

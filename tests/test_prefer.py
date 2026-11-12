@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -645,6 +646,8 @@ class Hold(TierHost):
         self.assertEqual(presence.hold_until(data, self.now), self.now + 1800)
         self.assertEqual(self.hold('--minutes', '720'), 0)  # extends; 720 at most
         self.assertEqual(presence.hold_until(data, self.now), self.now + 720 * 60)
+        self.assertEqual(self.hold('--minutes', '30'), 0)  # a later hold is kept, not cut short
+        self.assertEqual(presence.hold_until(data, self.now), self.now + 720 * 60)
         for bad in (('--minutes', '0'), ('--minutes', '721'), ('--minutes', 'x'), ('--until', '1'), ('--release', 'x')):
             with self.subTest(bad):
                 self.assertEqual(self.hold(*bad), 2)
@@ -660,10 +663,17 @@ class Hold(TierHost):
         with open(presence.hold_path(data)) as f:
             self.assertEqual(list(json.load(f)['holders']), ['maintainer'])
         self.assertTrue(any(x.get('hold') == 'set' for x in self.log()))
-        for junk in ('{', '[]', '{"holders": []}', '{"holders": {"m": {"until": "x"}}}'):
+        last = self.now + 60 * (presence.HOLD_MAX_MIN + 1)  # the latest until a marker may hold
+        for junk in ('{', '[]', '{"holders": []}', '{"holders": {"m": {"until": "x"}}}',
+                     '{"holders": {"m": {"until": Infinity}}}', '{"holders": {"m": {"until": NaN}}}',
+                     '{"holders": {"m": {"until": %r}}}' % (last + 1), '{"holders": {"m": {"until": 1e13}}}'):
             with open(presence.hold_path(data), 'w') as f:
                 f.write(junk)
             self.assertEqual(presence.read_holds(data, self.now), {}, junk)
+            self.assertEqual(self.hold(), 0, junk)  # the listing does not break on it
+        with open(presence.hold_path(data), 'w') as f:
+            f.write('{"holders": {"m": {"until": %r}}}' % last)
+        self.assertEqual(presence.hold_until(data, self.now), last)
 
     def test_who_may_hold(self):
         self.assertEqual(presence.holder(self.inv, self.JOB, str(self.etc)), ('chaobrain/a#7-1', 'chaobrain/a', ''))
@@ -675,6 +685,8 @@ class Hold(TierHost):
             'no entry': ({**self.JOB, 'GITHUB_REPOSITORY': 'chaobrain/b'}, POLICY, 'no entry'),
             'paused': (self.JOB, POLICY.replace('bot_dispatch = true', 'bot_dispatch = true\npaused = true'), 'no entry'),
             'another id': ({**self.JOB, 'GITHUB_REPOSITORY_ID': '2'}, POLICY, 'repository id'),
+            'no id': ({k: v for k, v in self.JOB.items() if k != 'GITHUB_REPOSITORY_ID'}, POLICY, 'repository id'),
+            'a policy too large': (self.JOB, POLICY + '#' * pool.POLICY_MAX, 'does not load'),
             'no nightly class': (self.JOB, no_class, 'lacks the class nightly'),
             'no policy': (self.JOB, None, 'does not load'),
         }
@@ -695,6 +707,19 @@ class Hold(TierHost):
         self.assertEqual(self.hold('--minutes', '5', env={**self.JOB, 'GITHUB_RUN_ID': 'x'}), 1)
         self.assertEqual(self.hold('--minutes', '9', env={**self.JOB, 'GITHUB_RUN_ID': '0'}), 0)  # its own: extended
         self.assertEqual(presence.HOLD_ENTRIES, 32)
+
+    def test_a_failed_write_or_inventory_is_one_line(self):
+        with unittest.mock.patch.object(presence, '_write_holds', side_effect=PermissionError):
+            self.assertEqual(self.hold('--minutes', '5'), 3)
+        self.assertEqual(self.said[-1], 'presence: hold not written: PermissionError')
+        self.assertIsNone(presence.hold_until(str(self.data), self.now))
+
+        def unread():
+            raise OSError('gone')
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.assertEqual(presence.main(['hold', '--minutes', '5'], unread), 3)
+        self.assertEqual(buf.getvalue(), 'presence: hold: inventory unread: OSError\n')
 
     def test_a_hold_suspends_the_cause(self):
         self.tick()
@@ -723,7 +748,10 @@ class Hold(TierHost):
         m = pool.load(REGISTRY).machines['hosta']
         row = pool.host_row(m, {'slots_free': 1, 'hold_until': until, 'holds': n})
         self.assertEqual((row['hold_until'], row['holds']), (until, 1))
-        self.assertIn('hold until ', pool.table([row]))
+        self.assertIn('hold until ' + datetime.datetime.fromtimestamp(
+            until, datetime.timezone.utc).strftime('%H:%MZ'), pool.table([row]))
+        self.hold('--minutes', '5', env=self.JOB)  # two holders: the latest until
+        self.assertEqual(pool.holds_of(self.inv, self.now), (self.now + 1800, 2))
         for bad in ({'hold_until': 'x', 'holds': 1}, {'hold_until': until, 'holds': 0}, {'hold_until': until}):
             self.assertNotIn('hold_until', pool.host_row(m, {'slots_free': 1, **bad}), bad)
         self.assertNotIn('hold until', pool.table([pool.host_row(m, {'slots_free': 1})]))
@@ -731,7 +759,7 @@ class Hold(TierHost):
                 unittest.mock.patch.object(pool, 'policy_digests', return_value=None), \
                 unittest.mock.patch.object(pool, 'host_health', return_value=''):
             p = pool._with_inventory({'runner_names': [], 'runner_busy': []}, str(self.etc))
-        self.assertEqual(p['holds'], 1)
+        self.assertEqual(p['holds'], 2)
         buf = io.StringIO()
         with unittest.mock.patch.dict(os.environ, {'GITHUB_ACTIONS': ''}), contextlib.redirect_stdout(buf):
             self.assertEqual(presence.main(['hold'], lambda: self.inv), 0)

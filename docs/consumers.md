@@ -164,7 +164,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 - `memory_gib` 可选，不写就用 registry 的默认值。超过这个标签不带 `mem-big` 的最大 slot 时，路由自动加 `mem-big`；连 `mem-big` 的 slot 都放不下，计划直接失败。
 - 部件只在所有主机都没有空闲 slot、而集群现在就能起它时才去 `ci-slurm`；集群起不了就留在共享标签上排队。没有任何主机提供的标签（带它的主机都掉线或 drained）在计划时就报错，不会排队等 24 小时。
 - 不认识的 `needs`、多余的键、重复的 id 都会让 plan 作业失败并给出原因。
-- **优先主机**（design 决定 19，R5b 起；运维给主机定了 `tier`、打开 presence 后生效）：所有测试先在 h100 上跑。计划里不写主机，部件只带能力标签；后面层级的主机在 h100 还有空闲 runner 时把自己的空闲 runner 停着，所以作业先到 h100；h100 满了，其他主机的 runner 大约一分钟内上线接剩下的部件。计划不能指定或改变这个顺序。故意写某台主机自己标签的作业（例如 nightly 要在参考主机上测秒数）要先在那台主机的 `home` 标签上跑 `ci-run presence hold --minutes N`，结束时 `--release`；仓库在那台主机的 policy 条目里要有 `nightly` 类（design 19.8）。
+- **优先主机**（design 决定 19，R5b 起；运维给主机定了 `tier`、打开 presence 后生效）：所有测试先在 h100 上跑。计划里不写主机，部件只带能力标签；后面层级的主机在 h100 还有空闲 runner 时把自己的空闲 runner 停着，所以作业先到 h100；h100 满了，其他主机的 runner 大约一分钟内上线接剩下的部件。计划不能指定或改变这个顺序。故意写某台主机自己标签的作业（例如 nightly 要在参考主机上测秒数）要先在那台主机的 `home` 标签上跑 `ci-run presence hold --minutes N`，结束时 `--release`；仓库在那台主机的 policy 条目里要有 `nightly` 类（design 19.8）。一个 run 的作业共用一个保持：只在 run 的最后一个作业里 `--release`。
 
 ## 5. 看结果与常见问题
 

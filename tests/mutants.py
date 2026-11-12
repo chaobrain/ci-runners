@@ -4,7 +4,10 @@ Each mutant replaces one exact snippet in a copy of the tree and runs only the t
 that should kill it; a mutant that passes them survives and fails this script. Up to
 ``WORKERS`` mutants run at once, each in its own copy; tests still running after
 ``HANG`` seconds have hung, which kills the mutant. Run it with
-``python tests/mutants.py`` from the repository root (CI runs it on every PR).
+``python tests/mutants.py`` from the repository root (CI runs it on every PR), or one
+shard of them: ``--shard K/N`` runs every N-th mutant from the K-th (CI runs ``SHARDS``
+shards side by side, so that no job runs much past 5 min). Every shard checks every
+snippet first.
 """
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 from ci_runners import stamp  # noqa: E402  (a stamp PR's tree is mutated in main's state)
 
 WORKERS = 4  # a hosted runner's cores; each worker has its own copy of the tree
+SHARDS = 4  # test.yml's mutant jobs: 925 s in one job on a hosted runner (2026-11-13)
 HANG = 60  # seconds: the slowest guarded test takes about 9 s, so a mutant's tests still running have hung
 POL = 'ci_runners/policy.py'
 INV = 'ci_runners/inventory.py'
@@ -1614,8 +1618,8 @@ MUTANTS = [
     # the action refs and the release stamp, with no reusable workflow left (decision 12.17)
     ('docs/consumers.md', '/actions/salvage@v1\n', '/actions/salvage@v1.4.1\n',
      [f'{TA}.Actions.test_the_action_refs_follow_the_release_stamp']),
-    ('.github/workflows/test.yml', '      - uses: actions/checkout@v4\n',
-     '      - uses: chaobrain/ci-runners/actions/claim@v1.4.1\n      - uses: actions/checkout@v4\n',
+    ('.github/workflows/test.yml', '    timeout-minutes: 15\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n      - uses: actions/setup-python@v5\n        with:\n          python-version: \'3.12\'  # the hosts',
+     '    timeout-minutes: 15\n    steps:\n      - uses: chaobrain/ci-runners/actions/claim@v1.4.1\n      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n      - uses: actions/setup-python@v5\n        with:\n          python-version: \'3.12\'  # the hosts',
      [f'{TA}.Actions.test_the_action_refs_follow_the_release_stamp']),
     # the docs' indented YAML examples are checked too (design §4.8)
     ('docs/consumers.md', '     if: always()\n', '     with: {a: ${{ x }}, b: 1}\n     if: always()\n',
@@ -4653,6 +4657,22 @@ MUTANTS = [
      [f'{TFL}.Contract.test_the_first_failed_read_is_the_one_reported']),
     (FLW, "            named = pool.submit(contents, env, call, SPEC, a.default_branch) if a.default_branch else None",
      "            named = None", [f'{TFL}.Contract.test_the_three_reads_overlap']),
+    # this repository's check split (PR 5): the shards cover every mutant, the required check needs them all
+    ('tests/mutants.py', "        mine\x20= list(enumerate(MUTANTS, 1))[k - 1::n_shards]", "        mine = list(enumerate(MUTANTS, 1))[k::n_shards]",
+     ['tests.test_workflow.OwnCheck.test_a_shard_is_every_nth_mutant']),
+    ('tests/mutants.py', "        every\x20= sorted({t for _, (*_, ts) in mine for t in ts})", "        every = sorted({t for *_, ts in MUTANTS for t in ts})",
+     ['tests.test_workflow.OwnCheck.test_a_shard_is_every_nth_mutant']),
+    ('tests/mutants.py', "        if\x20k.isdigit() and n.isdigit() and 1 <= int(k) <= int(n):", "        if k.isdigit() and n.isdigit():",
+     ['tests.test_workflow.OwnCheck.test_a_shard_is_every_nth_mutant']),
+    ('tests/mutants.py', "    if\x20len(argv) == 2 and argv[0] == '--shard':", "    if argv[0] == '--shard':",
+     ['tests.test_workflow.OwnCheck.test_a_shard_is_every_nth_mutant']),
+    ('tests/mutants.py', "SHARDS\x20= 4  #", "SHARDS = 3  #", ['tests.test_workflow.OwnCheck.test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all']),
+    ('.github/workflows/test.yml', "        shard: [1, 2, 3, 4]", "        shard: [1, 2, 3]",
+     ['tests.test_workflow.OwnCheck.test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all']),
+    ('.github/workflows/test.yml', "    needs: [tests, mutants]\n    if: always()", "    needs: [tests, mutants]",
+     ['tests.test_workflow.OwnCheck.test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all']),
+    ('.github/workflows/test.yml', '[ "$TESTS" = success ] && [ "$MUTANTS" = success ]', '[ "$TESTS" = success ]',
+     ['tests.test_workflow.OwnCheck.test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all']),
 ]
 
 
@@ -4684,7 +4704,19 @@ def one(tree: pathlib.Path, rel: str, old: str, new: str, tests: list[str]) -> t
         shutil.rmtree(cache, ignore_errors=True)
 
 
-def main() -> int:
+def shard(argv: list[str]) -> tuple[int, int]:
+    """``(K, N)`` of ``--shard K/N`` (``(1, 1)`` without it); SystemExit for anything else."""
+    if not argv:
+        return 1, 1
+    if len(argv) == 2 and argv[0] == '--shard':
+        k, _, n = argv[1].partition('/')
+        if k.isdigit() and n.isdigit() and 1 <= int(k) <= int(n):
+            return int(k), int(n)
+    raise SystemExit('usage: python tests/mutants.py [--shard K/N]')
+
+
+def main(argv: list[str] | None = None) -> int:
+    k, n_shards = shard(sys.argv[1:] if argv is None else argv)
     workers = max(1, min(WORKERS, os.cpu_count() or 1))
     with tempfile.TemporaryDirectory() as d:
         # main's state: a stamp PR's tree (operations §5 step 2) is stamped back to hook first, so
@@ -4697,12 +4729,13 @@ def main() -> int:
             if count != 1:
                 print(f'mutant {n}: the snippet occurs {count} times in {rel}', file=sys.stderr)
                 return 2
+        mine = list(enumerate(MUTANTS, 1))[k - 1::n_shards]
         trees = queue.SimpleQueue()
         for w in range(workers):  # a tree per worker: a mutant is never seen by another's tests
             tree = pathlib.Path(d) / f'tree{w}'
             shutil.copytree(base, tree)
             trees.put(tree)
-        every = sorted({t for *_, ts in MUTANTS for t in ts})
+        every = sorted({t for _, (*_, ts) in mine for t in ts})
         tree0 = trees.get()
         if run(tree0, every, hang=600):
             print('the unmutated tree fails its tests or leaves a process behind', file=sys.stderr)
@@ -4716,11 +4749,12 @@ def main() -> int:
             finally:
                 trees.put(tree)
         with concurrent.futures.ThreadPoolExecutor(workers) as ex:
-            killed = list(ex.map(job, MUTANTS))
-    for n, ((rel, old, *_), (k, secs)) in enumerate(zip(MUTANTS, killed), 1):
-        print(f'{"killed  " if k else "SURVIVED"} {n:3d} {secs:5.1f}s {rel}: {old.strip()[:70]!r}')
-    survived = [k for k, _ in killed].count(False)
-    print(f'{len(MUTANTS) - survived}/{len(MUTANTS)} mutants killed ({workers} workers)')
+            killed = list(ex.map(job, [m for _, m in mine]))
+    for (n, (rel, old, *_)), (dead, secs) in zip(mine, killed):
+        print(f'{"killed  " if dead else "SURVIVED"} {n:3d} {secs:5.1f}s {rel}: {old.strip()[:70]!r}')
+    survived = [dead for dead, _ in killed].count(False)
+    part = f', shard {k}/{n_shards}' if n_shards > 1 else ''
+    print(f'{len(mine) - survived}/{len(mine)} mutants killed ({workers} workers{part})')
     return 1 if survived else 0
 
 

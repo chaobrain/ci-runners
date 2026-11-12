@@ -186,6 +186,7 @@ class Plan(unittest.TestCase):
         self.assertEqual((b['gpus'], b['memory'], b['results'], b['labels']), (1, '', '', ['self-hosted', 'ci-gpu']))
         self.assertEqual((a['salvage_minutes'], a['salvage_wait']), (50, 2400))
         self.assertEqual(flow.entry({**b, 'needs': 'gpu2'})['gpus'], 2)
+        self.assertIs(flow.entry({**b, 'history': True})['history'], True)  # #228: the plan's key reaches part.yml
         self.assertEqual((out['ids'], out['max_parallel']), ('a b ' + 'c' * 64, '3'))
         self.assertNotIn('\n', out['parts'])
 

@@ -46,6 +46,16 @@ PERMISSIONS = {
 }
 
 
+#: part.yml's step after each checkout (#228): no credential stays in the checkout's config
+CREDENTIAL_CHECK = (
+    "git sparse-checkout disable 2> /dev/null || true\n"
+    "if git config --local --name-only --get-regexp "
+    "'^(http\\..*\\.extraheader|credential\\..*|include\\.path|includeif\\..*)$'; then\n"
+    '  echo "::error::the checkout kept a credential in its git config"\n'
+    "  exit 1\n"
+    "fi\n")
+
+
 def load(name: str) -> dict:
     return yamlsub.load((WF / name).read_text())
 
@@ -123,6 +133,45 @@ class Structure(unittest.TestCase):
             for jid, st in steps(load(name)):
                 if st.get('uses', '').startswith('actions/checkout@'):
                     self.assertIs(st['with']['persist-credentials'], False, f'{name}: {jid}')
+
+    def test_a_parts_checkout_is_one_commit_or_its_history_and_keeps_no_credential(self):
+        """#228: the plan's ``history`` sets the depth of both attempts' checkouts (``'0'``, a
+        string: a bare 0 is false in an expression and would read as ``'1'``); the job's own
+        read-only token fetches it, no token reaches the command, and a step after the
+        checkout fails the attempt where a credential stayed in the checkout's git config."""
+        jobs = load('part.yml')['jobs']
+        for jid in ('first', 'retry'):
+            sts = jobs[jid]['steps']
+            co = sts[0]
+            self.assertTrue(co['uses'].startswith('actions/checkout@'), jid)
+            self.assertEqual(co['with'], {'ref': '${{ inputs.sha }}', 'persist-credentials': False,
+                                          'fetch-depth': "${{ fromJSON(inputs.part).history && '0' || '1' }}"}, jid)
+            self.assertEqual(jobs[jid]['permissions'], {'contents': 'read'})
+            self.assertEqual(sts[1]['run'], CREDENTIAL_CHECK, jid)  # before the files and the command
+            self.assertNotIn('token', str(sts[1:]).lower(), jid)
+        self.assertEqual([jid for jid, st in steps(load('part.yml')) if st.get('uses', '').startswith('actions/checkout@')],
+                         ['first', 'retry'])
+
+    def test_the_credential_check_fails_on_what_a_checkout_could_keep(self):
+        if not shutil.which('git'):
+            self.skipTest('no git')
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(['git', 'init', '-q', d], check=True)
+            env = {'PATH': '/usr/bin:/bin', 'HOME': d, 'GIT_CONFIG_NOSYSTEM': '1'}
+
+            def check():
+                return subprocess.run(['bash', '-c', CREDENTIAL_CHECK], cwd=d, env=env, capture_output=True, text=True)
+            self.assertEqual(check().returncode, 0)
+            for key, value in (('http.https://github.com/.extraheader', 'AUTHORIZATION: basic x'),
+                               ('credential.helper', 'store'), ('credential.https://github.com.username', 'x'),
+                               ('include.path', '/tmp/creds'), ('includeIf.gitdir:/x/.path', '/tmp/creds')):
+                subprocess.run(['git', 'config', '--local', key, value], cwd=d, check=True)
+                r = check()
+                self.assertEqual(r.returncode, 1, key)
+                self.assertIn('::error::the checkout kept a credential in its git config', r.stdout, key)
+                subprocess.run(['git', 'config', '--local', '--unset', key], cwd=d, check=True)
+            subprocess.run(['git', 'config', '--local', 'http.postBuffer', '1'], cwd=d, check=True)
+            self.assertEqual(check().returncode, 0)  # other settings are not credentials
 
     def test_no_expression_in_a_shell_script(self):
         """A consumer's string (its plan command, a part's id or command) reaches a shell only

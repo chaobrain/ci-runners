@@ -6,6 +6,7 @@
 # the context at once; nothing is cancelled and the run goes on. A part is retried at most once (§4.4);
 # its attempts are 1 and 2 wherever they run (the retry names the first's record). The
 # plan's files come down before the command; the part's own artifacts go up per attempt.
+# A part's checkout is one commit, or the head's history with the plan's `history` (#228).
 # workflow_call only; every runs-on is the plan's route, the retry's row or the salvage
 # leg's computed host label, never a host named here (16.1).
 name: ci-runners part
@@ -43,12 +44,21 @@ jobs:
       uploaded: ${{ steps.part.outcome == 'success' || steps.again.outcome == 'success' }}
       retry: ${{ steps.retry.outputs.retry }}
     steps:
+      # one commit, or (the plan's history, #228) the head's whole history and every branch's
+      # remote ref, the default branch's too; fetched with this job's read-only token, which
+      # the checkout keeps nowhere (persist-credentials) and the command never gets
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.sha }}
+          fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}
           persist-credentials: false
       - shell: bash
-        run: git sparse-checkout disable 2> /dev/null || true
+        run: |
+          git sparse-checkout disable 2> /dev/null || true
+          if git config --local --name-only --get-regexp '^(http\..*\.extraheader|credential\..*|include\.path|includeif\..*)$'; then
+            echo "::error::the checkout kept a credential in its git config"
+            exit 1
+          fi
       # the plan's files (its key files), for the command as CIRUNNERS_FILES
       - if: fromJSON(inputs.part).files
         uses: actions/download-artifact@v4
@@ -190,12 +200,21 @@ jobs:
     env:
       RETRY: ${{ needs.first.outputs.retry || needs.salvage.outputs.retry || needs.locate.outputs.retry }}
     steps:
+      # one commit, or (the plan's history, #228) the head's whole history and every branch's
+      # remote ref, the default branch's too; fetched with this job's read-only token, which
+      # the checkout keeps nowhere (persist-credentials) and the command never gets
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.sha }}
+          fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}
           persist-credentials: false
       - shell: bash
-        run: git sparse-checkout disable 2> /dev/null || true
+        run: |
+          git sparse-checkout disable 2> /dev/null || true
+          if git config --local --name-only --get-regexp '^(http\..*\.extraheader|credential\..*|include\.path|includeif\..*)$'; then
+            echo "::error::the checkout kept a credential in its git config"
+            exit 1
+          fi
       # the plan's files (its key files), for the command as CIRUNNERS_FILES
       - if: fromJSON(inputs.part).files
         uses: actions/download-artifact@v4

@@ -38,7 +38,7 @@
    - `pools` 给出每个池子的 `labels`，不要用 `light`/`part` 这种裸类名；
    - 需要隧道时加 `[hosts.<role>.tunnel]`，并把密钥、`ssh_config`、`known_hosts` 放进 `etc/tunnel/`。
 
-   再写 `policy.toml`，格式见 `setup/policy.org.example.toml`，schema 2。
+   再写 `policy.toml`，格式见 `setup/policy.org.example.toml`，schema 2。**`[repositories]` 的条目从一台在用主机的 `policy.toml` 原样拷过来**（例如某个仓库的 `bot_dispatch`、`classes`）：少了一条，那个仓库的部分作业（例如合并机器人触发的）在这台主机上会在 "Set up runner" 被拒，整个 run 丢掉（2026-11-12 的事故，design 决定 19.6）。注册 runner 之前，在任一 CI 账户上跑 `ci-run pool status`，确认这台主机那一行没有 `warn: policy: repository entries differ ...`。
 4. **更新 deny 清单。** 运行 `python -m ci_runners.inventory deny <inventory> <policy>`，把输出的哈希合进仓库的 `tests/deny.sha256`，用一个 PR 提交，保证新主机的名字永远不会进入仓库。
 5. **看计划。** 手动运行时要先导出 `CI_RUNNERS_ETC` 和 `CI_RUNNERS_PYTHON`：
    ```
@@ -314,6 +314,12 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 - 这两种项只给 `pool status` 用，`pool run` 不会选它们。每个探测有自己的上限（主机 60 秒，集群 90 秒），并行运行，所以整张表在 plan 那一步的 120 秒之内出来。
 - 紧急关闭：以每个 CI 账户运行 `ci-run drain on --pool slurm`，或者把注册表移走（plan 会退回静态池并留一条说明）。
 
+**主机的顺序 `prefer`**（design 决定 19.1，R5b 起）：主机项（`local` 或 `ssh`，不能是集群）可以写 `prefer = N`（1 到 99，小的优先，相同的按注册表里的顺序；不写就不在顺序里，只走共享标签）。路由带 `--prefer` 时先把部件放到顺序里第一台有空位的主机的主机标签上（§16）。每个 CI 账户的注册表和维护者自己的注册表要写一样的值。现在的值：h100 `1`，新主机 `2`，3090a `3`，3090b 不写。**先装 release、`v1` 移过去，再加这个键**：旧版本的加载器不认识它，会让这个账户的 `pool status` 和路由失败（路由于是把所有部件放到共享标签上，不会放错主机）。
+
+**行里新加的字段**（design 决定 19.4，都是可选的，容量文件仍是 schema 1）：CI 账户自己的探测（本机，和强制探测）给主机行加上 `role`（inventory 的 `this`）、`pools`（每个 runner 池一项：`pool`、`class`、池里每个 runner 都带的 `labels`、`registered`/`online`/`free`，有 `slot` 表的再加 `memory_gib`、`speed`、`workers`）、`policy`（`file`：`policy.toml` 的 SHA-256 前 12 位，和 hook 行里的 `policy=` 一样；`repositories`：它的 `[repositories]` 条目的摘要）和健康门：数据目录剩余空间低于 `disk_min_gib`，或 CI 账户对共享文件的访问缺失时，问题里加 `health: ...`，这台主机就不接部件。`policy.toml` 读不进来时问题是 `policy: does not load`（hook 会拒绝所有作业）。注册表里写了 `prefer` 的主机行带 `prefer`。集群目标行加上 `memory_gib`、`max_minutes` 和一个不透明的 `partition`（机器名和分区名的哈希前 12 位，同分区的目标相同，分区名不出现）。维护者账户发代码过去的探测读不到 CI 账户的 inventory 和 policy，所以那样的行没有这些字段。
+
+**策略漂移的警告**（design 决定 19.6）：`pool status` 比较各主机行的 `policy.repositories`，多数主机持有的那个值是基准（并列就没有基准）；不一样的主机在问题一栏里显示 `warn: policy: repository entries differ from N other host(s)`，`--json` 里有 `policy_drift: true` 和 `warnings`。这只是警告，不是问题：这台主机仍算在线，它的 runner 照样接共享标签的作业，但路由不再把它当优先主机。处理：把多数主机的 `[repositories]` 条目拷过去（每个 CI 账户的 `etc/policy.toml`），下一次 `pool status` 警告就消失。
+
 **容量文件与 `--fast`**（design 决定 16.5，RUN-10 R4）：plan 时的路由（R5）读的数据。
 
 - `pool status` 每跑一次就把它的行写进 `state/capacity.json`（`etc` 旁边的 `state/`，模式 600，加锁后原子改名，带 `schema`）：每台机器一回答就写它那几行，每行带 `read_at`（读到的时间）；`local` 那一项还存下原始探测结果。主机行另有 `label_runners`：每个 runner 标签注册了几个实例、几个在线（有活的 `Runner.Listener`）、几个空闲（在线且没有 `Runner.Worker`，即没在跑作业）；`/proc` 看不到时在线和空闲是 `null`。集群目标行有 `jobs_free`。
@@ -401,8 +407,9 @@ presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 ru
 可复用工作流的 plan 作业在 `ci-light` 上跑 `ci-run route`：标准输入是计划（schema 1），标准输出是路由后的计划。容量用 `capacity.load()` 读（`pool status --fast` 的行）；`--rows FILE` 读一份事先存下的 `pool status --fast --json`，用来复现某次决定。
 
 - **输出**：`{"schema": 1, "capacity": "read" | "unreadable: <原因>", "parts": [...]}`，每个部件保留计划里的键，另加 `labels`（作业的 `runs-on`）、`timeout_minutes`（作业的 `timeout-minutes`）、`where`（`host` 或 `slurm`）、`target`（集群部件的目标，否则空）和 `why`。
-- **`why` 怎么读**：`N free`：去掉本计划前面部件订掉的之后，这组标签还有 N 个空闲 runner；`free runner unknown`：有主机 `/proc` 看不到空闲数，或者某台在线主机的 runner 表没读到，这时不溢出；`0 free; <key> can start it now`：主机上没有空闲 runner 了，这个集群目标现在就能起，部件去了 `ci-slurm`；`0 free; no cluster target can start it now`（或 `no host serves ci-slurm`、`no free ci-slurm runner`、`timing never overflows`）：留在共享标签上排队；`<m> GiB > <n> GiB`：加了 `mem-big`；`slot memory not reported`：主机行没有 `slot_pools`，没法判断要不要 `mem-big`。
+- **`why` 怎么读**：`N free`：去掉本计划前面部件订掉的之后，这组标签还有 N 个空闲 runner；`free runner unknown`：有主机 `/proc` 看不到空闲数，或者某台在线主机的 runner 表没读到，这时不溢出；`0 free; <key> can start it now`：主机上没有空闲 runner 了，这个集群目标现在就能起，部件去了 `ci-slurm`；`0 free; no cluster target can start it now`（或 `no host serves ci-slurm`、`no free ci-slurm runner`、`timing never overflows`）：留在共享标签上排队；`<m> GiB > <n> GiB`：加了 `mem-big`；`slot memory not reported`：有主机行没有 `pools`，或者这个标签的池没有 `slot` 表的内存，没法判断要不要 `mem-big`。
 - **退出码**：0 已路由；1 计划时的路由错误，标准错误里每行一个，先写标签，例如 `route: ci-gpu2: part gpu.1: no host serves the label (...)`（带这个标签的主机全部掉线、drained、连不上或过期），或者某个部件的内存连 `mem-big` 的 slot 都放不下；2 计划读不进来（键不对、`needs` 不认识、id 重复等），是使用方的问题。
 - **容量读不到**（没有注册表、没有容量文件、行全空，或者所有主机行都过期）：每个部件都走它的共享标签，不加 `mem-big`、不溢出、不报"没有主机提供"，退出码 0，`capacity` 和标准错误里写明原因（路径只保留文件名）。这时先查 `ci-capacity.timer`（§11）。
 - **"提供"的含义**：主机行在线（没有问题项）并且它的 inventory 给这个标签注册了 runner，就算提供，哪怕 presence 因为卡被占用、slot 被占用或 timing 部件在跑而暂时停掉了全部 runner。所以"没有主机提供"只说明这些主机本身不能用（掉线、drained、过期、连不上），不是忙。
-- **重试**（`route.retry`）：按 `outcome.hint` 的五行：`cool-card` 去首次尝试那台主机上凉的那张卡（`<host>-gpu<M>`，只限单卡部件，双卡部件按 fallback）；`same-host` 去首次尝试所在主机这一类的主机标签，集群部件回同一个目标；`more-memory` 原标签加 `mem-big`（并 `resume`），容量证明不了有主机同时提供这两个标签时，就用不带 `mem-big` 的标签加 `resume` 重试，免得排队 24 小时；`any` 原标签；fallback 用现在的容量重新路由。每个部件最多重试一次；主机标签取自首次尝试的记录（`host`、`pool_labels`、`cool_card`），不读 `retry-on`。
+- **优先主机**（design 决定 19，R5b；`ci-run route --prefer`，R6 的工作流会传）：注册表给主机排了 `prefer`（§11）时，主机行在线、60 秒内读过、没有策略警告，并且有一个池同时带这个部件的能力标签（要 `mem-big` 的部件还要带 `mem-big`）和这台主机的主机标签（等于 `role` 或以 `<role>-` 开头）、空闲数已知，这台主机就"提供"它；去掉本计划前面部件已放进这个池的数量之后还有空位，部件就放到顺序里第一台这样的主机上，标签是 `[self-hosted, ci-<need>, (mem-big,) <主机标签>]`，`why` 写 `prefer <key>: N free of <label>`。都没有空位时走共享标签，溢出规则不变（它把放到主机标签上的部件也算进去）。`timing` 从不优先，集群部件留在 `ci-slurm`。输出里每个部件多了 `host`（优先主机的键，否则空）、`spill_labels`（共享标签）和 `spill_after_s`（放到主机标签上时是 60，否则 0）：工作流里第一次尝试在主机标签上排队超过这么久没被接走，就取消它，改在 `spill_labels` 上跑（design 19.3）。容量读不到、全部过期或者没有 `--prefer`：不放主机标签。
+- **重试**（`route.retry`）：按 `outcome.hint` 的五行：`cool-card` 去首次尝试那台主机上凉的那张卡（`<host>-gpu<M>`，只限单卡部件，双卡部件按 fallback）；`same-host` 去首次尝试所在主机这一类的主机标签，集群部件回同一个目标；`more-memory` 原标签加 `mem-big`（并 `resume`），容量证明不了有主机同时提供这两个标签时，就用不带 `mem-big` 的标签加 `resume` 重试，免得排队 24 小时；`any` 原来的共享标签；fallback 用现在的容量重新路由，不用顺序。重试从不走优先主机的标签（`more-memory`、`any` 用 `spill_labels`），因为它没有改道的那一步。每个部件最多重试一次；主机标签取自首次尝试的记录（`host`、`pool_labels`、`cool_card`），不读 `retry-on`；part action 的输出 `pool-labels` 和 `cool-card`（design 19.5）就是这两个值。

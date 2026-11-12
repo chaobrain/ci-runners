@@ -89,6 +89,14 @@ how many jobs of its size (``start_now``'s: its cores, on a GPU target cards x c
 card, and the memory) the partition's ``idle`` and ``mix`` nodes hold now, summed, capped
 by the association's room; positive exactly where ``start_now`` is true.
 
+**Decision 19** (R5b): a host entry's ``prefer`` is its place in the route's order (1 to 99,
+lower first), and its row carries it. The CI account's own probe (``_with_inventory``) adds
+the host's ``role``, its ``pools`` (``pool_table``), its hook policy's digests
+(``policy_digests``: a policy that does not load is the problem ``policy: does not load``)
+and its health gate's failure (the problem ``health: ...``); a cluster target's row has
+its ``memory_gib``, ``max_minutes`` and an opaque ``partition`` (``partition_key``). ``pool
+status`` flags a host whose repository entries differ from most hosts' (``capacity.flag_policy``).
+
 **The capacity file** (decision 16.5; ``ci_runners/capacity.py``): ``pool status`` writes
 its rows, each with ``read_at``, into ``state/capacity.json`` beside the account's ``etc``,
 one machine's as soon as it answers, with the ``local`` machine's probe; a host row also

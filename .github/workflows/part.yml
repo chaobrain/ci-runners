@@ -42,7 +42,9 @@ jobs:
       outcome: ${{ steps.part.outputs.outcome }}
       # its outcome reached an artifact: the part step's own upload, or the second try below
       uploaded: ${{ steps.part.outcome == 'success' || steps.again.outcome == 'success' }}
-      retry: ${{ steps.retry.outputs.retry }}
+      # the decision below, or none where the attempt's end asks for no retry (no step decides
+      # it then): a known outcome is never read as lost, whatever its upload did
+      retry: ${{ steps.retry.outputs.retry || (steps.part.outputs.next == 'none' && 'none') || '' }}
     steps:
       # one commit, or (the plan's history, #228) the head's whole history and every branch's
       # remote ref, the default branch's too; fetched with this job's read-only token, which
@@ -88,6 +90,17 @@ jobs:
           path: ${{ runner.temp }}/ci-runners/${{ fromJSON(inputs.part).id }}
           retention-days: 7
           overwrite: true
+      # the retry's decision, before the part's own artifacts (its log and summary go up
+      # while they do), and only where the attempt's end asks for one: an end whose next is
+      # none (pass, red) has no retry whatever the rows say, so no step decides it (#239)
+      - id: retry
+        if: always() && steps.part.outputs.outcome != '' && steps.part.outputs.next != 'none'
+        uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: retry
+          part: ${{ inputs.part }}
+          project: ${{ inputs.project }}
+          outcome-file: ${{ runner.temp }}/ci-runners/${{ fromJSON(inputs.part).id }}/outcome.json
       - if: always() && steps.part.outputs.outcome != '' && fromJSON(inputs.part).artifacts[0].name
         uses: actions/upload-artifact@v4
         with:
@@ -116,14 +129,6 @@ jobs:
           path: ${{ runner.temp }}/${{ fromJSON(inputs.part).artifacts[3].path }}
           retention-days: 7
           if-no-files-found: warn
-      - id: retry
-        if: always() && steps.part.outputs.outcome != ''
-        uses: chaobrain/ci-runners/actions/flow@v1
-        with:
-          command: retry
-          part: ${{ inputs.part }}
-          project: ${{ inputs.project }}
-          outcome-file: ${{ runner.temp }}/ci-runners/${{ fromJSON(inputs.part).id }}/outcome.json
 
   # the lost path: the host whose runner took the first attempt, from its job's runner_name
   locate:

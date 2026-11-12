@@ -125,9 +125,10 @@ jobs:
       - if: steps.contract.outcome == 'success' && inputs.plan != ''
         shell: bash
         run: git sparse-checkout disable 2> /dev/null || true
-      # the plan command, a part of its own on this light runner (the project's env, its
-      # record and artifact ci-part-plan-1); its standard output is the plan. The event's
-      # facts reach it as variables; the read-only token only where the caller asks
+      # the plan command, a part of its own on this light runner (the project's env and its
+      # record; no artifact: its outcome is this step's output, and no verdict reads a plan
+      # part, #239); its standard output is the plan. The event's facts reach it as
+      # variables; the read-only token only where the caller asks
       - id: command
         if: steps.contract.outcome == 'success' && inputs.plan != ''
         uses: chaobrain/ci-runners/actions/part@v1
@@ -146,6 +147,7 @@ jobs:
           id: plan
           command: mkdir -p "$RUNNER_TEMP/ci-runners-plan" && eval "$CIRUNNERS_PLAN" > "$RUNNER_TEMP/ci-runners-plan/plan.json"
           timeout-minutes: '30'
+          upload: 'false'
       - id: plan
         if: always() && steps.contract.outcome == 'success'
         uses: chaobrain/ci-runners/actions/flow@v1

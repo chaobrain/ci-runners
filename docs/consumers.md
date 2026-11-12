@@ -287,6 +287,8 @@ jobs:
 2. **parts**：每个部件调用一次 `part.yml`，同时最多 registry 的 `max_parallel` 个。部件第一次尝试跑在路由给的标签上；按 `outcome.hint` 的五行（§2 的结果表）最多重试一次；第一次尝试没留下结果（runner 被停、上传失败）时，先在那台主机上 salvage（它的记录只在那台主机上），再决定重试。一次尝试红了，部件的 `red` 小作业（`ci-light`，只有 `statuses: write`，不跑 head 的代码）立刻在 `context` 上发 `failure`（"red at part <id>"），其他部件照常跑完，summary 完整；跑部件命令的作业都没有写权限。 同时一个 **pending** 小作业（`ci-light`，只有 `statuses: write`）发 claim 的 `pending`：只在计划路由出部件、claim 没跳过的时候，并且 claim 读状态之后 runners 没发过别的状态（红色不会被盖掉，绿色也不会）。
 3. **verdict**（`ci-light`）：发本次运行唯一的最终状态。plan 作业结束了运行时（`contract` 落后、计划读不进来、plan 命令红了、路由错误、空计划、`plan-only`）发 plan 作业给出的状态和描述；否则读每个部件的 artifact，每个部件以最后一次尝试为准，合并 summary，发状态。plan 作业结束运行的路径上，verdict 是第二次取 runner。
 
+plan 命令作为部件 `plan` 运行（有主机记录），但从 #239 起不再上传 `ci-part-plan-1` artifact：它的结果是那一步的输出，verdict 本来就不读它。在 `ci.yml` 之后读 `ci-part-*` 的作业只会看到真正的部件。
+
 **状态的描述**（精确字符串，测试红和基础设施红分开）：
 
 | 谁发 | 状态 | 描述 |

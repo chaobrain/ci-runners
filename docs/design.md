@@ -1804,7 +1804,7 @@ runner" (reason `bot`), whole runs were lost, and nothing reported the differenc
        a plan's parts beyond h100's room a host with a known free runner instead of the
        shared label, where they would race the plan's own h100 parts for h100's runners.
     2. **What the route does with it.** `ci-run route --prefer` (the reusable workflow
-       passes it, 19.3; without it the output is 16.5's, unchanged). A host *offers* a
+       passes it, 19.3; without it no part is preferred, as in 16.5). A host *offers* a
        part's labels (`ci-<need>`, with `mem-big` where 16.5 adds it) when its row is up
        (no problem: so not stale, drained, unreachable, without a runner online or failing
        its health gate, 19.4), was read within 60 s (two readings of `ci-capacity.timer`),
@@ -1891,8 +1891,8 @@ runner" (reason `bot`), whole runs were lost, and nothing reported the differenc
          it (operations §5's second lesson).
     5. **The part action's outputs** (amends §4.3, additive): `pool-labels`, the JSON
        array of the labels of the pool the part ran on (its record's `pool_labels`), and
-       `cool-card`, a card of this host that passes the health gate for a thermal retry,
-       or empty. `gpus` stays the cards the part held, which the `cool-card` row avoids.
+       `cool-card`, the card of this host that a thermal retry goes to (the `cool-card`
+       row: one that passes the health gate), else empty. `gpus` stays the cards the part held, which the `cool-card` row avoids.
        The reusable workflow passes them to `route.retry` (16.5); until then the
        `cool-card` row falls back and `same-host` becomes `any`.
     6. **A drifted hook policy shows.** The CI account's probe reads its `etc/policy.toml`

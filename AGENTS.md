@@ -19,7 +19,7 @@ The contract is [docs/design.md](docs/design.md); onboarding is
    before the code. A change that breaks a consumer is a new major version (design §8).
 4. **Every PR carries its test evidence** in its body: the commands run, on which host,
    and their result. A change that touches a host also carries its dry-run plan
-   (`setup/plan.sh`) and the live check on that host. Tests are stdlib Python with
+   (`setup/host/plan.sh`) and the live check on that host. Tests are stdlib Python with
    fixtures; each new test is shown to fail on a mutant of the line it guards.
 5. **Review.** Changes to the hook, the policy, the egress proxy and its allowlist,
    the org snapshot or the setup scripts get an independent review; for the rest
@@ -29,7 +29,7 @@ The contract is [docs/design.md](docs/design.md); onboarding is
 
 - **No inventory in the repository.** Host names and ssh aliases, IP addresses, Unix
   account names, home-directory paths, egress hosts, allowlists and any token stay on
-  the hosts (design §3.3). `tests/test_no_inventory.py` enforces it from RUN-1.
+  the hosts (design §3.3). `tests/security/test_no_inventory.py` enforces it from RUN-1.
 - **Waiting.** Wait on a PID (`while kill -0 "$PID"; do ...`) or on an exit file the job
   writes; never on a `pgrep -f` loop (its own command line matches). Start a long wait
   once, in the background, with a timeout, and never re-issue it.

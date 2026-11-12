@@ -1,5 +1,5 @@
 #!/bin/sh
-# ci-slurm-gate: see ci_runners/slurmgate.py. The forced command of a cluster key
+# ci-slurm-gate: see ci_runners/slurm/slurmgate.py. The forced command of a cluster key
 # (design decision 14.5): <base>/releases/<tag>/bin/ci-slurm-gate, <base> the account's
 # <root>/ci-runners. Its interpreter is <base>/etc/python's (written by the install), run
 # isolated (-I); the verb is in SSH_ORIGINAL_COMMAND.
@@ -7,4 +7,4 @@ release=$(dirname "$(dirname "$(readlink -f "$0")")")
 base=$(dirname "$(dirname "$release")")
 py=/usr/bin/python3
 [ -f "$base/etc/python" ] && read -r py < "$base/etc/python"
-exec "$py" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.slurmgate import main; sys.exit(main())' "$release" "$base"
+exec "$py" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.slurm.slurmgate import main; sys.exit(main())' "$release" "$base"

@@ -1,6 +1,6 @@
 # A Slurm site config, schema 1 (design decision 14.6). This file holds placeholders
 # only: the real one is <data>/ci-runners/etc/slurm/<site>.toml on each driver host,
-# mode 600, and is never committed. `python -m ci_runners.slurmsite check FILE` validates
+# mode 600, and is never committed. `python -m ci_runners.slurm.slurmsite check FILE` validates
 # it; `... deny FILE` prints the hashes of its names for tests/deny.sha256 (operations
 # §10). Every string value but `name`, `gpu_request`, `egress`, `gpu_model`, `variant`,
 # `mem_per_node`, `enabled` and a system `login_python` (under /usr) is treated as

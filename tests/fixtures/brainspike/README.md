@@ -5,7 +5,7 @@ Unmodified copies of brainspike's `scripts/host_lock.sh`, `scripts/host_lock.py`
 2026-11-07; `ci_slot.sh` again at a546b92f (2026-11-07), which writes nothing through a
 link in the shared queue and opens nothing there that can block (design T17);
 `host_lock.sh` again at 3a5eb4ee (2026-11-08), whose light probes take turns under
-`<stem>.probe.lock` (design 12.9, issue #69). The interop tests (`tests/test_interop.py`) run `ci-lock` and `ci-slot`
+`<stem>.probe.lock` (design 12.9, issue #69). The interop tests (`tests/resources/test_interop.py`) run `ci-lock` and `ci-slot`
 against them (design decision 12.9, D5, §7; RUN-7 acceptance 2). `ci_slot.sh` looks for
 `ci_runs.py` beside it and skips its newest-run registry without it, as here. Set
 `CI_RUNNERS_INTEROP_SRC` to a brainspike `scripts/` directory to test a live checkout

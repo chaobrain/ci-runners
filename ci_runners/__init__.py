@@ -1,6 +1,5 @@
-"""ci-runners: the host layer of chaobrain's shared self-hosted runners (design.md).
+"""ci-runners: the host layer of chaobrain's shared self-hosted runners.
 
-Stdlib only. Pure decisions live in their own modules (``policy``, ``claim``,
-``part``, ``inventory``, ...); the I/O around them is thin.
+Stdlib-only components are grouped by responsibility; see docs/layout.md.
 """
 __version__ = '0.1.0'

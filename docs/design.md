@@ -317,7 +317,7 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
         stay open to every private repository of the snapshot.
     15. **Setup and registration are the lead's** (AGENTS.md). The lead creates the CI
         accounts, places the tunnel keys and the push key, approves each host's
-        `setup/plan.sh` output before `apply`, registers the runners and tags `v1.4.0`.
+        `setup/host/plan.sh` output before `apply`, registers the runners and tags `v1.4.0`.
     16. **The CI account sees no other account's files** (RUN-7g; lead, 2026-11-07,
         #46: a private `/tmp` on both hosts, and the data disks and `/home` with it). Measured before any job ran: the CI account, and so
         a job, could read tens of thousands of the local account's files in `/tmp`,
@@ -738,7 +738,7 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
        - `plan` prints every change (the root's directories, mode 700; the release copied
          from the driver, of the tag the driver runs; the account's cluster-side entry; the
          key line; each env build; the canary's jobs and their cost), and changes nothing;
-         `apply` applies exactly an approved plan, as `setup/apply.sh` does;
+         `apply` applies exactly an approved plan, as `setup/host/apply.sh` does;
        - `env` builds the project's env on the login host (the nodes' C library; not on the
          driver, whose newer one could pick wheels the nodes cannot load), with egress for
          the build only, by the site's mode: `tunnel` (a reverse forward from the driver to
@@ -798,7 +798,7 @@ peer copies read zeros, so a two-card jax `psum` returned a wrong result with ex
 ## Lead decisions (2026-11-10): every machine is a pool (decision 15.1)
 
 Approved by the lead on 2026-11-10 (brainspike's D-0111, amended): CI is built as a device
-pool. Parts and people ask for capabilities, never a host. Built here (`ci_runners/pool.py`, `ci-run pool`):
+pool. Parts and people ask for capabilities, never a host. Built here (`ci_runners/pools/pool.py`, `ci-run pool`):
 
 1. **The machine registry** is `etc/pool.toml`, one `[machine.<key>]` per machine: its access (`ssh`,
    `local`, or `slurm` through the account's gate), its cores, memory, cards, card model,
@@ -806,7 +806,7 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    interpreter of its host side (`host_python`, 15.8), its work directory, its CI slot files, its compile cache and whether its numerics check
    passed. A cluster has one row per target (partition, cores a job takes, memory, minutes,
    env variant, cards, price). The registry is private site config like the inventory
-   (§3.3): `python -m ci_runners.pool deny FILE` hashes its names for `tests/deny.sha256`. It
+   (§3.3): `python -m ci_runners.pools.pool deny FILE` hashes its names for `tests/deny.sha256`. It
    is refused if others than its owner may write it.
 2. **`pool status`** is one live table, and `--json` rows with the fields of brainspike's
    `HostState`, for people, agents and the plan. A host's free slots are read from
@@ -837,7 +837,7 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    with the shortest queue.
 6. **Adding a machine** is one script (lead, 2026-11-10, D-0111 amended: "runners with
    capability labels, the env, its cache warmed, a canary, the numerics check; only then
-   usable"; `ci_runners/pooladd.py`). Hosts only: a cluster's entry stays hand-written and
+   usable"; `ci_runners/pools/pooladd.py`). Hosts only: a cluster's entry stays hand-written and
    its targets pass 14.10's gates. `ci-run pool add KEY (--ssh ALIAS | --local) ...` probes
    the host (hostname, cores, memory, the cards' model and MiB, the driver's CUDA major) and
    appends a validated `[machine.KEY]` entry with `ready = false` (an existing key or host is
@@ -1006,7 +1006,7 @@ quiet one needs a clock that is not GitHub's.
 
 1. **Where, and as whom.** User units of the maintainer's account on 3090b, brainspike's
    reference host (12.1), beside the snapshot push (11.9):
-   `setup/workstation/ci-nightly-backstop.{service,timer}` and `nightly-backstop.sh`. Not
+   `setup/maintenance/nightly/ci-nightly-backstop.{service,timer}` and `nightly-backstop.sh`. Not
    a CI account's: the CI accounts hold no GitHub credential (12.2), since every job such
    an account accepts could read one.
 2. **When.** At 21:00, 21:15, …, 22:45 and 22:59 UTC: every quarter hour of the backstop's
@@ -1036,7 +1036,7 @@ quiet one needs a clock that is not GitHub's.
    are the unit's placeholders, filled in the maintainer's `~/.config/systemd/user/`
    (§3.3).
 6. **Setup.** The lead applies the units (a timer: AGENTS.md, high-impact actions), from a
-   release installed by `setup/install.sh` under a directory of the maintainer's, as the
+   release installed by `setup/host/install.sh` under a directory of the maintainer's, as the
    push's (§5.3).
 - *Options weighed.* (B) A fine-grained token (brainspike only, Actions write) in 3090b's
   CI account, mode 600, as `etc/orgsync.token`: a new long-lived token that every job of
@@ -1166,7 +1166,7 @@ GitHub's own view of each runner (`GET /orgs/{org}/actions/runners`, `online` or
 only the maintainer holds.
 
 1. **Where, and as whom.** User units of the maintainer's account on 3090b, brainspike's
-   reference host (12.1), beside the backstop (15.3): `setup/workstation/ci-runner-watch.
+   reference host (12.1), beside the backstop (15.3): `setup/maintenance/runnerwatch/ci-runner-watch.
    {service,timer}` and `runner-watch.sh`, which runs `ci-run runner-watch` from the
    release's own checkout. Not a CI account's (12.2), and not the workstation's: a
    workstation that sleeps would miss the night.
@@ -1216,7 +1216,7 @@ only the maintainer holds.
    the org and the hosts are placeholders filled in the maintainer's
    `~/.config/systemd/user/` (§3.3).
 8. **Setup.** The lead applies the units (a timer: AGENTS.md, high-impact actions), from a
-   release installed by `setup/install.sh` under a directory of the maintainer's, as the
+   release installed by `setup/host/install.sh` under a directory of the maintainer's, as the
    backstop's (§5.3), and rehearses `--report-only` under the user manager first. A host
    taken out of the unit's list leaves an open issue of its own to a person.
 - *Options weighed.* (A) The workstation's push timer, every 10 min (15.5's text): the
@@ -1425,7 +1425,7 @@ verdict) until the branch's next push. These amend §4.1, §6.4's T11 and §6.5:
     `v1` and run code on every runner.
   - *Reason:* the repository's own tests then run free on hosted runners.
 - **D2. Two layers.**
-  - The *host layer* is installed on each host from a release by `setup/install.sh`, and
+  - The *host layer* is installed on each host from a release by `setup/host/install.sh`, and
     no job ever fetches it. It holds the hook, the executor, slots, GPU leases and
     outcome classification.
   - The *workflow layer* holds the actions (the reusable workflow went with 12.17). It
@@ -1488,66 +1488,60 @@ Settings read back from the API:
 
 ### 3.1 Repository
 
+Source files are grouped by responsibility. Public composite action paths, the `bin/`
+command names and the installed host layout in §3.2 stay the same. The source hooks and
+setup templates below are rendered into those existing installed paths.
+
 ```
-AGENTS.md  README.md  docs/design.md  docs/consumers.md  docs/operations.md
-ci_runners/           stdlib-only Python: pure functions, thin I/O
-  policy.py           hook decision: repository, actor, event, fork, runner class
-  orgsync.py          the org snapshot: members and private repositories (§6.5)
-  bridge.py           the egress proxy: HTTP CONNECT to allowlisted names (exact or
-                      suffix) on 443, run on the egress host (11.10)
-  claim.py github.py  claim decision from a sha's statuses; the status API
-  part.py             the executor: gate, slot, lease, scope, supervisor, record
-  drain.py            the drain switch (decision 13.1)
-  hostload.py         the load record and the busy rule (decision 13.2)
-  sampler.py          the GPU sampler and the early thermal stop (§5.5)
-  outcome.py          outcome classification and the retry hint
-  slots.py gpus.py    fair host slots with caps, GPU leases in ticket order per card
-  locks.py            `ci-lock`: brainspike's host-lock protocol on the 3090 hosts (12.9)
-  p2p.py              the P2P self-test of a `multi` part, over the CUDA driver API (12.6)
-  verdict.py          the verdict: the parts' outcomes, salvage, the status, the summary
-  registry.py         the project registry
-  envbuild.py         `ci-run env build` and `env refresh` (decisions 11.4, 12.10, 12.11)
-  reaper.py           stale scopes, work directories, records and logs
-  hook.py             the pre-job and post-job hooks; their copy in `/tmp` (decision 13.5)
-  setup.py            plan and apply
-  inventory.py        schema, loader, lint
-  slurmsite.py        the Slurm site config: schema, loader, prices, deny tokens (14.6)
-  slurmgate.py        the cluster's gate (14.5), the batch template and the job's supervisor (14.3)
-  slurmpart.py        the executor's `slurm` path: choice, budget, stage, submit, watch, end (14.3, 14.4)
-  slurmsetup.py       `ci-run slurm check|plan|apply|status|uninstall`: an account's install (14.9)
-  slurmlogin.py       the install's steps on the login host, through the owner's own login (14.9)
-  slurmenv.py         `ci-run slurm env`: a project's env on the login host, its egress for the build only (14.9, D4)
-  slurmcanary.py      `ci-run slurm canary`: a short job per target, and the check it runs on the node (14.9, 14.10)
-  cli.py              `ci-run`
-bin/                  ci-run, ci-lock, ci-slot: CLIs over the package; ci-slurm-gate, a cluster
-                      key's forced command (14.5)
-hooks/                job-started.sh, job-completed.sh -> python -I -m ci_runners.hook
-setup/                plan.sh, apply.sh, install.sh, register.sh, uninstall.sh
-setup/units/          user unit templates: ci-runner@.service, ci-reaper.{service,timer},
-                      ci-orgsync.{service,timer}, ci-envrefresh.{service,timer},
-                      ci-hostload.{service,timer}, ci-hooks.service, slices;
-                      ci-tunnel.service (a host's forward to the egress, 11.10, 12.3)
-setup/egress/         ci-egress.service and allow: the egress host's proxy unit and its
-                      allowlist (11.10), installed by root there
-setup/inventory.example.toml  setup/policy.org.example.toml   placeholders only
-setup/slurm/          site.example.toml: a Slurm site config, placeholders only (14.6)
-setup/workstation/    the maintainer's own user units: orgsync-push.sh and
-                      ci-orgsync-push.{service,timer}, the snapshot push from the
-                      workstation (decision 11.9); nightly-backstop.sh and
-                      ci-nightly-backstop.{service,timer}, brainspike's nightly backstop
-                      on 3090b (decision 15.3); runner-watch.sh and
-                      ci-runner-watch.{service,timer}, the alert when a host has no
-                      runner online (decision 15.6)
-actions/              claim/, part/, salvage/, verdict/ (composite, action.yml);
-                      lib/ci-run.sh, the launcher; RELEASE, the release stamp
-.github/workflows/    test.yml (this repository's tests, hosted only)
-tests/                unit tests; fixtures/ (sanitised): event payloads,
-                      nvidia-smi CSV, /proc/stat, /proc/locks, boot ids, JUnit; mutants.py
-tests/test_no_inventory.py     no tracked file holds a denied token (hashed deny list)
+AGENTS.md  README.md  pyproject.toml
+ci_runners/
+  __init__.py  cli.py             package metadata and the ci-run command dispatcher
+  layout.py                      release root, independent of component package depth
+  config/                        inventory schema/lint; project registry
+  workflow/                      claim decision, GitHub API, outcomes, verdict/salvage
+  execution/                     part executor/supervisor; running GPU sampler
+  resources/                     host locks, CI slots, GPU lease rules, P2P check
+  pools/                         machine registry, capacity probes, cross-host run/onboarding
+  slurm/                         site config, driver, gate, install, env and canary
+  environments/                  env builds/refresh; protection of builds in use
+  security/                      policy, runner hooks/copies, org snapshot sync
+  deployment/                    host setup plan/apply and template rendering
+  network/                       HTTPS CONNECT egress proxy
+  operations/                    drain, host load, reaper and runner watch
+bin/                             ci-run, ci-lock, ci-slot, ci-slurm-gate
+hooks/runner/                    job-started.sh and job-completed.sh source templates
+setup/
+  host/                          install.sh, plan.sh, apply.sh, register.sh, uninstall.sh
+    units/                       CI host user services, timers and slices
+  config/                        inventory.example.toml, policy.org.example.toml
+  egress/                        proxy system service and public domain allowlist
+  slurm/                         site.example.toml
+  maintenance/
+    orgsync/                     orgsync-push.sh and its service/timer
+    nightly/                     nightly-backstop.sh and its service/timer
+    runnerwatch/                 runner-watch.sh and its service/timer
+actions/                         claim/, part/, salvage/, verdict/; lib/ci-run.sh; RELEASE
+docs/                            design.md, consumers.md, operations.md, layout.md
+.github/workflows/test.yml       this repository's tests, GitHub-hosted only
+tests/
+  interfaces/ workflow/ security/ execution/ resources/ pools/ slurm/
+  environments/ config/ deployment/ network/ operations/ support/
+                                 unit/integration tests grouped by responsibility
+  fixtures/                      sanitised events, GPU/cgroup output, lock/slot references
+  leaks.py  mutants.py            process leak checks and mutation tests
+  p2p_fake.py  slurm_fake.py      device and cluster test doubles
+  deny.sha256                    hashed inventory deny list
 ```
 
+[layout.md](layout.md) maps each implementation file to its responsibility. Python
+subpackages are included recursively both in a built package and in the source bundles
+sent to a remote host or cluster. Child processes import the same grouped modules.
+`ci_runners.layout.release_root()` locates the installed release without assuming a
+component's directory depth.
+
 The deny list holds SHA-256 hashes of the inventory's tokens, so the list does not
-publish what it protects. `setup/plan.sh` regenerates it from a host's inventory.
+publish what it protects. `python -m ci_runners.config.inventory deny` generates the
+hashes from a host's inventory; `tests/security/test_no_inventory.py` enforces the list.
 
 ### 3.2 Hosts
 
@@ -1630,7 +1624,7 @@ optional with the defaults of 13.2); and removes `watchdog_log` and `watchdog_no
 GPU leases' directory, shared with the pool runs of other accounts; with
 `local_accounts` a plain name in `/tmp`, made by the root step as the slot queue). Without
 it the leases stay under `state/leases`. The first path's keys (`ssh`, `trusted`, `remote`,
-`cpu_slowdown`, `proxy`) are accepted and ignored in `v1.3` and `v1.4` (11.12). `setup/inventory.example
+`cpu_slowdown`, `proxy`) are accepted and ignored in `v1.3` and `v1.4` (11.12). `setup/config/inventory.example
 .toml` holds the schema with placeholder values.
 
 ## 4. The consumer interface
@@ -1952,22 +1946,22 @@ only the per-card, `multi` and `nightly` runners lease cards.
 
 All are idempotent and run as the runner account. None needs sudo.
 
-- `setup/plan.sh <host>` reads the inventory and prints every change it would make:
+- `setup/host/plan.sh <host>` reads the inventory and prints every change it would make:
   files with their diffs, units, `.env` lines and runner directories. It changes
   nothing. It also checks linger for the account (a root step) and each enabled unit's link,
   and prints the runners not running now on standard error (15.5). The lead approves this output. Save only its standard output as the plan.
-- `setup/apply.sh <host> --plan <file>` applies exactly an approved plan. It refuses if
+- `setup/host/apply.sh <host> --plan <file>` applies exactly an approved plan. It refuses if
   the plan's text differs from a fresh `plan.sh` output, or while a root step the plan
   lists (§5.3) is not done. It writes a state file, and a
   second run is a no-op.
-- `setup/install.sh --tag <tag> --expect <sha>` installs a release into
+- `setup/host/install.sh --tag <tag> --expect <sha>` installs a release into
   `releases/<tag>/` after checking that the tag resolves to the commit the lead
   released (an annotated tag by its peeled commit, matched by exact ref name).
   `--commit <sha>` installs `releases/main-<sha12>/`. It never moves what running jobs
   use (§9): an existing release is kept only if it is a real directory holding that
   commit, and is refused otherwise. `releases/hook` moves only forward (to a higher tag,
   or from a main commit to anything); moving back needs `--rollback`.
-- `setup/register.sh <runner>...` is run by the lead with a fresh registration token on
+- `setup/host/register.sh <runner>...` is run by the lead with a fresh registration token on
   stdin. It calls the runner app's `config.sh --url https://github.com/chaobrain
   --runnergroup Default --labels ... --work <data>/ci-work/<name> --unattended` under
   `env -i`, with the token in `ACTIONS_RUNNER_INPUT_TOKEN` (never in an argv, never
@@ -1975,7 +1969,7 @@ All are idempotent and run as the runner account. None needs sudo.
   while any runner of the account is active, since job code runs as that account and
   could read the token from the environment of `config.sh`. It starts the runners
   once all are configured. Auto-update stays on.
-- `setup/uninstall.sh <host>` reverses `apply` from its state file: it disables each
+- `setup/host/uninstall.sh <host>` reverses `apply` from its state file: it disables each
   unit on its own, removes only the unit files the state file records (nothing if a
   unit is still active), leaves the runners for the lead to deregister, and leaves
   `etc/` for the lead to delete.
@@ -2055,7 +2049,7 @@ credential of theirs.
 |---|---|
 | the egress account | a system account with no password and `nologin` as its shell (done 2026-11-06) |
 | `authorized_keys` | one line per host's tunnel key (h100, and from decision 12.3 3090b and 3090a), each restricted as decision 11.10 states: one `permitopen`, to the egress proxy's port. A host's plan prints its line: `restrict,port-forwarding,permitopen="127.0.0.1:<egress port>",permitlisten="127.0.0.1:9",command="/usr/sbin/nologin" <key>` |
-| the release | `setup/install.sh` run by root with `CI_RUNNERS_ETC=/opt/ci-runners/etc`, so the release is root-owned under `/opt/ci-runners/releases/`, readable by others (mode 555); `/usr/bin/python3` is 3.11 or later; git is installed |
+| the release | `setup/host/install.sh` run by root with `CI_RUNNERS_ETC=/opt/ci-runners/etc`, so the release is root-owned under `/opt/ci-runners/releases/`, readable by others (mode 555); `/usr/bin/python3` is 3.11 or later; git is installed |
 | `/opt/ci-runners/etc/egress-allow` | a root-owned copy of the release's `setup/egress/allow`, mode 644, in a directory of mode 755 |
 | `ci-egress.service` | the release's `setup/egress/ci-egress.service` in `/etc/systemd/system/`, enabled: `ci-run egress` as a dynamic user on 127.0.0.1:<egress port>, at most 256 connections, journal lines per connection (refused, or open and closed, with the name); hardened (no new privileges, a read-only system, no home, its own `/tmp`, IP and Unix sockets only, no capabilities) and capped at 512 MB |
 | unchanged | the egress host's sshd configuration |
@@ -2207,7 +2201,7 @@ time. The push timer is monotonic: a workstation suspended for an hour stales h1
 A host that holds its own token runs `ci-orgsync.timer` instead (inventory `orgsync`,
 `etc/orgsync.token`).
 
-`policy.toml` is schema 2 (`setup/policy.org.example.toml`); the hook refuses any other
+`policy.toml` is schema 2 (`setup/config/policy.org.example.toml`); the hook refuses any other
 (`policy`). Its `[org]` table holds `name`, `members = true`, `private_repositories =
 true` (each snapshot repository joins `repositories` as private) and `max_age_minutes =
 60`. With `members`, the snapshot's members may act **only in the org's private
@@ -2597,7 +2591,7 @@ Rules:
   retries a failed copy every 30 s; both units set `StartLimitIntervalSec=0`. `setup`'s plan checks the CI account's
   linger (a root step) and each enabled unit's `.wants` link on every host, and prints the runners alive now on
   standard error. A registry's host entry may name `runners`, and `pool status` reports `no runner online` for a host
-  with none alive. The runner watch (`ci-run runner-watch`, `setup/workstation/ci-runner-watch.{service,timer}`)
+  with none alive. The runner watch (`ci-run runner-watch`, `setup/maintenance/runnerwatch/ci-runner-watch.{service,timer}`)
   opens an issue when a host has had no runner online at GitHub for two checks. The shared-state checks (plan and
   job time) cover the slot queue's `seq.lock` and `take.lock`. No action's input or output changes, no label,
   outcome kind, inventory key, slurm or egress code changes. Its notes:
@@ -2625,7 +2619,7 @@ Rules:
   `start_now` is stricter; a CPU target no longer reads the association's `gpu` room. The table's `start` column
   shows `now (N)`. Also on `main` since `v1.11.0`: design §5.1's text on 8 slurm runners per 3090 host (#150). No
   action's input or output changes, no label, outcome kind, inventory or registry key, setup, gate, slurm part or
-  egress code changes: the code change is `ci_runners/pool.py` alone. Its notes:
+  egress code changes: the code change is `ci_runners/pools/pool.py` alone. Its notes:
   1. **When each side runs it.** `pool status` and the forced probe run `releases/hook`, so the fields hold from the
      install: a CI account's local row gains `runners` once its own hook is `v1.12.0`, the other host's row once
      that host's is. Until then a row may still carry `v1.11.0`'s int `runners`; a reader takes a `runners` that is
@@ -2768,7 +2762,7 @@ could be forced), and a human non-member and a newly added member (no second acc
 2. No module, unit, action, test or fixture of the first path remains; `tests/mutants.py`
    kills every mutant left. The hook refuses a schema-1 policy; the inventory loader
    accepts the retired keys and ignores them.
-3. `setup/plan.sh h100` with `v1.3.0` plans no change against `v1.2.0`'s apply.
+3. `setup/host/plan.sh h100` with `v1.3.0` plans no change against `v1.2.0`'s apply.
 4. The canary passes green and red on `@v1.3.0`, then on `@v1` after the move.
 
 **RUN-7: the 3090 hosts** (decision 12; `v1.4.0`). Sub-PRs, each with its tests and

@@ -5,7 +5,7 @@
     ci-run org-sync [--fetch --org NAME | --receive]   the org snapshot (§6.5, decision 11.9)
     ci-run runner-watch --org O --state F [--report-only] HOST...   an issue when a host has no
                            runner online (the maintainer's timer; decision 15.6)
-    ci-run plan|apply ...  host setup (setup/plan.sh, setup/apply.sh)
+    ci-run plan|apply ...  host setup (setup/host/plan.sh, setup/host/apply.sh)
     ci-run runners         this host's runners: name, labels, class
     ci-run role            this host's role
     ci-run claim ...       claim a head (actions/claim; design §4.1)
@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 import sys
 
-from ci_runners import inventory
+from ci_runners.config import inventory
 
 
 def etc_dir() -> str:
@@ -48,13 +48,14 @@ def main(argv: list[str]) -> int:
         print(load_inventory().this)
         return 0
     if cmd == 'egress':  # on the egress host: no inventory there
-        from ci_runners import bridge
+        from ci_runners.network import bridge
         return bridge.main(args)
     if cmd == 'reap':
-        from ci_runners import hookcopy, reaper
+        from ci_runners.security import hookcopy
+        from ci_runners.operations import reaper
         h = load_inventory().host
         print(reaper.reap(h['data']))
-        from ci_runners import slurmpart
+        from ci_runners.slurm import slurmpart
         for line in slurmpart.reap(h['data'], etc_dir()):  # a lost slurm part's job (decision 14.4)
             print(line)
         line = hookcopy.refresh(h)  # a copy /tmp's cleaning took, or one that changed (decision 13.5)
@@ -62,43 +63,43 @@ def main(argv: list[str]) -> int:
             print(line)
         return 0
     if cmd == 'pool':  # the registry is its own file: no inventory needed (an agent's account has none)
-        from ci_runners import pool
+        from ci_runners.pools import pool
         return pool.main(args, etc_dir())
     if cmd == 'runner-watch':  # the maintainer's account: no inventory there (decision 15.6)
-        from ci_runners import runnerwatch
+        from ci_runners.operations import runnerwatch
         return runnerwatch.main(args)
     if cmd == 'org-sync':
-        from ci_runners import orgsync
+        from ci_runners.security import orgsync
         return orgsync.cli(args, etc_dir())
     if cmd == 'claim':
-        from ci_runners import github
+        from ci_runners.workflow import github
         return github.main(args, etc_dir())
     if cmd == 'part':
-        from ci_runners import part
+        from ci_runners.execution import part
         return part.main(args, load_inventory(), etc_dir())
     if cmd == 'verdict':
-        from ci_runners import verdict
+        from ci_runners.workflow import verdict
         return verdict.main(args, load_inventory())
     if cmd == 'salvage':
-        from ci_runners import verdict
+        from ci_runners.workflow import verdict
         return verdict.salvage_main(args, load_inventory())
     if cmd == 'env':
-        from ci_runners import envbuild
+        from ci_runners.environments import envbuild
         return envbuild.main(args, load_inventory(), etc_dir())
     if cmd == 'hostload':
-        from ci_runners import hostload
+        from ci_runners.operations import hostload
         return hostload.main(args, load_inventory())
     if cmd == 'hooks':
-        from ci_runners import hookcopy
+        from ci_runners.security import hookcopy
         return hookcopy.main(args, load_inventory().host)
     if cmd == 'drain':
-        from ci_runners import drain
+        from ci_runners.operations import drain
         return drain.main(args, load_inventory())
     if cmd == 'slurm':
-        from ci_runners import slurmsetup
+        from ci_runners.slurm import slurmsetup
         return slurmsetup.main(args, load_inventory(), etc_dir())
     if cmd in ('plan', 'apply', 'runners'):
-        from ci_runners import setup
+        from ci_runners.deployment import setup
         return setup.main([cmd, *args])
     print(f'ci-run: unknown command {cmd!r}', file=sys.stderr)
     return 2

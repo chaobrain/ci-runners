@@ -2,7 +2,7 @@
 
 这份手册写给维护主机和发布版本的人。契约是 [design.md](design.md)（英文），本文与之不一致时以 design.md 为准。仓库怎么接入，看 [consumers.md](consumers.md)。
 
-本仓库公开，文档里**不写任何清单信息**：主机名、ssh 别名、IP、账户名、home 路径、令牌都不出现，只用角色名（design §3.3），由 `tests/test_no_inventory.py` 把关。下文的 `<data>` 指主机上 CI 账户数据目录的根（inventory 的 `data`）。
+本仓库公开，文档里**不写任何清单信息**：主机名、ssh 别名、IP、账户名、home 路径、令牌都不出现，只用角色名（design §3.3），由 `tests/security/test_no_inventory.py` 把关。下文的 `<data>` 指主机上 CI 账户数据目录的根（inventory 的 `data`）。
 
 ## 1. 拓扑
 
@@ -29,27 +29,27 @@
 1. **准备。** 主机上要有 Python ≥ 3.11（系统自带的版本不够就用 conda 的）、开启 linger、`systemctl --user` 可用。在这台主机上测一下哪些 GitHub 域名能直连。
 2. **装 release。** 从一个能访问 GitHub 的地方取得 release，在主机上运行：
    ```
-   setup/install.sh --tag vX.Y.Z --expect <tag 指向的 commit sha>
+   setup/host/install.sh --tag vX.Y.Z --expect <tag 指向的 commit sha>
    ```
    它会装到 `<data>/ci-runners/releases/vX.Y.Z/`，并把 `releases/hook` 指向它（只会往前移，回退要加 `--rollback`）。
-3. **写 inventory。** 写 `<data>/ci-runners/etc/inventory.toml`（`etc/` 的权限为 700）。格式见 `setup/inventory.example.toml`：
+3. **写 inventory。** 写 `<data>/ci-runners/etc/inventory.toml`（`etc/` 的权限为 700）。格式见 `setup/config/inventory.example.toml`：
    - `this` 为角色名；
    - `[hosts.<role>]` 填账户、路径、槽位、卡、`max_temp_c`、`cpus`、`python`；
    - `pools` 给出每个池子的 `labels`，不要用 `light`/`part` 这种裸类名；
    - 需要隧道时加 `[hosts.<role>.tunnel]`，并把密钥、`ssh_config`、`known_hosts` 放进 `etc/tunnel/`。
 
-   再写 `policy.toml`，格式见 `setup/policy.org.example.toml`，schema 2。
-4. **更新 deny 清单。** 运行 `python -m ci_runners.inventory deny <inventory> <policy>`，把输出的哈希合进仓库的 `tests/deny.sha256`，用一个 PR 提交，保证新主机的名字永远不会进入仓库。
+   再写 `policy.toml`，格式见 `setup/config/policy.org.example.toml`，schema 2。
+4. **更新 deny 清单。** 运行 `python -m ci_runners.config.inventory deny <inventory> <policy>`，把输出的哈希合进仓库的 `tests/deny.sha256`，用一个 PR 提交，保证新主机的名字永远不会进入仓库。
 5. **看计划。** 手动运行时要先导出 `CI_RUNNERS_ETC` 和 `CI_RUNNERS_PYTHON`：
    ```
-   setup/plan.sh <role> > plan.txt
+   setup/host/plan.sh <role> > plan.txt
    ```
    只保存 stdout，不要把 stderr 混进去：`apply` 会逐字比对计划文本。逐行检查要写哪些文件、单元和 `.env`。计划还检查 CI 账户的 linger（根步骤 `loginctl enable-linger <account>`，没做时 `apply` 拒绝）和每个要启用的单元在 `default.target.wants`、`timers.target.wants` 里的链接（缺了就重新 `enable`）；stderr 的最后一行是现在有几个 runner 进程活着、哪些没有（design 决定 15.5，不进计划文本）。在共享账户上，计划不得碰我们子目录以外的东西，`ci-*` 单元除外。
-6. **应用。** 运行 `setup/apply.sh <role> --plan plan.txt`。如果旧版本留下了没有记录的单元，`plan.sh` 和 `apply.sh` 都要加 `--adopt`，并逐个确认那些文件是我们的。
+6. **应用。** 运行 `setup/host/apply.sh <role> --plan plan.txt`。如果旧版本留下了没有记录的单元，`plan.sh` 和 `apply.sh` 都要加 `--adopt`，并逐个确认那些文件是我们的。
 7. **注册 runner。** 需要 gh 临时拥有 `admin:org`，用完立即收回（§7）。所有 runner 都停着的时候才能注册：
    ```
    gh api -X POST orgs/chaobrain/actions/runners/registration-token --jq .token \
-     | setup/register.sh <runner>...
+     | setup/host/register.sh <runner>...
    ```
    令牌只经过 stdin，不会落盘。注册完脚本会启动 runner。
 8. **现场检查。**
@@ -70,18 +70,18 @@
    ```
    完成后收回 `admin:org`。
 4. **删单元。**
-   - 有 apply 记录（`state/setup.json`）的单元，用 `setup/uninstall.sh <role>` 删。它只删记录里的单元，有单元仍在运行就什么都不删。
+   - 有 apply 记录（`state/setup.json`）的单元，用 `setup/host/uninstall.sh <role>` 删。它只删记录里的单元，有单元仍在运行就什么都不删。
    - 旧版本写的、没有记录的单元，先 `plan.sh <role> --adopt` 把它们收进记录，再 uninstall。
    - 如果是**专用** CI 账户，也可以逐个 `disable --now` 后手工删除 `~/.config/systemd/user/ci-*`，再 `daemon-reload`。共享账户上不要这样做。
 5. **删 runner 目录。** 删掉 `actions-runner/<name>/`，里面有已作废的凭据。`etc/` 由维护者决定是否删除。
-6. **清 inventory。** 从仓库的 `setup/inventory.example.toml` 删掉这台主机的段落（如果有）。`tests/deny.sha256` 里的哈希保留，删了反而可能让旧名字漏进仓库。
+6. **清 inventory。** 从仓库的 `setup/config/inventory.example.toml` 删掉这台主机的段落（如果有）。`tests/deny.sha256` 里的哈希保留，删了反而可能让旧名字漏进仓库。
 7. 最后确认 org 的 runner 列表里只剩预期的 runner。
 
 ## 4. 新增项目和成员
 
-- **成员和私有仓库**：自动同步，什么都不用做。新成员、新私有仓库最多 10 分钟后可用。要暂停某个仓库，在每台主机的 `policy.toml` 里写它的条目，设 `paused = true`（见 `setup/policy.org.example.toml`）。
+- **成员和私有仓库**：自动同步，什么都不用做。新成员、新私有仓库最多 10 分钟后可用。要暂停某个仓库，在每台主机的 `policy.toml` 里写它的条目，设 `paused = true`（见 `setup/config/policy.org.example.toml`）。
 - **新项目**（仓库要先按 [consumers.md](consumers.md) §3 加 `.github/ci-runners.toml`）：
-  1. 在要用的每台主机上写 `<data>/ci-runners/etc/projects/<project>.toml`，字段见 `ci_runners/registry.py` 的文档字符串：
+  1. 在要用的每台主机上写 `<data>/ci-runners/etc/projects/<project>.toml`，字段见 `ci_runners/config/registry.py` 的文档字符串：
      - `name` 与文件名同名；
      - `repository = "chaobrain/<repo>"`；
      - `context = "<project>/ci"`；
@@ -110,7 +110,7 @@
 - **conda 表。** 规格里的 `[conda]` 表（见 [consumers.md](consumers.md) §3）和 `python` 在同一次 `conda create` 里求解，在任何 pip 步骤之前。表格式不对就什么都不建，错误写在 stderr。`--dry-run` 会打印 `conda create` 那一行，先看一眼。
 - **环境刷新**（design §4.9）。`ci-run env refresh <project>` 不要令牌：它读环境里保存的 `ci-env.json`（规格、requirements 文件、每个 upstream 的 commit），用 `git ls-remote` 看分支动没动，动了才重建，建好后一次 rename 换上。有 upstream 读不了（私有，或者没有路由）就拒绝，什么都不建；任何一步失败都保留旧环境。在 v1.4 之前建的环境没有保存规格，要先用 `env build` 重建一次。`ci-run env refresh --all` 处理这台主机上 registry 里写了 `refresh = true` 的每个项目，一个失败不影响其他项目，只要有失败，退出码就是 2。同一个项目同一时刻只有一个 build 或 refresh 在跑（`envs/.<project>.lock`），撞上的刷新等下一轮。
 - **部件用哪个构建。** `envs/<project>` 是会被 refresh 移动的链接。部件开始时把它解析一次，`PATH` 和 `CONDA_PREFIX` 都指向那个构建目录，部件记录（`record.json`）的 `env_build` 写下构建名；部件在 `<构建>/.inuse` 上持有共享 `flock` 直到结束（supervisor 继承该描述符，runner 停了也不放）。清理旧构建时只删能拿到独占非阻塞锁的构建，被部件占用的构建多留一轮，拿不准就保留。
-- **刷新单元。** `setup/units/ci-envrefresh.{service,timer}`：timer 每 30 分钟触发，service 运行 `ci-run env refresh --all`。service 读 `etc/envrefresh.env`（可选，由维护者写，模式 600）：放 runner `.env` 里的 `https_proxy`、`http_proxy`、`no_proxy`，以及 `CI_RUNNERS_CONDA=<conda 路径>`。git 的 `ls-remote` 和 clone 都走这个代理。这两个文件随仓库发布，由 setup 计划在对应主机上安装，计划要经维护者批准。
+- **刷新单元。** `setup/host/units/ci-envrefresh.{service,timer}`：timer 每 30 分钟触发，service 运行 `ci-run env refresh --all`。service 读 `etc/envrefresh.env`（可选，由维护者写，模式 600）：放 runner `.env` 里的 `https_proxy`、`http_proxy`、`no_proxy`，以及 `CI_RUNNERS_CONDA=<conda 路径>`。git 的 `ls-remote` 和 clone 都走这个代理。这两个文件随仓库发布，由 setup 计划在对应主机上安装，计划要经维护者批准。
 
 **排空一台主机**（design 决定 13.1）。维修、重启 runner 之前，以 CI 账户身份：
 
@@ -143,7 +143,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 一次发布的六步（design §9）：
 
 1. **功能 PR**：带单元测试、夹具和一台主机上的现场检查，合并进 `main`。
-2. **stamp PR**：把 `actions/RELEASE` 改成 `vX.Y.Z`。本仓库的工作流不调用 action，所以没有 ref 要改；`tests/test_actions.py` 会检查工作流里的 ref 与 stamp 一致、文档示例引用 `@v1`。合并。
+2. **stamp PR**：把 `actions/RELEASE` 改成 `vX.Y.Z`。本仓库的工作流不调用 action，所以没有 ref 要改；`tests/interfaces/test_actions.py` 会检查工作流里的 ref 与 stamp 一致、文档示例引用 `@v1`。合并。
 3. **打 tag**：在 stamp 的合并 commit 上打 `vX.Y.Z`。
 4. **安装**：在每台主机上运行 `install.sh --tag vX.Y.Z --expect <sha>`，包括 egress 主机（以 root 身份，`CI_RUNNERS_ETC=/opt/ci-runners/etc`）。这一步不会切换任何东西。主机的计划有变化时，先看 `plan.sh`，再 `apply`。
 5. **金丝雀**：金丝雀仓库的一个分支把各 action 引用为 `@vX.Y.Z`，跑一个绿的 head 和一个红的 head。
@@ -258,7 +258,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 集群是 3090 主机 runner 的远程目标：`slurm` 池在 3090 主机上，部件以 `sbatch` 作业跑在集群上，集群上不常驻任何东西（没有单元、定时器、隧道或监听端口，决定 14.11）。所有命令都在一台驱动主机（3090）上以 CI 账户运行。
 
-**站点配置**：`etc/slurm/<site>.toml`（模式 600），格式见 `setup/slurm/site.example.toml`（RUN-9b 起；只有占位符）。站点名用角色名，不用机构的主机名。写的是：GPU 申请语法（例如 `--gpus={n}`）、额外的 `sbatch` 参数、登录节点的 Python、egress 方式、预算（每日、每月）、每个目标的排队上限；价格表（每核时、每种卡的卡时、GPU 作业是否另付 CPU）；目标（分区、节点、卡型号、每节点卡数、`max_cards`、环境变体、每卡 CPU、每节点内存、`max_minutes`、`enabled`）；账户（ssh 别名、共享文件系统上的根目录、Slurm 账户、可用目标、权重、每月上限）。`python -m ci_runners.slurmsite check etc/slurm/<site>.toml` 校验它（文件名要等于 `site.name`，权限要是 600）。把站点的名字加进 deny 清单（同 §2 第 4 步）：`python -m ci_runners.slurmsite deny etc/slurm/<site>.toml` 打印分区、节点、账户、ssh 别名、路径等值的哈希；目标名和账户别名是我们自己起的角色名，不算；配置里没有、但同样不能进仓库的名字（登录节点、机构名、其他节点）用 `python -m ci_runners.inventory hash` 从 stdin 生成。保证它们不会进入仓库。
+**站点配置**：`etc/slurm/<site>.toml`（模式 600），格式见 `setup/slurm/site.example.toml`（RUN-9b 起；只有占位符）。站点名用角色名，不用机构的主机名。写的是：GPU 申请语法（例如 `--gpus={n}`）、额外的 `sbatch` 参数、登录节点的 Python、egress 方式、预算（每日、每月）、每个目标的排队上限；价格表（每核时、每种卡的卡时、GPU 作业是否另付 CPU）；目标（分区、节点、卡型号、每节点卡数、`max_cards`、环境变体、每卡 CPU、每节点内存、`max_minutes`、`enabled`）；账户（ssh 别名、共享文件系统上的根目录、Slurm 账户、可用目标、权重、每月上限）。`python -m ci_runners.slurm.slurmsite check etc/slurm/<site>.toml` 校验它（文件名要等于 `site.name`，权限要是 600）。把站点的名字加进 deny 清单（同 §2 第 4 步）：`python -m ci_runners.slurm.slurmsite deny etc/slurm/<site>.toml` 打印分区、节点、账户、ssh 别名、路径等值的哈希；目标名和账户别名是我们自己起的角色名，不算；配置里没有、但同样不能进仓库的名字（登录节点、机构名、其他节点）用 `python -m ci_runners.config.inventory hash` 从 stdin 生成。保证它们不会进入仓库。
 
 **装一个账户**（决定 14.9）：
 
@@ -288,7 +288,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 ## 11. 设备池：`pool status` 与 `pool run`（design 决定 15.1）
 
-**注册表**：`$CI_RUNNERS_ETC/pool.toml`（默认 `~/data/ci-runners/etc/pool.toml`，权限 600），格式见 `ci_runners/pool.py` 的模块说明。它和清单一样是私有配置，不进仓库：写好后运行 `python -m ci_runners.pool deny <pool.toml>`，把新的哈希合进 `tests/deny.sha256`。每台机器一项，写明访问方式（`ssh`/`local`/`slurm`）、核数、内存、卡、环境、工作目录和 CI slot 文件。主机端（状态探测和 `pool run` 在远端的那一半）默认用系统的 `/usr/bin/python3`；它低于 3.11 时（h100 是 3.10，没有 `tomllib`），在项里写 `host_python = "<3.11 以上的 python 的绝对路径>"`（`pool add --host-python`；和 `python` 一样是私有路径）。集群写登录账户的 ssh 别名和 `ci-slurm-gate` 的路径，每个目标一行。
+**注册表**：`$CI_RUNNERS_ETC/pool.toml`（默认 `~/data/ci-runners/etc/pool.toml`，权限 600），格式见 `ci_runners/pools/pool.py` 的模块说明。它和清单一样是私有配置，不进仓库：写好后运行 `python -m ci_runners.pools.pool deny <pool.toml>`，把新的哈希合进 `tests/deny.sha256`。每台机器一项，写明访问方式（`ssh`/`local`/`slurm`）、核数、内存、卡、环境、工作目录和 CI slot 文件。主机端（状态探测和 `pool run` 在远端的那一半）默认用系统的 `/usr/bin/python3`；它低于 3.11 时（h100 是 3.10，没有 `tomllib`），在项里写 `host_python = "<3.11 以上的 python 的绝对路径>"`（`pool add --host-python`；和 `python` 一样是私有路径）。集群写登录账户的 ssh 别名和 `ci-slurm-gate` 的路径，每个目标一行。
 
 **查看**：`ci-run pool status` 打印一张表，`--json` 输出每行的 `HostState` 字段。主机的空闲 slot 从 `/proc/locks` 读取，不会去占用；集群的数字来自 `sinfo`，再减去本账户运行中作业所占的关联 `GrpTRES`。
 
@@ -311,12 +311,12 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 brainspike 的 nightly 靠 GitHub 的 `schedule` 触发，merge gate 的事件唤醒也会做同样的检查。为了在没有事件的晚上 GitHub 定时也停了的情况下仍然有 nightly，3090b 上维护者本人的账户跑一个 user 定时器（不是 CI 账户：CI 账户里没有任何 GitHub 凭据，决定 12.2）。
 
-- 单元：`setup/workstation/ci-nightly-backstop.{service,timer}`，脚本 `setup/workstation/nightly-backstop.sh [--report-only] CHECKOUT PYTHON NET_WRAP`。
+- 单元：`setup/maintenance/nightly/ci-nightly-backstop.{service,timer}`，脚本 `setup/maintenance/nightly/nightly-backstop.sh [--report-only] CHECKOUT PYTHON NET_WRAP`。
 - 登录：每次运行时用 `gh auth token` 读维护者的登录，只放在 gate 进程的环境变量 `GH_TOKEN` 里，不进命令行，也不写进任何文件。没有新令牌。
 - 安装（由 lead 执行，定时器属于高影响操作）：
-  1. 用 `setup/install.sh --commit <sha>` 把一个 release 装到维护者自己的目录下（`CI_RUNNERS_ETC` 指向那个目录下的 `ci-runners/etc`），和快照推送的 release 分开放；
+  1. 用 `setup/host/install.sh --commit <sha>` 把一个 release 装到维护者自己的目录下（`CI_RUNNERS_ETC` 指向那个目录下的 `ci-runners/etc`），和快照推送的 release 分开放；
   2. 把两个单元复制到 `~/.config/systemd/user/`，在 service 里填好 `@RELEASE@`、`@CHECKOUT@`、`@PYTHON@`、`@NET_WRAP@`；
-  3. 先在 user manager 下演练一次（不要在登录 shell 里跑：那里的 PATH 和 keyring 和定时器的不一样）：`systemd-run --user --wait --pipe <release>/setup/workstation/nightly-backstop.sh --report-only <checkout> <python> <wrapper>`，它只做判断、打印结论，不派发；
+  3. 先在 user manager 下演练一次（不要在登录 shell 里跑：那里的 PATH 和 keyring 和定时器的不一样）：`systemd-run --user --wait --pipe <release>/setup/maintenance/nightly/nightly-backstop.sh --report-only <checkout> <python> <wrapper>`，它只做判断、打印结论，不派发；
   4. `systemctl --user daemon-reload && systemctl --user enable --now ci-nightly-backstop.timer`，再用 `systemctl --user list-timers ci-nightly-backstop.timer` 确认下一次触发的时间。
 - 前提：维护者账户开了 linger；gh 的登录存在配置文件里，而不是需要会话才能解锁的 keyring；gh 在 user manager 的 PATH 上。
 
@@ -324,14 +324,14 @@ brainspike 的 nightly 靠 GitHub 的 `schedule` 触发，merge gate 的事件�
 
 3090b 上维护者本人的账户跑一个 user 定时器，每 15 分钟用维护者的 gh 登录读一次 org 的自托管 runner（`GET /orgs/{org}/actions/runners`），看每台主机有没有 GitHub 认为在线的 runner。要看哪些主机写在单元里，仓库里不写主机名。runner 的名字或某个标签等于主机名、或以 `<主机名>-` 开头，就算那台主机的。
 
-- 单元：`setup/workstation/ci-runner-watch.{service,timer}`，脚本 `setup/workstation/runner-watch.sh [--report-only] STATE NET_WRAP ORG HOST...`，它在代理包装下运行 release 自己的 `ci-run runner-watch`。
+- 单元：`setup/maintenance/runnerwatch/ci-runner-watch.{service,timer}`，脚本 `setup/maintenance/runnerwatch/runner-watch.sh [--report-only] STATE NET_WRAP ORG HOST...`，它在代理包装下运行 release 自己的 `ci-run runner-watch`。
 - 提醒：某台主机连续两次检查（间隔不超过 40 分钟）都没有在线的 runner，就在 `<org>/ci-runners` 开一个标题固定的 issue `No runner of <host> online`；已经有同名的 open issue 就沿用它，不重复开。一次故障只开一次：故障期间有人手动关掉，监视器不会再开。之后第一次检查看到那台主机有在线的 runner，就给每个同名的 open issue 评论并关闭。
 - 状态：每台主机连续离线的次数和上次检查的时间，存在单元的状态目录里（`%S/ci-runners/runner-watch.json`，systemd 255 上是 `~/.local/state`，权限 600）。离上次检查不到 5 分钟的检查（比如手动启动）不再计数。读 runner 失败时什么都不写，下一次再试；写 issue 只试一次，失败了下一次再试。
 - 登录：和 §12 一样，每次运行时用 `gh auth token` 读，只放在 `ci-run` 的环境变量 `GH_TOKEN` 里。需要 `admin:org`（读 runner）和 `repo`（写 issue）。没有新令牌。
 - 局限：监视器跑在 3090b 上，所以 3090b 整台宕机、或者它的网络或维护者账户出了问题时，它报告不了 3090b 自己；其他原因（CI 账户的 user manager、隧道、和 GitHub 的连接）都会报告。
 - 安装（由 lead 执行，定时器属于高影响操作）：
-  1. 用 `setup/install.sh --commit <sha>` 把一个 release 装到维护者自己的目录下（和 §12 的同一个也可以）；
+  1. 用 `setup/host/install.sh --commit <sha>` 把一个 release 装到维护者自己的目录下（和 §12 的同一个也可以）；
   2. 把两个单元复制到 `~/.config/systemd/user/`，在 service 里填好 `@RELEASE@`、`@NET_WRAP@`、`@ORG@`、`@HOSTS@`（要看的主机，空格分隔）；
-  3. 先在 user manager 下演练一次：`systemd-run --user --wait --pipe <release>/setup/workstation/runner-watch.sh --report-only <state 文件的绝对路径> <wrapper> <org> <host>...`，它只打印每台主机的结论和会开、会关的 issue，什么都不写；
+  3. 先在 user manager 下演练一次：`systemd-run --user --wait --pipe <release>/setup/maintenance/runnerwatch/runner-watch.sh --report-only <state 文件的绝对路径> <wrapper> <org> <host>...`，它只打印每台主机的结论和会开、会关的 issue，什么都不写；
   4. `systemctl --user daemon-reload && systemctl --user enable --now ci-runner-watch.timer`，再用 `systemctl --user list-timers ci-runner-watch.timer` 确认下一次触发的时间。
 - 前提：同 §12。

@@ -1,0 +1,21 @@
+# The org snapshot, pushed from the maintainer's workstation (design decision 11.9): a
+# user unit of the maintainer's account, not of a CI account. Placeholders: the release
+# directory on the workstation (setup/host/install.sh with CI_RUNNERS_ETC under a directory
+# of the maintainer's), the org, and @HOSTS@: for each host in turn (decision 12.4) its
+# ssh host, its data root and its interpreter, three words per host (on a 3090 host the
+# ssh host logs in to the CI account with the push key, whose line forces the receive).
+# Copy to ~/.config/systemd/user/, fill in, then enable ci-orgsync-push.timer.
+# The unit runs without a login session, so it needs: linger for the maintainer's
+# account; an ssh key for each host that needs no agent or passphrase prompt (BatchMode);
+# gh's login in its config file, not in a keyring locked without a session; gh and ssh on
+# the user manager's PATH. Each gap stops the push quietly, and 60 min later the host
+# refuses every job (stale): check `systemctl --user status ci-orgsync-push` after setup.
+# Each host is bounded on its own (2 min); one that fails does not hold up the others.
+[Unit]
+Description=ci-runners: push the org snapshot to each host
+
+[Service]
+Type=oneshot
+ExecStart=@RELEASE@/setup/maintenance/orgsync/orgsync-push.sh @ORG@ @HOSTS@
+NoNewPrivileges=yes
+TimeoutStartSec=10min

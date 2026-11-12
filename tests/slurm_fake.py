@@ -345,7 +345,7 @@ def ssh(args: list[str]) -> int:
             return _forwarded(forwards, ['sh', '-c', ' '.join(rest)], dict(os.environ, HOME=h['home']))
         os.execve('/bin/sh', ['sh', '-c', ' '.join(rest)], dict(os.environ, HOME=h['home']))
     env = dict(os.environ, SSH_ORIGINAL_COMMAND=' '.join(rest))
-    gate = ('import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.slurmgate import main; '
+    gate = ('import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.slurm.slurmgate import main; '
             'sys.exit(main())')
     os.execve(sys.executable, [sys.executable, '-I', '-c', gate, h['release'], h['base']], env)
     return 255

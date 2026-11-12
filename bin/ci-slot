@@ -1,5 +1,5 @@
 #!/bin/sh
-# ci-slot: see ci_runners/slots.py. Runs the installed package with the system Python,
+# ci-slot: see ci_runners/resources/slots.py. Runs the installed package with the system Python,
 # isolated (-I), so a job's environment cannot change what runs.
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
-exec "${CI_RUNNERS_PYTHON:-/usr/bin/python3}" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.slots import main; sys.exit(main(sys.argv[1:]))' "$root" "$@"
+exec "${CI_RUNNERS_PYTHON:-/usr/bin/python3}" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.resources.slots import main; sys.exit(main(sys.argv[1:]))' "$root" "$@"

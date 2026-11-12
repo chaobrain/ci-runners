@@ -24,147 +24,153 @@ import leaks  # noqa: E402  (tests/leaks.py)
 
 WORKERS = 4  # a hosted runner's cores; each worker has its own copy of the tree
 HANG = 60  # seconds: the slowest guarded test takes about 9 s, so a mutant's tests still running have hung
-POL = 'ci_runners/policy.py'
-INV = 'ci_runners/inventory.py'
-HOK = 'ci_runners/hook.py'
-SET = 'ci_runners/setup.py'
+POL = 'ci_runners/security/policy.py'
+INV = 'ci_runners/config/inventory.py'
+HOK = 'ci_runners/security/hook.py'
+SET = 'ci_runners/deployment/setup.py'
 CLI = 'ci_runners/cli.py'
-HKS = 'hooks/job-started.sh'
-HKC = 'hooks/job-completed.sh'
-PLN = 'setup/plan.sh'
-UNS = 'setup/uninstall.sh'
-CLA = 'ci_runners/claim.py'
-OUT = 'ci_runners/outcome.py'
-GPU = 'ci_runners/gpus.py'
-SLO = 'ci_runners/slots.py'
-LCK = 'ci_runners/locks.py'
-GHB = 'ci_runners/github.py'
-PRT = 'ci_runners/part.py'
-RGY = 'ci_runners/registry.py'
-REA = 'ci_runners/reaper.py'
-SMP = 'ci_runners/sampler.py'
-ORS = 'ci_runners/orgsync.py'
-OPS = 'setup/workstation/orgsync-push.sh'
-NBS = 'setup/workstation/nightly-backstop.sh'
-NBT = 'setup/workstation/ci-nightly-backstop.timer'
-RWP = 'ci_runners/runnerwatch.py'
-RWS = 'setup/workstation/runner-watch.sh'
-RWT = 'setup/workstation/ci-runner-watch.timer'
-RWU = 'setup/workstation/ci-runner-watch.service'
-BRG = 'ci_runners/bridge.py'
+HKS = 'hooks/runner/job-started.sh'
+HKC = 'hooks/runner/job-completed.sh'
+PLN = 'setup/host/plan.sh'
+UNS = 'setup/host/uninstall.sh'
+CLA = 'ci_runners/workflow/claim.py'
+OUT = 'ci_runners/workflow/outcome.py'
+GPU = 'ci_runners/resources/gpus.py'
+SLO = 'ci_runners/resources/slots.py'
+LCK = 'ci_runners/resources/locks.py'
+GHB = 'ci_runners/workflow/github.py'
+PRT = 'ci_runners/execution/part.py'
+RGY = 'ci_runners/config/registry.py'
+REA = 'ci_runners/operations/reaper.py'
+SMP = 'ci_runners/execution/sampler.py'
+ORS = 'ci_runners/security/orgsync.py'
+OPS = 'setup/maintenance/orgsync/orgsync-push.sh'
+NBS = 'setup/maintenance/nightly/nightly-backstop.sh'
+NBT = 'setup/maintenance/nightly/ci-nightly-backstop.timer'
+RWP = 'ci_runners/operations/runnerwatch.py'
+RWS = 'setup/maintenance/runnerwatch/runner-watch.sh'
+RWT = 'setup/maintenance/runnerwatch/ci-runner-watch.timer'
+RWU = 'setup/maintenance/runnerwatch/ci-runner-watch.service'
+BRG = 'ci_runners/network/bridge.py'
 LCH = 'actions/lib/ci-run.sh'
 APT = 'actions/part/action.yml'
-REG = 'setup/register.sh'
-INS = 'setup/install.sh'
-UNI = 'setup/uninstall.sh'
-TP = 'tests.test_policy'
-TI = 'tests.test_inventory'
-TH = 'tests.test_hook'
-TU = 'tests.test_setup'
-TC = 'tests.test_claim'
-TO = 'tests.test_outcome'
-TG = 'tests.test_gpus'
-TS = 'tests.test_slots'
-TQ = 'tests.test_github'
-TT = 'tests.test_part'
-TE = 'tests.test_reaper'
-TK = 'tests.test_scripts'
-TA = 'tests.test_actions'
-VRD = 'ci_runners/verdict.py'
-ENB = 'ci_runners/envbuild.py'
+REG = 'setup/host/register.sh'
+INS = 'setup/host/install.sh'
+UNI = 'setup/host/uninstall.sh'
+TP = 'tests.security.test_policy'
+TI = 'tests.config.test_inventory'
+TH = 'tests.security.test_hook'
+TU = 'tests.deployment.test_setup'
+TC = 'tests.workflow.test_claim'
+TO = 'tests.workflow.test_outcome'
+TG = 'tests.resources.test_gpus'
+TS = 'tests.resources.test_slots'
+TQ = 'tests.workflow.test_github'
+TT = 'tests.execution.test_part'
+TE = 'tests.operations.test_reaper'
+TK = 'tests.interfaces.test_scripts'
+TA = 'tests.interfaces.test_actions'
+VRD = 'ci_runners/workflow/verdict.py'
+ENB = 'ci_runners/environments/envbuild.py'
 AVD = 'actions/verdict/action.yml'
-TV = 'tests.test_verdict'
-TB = 'tests.test_envbuild'
-TM = 'tests.test_thermal'
-TZ = 'tests.test_orgsync'
-TBR = 'tests.test_bridge'
-TNB = 'tests.test_backstop'
-TRW = 'tests.test_runnerwatch'
-P2P = 'ci_runners/p2p.py'
-T2 = 'tests.test_p2p'
-TX = 'tests.test_interop'
-DRN = 'ci_runners/drain.py'
-TD = 'tests.test_drain'
-HL = 'ci_runners/hostload.py'
-SST = 'ci_runners/slurmsite.py'
-SGT = 'ci_runners/slurmgate.py'
-SPT = 'ci_runners/slurmpart.py'
-SS = 'ci_runners/slurmsetup.py'
-SL = 'ci_runners/slurmlogin.py'
-TSU = 'tests.test_slurmsetup'
-SE = 'ci_runners/slurmenv.py'
-TSE = 'tests.test_slurmenv'
-SC = 'ci_runners/slurmcanary.py'
-TSC = 'tests.test_slurmcanary'
-TSP = 'tests.test_slurmpart'
-TSG = 'tests.test_slurmgate'
-TSS = 'tests.test_slurmsite'
-THL = 'tests.test_hostload'
-HC = 'ci_runners/hookcopy.py'
-PO = 'ci_runners/pool.py'
-TPO = 'tests.test_pool'
-PA = 'ci_runners/pooladd.py'
-TPA = 'tests.test_pooladd'
-THC = 'tests.test_hookcopy'
+TV = 'tests.workflow.test_verdict'
+TB = 'tests.environments.test_envbuild'
+TM = 'tests.execution.test_thermal'
+TZ = 'tests.security.test_orgsync'
+TBR = 'tests.network.test_bridge'
+TNB = 'tests.operations.test_backstop'
+TRW = 'tests.operations.test_runnerwatch'
+P2P = 'ci_runners/resources/p2p.py'
+T2 = 'tests.resources.test_p2p'
+TX = 'tests.resources.test_interop'
+DRN = 'ci_runners/operations/drain.py'
+TD = 'tests.operations.test_drain'
+HL = 'ci_runners/operations/hostload.py'
+SST = 'ci_runners/slurm/slurmsite.py'
+SGT = 'ci_runners/slurm/slurmgate.py'
+SPT = 'ci_runners/slurm/slurmpart.py'
+SS = 'ci_runners/slurm/slurmsetup.py'
+SL = 'ci_runners/slurm/slurmlogin.py'
+TSU = 'tests.slurm.test_slurmsetup'
+SE = 'ci_runners/slurm/slurmenv.py'
+TSE = 'tests.slurm.test_slurmenv'
+SC = 'ci_runners/slurm/slurmcanary.py'
+TSC = 'tests.slurm.test_slurmcanary'
+TSP = 'tests.slurm.test_slurmpart'
+TSG = 'tests.slurm.test_slurmgate'
+TSS = 'tests.slurm.test_slurmsite'
+THL = 'tests.operations.test_hostload'
+HC = 'ci_runners/security/hookcopy.py'
+PO = 'ci_runners/pools/pool.py'
+TPO = 'tests.pools.test_pool'
+PA = 'ci_runners/pools/pooladd.py'
+TPA = 'tests.pools.test_pooladd'
+THC = 'tests.security.test_hookcopy'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
+    # The source layout includes subpackages; remote execution needs their sources too.
+    (PO, "for parent, dirs, names in os.walk(pkg):", "for parent, dirs, names in [next(os.walk(pkg))]:",
+     [f'{TPO}.Tree.test_the_bundle_keeps_nested_packages_and_excludes_bytecode',
+      f'{TPO}.Tree.test_the_shipped_package_imports_from_its_extracted_release']),
+    (SS, "for parent, dirs, names in os.walk(pkg):", "for parent, dirs, names in [next(os.walk(pkg))]:",
+     [f'{TSU}.Pure.test_a_cluster_release_includes_nested_packages_without_bytecode']),
     # RUN-9g: env variants (decision 14.9, §4.9)
-    (ENB, "'variables', 'conda', 'variant'}", "'variables', 'conda'}", ['tests.test_envbuild.Spec.test_a_variant_table_gives_a_variants_install']),
-    (ENB, '        if name not in self.variants:\n            return self', '        if False:\n            return self', ['tests.test_envbuild.Spec.test_a_variant_table_gives_a_variants_install']),
-    (ENB, '        return dataclasses.replace(self, install=v.install, conda=conda)', '        return dataclasses.replace(self, conda=conda)', ['tests.test_envbuild.Spec.test_a_variant_table_gives_a_variants_install']),
-    (ENB, "_variants(doc.get('variant', {}), conda), text)", "{}, text)", ['tests.test_envbuild.Spec.test_a_variant_table_gives_a_variants_install']),
+    (ENB, "'variables', 'conda', 'variant'}", "'variables', 'conda'}", ['tests.environments.test_envbuild.Spec.test_a_variant_table_gives_a_variants_install']),
+    (ENB, '        if name not in self.variants:\n            return self', '        if False:\n            return self', ['tests.environments.test_envbuild.Spec.test_a_variant_table_gives_a_variants_install']),
+    (ENB, '        return dataclasses.replace(self, install=v.install, conda=conda)', '        return dataclasses.replace(self, conda=conda)', ['tests.environments.test_envbuild.Spec.test_a_variant_table_gives_a_variants_install']),
+    (ENB, "_variants(doc.get('variant', {}), conda), text)", "{}, text)", ['tests.environments.test_envbuild.Spec.test_a_variant_table_gives_a_variants_install']),
     # a variant's conda table joins the base's (14.9, §4.9)
-    (ENB, "VARIANT_KEYS = {'install', 'conda'}", "VARIANT_KEYS = {'install'}", ['tests.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
+    (ENB, "VARIANT_KEYS = {'install', 'conda'}", "VARIANT_KEYS = {'install'}", ['tests.environments.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
     (ENB, 'install=v.install, conda=conda)', 'install=v.install, conda=self.conda)',
-     ['tests.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s',
-      'tests.test_envbuild.Steps.test_a_variants_conda_packages_are_in_its_one_solve_and_not_the_base_s',
-      'tests.test_slurmenv.Env.test_a_variants_conda_packages_join_the_base_s_in_its_own_build_only']),
+     ['tests.environments.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s',
+      'tests.environments.test_envbuild.Steps.test_a_variants_conda_packages_are_in_its_one_solve_and_not_the_base_s',
+      'tests.slurm.test_slurmenv.Env.test_a_variants_conda_packages_join_the_base_s_in_its_own_build_only']),
     (ENB, '        conda = Conda(self.conda.channels + v.conda.channels, self.conda.packages + v.conda.packages)',
-     '        conda = v.conda', ['tests.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
+     '        conda = v.conda', ['tests.environments.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
     (ENB, 'Conda(self.conda.channels + v.conda.channels,', 'Conda(v.conda.channels + self.conda.channels,',
-     ['tests.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
+     ['tests.environments.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
     (ENB, "        conda = _conda(v['conda'], f'variant.{name}.conda', base) if 'conda' in v else Conda((), ())",
-     "        conda = Conda((), ())", ['tests.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
-    (ENB, "f'variant.{name}.conda', base)", "f'variant.{name}.conda')", ['tests.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
+     "        conda = Conda((), ())", ['tests.environments.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
+    (ENB, "f'variant.{name}.conda', base)", "f'variant.{name}.conda')", ['tests.environments.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
     (ENB, "doc.get('channels', ['conda-forge'] if base is None else [])", "doc.get('channels', ['conda-forge'])",
-     ['tests.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
-    (ENB, "or (base is None and not channels)\n", "or not channels\n", ['tests.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
+     ['tests.environments.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
+    (ENB, "or (base is None and not channels)\n", "or not channels\n", ['tests.environments.test_envbuild.Spec.test_a_variants_conda_table_joins_the_base_s']),
     (ENB, '    have = list(base.channels) if base is not None else []', '    have = []',
-     ['tests.test_envbuild.Spec.test_a_malformed_variant_conda_table_is_refused']),
+     ['tests.environments.test_envbuild.Spec.test_a_malformed_variant_conda_table_is_refused']),
     (ENB, '    names = [CONDA_SPEC.fullmatch(p).group(1).lower() for p in base.packages] if base is not None else []',
-     '    names = []', ['tests.test_envbuild.Spec.test_a_malformed_variant_conda_table_is_refused']),
-    (ENB, '        if set(v) - VARIANT_KEYS:', '        if False:', ['tests.test_envbuild.Spec.test_a_malformed_variant_is_refused']),
-    (ENB, "        if 'install' not in v:", '        if False:', ['tests.test_envbuild.Spec.test_a_malformed_variant_is_refused']),
-    (ENB, '        if not VARIANT.fullmatch(name):', '        if False:', ['tests.test_envbuild.Spec.test_a_malformed_variant_is_refused']),
-    (ENB, "    if not isinstance(doc, dict):\n        raise SpecError(f'{SPEC}: variant must", "    if False:\n        raise SpecError(f'{SPEC}: variant must", ['tests.test_envbuild.Spec.test_a_malformed_variant_is_refused']),
-    (ENB, "        if not isinstance(v, dict):\n            raise SpecError(f'{SPEC}: variant.{name} must be a table')", "        if False:\n            raise SpecError(f'{SPEC}: variant.{name} must be a table')", ['tests.test_envbuild.Spec.test_a_malformed_variant_is_refused']),
-    (ENB, "(f'-{variant}' if variant else '')", "''", ['tests.test_envbuild.Steps.test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table']),
-    (ENB, ' or (variant and not VARIANT.fullmatch(variant)):', ':', ['tests.test_envbuild.Steps.test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table']),
-    (ENB, '    d = build_dir(envs, project, stamp, variant)', '    d = build_dir(envs, project, stamp)', ['tests.test_envbuild.Steps.test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table']),
-    (SE, '    base = [v for v in variants if v not in spec.variants]', '    base = list(variants)', ['tests.test_slurmenv.Env.test_two_variants_get_two_builds_with_their_own_install']),
-    (SE, '        if v in spec.variants:\n            vs = spec.variant(v)', '        if False:\n            vs = spec.variant(v)', ['tests.test_slurmenv.Env.test_a_variant_the_spec_does_not_name_links_the_base_build']),
-    (SE, '            vs = spec.variant(v)', '            vs = spec', ['tests.test_slurmenv.Env.test_two_variants_get_two_builds_with_their_own_install']),
+     '    names = []', ['tests.environments.test_envbuild.Spec.test_a_malformed_variant_conda_table_is_refused']),
+    (ENB, '        if set(v) - VARIANT_KEYS:', '        if False:', ['tests.environments.test_envbuild.Spec.test_a_malformed_variant_is_refused']),
+    (ENB, "        if 'install' not in v:", '        if False:', ['tests.environments.test_envbuild.Spec.test_a_malformed_variant_is_refused']),
+    (ENB, '        if not VARIANT.fullmatch(name):', '        if False:', ['tests.environments.test_envbuild.Spec.test_a_malformed_variant_is_refused']),
+    (ENB, "    if not isinstance(doc, dict):\n        raise SpecError(f'{SPEC}: variant must", "    if False:\n        raise SpecError(f'{SPEC}: variant must", ['tests.environments.test_envbuild.Spec.test_a_malformed_variant_is_refused']),
+    (ENB, "        if not isinstance(v, dict):\n            raise SpecError(f'{SPEC}: variant.{name} must be a table')", "        if False:\n            raise SpecError(f'{SPEC}: variant.{name} must be a table')", ['tests.environments.test_envbuild.Spec.test_a_malformed_variant_is_refused']),
+    (ENB, "(f'-{variant}' if variant else '')", "''", ['tests.environments.test_envbuild.Steps.test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table']),
+    (ENB, ' or (variant and not VARIANT.fullmatch(variant)):', ':', ['tests.environments.test_envbuild.Steps.test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table']),
+    (ENB, '    d = build_dir(envs, project, stamp, variant)', '    d = build_dir(envs, project, stamp)', ['tests.environments.test_envbuild.Steps.test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table']),
+    (SE, '    base = [v for v in variants if v not in spec.variants]', '    base = list(variants)', ['tests.slurm.test_slurmenv.Env.test_two_variants_get_two_builds_with_their_own_install']),
+    (SE, '        if v in spec.variants:\n            vs = spec.variant(v)', '        if False:\n            vs = spec.variant(v)', ['tests.slurm.test_slurmenv.Env.test_a_variant_the_spec_does_not_name_links_the_base_build']),
+    (SE, '            vs = spec.variant(v)', '            vs = spec', ['tests.slurm.test_slurmenv.Env.test_two_variants_get_two_builds_with_their_own_install']),
     # ci-pool-run: the requirement files' -c files bind the upstreams' editable installs
-    (ENB, "CONSTRAINT = re.compile(r'\\s*(?:-c|--constraint)[\\s=]+(\\S+)')", "CONSTRAINT = re.compile(r'\\s*(?:-c)[\\s=]+(\\S+)')", ['tests.test_envbuild.Spec.test_constraints_files_are_the_c_lines_of_the_fetched_files']),
+    (ENB, "CONSTRAINT = re.compile(r'\\s*(?:-c|--constraint)[\\s=]+(\\S+)')", "CONSTRAINT = re.compile(r'\\s*(?:-c)[\\s=]+(\\S+)')", ['tests.environments.test_envbuild.Spec.test_constraints_files_are_the_c_lines_of_the_fetched_files']),
     (ENB, "        base = posixpath.dirname(path)\n        for line in text.splitlines():\n            m = CONSTRAINT.match(line)",
-     "        base = ''\n        for line in text.splitlines():\n            m = CONSTRAINT.match(line)", ['tests.test_envbuild.Spec.test_constraints_files_are_the_c_lines_of_the_fetched_files']),
-    (ENB, "            m = CONSTRAINT.match(line)", "            m = NESTED.match(line)", ['tests.test_envbuild.Spec.test_constraints_files_are_the_c_lines_of_the_fetched_files']),
+     "        base = ''\n        for line in text.splitlines():\n            m = CONSTRAINT.match(line)", ['tests.environments.test_envbuild.Spec.test_constraints_files_are_the_c_lines_of_the_fetched_files']),
+    (ENB, "            m = CONSTRAINT.match(line)", "            m = NESTED.match(line)", ['tests.environments.test_envbuild.Spec.test_constraints_files_are_the_c_lines_of_the_fetched_files']),
     (ENB, "                p = _path(f'{path}: -c', posixpath.normpath(posixpath.join(base, m.group(1))))",
-     "                p = posixpath.normpath(posixpath.join(base, m.group(1)))", ['tests.test_envbuild.Spec.test_constraints_files_are_the_c_lines_of_the_fetched_files']),
-    (ENB, "                if p not in out:\n                    out.append(p)", "                if True:\n                    out.append(p)", ['tests.test_envbuild.Spec.test_constraints_files_are_the_c_lines_of_the_fetched_files']),
-    (ENB, "    cons = [a for c in constraints for a in ('-c', os.path.join(reqdir, c))]", "    cons = [a for c in constraints for a in ('-c', c)]", ['tests.test_envbuild.Steps.test_the_constraints_bind_every_upstreams_install_and_none_is_as_before']),
-    (ENB, "        out.append([*pip, *cons, '-e', os.path.join(d, 'src', u.name)])", "        out.append([*pip, '-e', os.path.join(d, 'src', u.name)])", ['tests.test_envbuild.Steps.test_the_constraints_bind_every_upstreams_install_and_none_is_as_before']),
-    (ENB, "                     constraints=constraints(files))", "                     constraints=())", ['tests.test_envbuild.Main.test_a_build_passes_the_requirement_files_constraints_to_the_upstreams_install']),
-    (SE, "conda=conda,\n                                            constraints=constraints)})", "conda=conda)})", ['tests.test_slurmenv.Env.test_the_requirement_files_constraints_bind_the_upstreams_install_of_every_build']),
-    (SE, "                                                variant=v, constraints=constraints)})", "                                                variant=v)})", ['tests.test_slurmenv.Env.test_the_requirement_files_constraints_bind_the_upstreams_install_of_every_build']),
-    (SE, "conda=conda, constraints=envbuild.constraints(files))", "conda=conda)", ['tests.test_slurmenv.Env.test_the_requirement_files_constraints_bind_the_upstreams_install_of_every_build']),
-    (SL, "            m = re.fullmatch(re.escape(project) + '-' + STAMP + f'(-{VARIANT})?', n)", "            m = re.fullmatch(re.escape(project) + '-' + STAMP, n)", ['tests.test_slurmenv.Env.test_old_builds_are_kept_per_variant']),
-    (SL, "                kinds.setdefault(m.group(1) or '', [])", "                kinds.setdefault('', [])", ['tests.test_slurmenv.Env.test_old_builds_are_kept_per_variant']),
-    (SL, "'variant': b['variant'], 'install': b.get('install', []),", "", ['tests.test_slurmenv.Env.test_two_variants_get_two_builds_with_their_own_install']),
-    (SL, '    if (not builds or len(set(names)) != len(names)', '    if (False and len(set(names)) != len(names)', ['tests.test_slurmenv.Env.test_a_requirement_file_stays_in_its_directory']),
-    (SL, ' or len(set(served)) != len(served)', '', ['tests.test_slurmenv.Env.test_a_requirement_file_stays_in_its_directory']),
-    (SL, "            or not all(re.fullmatch(VARIANT, v) for v in served + [n for n in names if n])):", "            or False):", ['tests.test_slurmenv.Env.test_a_requirement_file_stays_in_its_directory']),
+     "                p = posixpath.normpath(posixpath.join(base, m.group(1)))", ['tests.environments.test_envbuild.Spec.test_constraints_files_are_the_c_lines_of_the_fetched_files']),
+    (ENB, "                if p not in out:\n                    out.append(p)", "                if True:\n                    out.append(p)", ['tests.environments.test_envbuild.Spec.test_constraints_files_are_the_c_lines_of_the_fetched_files']),
+    (ENB, "    cons = [a for c in constraints for a in ('-c', os.path.join(reqdir, c))]", "    cons = [a for c in constraints for a in ('-c', c)]", ['tests.environments.test_envbuild.Steps.test_the_constraints_bind_every_upstreams_install_and_none_is_as_before']),
+    (ENB, "        out.append([*pip, *cons, '-e', os.path.join(d, 'src', u.name)])", "        out.append([*pip, '-e', os.path.join(d, 'src', u.name)])", ['tests.environments.test_envbuild.Steps.test_the_constraints_bind_every_upstreams_install_and_none_is_as_before']),
+    (ENB, "                     constraints=constraints(files))", "                     constraints=())", ['tests.environments.test_envbuild.Main.test_a_build_passes_the_requirement_files_constraints_to_the_upstreams_install']),
+    (SE, "conda=conda,\n                                            constraints=constraints)})", "conda=conda)})", ['tests.slurm.test_slurmenv.Env.test_the_requirement_files_constraints_bind_the_upstreams_install_of_every_build']),
+    (SE, "                                                variant=v, constraints=constraints)})", "                                                variant=v)})", ['tests.slurm.test_slurmenv.Env.test_the_requirement_files_constraints_bind_the_upstreams_install_of_every_build']),
+    (SE, "conda=conda, constraints=envbuild.constraints(files))", "conda=conda)", ['tests.slurm.test_slurmenv.Env.test_the_requirement_files_constraints_bind_the_upstreams_install_of_every_build']),
+    (SL, "            m = re.fullmatch(re.escape(project) + '-' + STAMP + f'(-{VARIANT})?', n)", "            m = re.fullmatch(re.escape(project) + '-' + STAMP, n)", ['tests.slurm.test_slurmenv.Env.test_old_builds_are_kept_per_variant']),
+    (SL, "                kinds.setdefault(m.group(1) or '', [])", "                kinds.setdefault('', [])", ['tests.slurm.test_slurmenv.Env.test_old_builds_are_kept_per_variant']),
+    (SL, "'variant': b['variant'], 'install': b.get('install', []),", "", ['tests.slurm.test_slurmenv.Env.test_two_variants_get_two_builds_with_their_own_install']),
+    (SL, '    if (not builds or len(set(names)) != len(names)', '    if (False and len(set(names)) != len(names)', ['tests.slurm.test_slurmenv.Env.test_a_requirement_file_stays_in_its_directory']),
+    (SL, ' or len(set(served)) != len(served)', '', ['tests.slurm.test_slurmenv.Env.test_a_requirement_file_stays_in_its_directory']),
+    (SL, "            or not all(re.fullmatch(VARIANT, v) for v in served + [n for n in names if n])):", "            or False):", ['tests.slurm.test_slurmenv.Env.test_a_requirement_file_stays_in_its_directory']),
     # RUN-9g review: one commit set per run, links checked before any moves, dropped variants pruned, refresh per variant
     (SL, '                if b is not builds[0] and got != commits:', '                if False:', [f'{TSE}.Env.test_builds_whose_upstream_commits_differ_fail_and_leave_the_links']),
     (SL, '                if b is not builds[0] and got != commits:', '                if got != commits:', [f'{TSE}.Env.test_builds_whose_upstream_commits_differ_fail_and_leave_the_links']),
@@ -224,28 +230,28 @@ MUTANTS = [
     (SST, '                if cut - start <= RUN_MAX:\n', '                if True:\n', [f'{TSS}.Redact.test_a_cut_never_splits_a_value']),
     # the ssh control socket fits a long data root
     # CI_CPUS is a cpuset list, never a count (issue #99)
-    (SGT, "'CI_CPUS': part.cpu_list(os.sched_getaffinity(0)),", "'CI_CPUS': str(len(os.sched_getaffinity(0))),", ['tests.test_slurmgate.Jobs.test_ci_cpus_lists_the_jobs_own_cpus']),
+    (SGT, "'CI_CPUS': part.cpu_list(os.sched_getaffinity(0)),", "'CI_CPUS': str(len(os.sched_getaffinity(0))),", ['tests.slurm.test_slurmgate.Jobs.test_ci_cpus_lists_the_jobs_own_cpus']),
     (PRT, "            cpus = pin or cpu_list(os.sched_getaffinity(0))", "            cpus = pin or str(len(os.sched_getaffinity(0)))",
-     ['tests.test_part.Classes.test_ci_cpus_without_a_pin_lists_the_cpus']),
-    (PRT, "        out.append(str(xs[i]) if i == j else f'{xs[i]}-{xs[j]}')", "        out.append(f'{xs[i]}-{xs[j]}')", ['tests.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
-    (PRT, "        while j + 1 < len(xs) and xs[j + 1] == xs[j] + 1:", "        while j + 1 < len(xs):", ['tests.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
-    (PRT, "    xs, out, i = sorted(set(cpus)), [], 0", "    xs, out, i = list(cpus), [], 0", ['tests.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
-    (PRT, "        i = j + 1\n    return ','.join(out)", "        i = j + 1\n    return ' '.join(out)", ['tests.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
+     ['tests.execution.test_part.Classes.test_ci_cpus_without_a_pin_lists_the_cpus']),
+    (PRT, "        out.append(str(xs[i]) if i == j else f'{xs[i]}-{xs[j]}')", "        out.append(f'{xs[i]}-{xs[j]}')", ['tests.execution.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
+    (PRT, "        while j + 1 < len(xs) and xs[j + 1] == xs[j] + 1:", "        while j + 1 < len(xs):", ['tests.execution.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
+    (PRT, "    xs, out, i = sorted(set(cpus)), [], 0", "    xs, out, i = list(cpus), [], 0", ['tests.execution.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
+    (PRT, "        i = j + 1\n    return ','.join(out)", "        i = j + 1\n    return ' '.join(out)", ['tests.execution.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
     # a master per process; a dropped transfer tried again (issue #103)
-    (SPT, "f'{alias}\\0{os.getpid()}'.encode()", "alias.encode()", ['tests.test_slurmpart.Pure.test_each_process_has_its_own_master']),
-    (SPT, "            if not dropped or wait is None:\n                break", "            if True:\n                break", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
-    (SPT, "dropped = r.returncode in SYNC_TRANSIENT and any(", "dropped = True or any(", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
-    (SPT, "dropped = r.returncode in SYNC_TRANSIENT and any(w in err for w in SYNC_DROPPED)", "dropped = r.returncode in SYNC_TRANSIENT", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
-    (SPT, "frozenset({10, 12, 23, 255})", "frozenset({12, 23, 255})", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
-    (SPT, "(b'broken pipe', b'connection reset', b'connection closed')", "(b'broken pipe', b'connection closed')", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
-    (SPT, "        for wait in (*SYNC_WAITS, None):", "        for wait in (*SYNC_WAITS, 1.0, None):", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
-    (SPT, "            self.sleep(wait)", "            pass", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
-    (SPT, "        self.sock = os.path.join(self.cm, hashlib.sha256(f'{alias}\\0{os.getpid()}'.encode()).hexdigest()[:12])", "        self.sock = os.path.join(self.cm, '%C')", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
-    (SPT, "hexdigest()[:12])", "hexdigest())", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
-    (SPT, "hashlib.sha256(f'{alias}\\0{os.getpid()}'.encode())", "hashlib.sha256(b'')", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
-    (SPT, "        if len(os.fsencode(self.sock)) + SSH_TMP >= SUN_PATH:", "        if False:", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
-    (SPT, "+ SSH_TMP >= SUN_PATH:", "+ SSH_TMP > SUN_PATH:", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
-    (SPT, "f'ControlPath={self.sock}'", "f'ControlPath={self.cm}/%C'", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "f'{alias}\\0{os.getpid()}'.encode()", "alias.encode()", ['tests.slurm.test_slurmpart.Pure.test_each_process_has_its_own_master']),
+    (SPT, "            if not dropped or wait is None:\n                break", "            if True:\n                break", ['tests.slurm.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
+    (SPT, "dropped = r.returncode in SYNC_TRANSIENT and any(", "dropped = True or any(", ['tests.slurm.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
+    (SPT, "dropped = r.returncode in SYNC_TRANSIENT and any(w in err for w in SYNC_DROPPED)", "dropped = r.returncode in SYNC_TRANSIENT", ['tests.slurm.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
+    (SPT, "frozenset({10, 12, 23, 255})", "frozenset({12, 23, 255})", ['tests.slurm.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
+    (SPT, "(b'broken pipe', b'connection reset', b'connection closed')", "(b'broken pipe', b'connection closed')", ['tests.slurm.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
+    (SPT, "        for wait in (*SYNC_WAITS, None):", "        for wait in (*SYNC_WAITS, 1.0, None):", ['tests.slurm.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
+    (SPT, "            self.sleep(wait)", "            pass", ['tests.slurm.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
+    (SPT, "        self.sock = os.path.join(self.cm, hashlib.sha256(f'{alias}\\0{os.getpid()}'.encode()).hexdigest()[:12])", "        self.sock = os.path.join(self.cm, '%C')", ['tests.slurm.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "hexdigest()[:12])", "hexdigest())", ['tests.slurm.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "hashlib.sha256(f'{alias}\\0{os.getpid()}'.encode())", "hashlib.sha256(b'')", ['tests.slurm.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "        if len(os.fsencode(self.sock)) + SSH_TMP >= SUN_PATH:", "        if False:", ['tests.slurm.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "+ SSH_TMP >= SUN_PATH:", "+ SSH_TMP > SUN_PATH:", ['tests.slurm.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "f'ControlPath={self.sock}'", "f'ControlPath={self.cm}/%C'", ['tests.slurm.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
     (SPT, '    if not isinstance(v, list) or not v or not all(', '    if not isinstance(v, list) or not all(', [f'{TSP}.Pending.test_without_the_clusters_node_list_no_part_runs']),
     (SPT, 'not all(isinstance(x, str) and slurmsite.hostlist(x) for x in v):', 'not all(isinstance(x, str) for x in v):', [f'{TSP}.Pending.test_without_the_clusters_node_list_no_part_runs']),
     (SPT, '        return lists  # an answer that does not parse', '        if lists is not None:\n            return lists  # an answer that does not parse', [f'{TSP}.Pending.test_without_the_clusters_node_list_no_part_runs']),
@@ -259,7 +265,7 @@ MUTANTS = [
     (SST, "        self.add(site.name, '<site>')", '        pass', [f'{TSS}.Redact.test_each_kind_of_inventory_has_its_placeholder']),
     (SST, "            self.add(alias, '<account>')", '            pass', [f'{TSS}.Redact.test_each_kind_of_inventory_has_its_placeholder']),
     (PRT, 'unavailable=slurmsite.Redactor(site)(why))', 'unavailable=why)', [f'{TSP}.Ends.test_refusals_before_a_job']),
-    (PRT, "            return self._end(record, rec, a, unavailable='site config: invalid (python -m ci_runners.slurmsite check)')", "            return self._end(record, rec, a, unavailable=f'site config: {e}')", [f'{TSP}.Ends.test_refusals_before_a_job']),
+    (PRT, "            return self._end(record, rec, a, unavailable='site config: invalid (python -m ci_runners.slurm.slurmsite check)')", "            return self._end(record, rec, a, unavailable=f'site config: {e}')", [f'{TSP}.Ends.test_refusals_before_a_job']),
     (PRT, "                f.write(f'{e}\\n')\n", '                pass\n', [f'{TSP}.Ends.test_refusals_before_a_job']),
     (SST, "            self.add_path(root, '<root>')", '            pass', [f'{TSS}.Redact.test_each_kind_of_inventory_has_its_placeholder']),
     (SST, "        self.add(path.replace('/', '%2F'), placeholder)", '        pass', [f'{TSS}.Redact.test_each_kind_of_inventory_has_its_placeholder']),
@@ -532,7 +538,7 @@ MUTANTS = [
      [f'{TSP}.Pending.test_an_account_of_unknown_spend_stops_every_part']),
     (SPT, "    tres = job.get('AllocTRES') or job.get('ReqTRES', '')", "    tres = job.get('AllocTRES') or ''",
      [f'{TSP}.Pure.test_a_ledger_is_priced_by_the_sites_table']),
-    (SGT, "'End', 'TimelimitRaw', 'ReqTRES', 'Submit')", "'End', 'TimelimitRaw', 'Submit')", ['tests.test_slurmgate.Ledger.test_the_months_jobs']),
+    (SGT, "'End', 'TimelimitRaw', 'ReqTRES', 'Submit')", "'End', 'TimelimitRaw', 'Submit')", ['tests.slurm.test_slurmgate.Ledger.test_the_months_jobs']),
     (SPT, "            skip = s.lower().startswith('[includeif')", "            skip = False",
      [f'{TSP}.Pure.test_the_staged_git_config_holds_no_credentials']),
     (SPT, "        if skip or s.split('=', 1)[0].strip().lower() == 'extraheader':", "        if skip:",
@@ -856,12 +862,12 @@ MUTANTS = [
     (SLO, "                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n", "                pass\n",
      [f'{TX}.SlotInterop.test_together_never_more_than_the_slot_count']),
     # no test run leaves a process behind (tests/leaks.py): a skipped cleanup is caught by the check itself
-    ('tests/test_interop.py', "            os.kill(child, 9)\n", "            pass\n",
+    ('tests/resources/test_interop.py', "            os.kill(child, 9)\n", "            pass\n",
      [f'{TX}.LockInterop.test_the_command_does_not_inherit_the_lock']),
     ('tests/leaks.py', "                os.kill(pid, signal.SIGKILL)\n", "                pass\n",
-     ['tests.test_leaks.Leaks.test_a_process_left_in_a_new_session_is_found_and_killed']),
+     ['tests.support.test_leaks.Leaks.test_a_process_left_in_a_new_session_is_found_and_killed']),
     ('tests/leaks.py', "        reap(mark, grace=0)\n        return 124, []", "        return 124, []",
-     ['tests.test_leaks.Leaks.test_a_hang_kills_the_whole_tree']),
+     ['tests.support.test_leaks.Leaks.test_a_hang_kills_the_whole_tree']),
     # two accounts: no O_CREAT on an existing shared file, none created in a sticky directory,
     # the queue's files keep the default ACL's rw (decision 12.9)
     (LCK, "        return os.open(path, os.O_WRONLY | os.O_APPEND)\n    except FileNotFoundError",
@@ -1170,7 +1176,7 @@ MUTANTS = [
      [f'{TA}.Actions.test_the_action_refs_follow_the_release_stamp']),
     # the docs' indented YAML examples are checked too (design §4.8)
     ('docs/consumers.md', '     if: always()\n', '     with: {a: ${{ x }}, b: 1}\n     if: always()\n',
-     ['tests.test_workflow.FlowExpressions.test_no_workflow_or_example_has_one']),
+     ['tests.interfaces.test_workflow.FlowExpressions.test_no_workflow_or_example_has_one']),
     # RUN-5: h100 as a standalone host (its own python, labelled pools, a shared account)
     (INV, "    if type(per_card) is not bool or per_card == ('count' in v):", "    if type(per_card) is not bool:",
      [f'{TI}.Load.test_pools_as_tables']),
@@ -1353,9 +1359,9 @@ MUTANTS = [
     (SET, "    except (OSError, subprocess.SubprocessError) as e:\n        raise ValueError(f'python",
      "    except OSError as e:\n        raise ValueError(f'python", [f'{TU}.Setup.test_a_hung_or_missing_python_is_refused']),
     (SET, "        _record(state_path, plan.digest(), made)", "        pass", [f'{TU}.Setup.test_a_failed_apply_records_what_it_made']),
-    ('hooks/job-started.sh', 'root=$(/usr/bin/readlink -f "$base/releases/hook")', 'root=$(readlink -f "$base/releases/hook")',
+    ('hooks/runner/job-started.sh', 'root=$(/usr/bin/readlink -f "$base/releases/hook")', 'root=$(readlink -f "$base/releases/hook")',
      [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
-    ('hooks/job-completed.sh', 'root=$(/usr/bin/readlink -f "$base/releases/hook")', 'root=$(readlink -f "$base/releases/hook")',
+    ('hooks/runner/job-completed.sh', 'root=$(/usr/bin/readlink -f "$base/releases/hook")', 'root=$(readlink -f "$base/releases/hook")',
      [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
     (PRT, "retry_on=None if other is None else ['self-hosted', f'{self.inv.this}-gpu{other}'])", "retry_on=None)",
      [f'{TM}.PerCard.test_a_hot_card_refuses_to_a_cool_cards_runner']),
@@ -1498,10 +1504,10 @@ MUTANTS = [
      "        run(['systemctl', '--user', 'disable', name], check=False, timeout=300)\n    st = os.lstat(path)", [f'{TU}.Egress.test_a_recorded_unit_already_gone_is_only_forgotten']),
     (UNI, "    elif m['kind'] == 'remove':\n        files.discard(m['path'])\nnames",
      "    elif False:\n        files.discard(m['path'])\nnames", [f'{TU}.Egress.test_uninstall_skips_a_removed_unit',
-                                                          'tests.test_scripts.Uninstall.test_a_unit_a_later_apply_removed_is_left_alone']),
+                                                          'tests.interfaces.test_scripts.Uninstall.test_a_unit_a_later_apply_removed_is_left_alone']),
     (UNI, "    elif m['kind'] == 'remove':\n        files.discard(m['path'])\nfor p in sorted(",
      "    elif False:\n        files.discard(m['path'])\nfor p in sorted(",
-     ['tests.test_scripts.Uninstall.test_a_unit_a_later_apply_removed_is_left_alone']),
+     ['tests.interfaces.test_scripts.Uninstall.test_a_unit_a_later_apply_removed_is_left_alone']),
     # (asyncio.TimeoutError is an OSError since 3.11: dropping it from the tuple is no mutant)
     (BRG, "raise Refused(408, 'no request head')", "raise Refused(400, 'no request head')",
      [f'{TBR}.Serve.test_a_head_that_never_comes']),
@@ -1525,23 +1531,23 @@ MUTANTS = [
     (SET, "        return apply(etc, argv[2], adopt=len(argv) == 4)", "        return apply(etc, argv[2], adopt=False)",
      [f'{TU}.Standalone.test_the_adopt_flag_reaches_plan_and_apply']),
     (PLN, 'exec "$ci_run" plan ${2:+"$2"}', 'exec "$ci_run" plan', [f'{TK}.Uninstall.test_the_state_and_the_release_follow_ci_runners_etc']),
-    ("setup/apply.sh", 'apply --plan "$3" ${4:+"$4"}', 'apply --plan "$3"', [f'{TK}.Uninstall.test_the_state_and_the_release_follow_ci_runners_etc']),
+    ("setup/host/apply.sh", 'apply --plan "$3" ${4:+"$4"}', 'apply --plan "$3"', [f'{TK}.Uninstall.test_the_state_and_the_release_follow_ci_runners_etc']),
     # (the uid check in adopt is not mutated: it needs a file of another account, so root)
     (SET, "    plan = build(etc, adopt)\n", "    plan = build(etc, True)\n", [f'{TU}.Standalone.test_adopt_takes_over_unrecorded_units']),
     # the review of the egress proxy
     (BRG, "    return await asyncio.get_running_loop().getaddrinfo(host + '.', PORT, type=socket.SOCK_STREAM)",
      "    return await asyncio.get_running_loop().getaddrinfo(host, PORT, type=socket.SOCK_STREAM)",
-     ['tests.test_bridge.Open.test_the_name_resolves_as_absolute']),
+     ['tests.network.test_bridge.Open.test_the_name_resolves_as_absolute']),
     (BRG, "            return await asyncio.wait_for(asyncio.open_connection(a, PORT), left)",
      "            return await asyncio.wait_for(asyncio.open_connection(a, PORT), CONNECT_TIMEOUT)",
-     ['tests.test_bridge.Open.test_one_deadline_for_all_addresses']),
+     ['tests.network.test_bridge.Open.test_one_deadline_for_all_addresses']),
     (BRG, "    server = await asyncio.start_server(bridge.handle, '127.0.0.1', port, limit=MAX_HEAD)",
      "    server = await asyncio.start_server(bridge.handle, '0.0.0.0', port)",
-     ['tests.test_bridge.Listen.test_serve_binds_loopback_with_the_head_limit']),
-    (BRG, "        self.tasks.add(task)", "        pass", ['tests.test_bridge.Serve.test_an_open_connection_is_held']),
+     ['tests.network.test_bridge.Listen.test_serve_binds_loopback_with_the_head_limit']),
+    (BRG, "        self.tasks.add(task)", "        pass", ['tests.network.test_bridge.Serve.test_an_open_connection_is_held']),
     (SET, "        run(['systemctl', '--user', 'stop', name], check=False, timeout=300)", "        pass",
-     ['tests.test_setup.Egress.test_a_recorded_unit_already_gone_is_only_forgotten']),
-    (INS, 'chmod 0555 "$rel/$id"', 'chmod u-w "$rel/$id"', ['tests.test_scripts.Install.test_an_annotated_tag_resolves_to_its_commit']),
+     ['tests.deployment.test_setup.Egress.test_a_recorded_unit_already_gone_is_only_forgotten']),
+    (INS, 'chmod 0555 "$rel/$id"', 'chmod u-w "$rel/$id"', ['tests.interfaces.test_scripts.Install.test_an_annotated_tag_resolves_to_its_commit']),
     # the first path retired (decision 11.12): what stays guards that it stays out
     (INV, "HOST_KEYS.update({k: (lambda v: True, False) for k in RETIRED_KEYS})", "pass",
      [f'{TI}.Load.test_the_retired_keys_are_accepted_and_ignored', f'{TU}.Setup.test_the_retired_keys_plan_nothing']),
@@ -1757,7 +1763,7 @@ MUTANTS = [
     # review round 1: the release's own P2P entry point, the hard bound
     (P2P, "    return 1 if why else 0", "    return 0",
      [f'{T2}.Entry.test_the_default_command_fails_on_zeros', f'{TT}.Classes.test_the_release_s_own_p2p_test_keeps_the_command_out']),
-    (PRT, "'from ci_runners.p2p import main; sys.exit(main())'", "'from ci_runners.p2p import main; main()'",
+    (PRT, "'from ci_runners.resources.p2p import main; sys.exit(main())'", "'from ci_runners.resources.p2p import main; main()'",
      [f'{T2}.Entry.test_the_default_command_fails_on_zeros', f'{TT}.Classes.test_the_release_s_own_p2p_test_keeps_the_command_out']),
     (PRT, "            child.communicate(timeout=P2P_KILL_WAIT)", "            child.communicate()",
      [f'{T2}.HardBound.test_a_test_that_does_not_go_is_given_up']),
@@ -1824,8 +1830,8 @@ MUTANTS = [
     (ENB, "            worst = 2", "            worst = 0", [f'{TB}.Refresh.test_all_goes_on_after_a_failure_and_reports_it']),
     (RGY, "            if load_file(etc, n, role).refresh:", "            if True:", [f'{TB}.Refresh.test_all_takes_the_projects_whose_entry_sets_refresh']),
     (RGY, "    if type(refresh) is not bool:", "    if False:", [f'{TB}.Refresh.test_the_registry_flag_is_a_boolean']),
-    ('setup/units/ci-envrefresh.timer', "OnUnitActiveSec=30min", "OnUnitActiveSec=3min", [f'{TB}.Units.test_the_timer_runs_the_service_every_30_minutes']),
-    ('setup/units/ci-envrefresh.service', "env refresh --all", "env refresh", [f'{TB}.Units.test_the_service_refreshes_every_project_that_asks_and_holds_no_token']),
+    ('setup/host/units/ci-envrefresh.timer', "OnUnitActiveSec=30min", "OnUnitActiveSec=3min", [f'{TB}.Units.test_the_timer_runs_the_service_every_30_minutes']),
+    ('setup/host/units/ci-envrefresh.service', "env refresh --all", "env refresh", [f'{TB}.Units.test_the_service_refreshes_every_project_that_asks_and_holds_no_token']),
     # a refresh moves the link while parts run: a part resolves it once and holds its build (decision 12.11)
     (PRT, "project=dataclasses.replace(proj, env=build), part_dir=work,", "project=proj, part_dir=work,",
      [f'{TT}.EnvLink.test_the_part_resolves_the_link_once_and_names_the_build']),
@@ -1835,16 +1841,16 @@ MUTANTS = [
      [f'{TT}.EnvLink.test_the_supervisor_holds_the_build_after_the_executor_is_gone']),
     (PRT, "for fd in {slot_fd, env_fd, *every} - {None}:", "for fd in {slot_fd, *every} - {None}:",
      [f'{TT}.EnvLink.test_the_build_is_held_for_the_parts_life_and_released_after']),
-    ('ci_runners/envuse.py', "    for _ in range(5):\n        build = os.path.realpath(link)", "    for _ in range(5):\n        build = link",
+    ('ci_runners/environments/envuse.py', "    for _ in range(5):\n        build = os.path.realpath(link)", "    for _ in range(5):\n        build = link",
      [f'{TB}.Held.test_the_hold_names_the_build_the_link_has_now']),
-    ('ci_runners/envuse.py', "fcntl.flock(fd, fcntl.LOCK_SH)", "pass",
+    ('ci_runners/environments/envuse.py', "fcntl.flock(fd, fcntl.LOCK_SH)", "pass",
      [f'{TB}.Held.test_a_held_build_survives_the_prune_that_would_remove_it',
       f'{TT}.EnvLink.test_the_build_is_held_for_the_parts_life_and_released_after']),
-    ('ci_runners/envuse.py', "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n        except OSError:\n            return False",
+    ('ci_runners/environments/envuse.py', "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n        except OSError:\n            return False",
      "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n        except OSError:\n            pass",
      [f'{TB}.Held.test_a_build_nobody_holds_is_removed_and_the_hold_keeps_the_link_target',
       f'{TB}.Held.test_a_held_build_survives_the_prune_that_would_remove_it']),
-    ('ci_runners/envuse.py', "0o600)\n    except OSError:\n        return False", "0o600)\n    except OSError:\n        return True",
+    ('ci_runners/environments/envuse.py', "0o600)\n    except OSError:\n        return False", "0o600)\n    except OSError:\n        return True",
      [f'{TB}.Held.test_an_unlockable_build_is_kept']),
     (ENB, "envuse.remove_unused(os.path.join(envs, old))", "shutil.rmtree(os.path.join(envs, old), ignore_errors=True)",
      [f'{TB}.Held.test_a_held_build_survives_the_prune_that_would_remove_it']),
@@ -2249,9 +2255,9 @@ MUTANTS = [
      [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
     (SET, "-f {hookcopy.DIR}/{n} -a -x {hookcopy.DIR}/{n}'", "-f {hookcopy.DIR}/{n}'",
      [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
-    ('setup/units/ci-hooks.service', "ExecReload=@CI_DATA@/ci-runners/releases/hook/bin/ci-run hooks copy\n", "",
+    ('setup/host/units/ci-hooks.service', "ExecReload=@CI_DATA@/ci-runners/releases/hook/bin/ci-run hooks copy\n", "",
      [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
-    ('setup/units/ci-runner@.service', "@HOOKS_CHECK@\n", "", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
+    ('setup/host/units/ci-runner@.service', "@HOOKS_CHECK@\n", "", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
     (CLI, "    if cmd == 'hooks':", "    if cmd == 'hooks-x':", [f'{THC}.Copy.test_ci_run_hooks_and_reap']),
     (CLI, "        line = hookcopy.refresh(h)", "        line = ''", [f'{THC}.Copy.test_ci_run_hooks_and_reap']),
     # RUN-8d review: the retry budget, the card rule through part, and an unreadable drain state
@@ -2769,9 +2775,9 @@ MUTANTS = [
     (RWU, 'UMask=0077\n', '',
      [f'{TRW}.Units.test_the_service_runs_the_script_with_its_placeholders_and_a_private_state']),
     # the runners come back by themselves; a host with no runner online (decision 15.5)
-    ('setup/units/ci-runner@.service', "StartLimitIntervalSec=0\n", "", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
-    ('setup/units/ci-hooks.service', "StartLimitIntervalSec=0\n", "", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
-    ('setup/units/ci-hooks.service', "Restart=on-failure\n", "", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
+    ('setup/host/units/ci-runner@.service', "StartLimitIntervalSec=0\n", "", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
+    ('setup/host/units/ci-hooks.service', "StartLimitIntervalSec=0\n", "", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
+    ('setup/host/units/ci-hooks.service', "Restart=on-failure\n", "", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
     (SET, "HOOKS_ORDER = 'Wants=ci-hooks.service", "HOOKS_ORDER = 'Requires=ci-hooks.service",
      [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
     (SET, "    return '\\n'.join(['ExecStartPre=/usr/bin/systemctl --user is-active --quiet ci-hooks.service'] +",
@@ -2887,7 +2893,7 @@ MUTANTS = [
     (ENB, "    sha, spec, files, _ = kept_record(rec, repository, f'--kept {path}')", "    sha, spec, files, _ = kept_record(rec, rec.get('repository') if isinstance(rec, dict) else '', f'--kept {path}')",
      [f'{TB}.Kept.test_a_record_that_does_not_fit_builds_nothing']),
     (PA, "            m = re.search(r'CUDA (?:UMD )?Version:", "            m = re.search(r'CUDA Version:",
-     ['tests.test_pooladd.Probe.test_the_probe_reads_the_cuda_major_of_either_driver_header']),
+     ['tests.pools.test_pooladd.Probe.test_the_probe_reads_the_cuda_major_of_either_driver_header']),
     # the host side's interpreter, host_python (decision 15.8, item 9)
     (PO, "HOST_PYTHON = '/usr/bin/python3'", "HOST_PYTHON = '/usr/bin/python3.11'", [f'{TPO}.Probe.test_the_host_side_runs_the_entrys_host_python']),
     (PO, "'price', 'python', 'host_python', 'work',", "'price', 'python', 'work',", [f'{TPO}.Probe.test_the_host_side_runs_the_entrys_host_python']),

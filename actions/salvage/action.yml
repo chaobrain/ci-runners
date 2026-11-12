@@ -29,7 +29,7 @@ runs:
       run: >-
         "$GITHUB_ACTION_PATH/../lib/ci-run.sh" salvage --parts "$IN_PARTS" --wait-seconds "$IN_WAIT"
         --artifacts "$ARTIFACTS" --out "$OUT"
-    # one upload per salvaged part, up to MAX_SALVAGED (ci_runners/verdict.py)
+    # one upload per salvaged part, up to MAX_SALVAGED (ci_runners/workflow/verdict.py)
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 1
       uses: actions/upload-artifact@v4
       with:

@@ -112,7 +112,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 
    对每个 artifact 不全、并且在这台主机上的最新记录属于本次 run 和这次 attempt 的部件，`salvage` 会把记录里的结果作为 `ci-part-<id>-<attempt>` 上传，并带上 `salvaged: true`。不在这台主机上跑的部件不处理；还在跑的部件最多等 `wait-seconds`，超时就是 `lost`。一个 salvage 作业最多上传 16 个部件。
 6. **权限**：`contents: read`，claim 和 verdict 还要 `statuses: write`。要读别的 run 的 artifact 时再加 `actions: read`。
-7. `concurrency` 必须写成块格式。行内映射 `{group: ...${{ }}...}` 里含表达式时，YAML 会解析失败，GitHub 会直接拒绝整个文件。`tests/test_workflow.py` 会检查本文档里的示例。
+7. `concurrency` 必须写成块格式。行内映射 `{group: ...${{ }}...}` 里含表达式时，YAML 会解析失败，GitHub 会直接拒绝整个文件。`tests/interfaces/test_workflow.py` 会检查本文档里的示例。
 
 各 action 的输入见 `actions/<name>/action.yml`，引用 `@v1`。不要钉某个发布 tag（如 `@v1.4.1`）：主机升级后，inventory 里新加的键（v1.5 的 `peer_labels`、`busy`）会让更旧的 action 在那台主机上全部失败（design §9，`v1.5.0` notes 第 6 条）。brainspike 的 `ci.yml` 是一个完整的例子。
 

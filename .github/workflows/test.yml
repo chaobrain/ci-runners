@@ -25,6 +25,6 @@ jobs:
       - name: unit tests
         run: python -I tests/leaks.py --timeout 900 -- python -I -m unittest discover -s tests -t . -v
       - name: inventory lint
-        run: python -m ci_runners.inventory lint . --deny tests/deny.sha256
+        run: python -m ci_runners.config.inventory lint . --deny tests/deny.sha256
       - name: mutants
         run: python tests/mutants.py

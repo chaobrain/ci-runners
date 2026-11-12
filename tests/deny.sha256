@@ -1,5 +1,5 @@
 # Salted SHA-256 hashes of inventory tokens (design §3.3). Regenerate with
-# python -m ci_runners.inventory deny|hash; never commit the tokens.
+# python -m ci_runners.config.inventory deny|hash; never commit the tokens.
 07ae633c54df9d18d4a3aec92d5834d96185e0a828b7aafe287b693d5a5a6b32
 0817c82dc9828b5804f8e087b05a3d030aa25f30e69287c981506db804932ff3
 08d7f3a2c14ed9b705164fd2e8aa12cf1817802eef0c93964fd8a76b54a9d4ac

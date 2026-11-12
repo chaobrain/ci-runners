@@ -21,7 +21,7 @@ class Fake:
 
     def _check(self, name: str) -> None:
         if name == self.fail:
-            from ci_runners import p2p  # the release's own, where a test runs it as one
+            from ci_runners.resources import p2p  # the release's own, where a test runs it as one
             raise p2p.P2PError(f'{name} returned CUDA_ERROR_UNKNOWN')
 
     def count(self) -> int:
@@ -73,7 +73,7 @@ def zeros_release(dest: str) -> str:
     fault. Returns the release directory."""
     pkg = pathlib.Path(dest) / 'ci_runners'
     shutil.copytree(ROOT / 'ci_runners', pkg, ignore=shutil.ignore_patterns('__pycache__'))
-    with open(pkg / 'p2p.py', 'a', encoding='utf-8') as f:
+    with open(pkg / 'resources' / 'p2p.py', 'a', encoding='utf-8') as f:
         f.write(f'\n\nsys.path.append({str(ROOT)!r})\nfrom tests.p2p_fake import Fake as _Fake  # noqa: E402\n'
                 "Driver = lambda: _Fake(mode='zeros')  # noqa: E731\n")
     return dest

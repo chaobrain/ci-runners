@@ -18,7 +18,10 @@ Decision 15.9 (2026-11-11) makes `claim` count only the runners' own statuses.
 Decision 16 (2026-11-12) makes this repository the self-hosted runner layer of every
 chaobrain repository: capability labels in place of host labels, one runner per slot,
 presence, an overflow-only route, a reusable workflow, and a public pool for public
-repositories that opt in, delivered in the phases of RUN-10.
+repositories that opt in, delivered in the phases of RUN-10. Decision 18 (2026-11-12)
+narrows that public pool to GPU jobs (public repositories' CPU work stays on GitHub-hosted
+runners) and opens it to any host, h100's shared account first, where a conformance check
+proves that a confined single-job runner keeps the job from everything of the account.
 
 Guides, in Chinese: [consumers.md](consumers.md) for the repositories that use the CI,
 [operations.md](operations.md) for the maintainer of the hosts. This file is the contract;
@@ -42,7 +45,8 @@ are listed with what replaced them.
    runners only when `github.event.pull_request.head.repo.full_name ==
    github.repository`, or on `push` or `workflow_dispatch`. *Amended by 16.7: a public
    repository that opts in reaches a pool of its own (repository-level runners on a
-   separate account), never the org's runners.*
+   separate account), never the org's runners.* *Amended by 18: for its GPU jobs only, on
+   confined single-job runners of any host whose check passes.*
 3. *h100, option A (runners on 3090b, parts over ssh).* Superseded by 11.3 and retired by
    11.12. Its safeguard 4 stands: **the exit path is a dedicated account from the host's
    admin, then normal runners.**
@@ -66,10 +70,13 @@ are listed with what replaced them.
    2. "Tamper gap (§5.3, T13): accepted for private consumers for now." It stays
       accepted, since only private repositories use the runners (11.1, 11.12).
       *Amended by 16.7: on the public pool the gap is closed (the hooks, the policy and
-      the `.env` files are root's), not accepted.*
+      the `.env` files are root's), not accepted.* *Amended by 18: closed by read-only
+      mounts in the confinement and a runner that lives for one job.*
    3. *The hook's path in job logs.* Moot while no public repository used the runners.
       *Amended by 16.7: on the public pool the logs are public; the hooks' path names no
-      disk or account, and the lead checks the machine name before P2.*
+      disk or account, and the lead checks the machine name before P2.* *Amended by 18:
+      the machine name is the confinement's (`<host>-pub-gpu<N>`); the lead checks the
+      logs in C4.*
 
 ## Lead decisions (2026-11-06): a standard test CI on h100 (RUN-5)
 
@@ -85,7 +92,8 @@ the first path.
        `allows_public_repositories` stays off. `Default` goes from `selected` to every
        private repository (supersedes §12 item 9; the lead makes the change).
        *Amended by 11.12: there is no public GPU path.* *Amended by 16.7: the flag stays
-       off; a public repository that opts in reaches a pool of its own.*
+       off; a public repository that opts in reaches a pool of its own.* *Amended by 18:
+       for its GPU jobs only.*
     2. **Allowlists synced from the org.** The actor allowlist is the org's members, and
        the repository allowlist is the org's private repositories with their ids. A
        timer fetches both every 10 min into a local snapshot on h100 (§6.5; where the
@@ -188,7 +196,7 @@ the first path.
         - RUN-2 (the ssh driver, the manifest, the keyed verify, `compare`,
           `disagreement`), RUN-3 (3090a) and RUN-4 (`gpu.yml`, public consumers) are not
           built. Public repositories stay on GitHub-hosted runners (*amended by 16.7*:
-          an opted-in one reaches the public pool);
+          an opted-in one reaches the public pool; *by 18*: for its GPU jobs only);
         - the hosted branch of `claim` goes: every job of `h100-test.yml` runs on h100;
         - policy schema 1 goes; the hook reads schema 2 only (§6.5).
 
@@ -1622,15 +1630,21 @@ Each item names what it supersedes or amends.
        most 20 workflow lines (§4.10) and one registry entry. Composing the actions
        (§4.8, 12.12) stays allowed, with capability labels.
     7. **A public pool** (amends decisions 2, 10.2, 10.3, 11.1 and 11.12; brings back
-       §12 item 2; amends §6.1, §6.2, §6.5, T1, T12 and T13). The Default group's
-       `allows_public_repositories` is never turned on: on Free it is the org's only
+       §12 item 2; amends §6.1, §6.2, §6.5, T1, T12 and T13). *Amended by 18: the pool is
+       GPU-only (public CPU work on hosted runners); its runners are confined single-job
+       runners on any host whose conformance check passes, h100 first; the account rule
+       is "a public job reaches nothing of its account", proven per host. The bullets on
+       the second account, the labels and the machine name below are superseded; the
+       policy, the snapshot, the first consumers and the forks' residual stand.* The
+       Default group's `allows_public_repositories` is never turned on: on Free it is the
+       org's only
        group, so the flag would open every runner on every host to every public
        repository, the runners of the shared account and of the hosts that hold a
        cluster key included, with the hook (a file of the account the job code runs as,
        T13) as the only barrier. A public repository opts in to a pool of its own
        instead:
-       - *A second account on one host* (the new host of 16.9), never a shared account
-         and never a host whose CI account holds a cluster key. It holds no cluster key,
+       - *A second account on one host* (the new host of 16.9; *superseded by 18.2 and
+         18.3*), never a shared account and never a host whose CI account holds a cluster key. It holds no cluster key,
          no tunnel key and no organisation token. Where the host has no direct route to
          GitHub, its runners' `.env` points at the loopback forward that the host's
          private CI account already holds (11.10): the public account gets the egress
@@ -1640,7 +1654,8 @@ Each item names what it supersedes or amends.
          gap is closed for this pool, not accepted).
        - *Runners registered at repository level* on each opted-in public repository,
          in no runner group of the org, with labels of their own (`ci-pub-light`,
-         `ci-pub-cpu`, `ci-pub-gpu`) and the runner audience `public`
+         `ci-pub-cpu`, `ci-pub-gpu`; *by 18.1, `ci-pub-gpu` only, one job per runner,
+         18.6*) and the runner audience `public`
          (`CI_RUNNER_AUDIENCE`, from the pool's inventory `audience`; every other
          runner's is `private`).
        - *The policy* (schema 2, additive). A repository entry gains `public_runners =
@@ -1661,14 +1676,16 @@ Each item names what it supersedes or amends.
          Every job log shows the runner's machine name and the hook's path (`v1.4.0`
          notes item 5): the hooks sit at a root-owned path that names no disk or
          account. The machine name is shown as the host has it, which the lead checks
-         before P2: it may name no person, site or address.
+         before P2: it may name no person, site or address. *Amended by 18.7: a fixed
+         path in the confinement, and the UTS namespace's machine name.*
        - *First consumers:* a public copy of the canary, then one public library. Never
          this repository (`policy.SELF`; its own CI stays on hosted runners).
        - *Residuals.* A member's same-repository branch may carry fork commits nobody
          reviewed; the hook cannot see that, and the member vouches for them (consumers'
          guide). A job reads the account's files as on every pool: there that is the
          runners' registrations of the opted-in repositories, the env and the host's
-         network.
+         network. *Amended by 18.8: the job reads none of the account's files; the
+         residuals are 18.8's.*
     8. **Statistics and dev slots** (amends §7 rule 5, and 15.1 items 3, 5 and 7: a pool
        run's claim). `ci-run stats [--repo R] [--since T]` reports, per label and per
        repository, the queue delay (created to started), the run time and the verdict
@@ -1685,7 +1702,8 @@ Each item names what it supersedes or amends.
        `compile` (`ci-timing`) and `slurm` pools. A new host (128 threads, 377 GiB,
        four 96 GB cards) joins with a dedicated CI account, its slots sized from the
        parts' measured memory peaks (about 96 threads and its 4 cards), and holds the
-       public pool (16.7). The cluster is overflow only (16.5).
+       public pool (16.7). The cluster is overflow only (16.5). *Amended by 18.1: h100
+       comes first for public GPU jobs too, the new host (`6000pro`) after it.*
     10. **`v2`** (§9). Once every consumer names capability labels only (the org's
         repositories searched), `v2` removes: host-label routing for consumers (the host
         labels stay for 16.1's own uses; `3090-light` goes), `peer_labels` and
@@ -1773,6 +1791,445 @@ host's eight runners were stopped.
   exhaust the descriptors and fail every connection with `EMFILE` instead of one with
   503. (c) Close a half-closed connection at once: TLS gives no reason to keep it, but a
   client that half-closes and still awaits an answer would lose it; 60 s quiet keeps that.
+
+## Lead decisions (2026-11-12): public repositories' GPU jobs on confined runners (decision 18, issue #194)
+
+Decided by the lead on 2026-11-12 (issue #194): the rulings of item 1 and the direction of
+the rest; this text is approved with its PR. Decision 16.7 gave an opted-in public
+repository a pool of its own: a second Unix account on the new host of 16.9, with
+root-owned hooks, policy and `.env` files, and light, CPU and GPU runners. None of it is
+built (P1 and P2 of §10; `policy.decide` refuses every public repository today). Two things
+changed the plan. The cards that public libraries need most are h100's, on a shared account
+where root is not ours (15.8), so "a second account with root-owned files" cannot hold
+there, and more hosts without root are expected to join. And a public repository's CPU work
+runs free on GitHub-hosted runners, so only its GPU jobs need our machines. Decision 18
+replaces 16.7's account rule by a property that a check proves on each host, and confines
+each public GPU job so that the property holds without root. C1's prototype (issue #196)
+measured it on three hosts; the text below says what was measured (18.9), and the lead
+decided the three points it left open on 2026-11-12 (items 4, 8 and 10: *Decided*). Each
+item names what it supersedes or
+amends.
+
+18. **Public GPU jobs on confined single-job runners.**
+    1. **The lead's rulings** (2026-11-12).
+       1. *Public repositories run their CPU tests on GitHub-hosted runners* and use the
+          self-hosted pool only for GPU jobs (amends 16.7: `ci-pub-light` and `ci-pub-cpu`
+          go; amends 16.6 for a public caller, item 7).
+       2. *h100 is the first choice for all tests,* public repositories' GPU jobs included;
+          the new host of 16.9, with its dedicated CI account (pool name `6000pro`), comes
+          after it (amends 16.7's "never a shared account" and 16.9's "holds the public
+          pool").
+       3. *The public pool's account rule.* "The public pool's account holds no key"
+          becomes: **a public job cannot reach a key or anything else of the account it
+          runs under, and a conformance check proves it on that host** (item 5). Hosts
+          without root are expected to join.
+    2. **Three properties, and the isolation backends that give them.** A dedicated account
+       gives a job three properties, and the public audience needs the same three on every
+       host: (a) the job cannot read the account's files (its keys, the runner credentials,
+       the private repositories' envs, checkouts and records, the account's home); (b) it
+       cannot change the hooks, the policy, the snapshot, the runner or anything a later
+       job runs; (c) it cannot see, signal or trace any process but its own. A host offers
+       the public audience only while one *isolation backend* gives all three there. The
+       backends, best first; each is a fact that the host's probe establishes, and a host
+       where it is not proven does not have it:
+
+       | backend (`isolation`) | how it gives (a), (b), (c) | GPU | public audience |
+       |---|---|---|---|
+       | `microvm` | a kernel of its own: a VM per job, where the KVM device opens | none: a card needs VFIO passthrough, which needs root and takes the card from the host | not for this pool |
+       | `account` | an account for public jobs alone (16.7's second account, never the host's private CI account), whose host layer is root's: (a), (b) and "signal or trace" by uid and file modes; "see" only with the account's own mount namespace and `ProtectProc=invisible` (12.16), since without them every account reads every command line in `/proc`. Needs root once | the account in the GPU group | yes, with the check (item 5) |
+       | `ns-subuid` | the confined single-job runner (item 3), its job as a subordinate uid: (a) by a mount namespace that holds nothing of the account and a uid that owns nothing of it; (b) by read-only mounts and a runner that lives for one job; (c) by a PID namespace and the uid. Needs unprivileged user namespaces with capabilities inside, a subordinate range and the set-uid id-map helpers: given on the shared-account host (Ubuntu 22.04); on Ubuntu 24.04 (the dedicated-account host and the reference host, measured) the default AppArmor setting gives an unprivileged user namespace no capabilities and the helpers are not installed, so there it needs root once: an AppArmor profile that allows user namespaces for the launcher, and the helpers' package | the leased card only (item 4), with the GPU group alone (mode (a)) | yes, with the check and mode (a) |
+       | `ns-uid` | the same namespaces, the job keeping the account's own uid | as `ns-subuid` | **no** (below) |
+       | `none` | — | — | no |
+
+       *`ns-uid` is not accepted.* There the mount namespace is the only barrier between
+       the job and the account's files: a mistake in the mounts, a descriptor leaked into
+       the namespace or a kernel bug in path resolution gives the job the whole account,
+       where under a subordinate uid it gives only what the host leaves readable by
+       everyone. The account's per-uid kernel state stays shared too: its process count
+       (`RLIMIT_NPROC`, on cgroup v1 the only bound on a fork bomb, item 3), its key and
+       inotify quotas, and the watchdog could no longer tell the job's processes by uid.
+       The probe still records `ns-uid`, so that the capacity row says what the host lacks:
+       a subordinate uid and gid range for the account, one line each in the host's
+       `/etc/subuid` and `/etc/subgid`, which its administrator can add without giving us
+       root or an account.
+    3. **The confined single-job runner** (`ns-subuid`). One runner, one job, one tree.
+       - *Everything inside.* A launcher of ours (`ci-run confine`; stdlib Python, the
+         kernel's calls and the system's set-uid `newuidmap` and `newgidmap`) creates a
+         user, mount, PID, IPC, network and UTS namespace and starts the whole runner in
+         them: its listener, its worker, the hooks and every step. No part of the runner
+         runs outside, so nothing outside holds the job's token or reads the job's output
+         but the relay and the read-back below.
+       - *Identity.* The job runs as a subordinate uid and gid of its own (one pair per
+         card of the host, so two jobs never share one), with no capability in any
+         namespace, `no_new_privs`, a session of its own without a terminal, and the
+         nested `user.max_user_namespaces` at 0, so it creates no namespace and mounts
+         nothing. The launcher's unit cannot set `NoNewPrivileges=` (amends D4 for this
+         unit only): the set-uid helpers it calls need it off. The launcher sets
+         `no_new_privs` for the job before the runner starts, so every process of the job
+         has it, as D4 wants.
+       - *Files.* The root is a new, empty file system. The launcher binds into it,
+         read-only, `nosuid` and `nodev`: the system directories a job needs (`/usr`, the
+         libraries, a minimal `/etc` with no name or secret of the host or the account),
+         the runner's release, the opted-in repository's own env (§4.9, built from its
+         public spec) and the driver's libraries; then, without `nodev`, the device nodes
+         of item 4 and nothing else of `/dev`. The job's tree (`_work`, `/tmp`, `/dev/shm`) is
+         a fresh directory per job that only the job's uid owns; `/proc` is its PID
+         namespace's; `/sys` is read-only. Nothing of the account's home or data disk is
+         mounted. The hooks, `policy.toml` and the public snapshot (§6.5, members only) are
+         read-only binds at fixed paths that name no disk or account. A read-only bind is,
+         for the job, what root ownership is on a dedicated account: it cannot write them,
+         and the next job starts from the account's own copies.
+       - *Network.* The network namespace has its loopback only. The runner and every step
+         reach the egress proxy (11.10, 17) through one relay: a listener on the
+         namespace's loopback, set as `https_proxy`, passes each connection over a Unix
+         socket bound in to a relay process outside, which connects it to the host's
+         forwarded port of the proxy and to nothing else. The relay accepts only `CONNECT
+         <name>:443` (a production requirement: C1's relay passed bytes and left the
+         filtering to the proxy), holds at most 64 connections per job, and logs their
+         count; the proxy's allowlist decides the name, as for every job. The job
+         cannot reach the host's loopback, the forwarded port directly, the host's abstract
+         Unix sockets (they belong to a network namespace) or its pathname sockets (none is
+         mounted).
+       - *One job.* The runner starts from a just-in-time single-job configuration issued
+         off the host (item 6), takes one job and ends, and GitHub removes its
+         registration. The host holds no credential of a public runner and nothing that can
+         issue one.
+       - *Resources.* The card's lease and its slot's cpuset (16.2) are taken outside,
+         before entry. Without a cpuset cgroup a process may widen its own CPU affinity, so
+         the cpuset fixes the start, not the job: a watchdog outside resets the affinity of
+         the job's processes at each tick, and a seccomp filter refuses
+         `sched_setaffinity` where C1 shows it costs nothing. Memory: where the account has
+         a delegated memory controller (cgroup v2), the launcher runs in a systemd user
+         scope with the slot's `MemoryMax=`; on cgroup v1 the watchdog sums the resident
+         memory of the job's uid every 5 s and stops the job above the slot's `memory`
+         (11.11's rule, by uid instead of by scope). Processes: `RLIMIT_NPROC` on the job's
+         uid, which no other process uses (cgroup v1 delegates no pids controller). Disk:
+         the watchdog stops a job whose tree passes its cap (50 GiB unless the pool says
+         otherwise). Time: the part's bound (16.2), kept outside.
+       - *After the job.* The launcher ends the PID namespace (its first process; the
+         kernel then kills every other), releases the lease, and deletes the tree from
+         inside a fresh user namespace with the same map (outside it, the account may not
+         remove the subordinate uid's files), never following a link. Everything it reads
+         back is untrusted input: the hook's log, the part's record and samples, the tree it
+         deletes. Each is opened `O_NOFOLLOW` below a directory descriptor, as a regular
+         file only, with a size cap, and parsed as data; nothing from the tree runs
+         outside.
+    4. **The GPU** (the pool is GPU-only).
+       - *Only the leased card* (held in C1). The mount namespace holds the leased card's
+         device node, the control node and the UVM nodes CUDA needs, and the driver's
+         user-space libraries, read-only. No other card's node exists there and none can
+         be made (no capability); inside, the driver's card list under `/proc` is masked
+         to the leased card. The mount namespace is the enforcement;
+         `CUDA_VISIBLE_DEVICES` is set for the tools' sake and enforces nothing. What it
+         needed: the card is named by its *device minor*, not by the vendor tool's or
+         CUDA's index, which differ; the driver's `ModifyDeviceFiles` must read 0 inside
+         (a read-only bind over the driver's params file, as the vendor's container
+         library does), and `/sys` must be there read-only (the driver reads its module
+         state from it), else the user-space driver tries to create or fix the nodes it
+         cannot see and fails (CUDA error 304). A host may already limit, by a device
+         cgroup per login session, which minors the account opens (the shared-account
+         host does): the launcher inherits that, so a lease names a minor the account may
+         open.
+       - *The GPU group: two modes* (measured; supersedes "the GPU group alone" as first
+         written). On the shared-account host the card nodes and the control node are open
+         to a GPU group, which the account is in, and the UVM nodes to everyone. The host's
+         `newgidmap` maps only the subordinate range and the account's passwd primary gid,
+         and refuses a caller whose real gid is another, so making the GPU group the
+         launcher's primary group (`sg`) is refused. Measured there: the job's kernel uid
+         and gid are a subordinate pair, and it keeps every supplementary group the
+         launcher inherited (it must not call `setgroups`, or it loses the GPU group and
+         the card with it).
+         - *(a) `gpu`, the GPU group alone:* one line in the host's `/etc/subgid` giving the
+           account the GPU group's gid (its administrator adds it; no root or account for
+           us). The launcher maps that gid and sets the job's groups to it alone, so a
+           group-readable file of the account is closed to the job like any other.
+         - *(b) `kept`, the account's groups kept:* the job holds every group of the
+           account. The mount namespace is then the only barrier to the account's
+           group-readable files; the uid barrier still covers its owner-only files (the
+           keys, the runner credentials).
+
+         *Decided* (the lead, 2026-11-12): **the public audience requires mode (a)**; the
+         lead asks each shared-account host's administrator for the `/etc/subgid` line. A
+         host whose job would keep the account's other groups (mode (b)) records `kept` in
+         its capacity row (item 7) and does not get the public audience: there is no interim
+         exception, and the canary starts on the dedicated-account host anyway (item 10).
+         The check's identity item fails when the job's kernel groups hold anything but the
+         GPU group (item 5, check 8).
+       - *What the control node shows* (a residual, measured). Inside, the vendor's tool
+         lists the leased card only, with its total memory use and utilisation (which
+         include other processes' use of that card), and lists no process: our own marker
+         process holding memory on the same card outside was not listed. Outside, the same
+         tool lists every card and every compute process. The job gets no handle to
+         another card's memory or contexts. It is information, like `/proc`'s global files
+         (item 8).
+       - *Memory between jobs* (measured). A card serves a private job and then a public
+         one, or the reverse. One process filled 384 MiB with a pattern and exited without
+         freeing it; a second allocated 512 MiB and read it uninitialised: no pattern,
+         about all zero words, on each of the three hosts' drivers, inside and outside the
+         confinement. So there is no scrub step. The measurement stays an item of the
+         check (item 5, check 9), so a driver that stops clearing memory withdraws the audience;
+         a scrub, or cards set apart, would then be decided again.
+       - *The kernel driver* is attack surface that neither a namespace nor a dedicated
+         account reduces: every job with a card reaches the driver's `ioctl`s. What reduces
+         it is who may run code there: the hook's actor rules (org members only; a
+         same-repository pull request or a protected push; no fork, no bot, no
+         `pull_request_target`; 16.7), the audience limited to the repositories the lead
+         lists in the policy, one job per card, and the driver kept current against the
+         vendor's security bulletins (the lead's, with each host's administrator).
+       - *Presence* (16.4). A public runner exists only while its card is free of other
+         users' processes and of private jobs. The launcher holds the card's lease for the
+         public runner's life; presence stops the card's private runner while the public
+         one holds the lease, and a public runner is not started on a card that presence
+         would stop for any cause. One job per card, always.
+    5. **The conformance check** (the gate). `ci-run confine check` runs inside the
+       confinement exactly as a job would, against probes the launcher plants outside, and
+       passes only if every item holds:
+       1. the account's files are not visible: planted files of mode 600 and 644 in the
+          account's home, its data directory and the directories of the runner credentials
+          and the keys are neither listed nor opened;
+       2. the hooks, the policy, the snapshot, the runner's release and the env cannot be
+          written, renamed or replaced;
+       3. a planted process of the account outside, the relay, the watchdog and the
+          namespace's first process cannot be seen in `/proc`, signalled or traced;
+       4. the host's loopback, the forwarded port directly, a planted abstract Unix socket
+          and the account's pathname sockets (its user bus included) cannot be reached;
+          only the relay answers;
+       5. through the relay a name on the proxy's allowlist answers, and a name off it, a
+          bare address and a port other than 443 are refused;
+       6. no namespace, mount, device node, capability or set-uid elevation can be had (a
+          nested user namespace reads `ENOSPC`: the namespace limits are 0 inside);
+       7. no other card can be opened, by any path, and the leased one can (a CUDA context
+          and a kernel run on it);
+       8. the job's kernel uid and gid are a subordinate pair and its kernel groups are the
+          GPU group alone (mode (a), item 4): any other group fails the item; and a widened
+          CPU affinity is refused or reset;
+       9. a fresh allocation on the card reads none of a previous process's data (item 4).
+
+       *A control run* of the same check without the confinement, as the account, must fail
+       items 1, 3, 4 and 7 (files, processes, network, the other card), so a check that
+       cannot see a leak never passes. Item 6 does not count in the control: `mknod` is
+       refused for the account on every host measured, and `mount` too (on the Ubuntu
+       24.04 hosts even inside a new user namespace), with or without the confinement. The check
+       runs before a host first gets the public audience, then daily, at each boot and
+       after any change of the kernel, the driver, the launcher's release or the host's
+       mounts (its record names the boot id and the versions; a difference makes it stale).
+       Its result (passed, the failed items, the time) goes into the capacity row (16.5). A
+       failed item, a failed control run, or a result older than 26 h withdraws the public
+       audience at once: presence stops the host's public runners and the issuer starts
+       none there until a check passes. It gates the audience as the numerics check gates a
+       capability label (16.1).
+    6. **Single-job configurations issued off the host.** A public runner is registered by
+       a just-in-time configuration (`POST /repos/{owner}/{repo}/actions/runners/
+       generate-jitconfig`) at repository level: one runner, one job. The *issuer* is a
+       unit of the maintainer's on the trusted host that already probes every host (§6.1's
+       maintainer rows), never a CI account and never a host that offers the public
+       audience. It holds a fine-grained token for the opted-in public repositories only,
+       with the one permission the call needs (administration, write), never `admin:org`.
+       Every 15 s it reads each opted-in repository's queued jobs that name `ci-pub-gpu`.
+       For each one that no idle public runner serves, it takes the first host in its order
+       (h100, then `6000pro`; ruling 2 and item 10) whose capacity row offers the
+       public audience and a free card, issues a configuration named
+       `<host>-pub-gpu<N>-<seq>` with the labels `ci-pub-gpu` and `<host>-pub-gpu`, and hands
+       it to that host over ssh with a forced command (a key line marked like the probe's,
+       15.8 item 4), which reads at most 64 KiB from standard input and starts one
+       launcher. A runner that takes no job within 5 min is removed by the issuer, and its
+       launcher stops. The placement order lives in one place, and a host that loses its
+       card or its check is skipped at the next pass. Labels alone could not say "h100
+       first" (16.1: they combine by AND only).
+    7. **Policy, workflow and inventory.**
+       - *What stays* (16.7): the Default group's `allows_public_repositories` off;
+         runners registered at repository level, in no runner group of the org; no secret
+         reaches a public job; the lead's `public_runners = true` entry; the actor and event
+         rules (members only; a same-repository `pull_request` or a protected `push`; forks,
+         non-members, bots, `pull_request_target`, `workflow_dispatch`, `schedule` and every
+         other event refused in "Set up runner", before the first step); the members-only
+         snapshot; hooks at a path that names no disk or account; each public repository's
+         setting that requires approval before an outside contributor's workflow runs.
+       - *What changes.* The public pool is GPU-only: the hook accepts a public repository
+         on a runner of audience `public` and class `gpu` only. For a public caller,
+         `ci.yml` runs its plan, claim, verdict and CPU parts on GitHub-hosted runners
+         (`ubuntu-latest`) and its `gpu` parts on `[self-hosted, ci-pub-gpu]`; a public plan
+         that asks for `gpu2`, `timing` or the cluster ends red at plan time. A public part
+         has no salvage leg (its tree goes with its job), and the retry rows that name a
+         host label (`cool-card`, `same-host`, 16.5) become the fallback row. The UTS
+         namespace names the machine `<host>-pub-gpu<N>`, so a public log shows no host's
+         own name (amends 16.7's "the machine name as the host has it").
+       - *Inventory.* A host's `isolation` names the backend it is set up for (`account`
+         or `ns-subuid`); the probe and the check prove it. A pool's `audience` (16.3) is
+         `public` on the public GPU pool: a per-card pool of 0 static instances (its runners
+         come from the issuer) on the cards of the host's `gpu` pool, shared through the
+         leases. The capacity row (16.5) carries the proven backend, its group mode (`gpu`
+         or `kept`, item 4), the check's result and age, and the cards a public runner could
+         take now.
+    8. **Residual risks**, plainly.
+       - *Kernel and driver bugs* reachable from inside. User namespaces open more of the
+         kernel to an unprivileged job (namespaced mounts and networking), and the GPU
+         driver's `ioctl`s are open to every job with a card. A local privilege escalation
+         in either gives the job the host. Kept small by who may run code (item 4), current
+         kernels and drivers, and one job per card; not removed.
+       - *A mistake in the confinement.* The check covers what it plants and tries (item
+         5). It cannot prove a path it does not try: a file system or device that the
+         mounts expose by accident, a descriptor that a later change leaks into the
+         namespace. Hence the control run, an independent review of the launcher and the
+         check (AGENTS.md, Review), a check after every change of the launcher, and a second
+         fence where the kernel has one (Landlock for files, seccomp for system calls).
+       - *The same-uid supervisor.* The relay, the watchdog and the read-back run as the
+         account and handle what the job controls: its bytes on the relay, its files, its
+         records. A parsing bug there is an escape. They stay small, stdlib, size-capped
+         and link-free (item 3), and run nothing they read.
+       - *Resource exhaustion on cgroup v1.* Memory and disk are bounded by a watchdog's
+         poll, not by the kernel: a fast allocation can push the host into memory pressure
+         for up to one poll, which the host's other users feel. CPU is fenced by affinity,
+         which a job can widen until the watchdog's next tick where seccomp is not used.
+       - *What the host shows.* The control node (item 4), the global files of `/proc` and
+         `/sys` (load, memory, CPUs, the driver's card list) and the proxy's allowlist are
+         visible to a public job, as a hosted runner's VM shows its own. Nothing there is a
+         key or a private repository's content.
+       - *The other direction* (measured). The confinement protects the account from the
+         job, not the job from the account. The account owns the job's user namespace, so
+         any process of the account outside has every capability in it: in C1 such a
+         process traced the confined job, where Yama stops the same trace on an ordinary
+         process of the account (the control). It can also enter the job's namespaces and
+         read or change its tree. Co-users of h100's shared account can therefore read a
+         public runner's configuration in flight, its job's token while it runs and its
+         results (T6), as they can a private job's; only a separate kernel uid for the
+         namespace's owner, which needs root, would close it. *Accepted* by the lead on
+         2026-11-12: a public job carries no secret, and co-users can do the same to
+         private jobs today.
+    9. **Evidence** (C1, issue #196, 2026-11-12). The prototype launcher and check ran on a
+       shared-account host (Ubuntu 22.04, kernel 5.15, cgroup v1), a dedicated-account host
+       and the reference host (both Ubuntu 24.04), on an idle card named by its device
+       minor. Columns: *control*, the check without confinement, where "not confined" is
+       the expected result (the check sees the difference) and "blocked anyway" means the
+       host refuses it without confinement too; *subuid-gpu*, `ns-subuid` in mode (b) (the
+       account's groups kept, the GPU group among them); *subuid-none*, `ns-subuid` with no
+       supplementary group; *single*, `ns-uid`. "did not start": the Ubuntu 24.04 hosts
+       give an unprivileged user namespace no capabilities and have no id-map helpers
+       (18.2), so only the control ran there.
+
+       | item | expected | shared-account host: control | shared-account host: subuid-gpu | shared-account host: subuid-none | shared-account host: single | dedicated-account host: control | dedicated-account host: subuid-gpu | dedicated-account host: single | reference host: control | reference host: subuid-gpu | reference host: single |
+       |---|---|---|---|---|---|---|---|---|---|---|---|
+       | I1 | record uid, gid, groups inside and the kernel ids outside; the job's kernel uid is not the account's | not confined | held | held | **not held** | not confined | did not start | did not start | not confined | did not start | did not start |
+       | F1 | a marker file outside the tree is not visible | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | F2 | creating a file in the read-only hook/policy stand-in fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | F3 | the account's home path does not exist | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | F4 | writing outside the per-job tree (and the per-job /tmp) fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | P1 | /proc lists only the sandbox's processes; the marker is not among them | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | P2 | signal 0 to the marker's pid fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | P3 | a trace attach to the marker fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | N1 | connecting to the marker listener on the host's loopback fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | N2 | the forwarded proxy port is not reachable directly | not confined | held | held | held | not confined | did not start | did not start | n/a | did not start | did not start |
+       | N3 | through the relay the allowlisted URL answers and a non-allowlisted one is refused by the proxy | works | works | works | works | works | did not start | did not start | n/a | did not start | did not start |
+       | K1 | creating a nested user namespace fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | K2 | mount fails (also after trying a new user namespace) | not confined | held | held | held | blocked anyway | did not start | did not start | blocked anyway | did not start | did not start |
+       | K3 | mknod of a device node fails | blocked anyway | held | held | held | blocked anyway | did not start | did not start | blocked anyway | did not start | did not start |
+       | G1 | the leased card works (jax.devices(); one small matmul) | works | works | **fails** | works | works | did not start | did not start | works | did not start | did not start |
+       | G2 | no other card's node exists; opening one fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | G3 | record what nvidia-smi shows of other cards and of processes outside (a marker of ours holds 64 MiB on the card) | recorded | recorded | recorded | recorded | recorded | did not start | did not start | recorded | did not start | did not start |
+       | G4 | record whether a fresh allocation reads the previous process's pattern | recorded | recorded | recorded | recorded | recorded | did not start | did not start | recorded | did not start | did not start |
+       | R1 | record whether a process of the account outside can trace the job (the reverse direction) | recorded | recorded | recorded | recorded | recorded | did not start | did not start | recorded | did not start | did not start |
+
+       Expected in it: I1 is "not held" under `single` by construction (the job keeps the
+       account's uid), and G1 fails under `subuid-none` (the card nodes are open to the GPU
+       group only: CUDA finds no device, the vendor's tool reports insufficient
+       permissions). Observed values that the decision relies on: under `subuid-gpu` the
+       job's kernel uid and gid are the subordinate range's first id plus 999 and its
+       groups are all of the account's (item 4); the nested user namespace reads `ENOSPC`
+       and a mount `EPERM`; inside, `/dev` holds one card node and opening another reads
+       `ENOENT`, where the control opened 4 of 9 other card nodes (the session's device
+       cgroup refused the rest); the vendor's tool lists 1 card and no process inside, 5
+       cards and every compute process outside; the relay passed an allowlisted name (200)
+       and the proxy refused another (403 on `CONNECT`), while the proxy's port and a
+       loopback listener of the host were refused from inside; a process of the account
+       outside attached to the confined job (R1), while the control's ordinary process
+       could not be attached (Yama). *Cost* on the shared-account host, idle card, 5 runs
+       each of a fresh process that imports JAX and runs one 1024 × 1024 product: 4.02 s
+       inside against 3.82 s outside (medians, +5 %); an empty confinement takes 0.11 s.
+
+       *From C1 to production* (each a requirement of C2 or later, none built in C1): the
+       relay accepts only `CONNECT <name>:443` and caps its connections (item 3; C1's
+       relay passed bytes); a seccomp filter (at least `sched_setaffinity`, as a second
+       fence beside the namespace limits that C1 used alone); the rlimits on the job's uid
+       (`RLIMIT_NPROC` and the others of item 3); the watchdog for memory, disk, affinity
+       and time on cgroup v1, and the user scope on cgroup v2; the lease by device minor and
+       presence's public runner (item 4); the tree's deletion inside the namespace's map and
+       the link-free, size-capped read-back; the whole runner inside, from a single-job
+       configuration (item 6); the hooks, policy and members-only snapshot as the real
+       read-only binds; and item 5's checks 2, 6 and 8 in full (C1 tried a stand-in for the
+       hooks and policy, and no set-uid elevation or affinity).
+    10. **Phases and rollout** (§10; they supersede P1 and P2, whose tests carry over): C1
+        the launcher and the check, as an experiment; C2 the policy, `ci.yml`'s hosted legs
+        for a public caller and the inventory (`isolation`, `audience`, the opt-in); C3 the
+        off-host issuer; C4 a public canary repository on `6000pro`, then on h100 once its
+        check passes there; C5 the first real public repository. Ruling 2's order is the
+        issuer's in production; the canary starts on the dedicated-account host, where root
+        is ours. *Decided* (the lead, 2026-11-12): **the dedicated-account host confines
+        too.** Once the production launcher exists, every Ubuntu 24.04 host that offers the
+        public audience gets from root what `ns-subuid` needs there (an AppArmor profile
+        that allows user namespaces for the launcher, and the id-map helpers' package, item
+        2), so a public job runs the same way on every host: on `6000pro` its dedicated
+        account plus the confinement. *Which hosts offer the public audience:* h100 first,
+        then `6000pro`. The current plan (proposed to the lead, not yet confirmed) is that
+        the two 3090 hosts do not: 3090b is the reference host, which holds the issuer
+        (item 6) and times the compile gates, and 3090a's two cards serve the nightly's
+        two-card parts. The host and org steps are the lead's: each host's subordinate
+        range, the `/etc/subgid` line for the GPU group on a shared-account host (mode (a),
+        item 4), root's profile and package on the Ubuntu 24.04 hosts, each host's
+        forced key line (on h100 a line in the shared account's `authorized_keys`, as 15.8
+        item 4), the issuer's token, the canary repository, each repository's opt-in and its
+        approval setting for outside contributors.
+
+- *Facts* (the shared-account host, read on 2026-11-12, read-only). Ubuntu 22.04, kernel
+  5.15; unprivileged user namespaces work (user, mount, PID, network); the account has a
+  subordinate uid and gid range, and `newuidmap` and `newgidmap` are installed; the LSMs
+  are Landlock (ABI 1, files only), Yama (`ptrace_scope` 1) and AppArmor without a
+  restriction on user namespaces; rootless-capable podman and the GPU vendor's container
+  CLI are installed, bubblewrap is not; the KVM device cannot be opened; cgroup v1, with no
+  delegated memory or pids controller; the card nodes and the control node are open to a
+  GPU group the account is in, the UVM nodes are readable and writable by everyone; no
+  sudo; GitHub is reachable only through a loopback port forwarded to the egress proxy.
+  Several people use the account, and it holds a cluster key, a tunnel key and the private
+  pool's runner credentials: everything a public job must not reach.
+- *Considered* (changes to the approved direction, said here rather than made silently).
+  (1) *A UTS namespace* is added to the list, so that the public logs' machine name is the
+  confinement's, not the host's (item 7). (2) *"cpuset fixed before entry"* fixes only the
+  start: without a cpuset cgroup a job may widen its own affinity, hence the watchdog's
+  reset and the seccomp filter (item 3). (3) *The subordinate uid earns its place twice
+  more:* on cgroup v1 it is the process bound (`RLIMIT_NPROC`) and the watchdog's way to
+  find the job's processes, which is why `ns-uid` is refused. (4) *D4 cannot hold for the
+  launcher's unit,* whose set-uid helpers need privileges; the job gets `no_new_privs` from
+  the launcher instead. (5) *Deleting the tree* needs the namespace's map, since the account
+  cannot remove a subordinate uid's files (item 3). (6) *The issuer is the placement
+  point:* ruling 2's order cannot be a label, so the issuer applies it when it issues each
+  single-job configuration, on demand rather than as idle runners that would hold h100's
+  cards away from private jobs. (7) *Backends compose:* a plain second account does not
+  hide other accounts' command lines without root's `ProtectProc=invisible`; on a host
+  whose administrator gives us an account but no root, `ns-subuid` runs inside that account
+  and the check judges the pair. (8) *A launcher of our own* rather than podman or a shipped
+  bubblewrap. On the GPU group they are now equal: C1 showed that our launcher, too, keeps
+  every group of the account unless the host gives mode (a)'s `/etc/subgid` line (item 4),
+  which is what podman's `keep-groups` does. What remains: podman's defaults (outbound
+  network, its storage and configuration in the account's home) need overriding one by
+  one; bubblewrap maps only the caller's own uid, which is `ns-uid`, unless it joins a
+  namespace made beforehand by `newuidmap`, and it is not installed here. Our launcher
+  makes exactly the map and the mounts of items 3 and 4 (the device minor, the driver's
+  params overlay), the same on every host, at the price of owning security-critical code: it stays small, gets an independent
+  review, and the check does not trust it. The check does not depend on the backend, so if
+  C1 shows the launcher harder than podman configured to the same effect, podman can be
+  swapped in without changing this contract.
+- *Options weighed.* What each protects, what it needs from the host, what breaks, and its
+  operational weight:
+
+  | option | protects | needs from the host | what breaks | weight |
+  |---|---|---|---|---|
+  | (a) one more unprivileged account from the host's administrator | (a), (b), signal and trace by uid; not "see" without root's `ProtectProc=invisible` or our namespaces | an account in the GPU group, with linger | nothing; combined with `ns-subuid` (7 above) it gives all three | one request per host; not possible on h100 now (15.8) |
+  | (b) only a subordinate range | `ns-subuid`: all three, with the check | one line each in `/etc/subuid` and `/etc/subgid`, and one more in `/etc/subgid` for the GPU group's gid (18.4, mode (a)); `newuidmap`, `newgidmap`; unprivileged user namespaces with capabilities (on Ubuntu 24.04 root's AppArmor profile) | nothing; h100 has the range, and lacks the GPU group's line | the smallest request; **chosen** |
+  | (c) world-accessible GPU nodes | spares the GPU-group step | a driver option changed by the administrator | every local user of the host gets every card | rejected: it weakens the host for its other users to save us one map |
+  | (d) rootless podman with the vendor's toolkit | as `ns-subuid` once configured | podman; the toolkit with `no-cgroups` on cgroup v1; storage in the account's home | the GPU group only with every group of the account (`keep-groups`), as our launcher without mode (a)'s line; its network outbound by default; much to override | heavy: images, configuration, two upstreams; kept as the fallback (8 above) |
+  | (e) a shipped bubblewrap | `ns-uid` only, unless joined to a namespace made by `newuidmap` | a static binary in our subtree | the subordinate uid needs a helper of ours anyway | light, well-reviewed code; not alone |
+  | (f) a micro-VM | all three, and a kernel of its own | an openable KVM device; VFIO and root for a card | no GPU: useless for a GPU-only pool | heavy; not on h100 (no KVM) |
+  | (g) Landlock and seccomp alone, without namespaces | on 5.15 files only (ABI 1): no network rules (ABI 4, kernel 6.7), no signal or abstract-socket scoping (ABI 6, 6.12); every process visible, and the account's processes' `/proc/<pid>/environ` readable (Yama limits attaching only); pathname Unix sockets and the user's D-Bus reachable (a connect is no file access); the job keeps the account's uid and may signal any of its processes | Landlock in the kernel | (b) and (c) fail | light; kept as a second fence inside the namespaces |
+  | (h) public GPU jobs on `6000pro` only | `account` | root on that host (we have it) | ruling 2: h100's cards stay closed to public repositories, and no host without root ever joins | the lightest now; it is C4's first step anyway |
 
 ## Decisions of this spec
 
@@ -1865,9 +2322,12 @@ back to this contract.
 | The job token with `actions: read` lists only its own repository's runs and jobs; the org's runner list needs `admin:org` (15.6). So the route reads capacity from the hosts, never from GitHub's queue. | 16.5 | R5 |
 | A job queued on labels that no online runner has waits (up to 24 h) instead of failing at once. | 16.5 (the plan-time error) | R5 |
 | A runner stopped while idle goes offline and takes no job; a job assigned to it just before the stop is queued again or ends without outputs (`lost` or `stopped`), and never runs twice. | 16.4 | R3 (the 50 flips) |
-| The pre-job hook sees `GITHUB_REF_PROTECTED` with the other default variables, for every event, on a repository-level runner of a public repository too. | 16.7 | P1, P2 |
-| A fork's pull request to a public repository that names `ci-pub-*` labels is assigned to a repository runner and fails in "Set up runner" on the hook's refusal, before any step. | 16.7 | P2 (the live negative test) |
-| Runners registered on a public repository are reachable from that repository only, and from no other repository of the org. | 16.7 | P2 |
+| The pre-job hook sees `GITHUB_REF_PROTECTED` with the other default variables, for every event, on a repository-level runner of a public repository too. | 16.7, 18.7 | C2, C4 (were P1, P2) |
+| A fork's pull request to a public repository that names `ci-pub-gpu` is assigned to a repository runner and fails in "Set up runner" on the hook's refusal, before any step. | 16.7, 18.7 | C4 (the live negative test; was P2) |
+| Runners registered on a public repository are reachable from that repository only, and from no other repository of the org. | 16.7, 18.6 | C3, C4 |
+| A just-in-time configuration (`generate-jitconfig`) registers a repository-level runner that takes one job, after which GitHub removes it; the call needs only the repository's administration (write) permission of a fine-grained token. | 18.6 | C3 |
+| A token of an opted-in public repository lists its queued jobs with their labels before any runner can take them, so the issuer sees a job that waits for `ci-pub-gpu`. | 18.6 | C3 |
+| The runner and the actions a job uses reach GitHub through `https_proxy` (`CONNECT`) alone, uploads and downloads included. | 18.3 | C1 |
 
 ## 3. Layout
 
@@ -2217,7 +2677,7 @@ hosts, a coverage job). These rules are the consumer's:
    | `timing` | `ci-timing`, opt-in (12.14) | `compile` | exclusive timing parts on `compile_cpus` | 0 | `x` | one | ≤ 240 |
    | (the route's overflow) | `ci-slurm`, opt-in (14.2) | `slurm` | one batch job on a Slurm cluster's `target` (14.3) | up to the target's `max_cards` | `none` | none on its host | ≤ the target's `max_minutes` |
    | — | `<host>-nightly` (3090a), opt-in (12.14), until its consumer moves (16.10) | `nightly` | the consumer's nightly | 0 to all cards | any | every slot and card lease | ≤ 600 |
-   | — | `ci-pub-light`, `ci-pub-cpu`, `ci-pub-gpu`: an opted-in public repository's own runners (16.7) | `light`, `part`, `gpu` | as the rows above | | | | |
+   | `gpu`, for an opted-in public repository | `ci-pub-gpu`: its own confined single-job runners (16.7, 18); its plan, claim, verdict and CPU parts run on GitHub-hosted runners (18.1) | `gpu` | one-card parts on the runner's card, confined (18.3, 18.4) | 1 | any | the card's lease, held outside | ≤ 240 |
 
    Host labels (`<host>-light`, `<host>-cpu`, `<host>-gpu`, `<host>-gpu<N>`,
    `<host>-multi`, `<host>-compile`, `<host>-slurm`, and the shared `3090-light` and
@@ -2353,7 +2813,8 @@ expect of the head.
 
 **Onboarding** is at most 20 workflow lines and one registry entry (`etc/projects/
 <project>.toml`, §4.9's env). A private repository of the org needs no policy entry (the
-snapshot holds it, §6.5); a public one needs the lead's entry and its own pool (16.7). The
+snapshot holds it, §6.5); a public one needs the lead's entry (16.7), and `ci.yml` runs its
+CPU work on GitHub-hosted runners and its GPU parts on the confined public pool (18). The
 whole workflow:
 
 ```yaml
@@ -2417,7 +2878,7 @@ only after the label's numerics check passed there (16.1).
 | h100 | `part` | 8 | `ci-cpu`, `mem-big` | `h100-cpu` | CPU parts, 8 slots of 20 threads (16.9) |
 | h100 | `gpu` | 5 | `ci-gpu` | `h100-gpu`, `h100-gpu<N>` | one-card parts on card N; no `multi` until a P2P self-test passes (15.8) |
 | the new host (16.9) | `light`, `home`, `part`, `gpu` | sized at its plan from the parts' measured peaks: about 96 threads and its 4 cards | `ci-light`, `ci-cpu`, `ci-gpu`; `ci-gpu2` after a P2P self-test | its role's | as on h100; a dedicated CI account |
-| the new host, second account (16.7) | `light`, `part`, `gpu`, audience `public` | a few, per opted-in repository | `ci-pub-light`, `ci-pub-cpu`, `ci-pub-gpu` | — | an opted-in public repository's jobs only; registered at repository level |
+| h100, then the new host (`6000pro`) (18.10; the 3090 hosts not, as planned) | `pub-gpu` (`gpu`, per card), audience `public` | 0 static; the issuer starts single-job runners on demand, at most one per free card (18.6) | `ci-pub-gpu` | `<host>-pub-gpu` | an opted-in public repository's GPU parts only, confined (18.3); registered at repository level |
 
 A pool's size is its slots (or cards): one runner is one slot (16.2), and presence keeps
 online only the runners that can start a job (16.4), so no runner waits for a slot. The
@@ -2436,8 +2897,9 @@ holds 2 CPU parts at once (72 cores); a CPU part past those pends, and ends `una
 (`pending: … AssocGrpCpuLimit`) once its bound passes, so the route (16.5) books CPU
 parts against the CPU target's `jobs_free` before it sends one there. The GPU targets
 have room for the rest.
-Runner names are `<host role>-<pool>-<i>`, except the per-card pools'. All are org-level
-in Default (decision 1), but the public pool's, which are registered on their repository.
+Runner names are `<host role>-<pool>-<i>`, except the per-card pools' and the public
+pool's (`<host>-pub-gpu<N>-<seq>`, 18.6). All are org-level in Default (decision 1), but the
+public pool's, which are registered on their repository.
 
 **Labels** (decision 16.1, amending 12.5). GitHub gives a job to any runner that has all
 its labels. A consumer asks for a capability label, an equal-verdict class: any runner
@@ -2640,7 +3102,7 @@ On 3090b and 3090a the executor of §4.3 adds:
 |---|---|---|---|---|
 | h100 | the shared account, runners on it (decision 11.3) | everything a co-user of the account can reach, and they can reach everything of ours: the runner credentials, the hook, the policy, each job's `GITHUB_TOKEN` while the job runs, the checkout of a private repository, the results and the statuses we post | private repositories only, of org members only (decision 11.1, 11.2); `GITHUB_TOKEN` with `contents: read`, plus `statuses: write` only in claim and verdict; per-job directories, deleted after the job; no other credential there but the tunnel key, which opens only allowlisted HTTPS (T15); `NoNewPrivileges` | a dedicated account (decision 11.7) |
 | 3090b, 3090a | a dedicated CI account per host, runners on it (decision 12.2) | the CI account's files: the runner credentials, the hook, the policy, the envs, each job's `GITHUB_TOKEN` while it runs, the checkout of a private repository, the shared lock and slot files (a job can hold them and stall local runs); nothing of the local accounts (T18), no sudo, no GitHub credential | private repositories only, of org members only; `NoNewPrivileges`; the account's own mount namespace (decision 12.16); `GITHUB_TOKEN` as on h100; per-job directories; the tunnel key opens only allowlisted HTTPS; the push key only `--receive` | a root-owned host layer with system units (§5.3, T13) |
-| the new host's second account (16.7, from P2) | a second Unix account, runners registered on each opted-in public repository | the account's files: the runners' registrations of the opted-in repositories, the env, each job's `GITHUB_TOKEN` while it runs, the host's network; not the hooks, the policy, the snapshot or the `.env` files, which are root's; no cluster key, no tunnel key, no organisation token, no private repository's name | opted-in public repositories only, same-repository pull requests and protected refs of org members only (16.7); `NoNewPrivileges`; per-job directories | — |
+| a public GPU job on a host whose check passes: h100, then `6000pro` (18, from C4; supersedes 16.7's second account) | a subordinate uid in its own user, mount, PID, IPC, network and UTS namespaces (`ns-subuid`), or a dedicated account (`account`); one runner for one job, registered on its opted-in public repository | its own tree, its job's `GITHUB_TOKEN` while it runs, its repository's env and the system read-only, its leased card, the egress proxy's allowlist through one relay; what the control node and the global files of `/proc` and `/sys` show (18.8); not the account's files or keys, not the hooks, the policy or the snapshot (read-only), not any other process, card or socket | the conformance check before the audience and on a timer (18.5); the hook's rules of 16.7, GPU class only; single-job configurations issued off the host (18.6); `no_new_privs`, no capability; the tree deleted after the job | a kernel and driver kept current (18.8) |
 | egress host | a dynamic user of `ci-egress.service` | nothing of a job's: it sees only the names a job connects to | hardened system unit; root-owned release and allowlist | — |
 | workstation | the maintainer | nothing: no job runs there | the push reads the login at each run and stores nothing | — |
 | 3090b, the maintainer's account (15.3, 15.6) | the maintainer | nothing: no job runs as the maintainer, and the CI account reaches nothing of the local accounts (T18) | the backstop and the runner watch read the login at each run and store it nowhere; the watch keeps its counts | — |
@@ -2650,7 +3112,7 @@ On 3090b and 3090a the executor of §4.3 adds:
 | class | events accepted | actors | runner classes |
 |---|---|---|---|
 | private, allowlisted (every private repository of the org snapshot, §6.5, with its id; `compile` and `nightly` only where its `policy.toml` entry lists the class, decision 12.14) | `pull_request` (same repository), `push`, `workflow_dispatch`, `schedule`, `workflow_run`, `status`, `repository_dispatch` | `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR`, and for a pull request its author and for a push its pusher, all on the actor allowlist (the org's members, §6.5). The workflow bot is accepted only for `workflow_dispatch` and `repository_dispatch`, and only where the repository's `bot_dispatch` switch is on (off by default; decision 10.1). | all |
-| public, opted in (decision 16.7, from P1: `visibility = "public"`, `public_runners = true` and its id in `policy.toml`, written by the lead) | `pull_request` (same repository); `push` only where `GITHUB_REF_PROTECTED` is `true` | as for a private repository (the snapshot's members); the workflow bot never | `light`, `part`, `gpu` of the runner audience `public` only |
+| public, opted in (decision 16.7, from C2: `visibility = "public"`, `public_runners = true` and its id in `policy.toml`, written by the lead) | `pull_request` (same repository); `push` only where `GITHUB_REF_PROTECTED` is `true` | as for a private repository (the snapshot's members); the workflow bot never | `gpu` of the runner audience `public` only (18.7); its CPU work runs on GitHub-hosted runners |
 | any other repository, other public ones and ci-runners itself included | none | none | none |
 
 `pull_request_target`, `issue_comment` and other events are refused everywhere unless
@@ -2677,7 +3139,7 @@ bound).
 
 | # | threat | mitigation |
 |---|---|---|
-| T1 | A fork pull request asks for a self-hosted label by editing the workflow in the fork. | `allows_public_repositories` stays off, so a public repository's job matches no org runner; the org forbids forks of private repositories; the guard on every job (§4.8 rule 1); the hook (fork, actor, repository, class, audience); no docker for the runner account; `NoNewPrivileges`. On an opted-in public repository's own runners (16.7) the hook refuses a fork's pull request, `pull_request_target`, a non-member and a bot before the first step, proven by the live negative test (P2), and the account holds no credential of ours |
+| T1 | A fork pull request asks for a self-hosted label by editing the workflow in the fork. | `allows_public_repositories` stays off, so a public repository's job matches no org runner; the org forbids forks of private repositories; the guard on every job (§4.8 rule 1); the hook (fork, actor, repository, class, audience); no docker for the runner account; `NoNewPrivileges`. On an opted-in public repository's own runners (16.7) the hook refuses a fork's pull request, `pull_request_target`, a non-member and a bot before the first step, proven by the live negative test (C4), and the job reaches no credential of the account (18.5) |
 | T2 | Someone outside the org's members pushes a workflow that asks for our labels (an outside collaborator, a bot). | the hook's actor checks against the snapshot's members |
 | T3 | A new or unlisted repository asks for our labels (Default is open to all private repositories). | the hook's repository allowlist (the snapshot); the repository id is checked against the name |
 | T4 | Someone moves `v1` in ci-runners to bad code. | D1 rulesets (only the lead can update or delete `v*` and `main`); the hook and executor come from installed releases (D2) |
@@ -2689,7 +3151,7 @@ bound).
 | T10 | A hostile event payload targets the hook. | JSON parsing in `python -I`; no shell interpolation; fixtures with hostile strings |
 | T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the statuses of the runners' identity, the policy's `bot` (15.9). A workflow of the repository can still post as the bot with its own job token, so someone with write can still forge one; consumers audit merges |
 | T12 | A burst of refused jobs blocks our runners (on the public pool, anyone may open fork pull requests). | refusal in under 10 s; the lead can pause a repository in the policy; each opted-in public repository requires approval before an outside contributor's workflow runs (a repository setting, the lead's); the public pool's runners serve that repository only |
-| T13 | (also any co-user of h100's account, an accepted gap; on the 3090 hosts the CI account's own jobs only; not on the public pool, whose hooks, policy, snapshot and `.env` are root's, 16.7) An accepted job (or its dependency) edits the host layer it owns: the hook (or its copy in `/tmp`, 13.5), the policy, `.env`, the units, the drain file, the load record (13.1, 13.2), presence's state or the capacity file (16.4, 16.5), so later jobs pass unchecked or the route is misled. | private consumers only (§5.3); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs; `ci-run hooks copy` checks its `/tmp` directory through a descriptor (no link, the account's, mode 700) and then writes the copies by path, which only the account itself could race in its private `/tmp` (accepted, 13.5) |
+| T13 | (also any co-user of h100's account, an accepted gap; on the 3090 hosts the CI account's own jobs only; not on the public pool, whose hooks, policy and snapshot are read-only mounts in the confinement and whose runner lives for one job, 18.3) An accepted job (or its dependency) edits the host layer it owns: the hook (or its copy in `/tmp`, 13.5), the policy, `.env`, the units, the drain file, the load record (13.1, 13.2), presence's state or the capacity file (16.4, 16.5), so later jobs pass unchecked or the route is misled. | private consumers only (§5.3); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs; `ci-run hooks copy` checks its `/tmp` directory through a descriptor (no link, the account's, mode 700) and then writes the copies by path, which only the account itself could race in its private `/tmp` (accepted, 13.5) |
 | T14 | A co-user of h100's shared account reads the org-sync token, or edits the snapshot. | no token on h100 (decision 11.9): the snapshot arrives over the maintainer's ssh access, checked by `--receive` (§6.5). A host that syncs itself holds a fine-grained read-only token (members, metadata): it shows the member list and the private repositories' names, nothing else. An edited snapshot is T13's case. |
 | T15 | A co-user of h100's shared account takes the tunnel key, or any local user of a host uses the tunnel's port on 127.0.0.1 (on the 3090 hosts, every local account can reach it). | the egress account has no shell and no listening forward, and its key opens only the egress proxy's port (decision 11.10). The proxy passes only its allowlist on port 443: HTTPS to GitHub, the Actions service's storage and the package indexes, which job code reaches through the tunnel anyway. The suffix `.blob.core.windows.net` lets them reach any Azure storage account over HTTPS, and `storage.googleapis.com` any Google Cloud Storage bucket: accepted gaps, since the Actions storage accounts have no stable names and package downloads use those buckets. They appear as the egress host's address. The allowlist is root-owned on the egress host. The lead revokes the key by deleting one line there. |
 | T16 | (3090 hosts) A job, or a local user, holds the shared host lock or a slot, and stalls the other side's work; or a local account empties the ticket queue. | the files are `flock` locks, so a hold ends with its process: a part's hold ends with its scope (inner timeout, the job-completed hook, the reaper); a waiting part ends `unavailable` at its queue timeout; the files hold no data, and a lost ticket only loses a place in the queue |
@@ -2699,7 +3161,8 @@ bound).
 | T20 | (14) Other users of the cluster reach our files or a forward, or read the site's names in our public logs. | the account's root and every part directory mode 700; `check` and `apply` refuse a root another user could swap (its mode, a link, the directories above it); what a part shows on GitHub is redacted (14.4); a part's temporary files on a node only inside a 700 directory of its own; the build's forward is a Unix socket in a 700 directory behind a relay that accepts only the build's random credential | a node's `/tmp` and process table are shared with other users' jobs, as for any user of the site |
 | T21 | (14) Runaway cost: a lost driver, a stuck job, a retry loop. | every job has `--time`; the reaper cancels a job whose GitHub job is gone; pending is bounded; one retry (§4.4); the daily and monthly caps (14.7) | job code (T19) can spend up to the site's association limits |
 | T22 | (14) A node silently corrupts multi-card results (peer copies that read zeros). | the P2P self-test before every two-card part (12.6); a target's `max_cards` from its canary | – |
-| T23 | (16.7) Code of an opted-in public repository, from a member's same-repository branch (fork commits nobody reviewed included) or a compromised dependency, runs on the public pool and reads what the account holds, or its public logs show the host. | a separate account and host: no cluster key, tunnel key or organisation token, a snapshot without private repositories, root-owned checks; repository-level runners; the hooks at a path naming no disk or account, the machine name the lead's | the member vouches for their branch (consumers' guide); the job reaches the runners' registrations of the opted-in repositories and the host's network |
+| T23 | (16.7, 18) Code of an opted-in public repository, from a member's same-repository branch (fork commits nobody reviewed included) or a compromised dependency, runs on the public pool and reads what the account holds, or its public logs show the host. | the confinement (18.3): the account's files, processes and sockets out of reach, the checks read-only, one relay to the proxy, one job per runner; the conformance check per host (18.5); a snapshot without private repositories; repository-level single-job runners issued off the host; the hooks at a fixed path, the machine name the confinement's | the member vouches for their branch (consumers' guide); the job reaches its own tree, its card, the proxy's allowlist and what the host shows (18.8) |
+| T24 | (18) A public job uses a bug of the kernel or of the GPU driver (its `ioctl`s on the card and control nodes) to leave the confinement, or reads another job's data left on its card. | who may run code: members' same-repository pull requests and protected pushes of listed repositories only (16.7); kernels and drivers kept current; one job per card; the card memory a new context gets, measured clean on three drivers and kept as check 9 of 18.5, so a driver that leaves data withdraws the audience (18.4) | a local privilege escalation in the kernel or the driver gives the host; neither a namespace nor a dedicated account removes it (18.8) |
 
 ### 6.5 The org snapshot
 
@@ -2719,7 +3182,9 @@ else leaves the old snapshot, exits 1 and prints why. Receives take a lock, one 
 time. The push timer is monotonic: a workstation suspended for an hour stales h100 too.
 The public pool's account (16.7, from P2) receives with `--receive --public`, which keeps
 the members only and drops every private repository before it writes (an opted-in public
-repository is the policy's own entry).
+repository is the policy's own entry). *Amended by 18.3: the members-only snapshot is a
+file of its own that the confinement binds in read-only; the account's own snapshot is
+never mounted there.*
 A host that holds its own token runs `ci-orgsync.timer` instead (inventory `orgsync`,
 `etc/orgsync.token`).
 
@@ -3566,7 +4031,7 @@ nightly on capability labels) are its PRs, not this repository's.
   and a part's `SlotQueue` go; `v2.0.0`. *Acceptance:* the org's repositories, searched,
   name no host label; the canary is green and red as expected on `@v2.0.0`; `v1` stays
   installed until its last caller has moved.
-- **P1, the public policy** (16.7): the entry's `public_runners`, the runner audience,
+- **P1, the public policy** (16.7; *superseded by C2, never built*): the entry's `public_runners`, the runner audience,
   the protected-ref rule, the snapshot's `--public` receive. *Acceptance:* unit tests on
   the event fixtures (a fork pull request, a member's fork, `pull_request_target`, a
   bot's dispatch, a member's `workflow_dispatch`, a `schedule`, a fork's `workflow_run`,
@@ -3575,7 +4040,7 @@ nightly on capability labels) are its PRs, not this repository's.
   runner) are each refused with its reason; a same-repository pull request and a
   protected `push` of an opted-in public repository are accepted on a `public` runner
   only.
-- **P2, the public pool live** (16.7): the second account, its root-owned files, the
+- **P2, the public pool live** (16.7; *superseded by C4, never built*): the second account, its root-owned files, the
   repository-level runners, on a public copy of the canary, then one public library.
   *Acceptance:* a fork's pull request whose workflow names `[self-hosted, ci-pub-cpu]`
   and whose first step writes a marker ends in "Set up runner" with `ci-runners: refused
@@ -3583,6 +4048,45 @@ nightly on capability labels) are its PRs, not this repository's.
   file and no `ci-part-*` scope exist; the same for a member's fork,
   `pull_request_target` and a non-member's re-run; a same-repository pull request is
   green.
+
+**Decision 18: public GPU jobs on confined runners** (issue #194). It replaces P1 and P2,
+whose tests carry over. Each phase is its own issue and PR, with its tests, each failing on
+a mutant, and its evidence; host and org steps are the lead's (18.10). The launcher, the
+check, the relay and the issuer get an independent review (AGENTS.md, Review).
+
+- **C0**: this contract (decision 18). *Acceptance:* the lead approves the PR.
+- **C1, the launcher and the check, as an experiment** (18.3 to 18.5; issue #196, its
+  prototype in `experiments/sandbox/`, wired to no runner). *Acceptance:* on a
+  shared-account host, a dedicated-account host and the reference host, the check passes
+  confined and its control run fails on files, processes, network and the other card; a
+  one-card CUDA smoke passes inside with no other card visible; the card memory a new
+  context gets after another process's job is measured; the start-up cost is recorded; the
+  table becomes 18.9. *Measured:* all of it on the shared-account host; on the two Ubuntu
+  24.04 hosts the confinement does not start without root (18.2), and only the control ran.
+  The gaps to production are 18.9's list.
+- **C2, policy, workflow and inventory** (18.7): the policy's `public_runners` and the
+  audience, GPU class only; `ci.yml`'s hosted legs for a public caller; the keys
+  `isolation` and a pool's public `audience` (accepted and ignored first, 16.3); the
+  capacity row's backend, check result and age; presence's public runner and the lease it
+  holds. *Acceptance:* P1's event fixtures, each refused or accepted as P1 said; a public
+  repository's job on a `light` or `part` runner of audience `public` refused; a public
+  plan asking for `gpu2`, `timing` or the cluster red at plan time; a withdrawn audience
+  stops the public runners within one tick.
+- **C3, the issuer** (18.6). *Acceptance,* on the canary: a queued `ci-pub-gpu` job gets
+  one runner on the first host in the order that has a free card and a fresh check; it
+  takes one job and is gone; an unused runner is removed after 5 min; a host whose check
+  failed or is stale is skipped; after a run, a scan of the host account's files finds no
+  credential of a public runner; §2's rows for 18.6 confirmed.
+- **C4, the public canary** (18.10): a public copy of the canary on `6000pro`, then on h100
+  once its check passes. *Acceptance:* P2's negative tests with `[self-hosted,
+  ci-pub-gpu]` (a fork's pull request, a member's fork, `pull_request_target`, a
+  non-member's re-run: each ends in "Set up runner" with its reason, no step run, no
+  marker); a same-repository pull request green; the check, run as a job of the canary,
+  passes; the lead reads the public logs (the machine name, the paths) and finds no site
+  detail.
+- **C5, the first public library**: the lead's policy entry and the repository's approval
+  setting for outside contributors. *Acceptance:* a week of its runs with every host's
+  check passing on its timer and no public job refused after its start.
 
 *Open point:* the design of a queued part's bound inside the reusable workflow (a part
 whose job no runner takes; today the consumer's own sweeper), closed by R6. Decided with
@@ -3619,7 +4123,8 @@ uses until then.
    `v*` that only the lead may bypass. It never holds inventory (D1).
 2. **Repository-level runners for public consumers.** Retired by 11.12; back with 16.7:
    light, CPU and GPU runners of a separate account on one host, registered on each
-   public repository that opts in, with root-owned checks.
+   public repository that opts in, with root-owned checks. *Amended by 18:* GPU runners
+   only, confined, one job each, on any host whose conformance check passes, h100 first.
 3. **Runner pools.** Pools are shared per host and class. *Amended by 16.2 and 16.4:* one
    runner per slot, and presence keeps online only the runners that can start a job, so
    the waiting seat and `max_waiting` lapse where a pool's instances equal its slots.

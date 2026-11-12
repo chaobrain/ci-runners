@@ -9,7 +9,7 @@
 - **公开仓库不能用**，继续用 GitHub 托管 runner。org 也不允许 fork 私有仓库，所以 fork 的 PR 跑不到这里。
 - 作业都跑在自托管 runner 上，**不消耗**私有仓库的托管 Actions 分钟数。
 - 不要把 secret 传给这些任务。
-- **即将变化（design 决定 16，按 RUN-10 分阶段上线）**：工作流只写能力标签（`ci-cpu`、`ci-gpu`、`ci-gpu2`、`ci-timing` 等），不再写主机标签；ci-runners 提供可复用工作流 `ci.yml`，仓库只需给一个打印计划 JSON 的 `plan` 命令，接入不超过 20 行工作流加一个 registry 条目（design §4.10）；选择加入的公开仓库可以用单独的公开池（design 决定 16.7），fork 的 PR 仍然在第一步之前被拒。各阶段上线之前，下面写的仍是现在的用法，主机标签照常可用。
+- **即将变化（design 决定 16，按 RUN-10 分阶段上线）**：工作流只写能力标签（`ci-cpu`、`ci-gpu`、`ci-gpu2`、`ci-timing` 等），不再写主机标签；ci-runners 提供可复用工作流 `ci.yml`，仓库只需给一个打印计划 JSON 的 `plan` 命令，接入不超过 20 行工作流加一个 registry 条目（design §4.10）；选择加入的公开仓库只有 GPU 作业用公开池，每个作业在一个隔离的单次 runner 里运行，CPU 作业仍在 GitHub 托管 runner 上（design 决定 16.7、18），fork 的 PR 仍然在第一步之前被拒。各阶段上线之前，下面写的仍是现在的用法，主机标签照常可用。
 
 ## 2. 管线
 

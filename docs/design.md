@@ -4018,7 +4018,7 @@ Rules:
   4. **The canary** (`canary-3090-v1160`): green on every part (claim, cpu, gpu, multi-a, multi-b, compile, slow,
      oom, salvage, verdict; no retry); the red head was red on compile, cpu, gpu, multi-a and multi-b.
 - **`v1.17.0`** (minor, stamped 2026-11-12; decision 19, RUN-10 R5b, #201, #202; brainspike's coordinator under the
-  lead's delegation of 2026-11-12): a host entry's optional `tier` in a pool registry and presence's `tier` cause
+  lead's delegation of 2026-11-12; `v1` moved to it after the 3090 canary at `@v1.17.0`, green and red, 2026-11-12): a host entry's optional `tier` in a pool registry and presence's `tier` cause
   (19.1, 19.2), read only where a registry has the key; the hold (`ci-run presence hold`, 19.8); the host rows'
   `role`, `pools` (with `listening` and `yielded`), `policy`, `tier`, `hold_until` and the health gate (19.4); the
   policy-drift warning of `pool status` (19.6); the route's room counts yielded runners and its retry rows read the
@@ -4028,6 +4028,13 @@ Rules:
   1. **Order.** No setup file changes, so no host's plan changes and the egress proxy keeps running (the egress
      host's hook link moves first, as for every release). A loader older than this release refuses `tier`, so no
      registry gains the key before `v1` points here on every host (19.9 step 1).
+  2. **The rollout.** The egress host's hook link moved first and the proxy kept running; every host's plan was all
+     `keep` (the new host's but for its four GPU runners, left disabled on purpose), so nothing was applied and no
+     runner restarted. `pool status` then showed every host's `[repositories]` entries equal, with no drift warning.
+  3. **The canary** (`canary-3090-v1170`): green on every part (claim, cpu, gpu, multi-a, multi-b, compile, slow, oom,
+     salvage, verdict; no retry) on a second head, after a first whose parts all passed but whose two artifact uploads
+     from one host were reset on the way to the egress proxy (a network fault the release does not touch); the red
+     head was red on compile, cpu, gpu, multi-a and multi-b.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

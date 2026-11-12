@@ -21,6 +21,7 @@
     ci-run slurm check|plan|apply|env|canary|status|cost|uninstall ...   a Slurm site's accounts (decision 14.9)
     ci-run pool status|run|add|check|ready ...   the machine registry's live capacity, a command on a free
                            machine, and adding a host (decision 15.1)
+    ci-run route [--rows FILE]   a plan's parts to capability labels, from the capacity (decision 16.5)
 
 The inventory is ``$CI_RUNNERS_ETC/inventory.toml``, else ``~/data/ci-runners/etc``.
 """
@@ -66,6 +67,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'pool':  # the registry is its own file: no inventory needed (an agent's account has none)
         from ci_runners import pool
         return pool.main(args, etc_dir())
+    if cmd == 'route':  # the plan job's, on a light runner: the capacity, no inventory (decision 16.5)
+        from ci_runners import route
+        return route.main(args, etc_dir())
     if cmd == 'runner-watch':  # the maintainer's account: no inventory there (decision 15.6)
         from ci_runners import runnerwatch
         return runnerwatch.main(args)

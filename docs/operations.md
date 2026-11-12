@@ -385,3 +385,14 @@ presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 ru
 **回滚**：把 inventory 改成 `presence = { enabled = false }`（或删掉这个表）。下一个 tick 就启动它停掉的和被 `ExecCondition=` 拦下的所有 runner，然后什么都不做；`check` 也总是放行。状态文件读不出来时，回滚把所有停着的 runner 都当成 presence 停的，一并启动。
 
 **仍然存在的竞争**：presence 只能缩小、不能消除取作业和资源变化之间的竞争。停之前的最后一次查看到 systemd 把 SIGTERM 送到 runner 之间（毫秒级），GitHub 仍可能把作业派给它：作业会被重新排队，或者以 `stopped`/`lost` 结束，由 16.5 的重试行重试，不会跑两次。tick 之后到作业开始之间资源也可能变化：执行器的拒绝（drain、busy、健康门、租约）仍然生效。
+
+## 16. 看懂一次路由（design 决定 16.5，RUN-10 R5）
+
+可复用工作流的 plan 作业在 `ci-light` 上跑 `ci-run route`：标准输入是计划（schema 1），标准输出是路由后的计划。容量用 `capacity.load()` 读（`pool status --fast` 的行）；`--rows FILE` 读一份事先存下的 `pool status --fast --json`，用来复现某次决定。
+
+- **输出**：`{"schema": 1, "capacity": "read" | "unreadable: <原因>", "parts": [...]}`，每个部件保留计划里的键，另加 `labels`（作业的 `runs-on`）、`timeout_minutes`（作业的 `timeout-minutes`）、`where`（`host` 或 `slurm`）、`target`（集群部件的目标，否则空）和 `why`。
+- **`why` 怎么读**：`N free`：去掉本计划前面部件订掉的之后，这组标签还有 N 个空闲 runner；`free runner unknown`：有主机 `/proc` 看不到空闲数，或者某台在线主机的 runner 表没读到，这时不溢出；`0 free; <key> can start it now`：主机上没有空闲 runner 了，这个集群目标现在就能起，部件去了 `ci-slurm`；`0 free; no cluster target can start it now`（或 `no host serves ci-slurm`、`no free ci-slurm runner`、`timing never overflows`）：留在共享标签上排队；`<m> GiB > <n> GiB`：加了 `mem-big`；`slot memory not reported`：主机行没有 `slot_pools`，没法判断要不要 `mem-big`。
+- **退出码**：0 已路由；1 计划时的路由错误，标准错误里每行一个，先写标签，例如 `route: ci-gpu2: part gpu.1: no host serves the label (...)`（带这个标签的主机全部掉线、drained、连不上或过期），或者某个部件的内存连 `mem-big` 的 slot 都放不下；2 计划读不进来（键不对、`needs` 不认识、id 重复等），是使用方的问题。
+- **容量读不到**（没有注册表、没有容量文件、行全空，或者所有主机行都过期）：每个部件都走它的共享标签，不加 `mem-big`、不溢出、不报"没有主机提供"，退出码 0，`capacity` 和标准错误里写明原因（路径只保留文件名）。这时先查 `ci-capacity.timer`（§11）。
+- **"提供"的含义**：主机行在线（没有问题项）并且它的 inventory 给这个标签注册了 runner，就算提供，哪怕 presence 因为卡被占用、slot 被占用或 timing 部件在跑而暂时停掉了全部 runner。所以"没有主机提供"只说明这些主机本身不能用（掉线、drained、过期、连不上），不是忙。
+- **重试**（`route.retry`）：按 `outcome.hint` 的五行：`cool-card` 去首次尝试那台主机上凉的那张卡（`<host>-gpu<M>`，只限单卡部件，双卡部件按 fallback）；`same-host` 去首次尝试所在主机这一类的主机标签，集群部件回同一个目标；`more-memory` 原标签加 `mem-big`（并 `resume`），容量证明不了有主机同时提供这两个标签时，就用不带 `mem-big` 的标签加 `resume` 重试，免得排队 24 小时；`any` 原标签；fallback 用现在的容量重新路由。每个部件最多重试一次；主机标签取自首次尝试的记录（`host`、`pool_labels`、`cool_card`），不读 `retry-on`。

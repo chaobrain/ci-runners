@@ -227,7 +227,7 @@ def admit(env: Mapping[str, str], event: object) -> str:
     if not isinstance(event, dict):
         return 'the event payload does not load'
     actors = [env.get('GITHUB_ACTOR'), env.get('GITHUB_TRIGGERING_ACTOR'), _login_of(event.get('sender'))]
-    users = [event.get('sender')]  # GitHub's own account type: a bot whose login has no [bot] (an agent's)
+    users = [event.get('sender')]  # GitHub's account type: a bot whose login has no [bot] too
     if name == 'pull_request':
         pr = event.get('pull_request') if isinstance(event.get('pull_request'), dict) else {}
         names = [_login_of(_login_of(pr.get(side), 'repo'), 'full_name') for side in ('head', 'base')]

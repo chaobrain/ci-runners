@@ -2208,9 +2208,12 @@ back to this contract.
 | The job token with `actions: read` lists only its own repository's runs and jobs; the org's runner list needs `admin:org` (15.6). So the route reads capacity from the hosts, never from GitHub's queue. | 16.5 | R5 |
 | A job queued on labels that no online runner has waits (up to 24 h) instead of failing at once. | 16.5 (the plan-time error) | R5 |
 | A runner stopped while idle goes offline and takes no job; a job assigned to it just before the stop is queued again or ends without outputs (`lost` or `stopped`), and never runs twice. | 16.4 | R3 (the 50 flips) |
-| The pre-job hook sees `GITHUB_REF_PROTECTED` with the other default variables, for every event, on a repository-level runner of a public repository too. | 16.7 | P1, P2 |
-| A fork's pull request to a public repository that names `ci-pub-*` labels is assigned to a repository runner and fails in "Set up runner" on the hook's refusal, before any step. | 16.7 | P2 (the live negative test) |
-| Runners registered on a public repository are reachable from that repository only, and from no other repository of the org. | 16.7 | P2 |
+| The pre-job hook sees `GITHUB_REF_PROTECTED` with the other default variables, for every event, on a repository-level runner of a public repository too. | 16.7, 18.7 | C2, C4 (were P1, P2) |
+| A fork's pull request to a public repository that names `ci-pub-gpu` is assigned to a repository runner and fails in "Set up runner" on the hook's refusal, before any step. | 16.7, 18.7 | C4 (the live negative test; was P2) |
+| Runners registered on a public repository are reachable from that repository only, and from no other repository of the org. | 16.7, 18.6 | C3, C4 |
+| A just-in-time configuration (`generate-jitconfig`) registers a repository-level runner that takes one job, after which GitHub removes it; the call needs only the repository's administration (write) permission of a fine-grained token. | 18.6 | C3 |
+| A token of an opted-in public repository lists its queued jobs with their labels before any runner can take them, so the issuer sees a job that waits for `ci-pub-gpu`. | 18.6 | C3 |
+| The runner and the actions a job uses reach GitHub through `https_proxy` (`CONNECT`) alone, uploads and downloads included. | 18.3 | C1 |
 
 ## 3. Layout
 
@@ -2560,7 +2563,7 @@ hosts, a coverage job). These rules are the consumer's:
    | `timing` | `ci-timing`, opt-in (12.14) | `compile` | exclusive timing parts on `compile_cpus` | 0 | `x` | one | ≤ 240 |
    | (the route's overflow) | `ci-slurm`, opt-in (14.2) | `slurm` | one batch job on a Slurm cluster's `target` (14.3) | up to the target's `max_cards` | `none` | none on its host | ≤ the target's `max_minutes` |
    | — | `<host>-nightly` (3090a), opt-in (12.14), until its consumer moves (16.10) | `nightly` | the consumer's nightly | 0 to all cards | any | every slot and card lease | ≤ 600 |
-   | — | `ci-pub-light`, `ci-pub-cpu`, `ci-pub-gpu`: an opted-in public repository's own runners (16.7) | `light`, `part`, `gpu` | as the rows above | | | | |
+   | `gpu`, for an opted-in public repository | `ci-pub-gpu`: its own confined single-job runners (16.7, 18); its plan, claim, verdict and CPU parts run on GitHub-hosted runners (18.1) | `gpu` | one-card parts on the runner's card, confined (18.3, 18.4) | 1 | any | the card's lease, held outside | ≤ 240 |
 
    Host labels (`<host>-light`, `<host>-cpu`, `<host>-gpu`, `<host>-gpu<N>`,
    `<host>-multi`, `<host>-compile`, `<host>-slurm`, and the shared `3090-light` and
@@ -2696,7 +2699,8 @@ expect of the head.
 
 **Onboarding** is at most 20 workflow lines and one registry entry (`etc/projects/
 <project>.toml`, §4.9's env). A private repository of the org needs no policy entry (the
-snapshot holds it, §6.5); a public one needs the lead's entry and its own pool (16.7). The
+snapshot holds it, §6.5); a public one needs the lead's entry (16.7), and `ci.yml` runs its
+CPU work on GitHub-hosted runners and its GPU parts on the confined public pool (18). The
 whole workflow:
 
 ```yaml
@@ -2760,7 +2764,7 @@ only after the label's numerics check passed there (16.1).
 | h100 | `part` | 8 | `ci-cpu`, `mem-big` | `h100-cpu` | CPU parts, 8 slots of 20 threads (16.9) |
 | h100 | `gpu` | 5 | `ci-gpu` | `h100-gpu`, `h100-gpu<N>` | one-card parts on card N; no `multi` until a P2P self-test passes (15.8) |
 | the new host (16.9) | `light`, `home`, `part`, `gpu` | sized at its plan from the parts' measured peaks: about 96 threads and its 4 cards | `ci-light`, `ci-cpu`, `ci-gpu`; `ci-gpu2` after a P2P self-test | its role's | as on h100; a dedicated CI account |
-| the new host, second account (16.7) | `light`, `part`, `gpu`, audience `public` | a few, per opted-in repository | `ci-pub-light`, `ci-pub-cpu`, `ci-pub-gpu` | — | an opted-in public repository's jobs only; registered at repository level |
+| h100, then the new host (`6000pro`), then any host whose check passes (18) | `pub-gpu` (`gpu`, per card), audience `public` | 0 static; the issuer starts single-job runners on demand, at most one per free card (18.6) | `ci-pub-gpu` | `<host>-pub-gpu` | an opted-in public repository's GPU parts only, confined (18.3); registered at repository level |
 
 A pool's size is its slots (or cards): one runner is one slot (16.2), and presence keeps
 online only the runners that can start a job (16.4), so no runner waits for a slot. The
@@ -2779,8 +2783,9 @@ holds 2 CPU parts at once (72 cores); a CPU part past those pends, and ends `una
 (`pending: … AssocGrpCpuLimit`) once its bound passes, so the route (16.5) books CPU
 parts against the CPU target's `jobs_free` before it sends one there. The GPU targets
 have room for the rest.
-Runner names are `<host role>-<pool>-<i>`, except the per-card pools'. All are org-level
-in Default (decision 1), but the public pool's, which are registered on their repository.
+Runner names are `<host role>-<pool>-<i>`, except the per-card pools' and the public
+pool's (`<host>-pub-gpu<N>-<seq>`, 18.6). All are org-level in Default (decision 1), but the
+public pool's, which are registered on their repository.
 
 **Labels** (decision 16.1, amending 12.5). GitHub gives a job to any runner that has all
 its labels. A consumer asks for a capability label, an equal-verdict class: any runner
@@ -2983,7 +2988,7 @@ On 3090b and 3090a the executor of §4.3 adds:
 |---|---|---|---|---|
 | h100 | the shared account, runners on it (decision 11.3) | everything a co-user of the account can reach, and they can reach everything of ours: the runner credentials, the hook, the policy, each job's `GITHUB_TOKEN` while the job runs, the checkout of a private repository, the results and the statuses we post | private repositories only, of org members only (decision 11.1, 11.2); `GITHUB_TOKEN` with `contents: read`, plus `statuses: write` only in claim and verdict; per-job directories, deleted after the job; no other credential there but the tunnel key, which opens only allowlisted HTTPS (T15); `NoNewPrivileges` | a dedicated account (decision 11.7) |
 | 3090b, 3090a | a dedicated CI account per host, runners on it (decision 12.2) | the CI account's files: the runner credentials, the hook, the policy, the envs, each job's `GITHUB_TOKEN` while it runs, the checkout of a private repository, the shared lock and slot files (a job can hold them and stall local runs); nothing of the local accounts (T18), no sudo, no GitHub credential | private repositories only, of org members only; `NoNewPrivileges`; the account's own mount namespace (decision 12.16); `GITHUB_TOKEN` as on h100; per-job directories; the tunnel key opens only allowlisted HTTPS; the push key only `--receive` | a root-owned host layer with system units (§5.3, T13) |
-| the new host's second account (16.7, from P2) | a second Unix account, runners registered on each opted-in public repository | the account's files: the runners' registrations of the opted-in repositories, the env, each job's `GITHUB_TOKEN` while it runs, the host's network; not the hooks, the policy, the snapshot or the `.env` files, which are root's; no cluster key, no tunnel key, no organisation token, no private repository's name | opted-in public repositories only, same-repository pull requests and protected refs of org members only (16.7); `NoNewPrivileges`; per-job directories | — |
+| a public GPU job on any host whose check passes, h100 first (18, from C4; supersedes 16.7's second account) | a subordinate uid in its own user, mount, PID, IPC, network and UTS namespaces (`ns-subuid`), or a dedicated account (`account`); one runner for one job, registered on its opted-in public repository | its own tree, its job's `GITHUB_TOKEN` while it runs, its repository's env and the system read-only, its leased card, the egress proxy's allowlist through one relay; what the control node and the global files of `/proc` and `/sys` show (18.8); not the account's files or keys, not the hooks, the policy or the snapshot (read-only), not any other process, card or socket | the conformance check before the audience and on a timer (18.5); the hook's rules of 16.7, GPU class only; single-job configurations issued off the host (18.6); `no_new_privs`, no capability; the tree deleted after the job | a kernel and driver kept current (18.8) |
 | egress host | a dynamic user of `ci-egress.service` | nothing of a job's: it sees only the names a job connects to | hardened system unit; root-owned release and allowlist | — |
 | workstation | the maintainer | nothing: no job runs there | the push reads the login at each run and stores nothing | — |
 | 3090b, the maintainer's account (15.3, 15.6) | the maintainer | nothing: no job runs as the maintainer, and the CI account reaches nothing of the local accounts (T18) | the backstop and the runner watch read the login at each run and store it nowhere; the watch keeps its counts | — |
@@ -2993,7 +2998,7 @@ On 3090b and 3090a the executor of §4.3 adds:
 | class | events accepted | actors | runner classes |
 |---|---|---|---|
 | private, allowlisted (every private repository of the org snapshot, §6.5, with its id; `compile` and `nightly` only where its `policy.toml` entry lists the class, decision 12.14) | `pull_request` (same repository), `push`, `workflow_dispatch`, `schedule`, `workflow_run`, `status`, `repository_dispatch` | `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR`, and for a pull request its author and for a push its pusher, all on the actor allowlist (the org's members, §6.5). The workflow bot is accepted only for `workflow_dispatch` and `repository_dispatch`, and only where the repository's `bot_dispatch` switch is on (off by default; decision 10.1). | all |
-| public, opted in (decision 16.7, from P1: `visibility = "public"`, `public_runners = true` and its id in `policy.toml`, written by the lead) | `pull_request` (same repository); `push` only where `GITHUB_REF_PROTECTED` is `true` | as for a private repository (the snapshot's members); the workflow bot never | `light`, `part`, `gpu` of the runner audience `public` only |
+| public, opted in (decision 16.7, from C2: `visibility = "public"`, `public_runners = true` and its id in `policy.toml`, written by the lead) | `pull_request` (same repository); `push` only where `GITHUB_REF_PROTECTED` is `true` | as for a private repository (the snapshot's members); the workflow bot never | `gpu` of the runner audience `public` only (18.7); its CPU work runs on GitHub-hosted runners |
 | any other repository, other public ones and ci-runners itself included | none | none | none |
 
 `pull_request_target`, `issue_comment` and other events are refused everywhere unless
@@ -3020,7 +3025,7 @@ bound).
 
 | # | threat | mitigation |
 |---|---|---|
-| T1 | A fork pull request asks for a self-hosted label by editing the workflow in the fork. | `allows_public_repositories` stays off, so a public repository's job matches no org runner; the org forbids forks of private repositories; the guard on every job (§4.8 rule 1); the hook (fork, actor, repository, class, audience); no docker for the runner account; `NoNewPrivileges`. On an opted-in public repository's own runners (16.7) the hook refuses a fork's pull request, `pull_request_target`, a non-member and a bot before the first step, proven by the live negative test (P2), and the account holds no credential of ours |
+| T1 | A fork pull request asks for a self-hosted label by editing the workflow in the fork. | `allows_public_repositories` stays off, so a public repository's job matches no org runner; the org forbids forks of private repositories; the guard on every job (§4.8 rule 1); the hook (fork, actor, repository, class, audience); no docker for the runner account; `NoNewPrivileges`. On an opted-in public repository's own runners (16.7) the hook refuses a fork's pull request, `pull_request_target`, a non-member and a bot before the first step, proven by the live negative test (C4), and the job reaches no credential of the account (18.5) |
 | T2 | Someone outside the org's members pushes a workflow that asks for our labels (an outside collaborator, a bot). | the hook's actor checks against the snapshot's members |
 | T3 | A new or unlisted repository asks for our labels (Default is open to all private repositories). | the hook's repository allowlist (the snapshot); the repository id is checked against the name |
 | T4 | Someone moves `v1` in ci-runners to bad code. | D1 rulesets (only the lead can update or delete `v*` and `main`); the hook and executor come from installed releases (D2) |
@@ -3032,7 +3037,7 @@ bound).
 | T10 | A hostile event payload targets the hook. | JSON parsing in `python -I`; no shell interpolation; fixtures with hostile strings |
 | T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the statuses of the runners' identity, the policy's `bot` (15.9). A workflow of the repository can still post as the bot with its own job token, so someone with write can still forge one; consumers audit merges |
 | T12 | A burst of refused jobs blocks our runners (on the public pool, anyone may open fork pull requests). | refusal in under 10 s; the lead can pause a repository in the policy; each opted-in public repository requires approval before an outside contributor's workflow runs (a repository setting, the lead's); the public pool's runners serve that repository only |
-| T13 | (also any co-user of h100's account, an accepted gap; on the 3090 hosts the CI account's own jobs only; not on the public pool, whose hooks, policy, snapshot and `.env` are root's, 16.7) An accepted job (or its dependency) edits the host layer it owns: the hook (or its copy in `/tmp`, 13.5), the policy, `.env`, the units, the drain file, the load record (13.1, 13.2), presence's state or the capacity file (16.4, 16.5), so later jobs pass unchecked or the route is misled. | private consumers only (§5.3); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs; `ci-run hooks copy` checks its `/tmp` directory through a descriptor (no link, the account's, mode 700) and then writes the copies by path, which only the account itself could race in its private `/tmp` (accepted, 13.5) |
+| T13 | (also any co-user of h100's account, an accepted gap; on the 3090 hosts the CI account's own jobs only; not on the public pool, whose hooks, policy and snapshot are read-only mounts in the confinement and whose runner lives for one job, 18.3) An accepted job (or its dependency) edits the host layer it owns: the hook (or its copy in `/tmp`, 13.5), the policy, `.env`, the units, the drain file, the load record (13.1, 13.2), presence's state or the capacity file (16.4, 16.5), so later jobs pass unchecked or the route is misled. | private consumers only (§5.3); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs; `ci-run hooks copy` checks its `/tmp` directory through a descriptor (no link, the account's, mode 700) and then writes the copies by path, which only the account itself could race in its private `/tmp` (accepted, 13.5) |
 | T14 | A co-user of h100's shared account reads the org-sync token, or edits the snapshot. | no token on h100 (decision 11.9): the snapshot arrives over the maintainer's ssh access, checked by `--receive` (§6.5). A host that syncs itself holds a fine-grained read-only token (members, metadata): it shows the member list and the private repositories' names, nothing else. An edited snapshot is T13's case. |
 | T15 | A co-user of h100's shared account takes the tunnel key, or any local user of a host uses the tunnel's port on 127.0.0.1 (on the 3090 hosts, every local account can reach it). | the egress account has no shell and no listening forward, and its key opens only the egress proxy's port (decision 11.10). The proxy passes only its allowlist on port 443: HTTPS to GitHub, the Actions service's storage and the package indexes, which job code reaches through the tunnel anyway. The suffix `.blob.core.windows.net` lets them reach any Azure storage account over HTTPS, and `storage.googleapis.com` any Google Cloud Storage bucket: accepted gaps, since the Actions storage accounts have no stable names and package downloads use those buckets. They appear as the egress host's address. The allowlist is root-owned on the egress host. The lead revokes the key by deleting one line there. |
 | T16 | (3090 hosts) A job, or a local user, holds the shared host lock or a slot, and stalls the other side's work; or a local account empties the ticket queue. | the files are `flock` locks, so a hold ends with its process: a part's hold ends with its scope (inner timeout, the job-completed hook, the reaper); a waiting part ends `unavailable` at its queue timeout; the files hold no data, and a lost ticket only loses a place in the queue |
@@ -3042,7 +3047,8 @@ bound).
 | T20 | (14) Other users of the cluster reach our files or a forward, or read the site's names in our public logs. | the account's root and every part directory mode 700; `check` and `apply` refuse a root another user could swap (its mode, a link, the directories above it); what a part shows on GitHub is redacted (14.4); a part's temporary files on a node only inside a 700 directory of its own; the build's forward is a Unix socket in a 700 directory behind a relay that accepts only the build's random credential | a node's `/tmp` and process table are shared with other users' jobs, as for any user of the site |
 | T21 | (14) Runaway cost: a lost driver, a stuck job, a retry loop. | every job has `--time`; the reaper cancels a job whose GitHub job is gone; pending is bounded; one retry (§4.4); the daily and monthly caps (14.7) | job code (T19) can spend up to the site's association limits |
 | T22 | (14) A node silently corrupts multi-card results (peer copies that read zeros). | the P2P self-test before every two-card part (12.6); a target's `max_cards` from its canary | – |
-| T23 | (16.7) Code of an opted-in public repository, from a member's same-repository branch (fork commits nobody reviewed included) or a compromised dependency, runs on the public pool and reads what the account holds, or its public logs show the host. | a separate account and host: no cluster key, tunnel key or organisation token, a snapshot without private repositories, root-owned checks; repository-level runners; the hooks at a path naming no disk or account, the machine name the lead's | the member vouches for their branch (consumers' guide); the job reaches the runners' registrations of the opted-in repositories and the host's network |
+| T23 | (16.7, 18) Code of an opted-in public repository, from a member's same-repository branch (fork commits nobody reviewed included) or a compromised dependency, runs on the public pool and reads what the account holds, or its public logs show the host. | the confinement (18.3): the account's files, processes and sockets out of reach, the checks read-only, one relay to the proxy, one job per runner; the conformance check per host (18.5); a snapshot without private repositories; repository-level single-job runners issued off the host; the hooks at a fixed path, the machine name the confinement's | the member vouches for their branch (consumers' guide); the job reaches its own tree, its card, the proxy's allowlist and what the host shows (18.8) |
+| T24 | (18) A public job uses a bug of the kernel or of the GPU driver (its `ioctl`s on the card and control nodes) to leave the confinement, or reads another job's data left on its card. | who may run code: members' same-repository pull requests and protected pushes of listed repositories only (16.7); kernels and drivers kept current; one job per card; the memory measurement, and a scrub or cards set apart if the driver leaves data (18.4) | a local privilege escalation in the kernel or the driver gives the host; neither a namespace nor a dedicated account removes it (18.8) |
 
 ### 6.5 The org snapshot
 
@@ -3062,7 +3068,9 @@ else leaves the old snapshot, exits 1 and prints why. Receives take a lock, one 
 time. The push timer is monotonic: a workstation suspended for an hour stales h100 too.
 The public pool's account (16.7, from P2) receives with `--receive --public`, which keeps
 the members only and drops every private repository before it writes (an opted-in public
-repository is the policy's own entry).
+repository is the policy's own entry). *Amended by 18.3: the members-only snapshot is a
+file of its own that the confinement binds in read-only; the account's own snapshot is
+never mounted there.*
 A host that holds its own token runs `ci-orgsync.timer` instead (inventory `orgsync`,
 `etc/orgsync.token`).
 
@@ -3948,7 +3956,8 @@ uses until then.
    `v*` that only the lead may bypass. It never holds inventory (D1).
 2. **Repository-level runners for public consumers.** Retired by 11.12; back with 16.7:
    light, CPU and GPU runners of a separate account on one host, registered on each
-   public repository that opts in, with root-owned checks.
+   public repository that opts in, with root-owned checks. *Amended by 18:* GPU runners
+   only, confined, one job each, on any host whose conformance check passes, h100 first.
 3. **Runner pools.** Pools are shared per host and class. *Amended by 16.2 and 16.4:* one
    runner per slot, and presence keeps online only the runners that can start a job, so
    the waiting seat and `max_waiting` lapse where a pool's instances equal its slots.

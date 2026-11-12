@@ -1,0 +1,10 @@
+[Unit]
+Description=ci-runners: refresh the capacity file every minute (a row older than 2 min counts as down)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

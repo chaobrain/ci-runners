@@ -671,8 +671,10 @@ class Probe(unittest.TestCase):
             open(lock, 'w').close()
             self.assertEqual(pool.probe(lock, 1, '', runners=os.path.join(d, 'actions-runner'))['runners'], 0)
             self.assertNotIn('runners', pool.probe(lock, 1, ''))
-            with unittest.mock.patch.object(pool, 'runners_alive', lambda root: None):  # hidden: not known, not 0
-                self.assertIsNone(pool.probe(lock, 1, '', runners='/x')['runners'])
+            with unittest.mock.patch.object(pool, 'runner_procs', lambda root: None):  # hidden: not known, not 0
+                got = pool.probe(lock, 1, '', runners='/x')
+                self.assertIsNone(got['runners'])
+                self.assertNotIn('runner_names', got)
 
     def test_the_host_side_runs_the_entrys_host_python(self):
         """h100's system python is 3.10, without tomllib (decision 15.8, item 9): the status
@@ -809,6 +811,19 @@ class Cluster(unittest.TestCase):
         nomem = dataclasses.replace(cpu, memory_gib=0)  # the registry allows it: a job still takes 1 GiB
         self.assertEqual(jobs(nomem), 2 + 1 + 1)
         self.assertEqual(jobs(cpu, mem_gib=0), 2 + 1 + 1)
+
+    def test_other_users_cores_count_as_well_as_the_associations_room(self):
+        """Issue #155: other users hold 16 of the one node's 72 cores; the association still
+        allows 72. Room for one 32-core job, not two: the node's idle cores bind."""
+        m = reg().machines['cl']
+        nodes = pool.parse_sinfo('cn1|part_c|mix|16/56/0/72|2060000|0|(null)|(null)|')
+        r = pool.target_row(m, m.targets['cpu'], nodes, {'part_c': {'cpu': 72}}, {})
+        self.assertEqual((r['jobs_free'], r['start_now'], r['cpus_free']), (1, True, 56))
+        r = pool.target_row(m, m.targets['cpu'], nodes, {'part_c': {'cpu': 72}}, {'part_c': {'cpu': 32}})
+        self.assertEqual((r['jobs_free'], r['start_now']), (1, True))  # 40 of the room left, 56 idle: one
+        busy = pool.parse_sinfo('cn1|part_c|mix|48/24/0/72|2060000|0|(null)|(null)|')
+        r = pool.target_row(m, m.targets['cpu'], busy, {'part_c': {'cpu': 72}}, {})
+        self.assertEqual((r['jobs_free'], r['start_now']), (0, False))  # 24 idle cores: none, whatever the room
 
     def test_the_table_shows_the_jobs_a_target_starts_now(self):
         m = reg().machines['cl']
@@ -1539,7 +1554,8 @@ class CIAccount(unittest.TestCase):
             return []
         with unittest.mock.patch.object(pool, 'status', status), unittest.mock.patch('sys.stdout', io.StringIO()):
             self.assertEqual(pool.main(['status', '--json'], self.etc), 0)
-        self.assertEqual(seen, {'etc': self.etc})  # the keys and the site config beside the registry
+        self.assertEqual(seen.pop('etc'), self.etc)  # the keys and the site config beside the registry
+        self.assertEqual(list(seen), ['on_rows'])  # the capacity file's writer (16.5)
 
     def test_the_forced_command_takes_no_argument_and_reads_no_stdin(self):
         self.local_lock()

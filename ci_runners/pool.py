@@ -87,6 +87,18 @@ how many jobs of its size (``start_now``'s: its cores, on a GPU target cards x c
 card, and the memory) the partition's ``idle`` and ``mix`` nodes hold now, summed, capped
 by the association's room; positive exactly where ``start_now`` is true.
 
+**The capacity file** (decision 16.5; ``ci_runners/capacity.py``): ``pool status`` writes
+its rows, each with ``read_at``, into ``state/capacity.json`` beside the account's ``etc``,
+one machine's as soon as it answers, with the ``local`` machine's probe; a host row also
+has ``label_runners``, each runner label's instances registered, online and free (no
+``Runner.Worker``). The account's ``ci-capacity.timer`` runs it every minute. The forced
+probe answers with that file's probe while it is fresh (``capacity.STALE_S``), without
+running anything. ``pool status --fast`` reads the files: the forced hosts' through their
+probes, the hosts this account probes itself without ``nvidia-smi`` (their cards from the
+file), the cluster's targets from the file; each ssh call connects within 2 s and ends
+within ``FAST_TIMEOUT``; a row older than 2 min counts as down. The route reads it through
+``capacity.load``.
+
 A machine that is not ``ready`` is skipped by ``pool run``'s plan unless ``--on`` names it
 (``pool add``'s checks run there that way). A cluster's entry is hand-written.
 
@@ -133,7 +145,7 @@ bounded below that).
 
 CLI::
 
-    ci-run pool status [--json]
+    ci-run pool status [--json] [--fast]   # --fast: from the capacity files, within 2 s
     ci-run pool probe                    # the local machine's probe, as JSON (a forced command)
     ci-run pool run [--cpu N] [--mem G] [--gpu MODEL[:COUNT]] [--on KEY] [--here]
                     [--timeout MIN] [--queue-minutes MIN] [--no-wait]
@@ -512,12 +524,14 @@ def drained(path: str) -> bool:
 NO_RUNNER = 'no runner online'
 
 
-def runners_alive(root: str, proc: str = '/proc') -> 'set[str] | None':
+def runner_procs(root: str, proc: str = '/proc') -> 'tuple[set[str], set[str]] | None':
     """The names of the runners under ``root`` (``<data>/actions-runner``) with a live
-    process, read from each process's ``cmdline`` without taking anything: a listener
+    process, and of those running a job, read from each process's ``cmdline`` without
+    taking anything. Alive: a listener
     (``argv[0]`` ``<root>/<name>/bin/Runner.Listener``) or its helper (``argv[1]``
     ``<root>/<name>/run-helper.sh``, after its shell), which outlives the listener's
-    self-update (decision 15.5). ``root`` counts as written and as its real path (the
+    self-update (decision 15.5). Busy: a worker (``argv[0]``
+    ``<root>/<name>/bin/Runner.Worker``), which runs the runner's job (16.5). ``root`` counts as written and as its real path (the
     runner's scripts start from their physical directory), and where its owner is known
     only that account's processes count. None when it cannot be known: ``proc`` hides
     other accounts' processes (``hidepid``) and ``root`` is not the caller's.
@@ -536,7 +550,7 @@ def runners_alive(root: str, proc: str = '/proc') -> 'set[str] | None':
         hidden = False
     if hidden and owner != os.getuid():
         return None
-    names = set()
+    names, busy = set(), set()
     try:
         pids = [p for p in os.listdir(proc) if p.isdigit()]
     except OSError:
@@ -549,23 +563,33 @@ def runners_alive(root: str, proc: str = '/proc') -> 'set[str] | None':
                 argv = f.read(8192).split(b'\0')
         except OSError:
             continue  # gone, or hidden
-        for i, tail in ((0, ['bin', 'Runner.Listener']), (1, ['run-helper.sh'])):
+        for i, tail, into in ((0, ['bin', 'Runner.Listener'], names), (1, ['run-helper.sh'], names),
+                              (0, ['bin', 'Runner.Worker'], busy)):
             path = argv[i].decode('utf-8', 'replace') if len(argv) > i else ''
             for prefix in prefixes:
                 rest = path[len(prefix):].split('/') if path.startswith(prefix) else []
                 if rest and rest[0] and rest[1:] == tail:
-                    names.add(rest[0])
-    return names
+                    into.add(rest[0])
+    return names, busy & names
+
+
+def runners_alive(root: str, proc: str = '/proc') -> 'set[str] | None':
+    """The names of the runners under ``root`` with a live process (``runner_procs``), or
+    None where it cannot be known (decision 15.5)."""
+    got = runner_procs(root, proc)
+    return None if got is None else got[0]
 
 
 def probe(lock: str, count: int, queue: str, drain: str = '', leases: str = '', parts: int = 1, gpus: int = 0,
-          runners: str = '') -> dict:
+          runners: str = '', smi: bool = True) -> dict:
     """What a host's row needs, read on the host without taking anything: its free CI slots
     (``/proc/locks``, as ``slots._flocked``), the tickets waiting, the load, the available
     memory, the cards' free MiB, whether ``drain`` drains it, with ``leases`` (the
     leases' directory, ``parts`` a card) the leases held per card, and with ``runners``
-    how many of the CI account's runners have a live process (decision 15.5). Self-contained
-    (its source, ``drained``'s and ``runners_alive``'s run on the host). Stdlib."""
+    how many of the CI account's runners have a live process (decision 15.5), their names
+    and those running a job (16.5). Without ``smi`` the cards are not read (no
+    ``nvidia-smi``: ``pool status --fast``). Self-contained (its source, ``drained``'s and
+    ``runner_procs``'s run on the host). Stdlib."""
     import os
     import subprocess
 
@@ -598,10 +622,11 @@ def probe(lock: str, count: int, queue: str, drain: str = '', leases: str = '', 
             if line.startswith('MemAvailable:'):
                 out['mem_free_gib'] = int(line.split()[1]) // (1 << 20)
     try:
-        r = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,noheader,nounits'],
-                           capture_output=True, text=True, timeout=30)
-        out['gpu_free'] = {int(a): int(b) for a, b in (x.split(',') for x in r.stdout.split('\n') if x.strip())} \
-            if r.returncode == 0 else {}
+        if smi:
+            r = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,noheader,nounits'],
+                               capture_output=True, text=True, timeout=30)
+            out['gpu_free'] = {int(a): int(b) for a, b in (x.split(',') for x in r.stdout.split('\n') if x.strip())} \
+                if r.returncode == 0 else {}
     except (OSError, subprocess.SubprocessError, ValueError):
         out['gpu_free'] = {}
     rt = os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}'
@@ -611,14 +636,16 @@ def probe(lock: str, count: int, queue: str, drain: str = '', leases: str = '', 
         out['cards_leased'] = {c: sum(1 for k in range(parts) if flocked(os.path.join(leases, f'card{c}.{k}.lock')))
                                for c in range(gpus)}
     if runners:
-        alive = runners_alive(runners)
-        out['runners'] = None if alive is None else len(alive)
+        got = runner_procs(runners)
+        out['runners'] = None if got is None else len(got[0])
+        if got is not None:
+            out['runner_names'], out['runner_busy'] = sorted(got[0]), sorted(got[1])
     return out
 
 
 def _probe_src() -> str:
     import inspect
-    return '\n\n'.join(inspect.getsource(f) for f in (drained, runners_alive, probe))
+    return '\n\n'.join(inspect.getsource(f) for f in (drained, runner_procs, probe))
 
 
 def runner_labels(etc: str = '') -> dict[str, int] | None:
@@ -626,33 +653,95 @@ def runner_labels(etc: str = '') -> dict[str, int] | None:
     registers, by setup's own rule (``setup.runners``, design §5.1): each instance once for
     each label it carries, shared labels included (decision 15.7). None where the inventory
     is missing or does not load (a maintainer's registry has none beside it)."""
-    from ci_runners import inventory, setup
-    try:
-        with open(os.path.join(_etc(etc), 'inventory.toml'), encoding='utf-8') as f:
-            rs = setup.runners(inventory.load(f.read()))
-    except (OSError, ValueError):  # InventoryError is a ValueError, as are two runners of one name
+    rs = _inventory_runners(etc)
+    if rs is None:
         return None
     out: dict[str, int] = {}
-    for _, labels, _ in rs:
+    for _, labels in rs:
         for label in set(labels):
             out[label] = out.get(label, 0) + 1
     return out
 
 
-def local_probe(reg: Registry, etc: str = '') -> dict:
-    """``ci-run pool probe``: the probe of the registry's one ``local`` machine, what a
-    forced key's caller reads (item 8), with this account's ``runner_labels`` where its
-    inventory loads (decision 15.7). Takes no input."""
-    local = [m for m in reg.machines.values() if m.access == 'local']
-    if len(local) != 1:
-        raise RegistryError(f'pool probe: {len(local)} local machines in the registry, not one')
-    m = local[0]
-    lz = m.leases or LeaseDir('', 1)
-    p = probe(m.slots.lock, m.slots.count, m.slots.queue, m.drain, lz.dir, lz.parts, m.gpus, m.runners)
+def _inventory_runners(etc: str) -> list[tuple[str, list[str]]] | None:
+    from ci_runners import inventory, setup
+    try:
+        with open(os.path.join(_etc(etc), 'inventory.toml'), encoding='utf-8') as f:
+            return [(n, labels) for n, labels, _ in setup.runners(inventory.load(f.read()))]
+    except (OSError, ValueError):  # InventoryError is a ValueError, as are two runners of one name
+        return None
+
+
+def label_runners(etc: str, p: Mapping) -> dict[str, dict] | None:
+    """Each label's runner instances that this account's inventory registers (as
+    ``runner_labels``), with how many of them are online and free by the probe ``p``'s
+    names (``runner_names``: a live process; ``runner_busy``: running a job), decision
+    16.5: ``{label: {"registered": n, "online": n, "free": n}}``, ``online`` and ``free``
+    None where the probe does not know them. None where the inventory does not load."""
+    rs = _inventory_runners(etc)
+    if rs is None:
+        return None
+    alive, busy = p.get('runner_names'), p.get('runner_busy')
+    known = isinstance(alive, list) and isinstance(busy, list)
+    alive, busy = (set(alive), set(busy)) if known else (set(), set())
+    out: dict[str, dict] = {}
+    for name, labels in rs:
+        for label in set(labels):
+            c = out.setdefault(label, {'registered': 0, 'online': 0 if known else None, 'free': 0 if known else None})
+            c['registered'] += 1
+            if known and name in alive:
+                c['online'] += 1
+                c['free'] += name not in busy
+    return out
+
+
+def _with_inventory(p: dict, etc: str) -> dict:
+    """``p`` with this account's ``runner_labels`` and ``label_runners``, where its inventory loads."""
     labels = runner_labels(etc)
     if labels is not None:
         p['runner_labels'] = labels
+        p['label_runners'] = label_runners(etc, p)
     return p
+
+
+def _local(reg: Registry) -> Machine:
+    local = [m for m in reg.machines.values() if m.access == 'local']
+    if len(local) != 1:
+        raise RegistryError(f'pool probe: {len(local)} local machines in the registry, not one')
+    return local[0]
+
+
+def live_probe(m: Machine, etc: str = '') -> dict:
+    """The local machine ``m``'s probe, read now, with this account's runners per label."""
+    lz = m.leases or LeaseDir('', 1)
+    return _with_inventory(probe(m.slots.lock, m.slots.count, m.slots.queue, m.drain, lz.dir, lz.parts, m.gpus,
+                                 m.runners), etc)
+
+
+def local_probe(reg: Registry, etc: str = '', now: Callable[[], float] | None = None) -> dict:
+    """``ci-run pool probe``: the probe of the registry's one ``local`` machine, what a
+    forced key's caller reads (item 8), with this account's ``runner_labels`` and
+    ``label_runners`` where its inventory loads (15.7, 16.5). While the account's capacity
+    file holds a fresh probe of it (``capacity.fresh_local``), that one, with its ``age``,
+    and nothing is run (no ``nvidia-smi``, 16.5). Takes no input."""
+    from ci_runners import capacity
+    m = _local(reg)
+    cached = capacity.fresh_local(capacity.path(_etc(etc)), m.key, (now or time.time)())
+    return cached if cached is not None else live_probe(m, etc)
+
+
+def record_local(reg: Registry, etc: str = '', p: dict | None = None, here: str | None = None,
+                 now: Callable[[], float] = time.time) -> dict:
+    """Write the local machine's row and probe ``p`` (read now by default) into the
+    account's capacity file, the others' rows kept: presence's hook at each tick (16.4,
+    16.5). Returns the row."""
+    from ci_runners import capacity
+    m = _local(reg)
+    p = live_probe(m, etc) if p is None else p
+    t = round(now(), 3)
+    row = dict(host_row(m, p, here=socket.gethostname() if here is None else here), read_at=t)
+    capacity.merge(capacity.path(_etc(etc)), [row], list(reg.machines), {'key': m.key, 'read_at': t, 'probe': p}, now)
+    return row
 
 
 def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> dict:
@@ -676,6 +765,9 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
     labels = p.get('runner_labels')  # the host's own inventory's instances per label (decision 15.7)
     if isinstance(labels, dict) and all(isinstance(k, str) and type(v) is int and v >= 0 for k, v in labels.items()):
         row['runners'] = dict(labels)
+    table = p.get('label_runners')  # and how many are online and free (16.5)
+    if isinstance(table, dict) and all(isinstance(k, str) and _counts(v) for k, v in table.items()):
+        row['label_runners'] = {k: dict(v) for k, v in table.items()}
     free = int(p.get('slots_free', 0))
     cores = max(0, (m.cpus or int(p.get('cpus', 0))) - math.ceil(float(p.get('load', 0.0))))
     gpu_free = {int(k): int(v) for k, v in p.get('gpu_free', {}).items()}
@@ -687,6 +779,16 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
     row.update(slots_free=free, queue=int(p.get('queue', 0)), cpus_free=cores if free else 0,
                mem_free_gib=int(p.get('mem_free_gib', 0)), gpu_free=gpu_free, scope=bool(p.get('scope')))
     return row
+
+
+def _counts(v: object) -> bool:
+    """A well-formed ``label_runners`` entry: registered >= online >= free >= 0, the last two
+    both None where not known."""
+    if not isinstance(v, dict) or set(v) != {'registered', 'online', 'free'} or type(v['registered']) is not int:
+        return False
+    if v['online'] is None and v['free'] is None:
+        return v['registered'] >= 0
+    return all(type(v[k]) is int for k in ('online', 'free')) and v['registered'] >= v['online'] >= v['free'] >= 0
 
 
 def _base_row(key: str, m: Machine, here: str) -> dict:
@@ -818,17 +920,20 @@ def target_row(m: Machine, t: Target, nodes: Sequence[Node], assoc: Mapping[str,
 Runner = Callable[..., subprocess.CompletedProcess]
 
 
-def _ssh(alias: str, key: str = '', config: str = '') -> list[str]:
-    """ssh to ``alias`` in batch mode; with ``key``, that key only; with ``config``, that
-    file for the account's ssh configuration."""
+def _ssh(alias: str, key: str = '', config: str = '', connect: int = 15) -> list[str]:
+    """ssh to ``alias`` in batch mode, connecting within ``connect`` s; with ``key``, that
+    key only; with ``config``, that file for the account's ssh configuration."""
     only = ['-o', 'IdentitiesOnly=yes', '-i', key] if key else []
     only += ['-F', config] if config else []
-    return ['ssh', '-o', 'BatchMode=yes', *only, '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', alias]
+    return ['ssh', '-o', 'BatchMode=yes', *only, '-o', f'ConnectTimeout={connect}', '-o', 'ServerAliveInterval=15', alias]
 
 
 #: what ``pool status`` asks of a host whose key is forced to it (the forced line runs it anyway)
 FORCED_PROBE = 'ci-run pool probe'
 HOST_TIMEOUT, CLUSTER_TIMEOUT = 60, 90  # s a host's probe and a cluster's may take; status runs them in parallel
+#: pool status --fast (16.5): each ssh call connects within FAST_CONNECT s and ends within
+#: FAST_TIMEOUT s, so that the whole ends within 2 s with a host down
+FAST_CONNECT, FAST_TIMEOUT = 2, 1.5
 
 
 def _etc(etc: str) -> str:
@@ -848,40 +953,65 @@ def probe_config(etc: str) -> str:
     return path if os.path.isfile(path) else ''
 
 
-def _remote(m: Machine, argv: Sequence[str]) -> list[str]:
+def _remote(m: Machine, argv: Sequence[str], connect: int = 15) -> list[str]:
     """``argv`` run on ``m``: through ssh as one quoted command line, or here for a local machine."""
-    return list(argv) if m.access == 'local' else [*_ssh(m.ssh), shlex.join(argv)]
+    return list(argv) if m.access == 'local' else [*_ssh(m.ssh, connect=connect), shlex.join(argv)]
 
 
-def probe_host(m: Machine, run: Runner = subprocess.run, here: str = '', etc: str = '') -> dict:
-    """A host's row: its probe's source sent to its python, or with ``probe = "forced"``
-    no code and no stdin, through its key (``probe_key``), whose line forces ``ci-run pool
-    probe`` there."""
+def probe_host(m: Machine, run: Runner = subprocess.run, here: str = '', etc: str = '', fast: bool = False,
+               cached: Mapping | None = None, now: Callable[[], float] = time.time) -> dict:
+    """A host's row, with ``read_at``: its probe's source sent to its python, or with
+    ``probe = "forced"`` no code and no stdin, through its key (``probe_key``), whose line
+    forces ``ci-run pool probe`` there; that answers with its account's capacity file while
+    it is fresh, and the row was read when that was (its ``age``). ``fast`` (``pool status
+    --fast``, 16.5): ssh connects within ``FAST_CONNECT`` s and the whole ends within
+    ``FAST_TIMEOUT`` s; a probe this account runs reads no cards (no ``nvidia-smi``) and
+    takes them from ``cached``, this account's file's row of the host, while that is fresh."""
+    return _host(m, run, here, etc, fast, cached, now)[0]
+
+
+def _host(m: Machine, run: Runner, here: str, etc: str, fast: bool = False, cached: Mapping | None = None,
+          now: Callable[[], float] = time.time) -> tuple[dict, dict | None]:
+    """``probe_host``'s row and the probe it was made of (None where none answered)."""
+    from ci_runners import capacity
+    connect, timeout = (FAST_CONNECT, FAST_TIMEOUT) if fast else (15, HOST_TIMEOUT)
+
+    def down(why):
+        return dict(host_row(m, None, why, here), read_at=round(now(), 3)), None
     if m.probe == 'forced':
         key = probe_key(etc, m.key)
         if not os.path.isfile(key):
-            return host_row(m, None, f'no key etc/pool/keys/{m.key}', here)
-        argv, kw = [*_ssh(m.ssh, key, probe_config(etc)), FORCED_PROBE], {'stdin': subprocess.DEVNULL}
+            return down(f'no key etc/pool/keys/{m.key}')
+        argv, kw = [*_ssh(m.ssh, key, probe_config(etc), connect), FORCED_PROBE], {'stdin': subprocess.DEVNULL}
     else:
         lz = m.leases or LeaseDir('', 1)
         src = _probe_src() + (f'\nimport json; print(json.dumps(probe({m.slots.lock!r}, {m.slots.count}, '
-                              f'{m.slots.queue!r}, {m.drain!r}, {lz.dir!r}, {lz.parts}, {m.gpus}, {m.runners!r})))\n')
-        argv, kw = _remote(m, [m.host_python, '-I', '-']), {'input': src}
+                              f'{m.slots.queue!r}, {m.drain!r}, {lz.dir!r}, {lz.parts}, {m.gpus}, {m.runners!r}'
+                              f'{", smi=False" if fast else ""})))\n')
+        argv, kw = _remote(m, [m.host_python, '-I', '-'], connect), {'input': src}
     try:
-        r = run(argv, capture_output=True, text=True, timeout=HOST_TIMEOUT, **kw)
+        r = run(argv, capture_output=True, text=True, timeout=timeout, **kw)
+    except subprocess.TimeoutExpired:
+        return down(f'unreachable (no answer within {timeout:g} s)')
     except (OSError, subprocess.SubprocessError) as e:
-        return host_row(m, None, f'probe failed: {type(e).__name__}', here)
+        return down(f'probe failed: {type(e).__name__}')
     if r.returncode != 0:
-        return host_row(m, None, f'unreachable (exit {r.returncode})', here)
+        return down(f'unreachable (exit {r.returncode})')
     try:
         p = json.loads(r.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        return host_row(m, None, 'probe answer not JSON', here)
-    if m.access == 'local' and isinstance(p, dict):  # the caller's own host: its inventory is this account's (15.7)
-        labels = runner_labels(etc)
-        if labels is not None:
-            p['runner_labels'] = labels
-    return host_row(m, p, here=here)
+        return down('probe answer not JSON')
+    if not isinstance(p, dict):
+        return down('probe answer not JSON')
+    t = now()
+    age = p.pop('age', None)  # a forced probe's answer from its account's capacity file (16.5)
+    read_at = t - age if type(age) in (int, float) and age >= 0 else t
+    if m.access == 'local':  # the caller's own host: its inventory is this account's (15.7)
+        _with_inventory(p, etc)
+    if fast and m.probe != 'forced':  # no cards read now: this account's last reading, while fresh
+        p['gpu_free'] = dict(cached['gpu_free']) if cached and isinstance(cached.get('gpu_free'), dict) \
+            and not capacity.is_stale(cached, t) else {}
+    return dict(host_row(m, p, here=here), read_at=round(read_at, 3)), p
 
 
 CLUSTER_PROBE = ('sinfo -h -N -O "NodeHost:|,Partition:|,StateCompact:|,CPUsState:|,Memory:|,AllocMem:|,Gres:|,GresUsed:|"; '
@@ -937,21 +1067,71 @@ def probe_cluster(m: Machine, run: Runner = subprocess.run, cards: int = 1, mem_
 
 
 def status(reg: Registry, run: Runner = subprocess.run, here: str | None = None, cards: int = 1,
-           mem_gib: int = 1, etc: str = '') -> list[dict]:
+           mem_gib: int = 1, etc: str = '', on_rows: Callable[[list[dict], dict | None], None] | None = None,
+           now: Callable[[], float] = time.time) -> list[dict]:
     """``pool status``: every machine's rows, in the registry's order, probed in parallel,
-    so that it ends within the longest probe's bound (``CLUSTER_TIMEOUT``)."""
+    so that it ends within the longest probe's bound (``CLUSTER_TIMEOUT``); each row with
+    ``read_at``, when its machine answered. ``on_rows(rows, local)`` is called with each
+    machine's rows as they come in, ``local`` the ``local`` machine's probe
+    (``{key, read_at, probe}``) with its row, else None: the capacity file's writer (16.5)."""
     here = socket.gethostname() if here is None else here
     out: dict[str, list[dict]] = {}
 
     def one(m: Machine) -> None:
-        out[m.key] = (probe_cluster(m, run, cards, mem_gib, etc) if m.access == 'slurm'
-                      else [probe_host(m, run, here, etc)])
+        local = None
+        if m.access == 'slurm':
+            t = round(now(), 3)
+            rows = [dict(r, read_at=t) for r in probe_cluster(m, run, cards, mem_gib, etc)]
+        else:
+            row, p = _host(m, run, here, etc, now=now)
+            rows = [row]
+            if m.access == 'local' and p is not None:
+                local = {'key': m.key, 'read_at': row['read_at'], 'probe': p}
+        out[m.key] = rows
+        if on_rows is not None:
+            on_rows(rows, local)
     threads = [threading.Thread(target=one, args=(m,)) for m in reg.machines.values()]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
     return [row for k in reg.machines for row in out.get(k, [])]
+
+
+def fast_status(reg: Registry, run: Runner = subprocess.run, here: str | None = None, etc: str = '',
+                now: Callable[[], float] = time.time) -> list[dict]:
+    """``pool status --fast`` (16.5): the rows from the capacity files, within 2 s. A host
+    with ``probe = "forced"`` answers with its account's file (``local_probe``); a host this
+    account probes itself (``local``, or ssh with code) has its slots, load and runners read
+    now without ``nvidia-smi``, its cards from this account's file; each ssh call within
+    ``FAST_TIMEOUT`` s. A cluster target's row is this account's file's, which
+    ``ci-capacity.timer`` keeps. Every row past ``capacity.STALE_S`` counts as down
+    (``capacity.mark``). Writes nothing."""
+    from ci_runners import capacity
+    here = socket.gethostname() if here is None else here
+    cached = {r['key']: r for r in capacity.read(capacity.path(_etc(etc)))['rows']}
+    out: dict[str, list[dict]] = {}
+
+    def not_read(m: Machine, t: Target | None = None) -> dict:
+        row = target_row(m, t, [], {}, {}) if t else host_row(m, None, 'not read', here)
+        row.update(problems=['not read'], start_now=False)
+        return row
+
+    def one(m: Machine) -> None:
+        out[m.key] = [probe_host(m, run, here, etc, fast=True, cached=cached.get(m.key), now=now)]
+    threads = []
+    for m in reg.machines.values():
+        if m.access == 'slurm':  # the timer's cached figures
+            out[m.key] = [cached.get(f'{m.key}:{t.name}') or not_read(m, t) for t in m.targets.values()]
+        else:
+            threads.append(threading.Thread(target=one, args=(m,), daemon=True))
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + FAST_TIMEOUT + 0.3
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    t = now()
+    return [capacity.mark(row, t) for m in reg.machines.values() for row in out.get(m.key) or [not_read(m)]]
 
 
 def table(rows: Sequence[Mapping]) -> str:
@@ -1750,6 +1930,22 @@ def pool_run(reg: Registry, a: RunArgs, *, only: str = '', here_ok: bool = False
 # ------------------------------------------------------------------ CLI
 
 
+def _writer(reg: Registry, etc: str) -> Callable[[list[dict], dict | None], None]:
+    """``status``'s ``on_rows``: each machine's rows into the account's capacity file (16.5);
+    a file that cannot be written is said once on standard error, and the rows still print."""
+    from ci_runners import capacity
+    file, order, said = capacity.path(etc), list(reg.machines), []
+
+    def write(rows: list[dict], local: dict | None) -> None:
+        try:
+            capacity.merge(file, rows, order, local)
+        except OSError as e:
+            if not said:
+                said.append(1)
+                print(f'pool: {capacity.NAME} not written: {e.strerror or type(e).__name__}', file=sys.stderr)
+    return write
+
+
 def main(argv: Sequence[str], etc: str) -> int:
     if list(argv[:1]) in (['add'], ['check'], ['ready']):  # adding a machine: ci_runners/pooladd.py
         from ci_runners import pooladd
@@ -1759,6 +1955,7 @@ def main(argv: Sequence[str], etc: str) -> int:
     sub = ap.add_subparsers(dest='cmd', required=True)
     s = sub.add_parser('status')
     s.add_argument('--json', action='store_true')
+    s.add_argument('--fast', action='store_true', help='from the capacity files, within 2 s (writes nothing)')
     sub.add_parser('probe', help='the local machine\'s probe, as JSON (a forced command: no argument, no stdin)')
     r = sub.add_parser('run')
     r.add_argument('--cpu', type=int, default=8)
@@ -1788,7 +1985,7 @@ def main(argv: Sequence[str], etc: str) -> int:
             return EXIT_USAGE
         return 0
     if a.cmd == 'status':
-        rows = status(reg, etc=etc)
+        rows = fast_status(reg, etc=etc) if a.fast else status(reg, etc=etc, on_rows=_writer(reg, etc))
         print(json.dumps(rows, indent=1, sort_keys=True) if a.json else table(rows))
         return 0
     cmd = a.command[1:] if a.command[:1] == ['--'] else a.command

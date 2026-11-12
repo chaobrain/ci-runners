@@ -59,6 +59,8 @@ ARTIFACT_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.]{0,31}')  # no '-': <name>-
 SAFE_PATH = re.compile(r'[A-Za-z0-9._/-]+')
 #: the plan's ``files``: what the plan job uploads once for every part
 MAX_FILES, MAX_FILES_BYTES = 1000, 64 << 20
+#: what actions/upload-artifact refuses in a file's path (its path check), and so the plan
+UNCARRIED = frozenset('":<>|*?\r\n')
 #: the run's jobs read for the salvage leg's host: 2 + 256 parts x 4 jobs fit
 MAX_JOB_PAGES = 20
 #: parts of one run at once where the registry sets no ``max_parallel`` (§7 rule 1)
@@ -286,7 +288,12 @@ def load(doc: object) -> tuple[list[dict], dict]:
 
 def check_files(workspace: str, rel: str) -> str:
     """Why the plan's ``files`` directory ``rel`` below ``workspace`` cannot be handed to
-    the parts, or ''. No link on its path or inside it."""
+    the parts, or ''. The plan job uploads it hidden entries and all (``.name``, a hidden
+    directory too), so it refuses here what that upload cannot carry: a link on its path or
+    inside it, an entry that is neither a file nor a directory, a name with a character the
+    upload refuses (``UNCARRIED``) or not in UTF-8, a ``.git`` (a clone's config may hold the
+    plan command's token, which no part may get), an empty directory (the upload keeps files alone; the
+    whole directory empty fails it), and more than the bounds."""
     root = os.path.join(workspace, rel)
     if os.path.realpath(root) != os.path.join(os.path.realpath(workspace), rel.rstrip('/')):
         return f'files: {rel} goes through a link'
@@ -294,12 +301,24 @@ def check_files(workspace: str, rel: str) -> str:
         return 'files: not a directory'
     total = count = 0
     for d, dirs, names in os.walk(root):
+        if not dirs and not names:
+            return f'files: {os.path.relpath(d, root) if d != root else rel} is an empty directory (the upload carries files)'
         for n in dirs + names:
             f = os.path.join(d, n)
             count += 1
             if os.path.islink(f):
                 return f'files: {os.path.relpath(f, root)} is a link'
+            if n == '.git':  # a clone's config may hold the plan command's token (plan-token)
+                return f'files: {os.path.relpath(f, root)} is a git directory (it may hold a credential)'
+            try:
+                n.encode('utf-8')
+            except UnicodeEncodeError:
+                return f'files: {os.path.relpath(f, root)!a} is not a UTF-8 name (the upload cannot name it)'
+            if UNCARRIED & set(n):
+                return f'files: {os.path.relpath(f, root)!r} has a character the upload refuses (" : < > | * ? or a line break)'
             if n in names:
+                if not os.path.isfile(f):
+                    return f'files: {os.path.relpath(f, root)} is not a file (a pipe, a socket or a device)'
                 total += os.path.getsize(f)
         if count > MAX_FILES or total > MAX_FILES_BYTES:
             return f'files: more than {MAX_FILES} entries or {MAX_FILES_BYTES >> 20} MiB'

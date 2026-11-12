@@ -3249,7 +3249,7 @@ not load is a red plan job with the reason:
 |---|---|---|
 | `schema` | yes | `1`; a later schema is a new key set, read by the release that brings it |
 | `parts` | yes | a list of at most 256 parts (GitHub's matrix limit); an empty list is a plan: no part job, the verdict job posts `success` "nothing to run" |
-| `files` | no | a directory below the checkout (relative, no `..`, no links, at most 1000 entries and 64 MiB) the plan command wrote: uploaded once (`ci-plan-files`), downloaded into every attempt before its command, at `CIRUNNERS_FILES` |
+| `files` | no | a directory below the checkout (relative, no `..`, no links, at most 1000 entries and 64 MiB) the plan command wrote: uploaded once (`ci-plan-files`), hidden entries included (#227: the plan named the directory, `.ci-plan` too), downloaded into every attempt before its command, at `CIRUNNERS_FILES`. `flow plan` refuses what the upload cannot carry (a link, an empty directory, an entry that is not a file, a name not in UTF-8 or with `" : < > \| * ?` or a line break) and a `.git` (a clone's config may hold the plan command's token); files that did not upload after the route (failed, timed out, skipped) are the plan's end (`error`, "plan: the plan's files did not upload after the route (<outcome>); no part ran"), not every part lost; a plan job lost after the route has no outputs and posts on the run's own head |
 | `max_parallel` | no | an integer in [1, 256]: lowers the registry's `max_parallel` for this run, never raises it |
 | `parts[].id` | yes | `[A-Za-z0-9][A-Za-z0-9_.-]*`, at most 64 characters (its artifact's name), unique in the plan; not `plan`, the plan command's own part |
 | `parts[].command` | yes | as `part`'s `command`, at most 32 KiB |

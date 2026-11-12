@@ -2941,6 +2941,7 @@ h100 is the only host, and its labels choose the pool (§5.1); there is nothing 
 | `resume` | false | sets `CI_RESUME=1`, for a command that can resume |
 | `attempt-of` | none | the record of the attempt this one retries; a record of another host is taken by its name (decision 13.3) |
 | `target` | none | `slurm` only, required there (decision 14.2): a target of the site config, or several in the order to try, separated by commas or spaces; `<site>:<target>` where the host has more than one site config |
+| `upload` | `true` | `false`: no outcome artifact `ci-part-<id>-<attempt>` (#239), for `ci.yml`'s plan command (§4.10), whose outcome is the step's output and which no verdict reads; a part a verdict or a retry reads keeps the default |
 
 A CPU part (`gpus: 0`) takes one of the host's CI slots; a GPU part takes its card's
 lease, which is its slot (§7). On a runner with a slot (16.2, from R2) the part also runs
@@ -3254,7 +3255,10 @@ is red and one is not `pass` ("infrastructure: <id> <outcome>, ..."), else `succ
 consumers' guide lists every description. The retry's decision runs after the part
 command in its job, as the same account, so the command can rewrite its files (T13):
 what decides the head's state is the verdict, which reads the artifacts and the host's
-records from a job of its own.
+records from a job of its own. It runs before the part's own `artifacts` go up, and only
+where the attempt's end asks for a retry (`next` is `retry` or `fallback`); an end whose
+`next` is `none` (`pass`, `red`) hands on `none` without a step, so a known outcome is
+still never read as lost (#239).
 
 **The plan** is one JSON document on the command's standard output; anything that does
 not load is a red plan job with the reason:
@@ -3278,8 +3282,9 @@ not load is a red plan job with the reason:
 An unknown key is refused. Without `plan`, the plan is `{"schema": 1, "parts": [{"id":
 "pytest", "command": "python -m pytest", "needs": "cpu", "minutes": 60}]}`. The plan
 command runs as a part of its own, `plan`, in the plan job (the `part` action on its
-light runner, an inner bound of 30 min), and its standard output, at most 1 MiB, is the
-plan. Where the plan job ends the run, no part starts and the verdict job posts its end:
+light runner, an inner bound of 30 min, `upload: false`: its record, and no `ci-part-plan-1`
+artifact from the release after `v1.19.0`, #239: a consumer's job that reads `ci-part-*` no longer finds the
+plan command's `outcome.json` and `summary.md`; the plan job's summary still holds the latter), and its standard output, at most 1 MiB, is the plan. Where the plan job ends the run, no part starts and the verdict job posts its end:
 a plan that does not load and a red plan command are `failure`; a plan command's other
 end (§4.4) and a route error (16.5) are `error`. The checks and the route are `ci-run
 flow plan` (`ci_runners/flow.py`); the consumers' guide lists every key's error text. A

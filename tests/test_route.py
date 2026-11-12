@@ -50,14 +50,15 @@ def one(p, *rs):
 
 class Labels(unittest.TestCase):
     def test_each_need_its_capability_label_and_never_a_host_label(self):
-        cap = rows(host(ci_cpu=R(1), ci_gpu=R(1), ci_gpu2=R(1), ci_timing=R(1), hosta_cpu=R(1), hosta_gpu0=R(1)), SLURMS,
-                   target())
+        cap = rows(host(ci_cpu=R(1), ci_gpu=R(1), ci_gpu2=R(1), ci_timing=R(1), ci_light=R(1), hosta_cpu=R(1),
+                        hosta_gpu0=R(1)), SLURMS, target())
         got = rt.route([part(n, n) for n in rt.NEEDS], cap)
         self.assertEqual([g['labels'] for g in got], [['self-hosted', f'ci-{n}'] for n in rt.NEEDS])
         self.assertEqual({g['where'] for g in got}, {'host'})
         for g in got:
             self.assertLessEqual(set(g['labels']), rt.SHARED)
-        self.assertEqual(rt.NEEDS, {'cpu': 'ci-cpu', 'gpu': 'ci-gpu', 'gpu2': 'ci-gpu2', 'timing': 'ci-timing'})
+        self.assertEqual(rt.NEEDS, {'cpu': 'ci-cpu', 'gpu': 'ci-gpu', 'gpu2': 'ci-gpu2', 'timing': 'ci-timing',
+                                    'light': 'ci-light'})
 
     def test_the_part_keeps_its_own_keys(self):
         got = one(part(results='out', memory_gib=4), host(ci_cpu=R(1)))
@@ -102,6 +103,9 @@ class Overflow(unittest.TestCase):
         got = one(part(needs='timing'), host(ci_timing=R(0)), SLURMS, target(), target('g', gpu='m'))
         self.assertEqual((got['labels'], got['where']), (['self-hosted', 'ci-timing'], 'host'))
         self.assertIn('timing never overflows', got['why'])
+        got = one(part(needs='light'), host(ci_light=R(0)), SLURMS, target())
+        self.assertEqual((got['labels'], got['where']), (['self-hosted', 'ci-light'], 'host'))
+        self.assertIn('light never overflows', got['why'])
 
     def test_unknown_free_never_overflows(self):
         hidden = {'registered': 2, 'online': None, 'free': None}
@@ -215,12 +219,12 @@ class PlanTime(unittest.TestCase):
             one(part(needs='gpu2'), host('hostc', problems=['drained']))
 
     def test_an_unknown_need_is_the_plans_fault(self):
-        with self.assertRaisesRegex(rt.PlanError, "p: needs 'tpu' is not one of cpu, gpu, gpu2, timing"):
+        with self.assertRaisesRegex(rt.PlanError, "p: needs 'tpu' is not one of cpu, gpu, gpu2, timing, light"):
             rt.route([part(needs='tpu')], rows(host(ci_cpu=R(1))))
         with self.assertRaisesRegex(rt.PlanError, r"p: needs \['cpu'\]"):
             rt.route([part(needs=['cpu'])], rows(host(ci_cpu=R(1))))
         with self.assertRaisesRegex(rt.PlanError, 'needs'):
-            rt.route([part(needs='light')], None)
+            rt.route([part(needs='tiny')], None)
 
 
 class Unreadable(unittest.TestCase):
@@ -234,12 +238,15 @@ class Unreadable(unittest.TestCase):
 
 class Plan(unittest.TestCase):
     def test_a_schema_1_plan_loads(self):
-        doc = {'schema': 1, 'parts': [part(), part('q', 'gpu', 240, memory_gib=8, results='r')]}
+        doc = {'schema': 1, 'parts': [part(), part('q', 'gpu', 240, memory_gib=8, results='r'), part('l', 'light', 15)]}
         self.assertEqual(rt.load_plan(doc), doc['parts'])
+        self.assertEqual(rt.load_plan({'schema': 1, 'parts': [], 'files': 'x', 'max_parallel': 2}), [])  # nothing to run
 
     def test_each_fault_is_named(self):
-        cases = [({'schema': 2, 'parts': [part()]}, 'schema 2'), ({'schema': 1}, 'exactly'),
-                 ({'schema': 1, 'parts': []}, '1 to 256'), ({'schema': 1, 'parts': [part()] * 257}, '1 to 256'),
+        cases = [({'schema': 2, 'parts': [part()]}, 'schema 2'), ({'schema': 1}, 'and optionally files, max_parallel'),
+                 ({'schema': 1, 'parts': [], 'other': 1}, 'and optionally'),
+                 ({'schema': 1, 'parts': {}}, 'at most 256'), ({'schema': 1, 'parts': [part()] * 257}, 'at most 256'),
+                 ({'schema': 1, 'parts': [part(needs='light', minutes=16)]}, r'minutes is a number in \(0, 15\] for needs light'),
                  ({'schema': 1, 'parts': [part(extra=1)]}, r"unknown key\(s\) \['extra'\]"),
                  ({'schema': 1, 'parts': [{'id': 'p'}]}, 'missing'),
                  ({'schema': 1, 'parts': [part(), part()]}, 'unique'), ({'schema': 1, 'parts': [part('-x')]}, 'unique'),

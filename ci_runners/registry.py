@@ -10,6 +10,7 @@ host, added by the lead. It holds what a consumer's inputs may leave out.
     gpu_mem_mib = 6000                    # free MiB a leased card needs
     memory = "40G"                        # a part's MemoryMax unless the input sets one
     max_waiting = 1                       # waiting parts per pool (design §7 rule 2)
+    max_parallel = 16                     # parts of one run of the reusable workflow at once (§7 rule 1, 16.6)
     refresh = true                        # ci-envrefresh.timer rebuilds its env when an upstream moves (§4.9)
     [fallback]                            # labels per runner class, for next=fallback
     part = ["self-hosted", "part"]
@@ -36,7 +37,10 @@ VAR = re.compile(r'[A-Z_][A-Z0-9_]{0,63}')
 #: names a project may not set: the executor's own, and what changes how code loads
 RESERVED = re.compile(r'(CI_|GITHUB_|ACTIONS_|RUNNER_|LD_|PYTHON).*|CUDA_VISIBLE_DEVICES|CUDA_DEVICE_ORDER|PATH|'
                       r'BASH_ENV|ENV|HOME|USER|SHELL|IFS')
-TOP = {'name', 'repository', 'context', 'retries', 'gpu_mem_mib', 'memory', 'max_waiting', 'refresh', 'fallback', 'hosts'}
+TOP = {'name', 'repository', 'context', 'retries', 'gpu_mem_mib', 'memory', 'max_waiting', 'refresh', 'fallback', 'hosts',
+       'max_parallel'}
+#: ``max_parallel``'s default and bound (16.6; GitHub's matrix holds at most 256 legs)
+MAX_PARALLEL, MAX_PARALLEL_BOUND = 16, 256
 HOST = {'memory_max', 'env', 'max_slots', 'variables'}
 
 
@@ -59,6 +63,7 @@ class Project:
     env: str = ''  # this host's
     max_slots: int = 1  # this host's
     variables: Mapping[str, str] = dataclasses.field(default_factory=dict)  # this host's
+    max_parallel: int = MAX_PARALLEL  # read by the reusable workflow's plan job only
 
 
 def _bytes(m: str) -> int:
@@ -94,6 +99,7 @@ def parse(doc: Mapping[str, object], role: str, stem: str = '') -> Project:
     retries = _int('retries', doc.get('retries', 1), 0, 1)
     gpu_mem = _int('gpu_mem_mib', doc.get('gpu_mem_mib', 0), 0, 1 << 20)
     max_waiting = _int('max_waiting', doc.get('max_waiting', 1), 1, 64)
+    max_parallel = _int('max_parallel', doc.get('max_parallel', MAX_PARALLEL), 1, MAX_PARALLEL_BOUND)
     refresh = doc.get('refresh', False)
     if type(refresh) is not bool:
         raise RegistryError('refresh must be true or false')
@@ -129,7 +135,8 @@ def parse(doc: Mapping[str, object], role: str, stem: str = '') -> Project:
         if not isinstance(v, str) or '\0' in v or '\n' in v:
             raise RegistryError(f'hosts.{role}.variables.{k} must be a one-line string')
     return Project(name, repo.lower(), context, retries, gpu_mem, memory, max_waiting, refresh,
-                   {k: tuple(v) for k, v in fallback.items()}, memory_max, env, max_slots, dict(variables))
+                   {k: tuple(v) for k, v in fallback.items()}, memory_max, env, max_slots, dict(variables),
+                   max_parallel)
 
 
 def load_file(etc: str, name: str, role: str) -> Project:

@@ -86,7 +86,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 
 `conda` 表（design §4.9，决定 12.10）是可选的，不写时与以前完全一样。`packages` 和 `python` 在同一次 `conda create` 里一起求解，之后才跑 pip 的各步（`requirements`、`install`、upstream）。`python` 由 `python` 键决定，`packages` 里不能再写 `python`，同一个包也不能写两次。表里有未知的键、`channels` 里是 URL 或路径、`packages` 里有选项或 URL，整个规格都会被拒绝，什么都不会构建。例如需要 Python 3.13 加 conda-forge 的 `nest-simulator=3.10`，就写 `python = "3.13"` 加上面的 `[conda]` 表。
 
-`contract`（design §4.9，决定 16.6）是一个非负整数：可复用工作流上线后，plan 作业会拿 head 的值和默认分支的比，比默认分支小或缺失的 head 直接红，提示 merge origin/main。在那之前它只被接受、不起作用（R1，决定 16.3）；`v1` 指向接受它的版本之前不要写，否则更旧的主机层会拒绝整个规格。
+`contract`（design §4.9，决定 16.6）是一个非负整数：调用可复用工作流 `ci.yml` 时，plan 作业会拿 head 的值和默认分支的比，比默认分支小或缺失的 head 直接红，提示 merge origin/main（§8）。自己组合 action 的工作流不读它。`v1` 指向接受它的版本（R1 起，决定 16.3）之前不要写，否则更旧的主机层会拒绝整个规格。
 
 `variant` 表（design §4.9，决定 14.9）只给 `slurm` 类用：集群站点配置里每个目标有一个环境变体（例如 `cpu`、`cuda12`、`cuda13`），`ci-run slurm env` 为规格里写了的每个变体单独建一个环境，用它的 `install` 替换基础的 `install`（`requirements`、upstream 都不变）；规格里没写的变体用基础环境。变体还可以有一个 `conda` 表（`packages`，需要时加 `channels`，检查规则和基础的一样）：它的包加在基础的 `conda` 包后面，在同一次 `conda create` 里一起求解；它的 channel（默认没有）排在基础的后面。变体不能再写基础已经写了的包或 channel。表里只能有 `install` 和 `conda`，有其他键整个规格都会被拒绝。3090 主机上的 `ci-run env build` 只读基础部分，有没有这个表结果都一样。所以要按变体换的包（例如 jax 的 CUDA 插件、和变体 CUDA 版本一致的 nvcc）放在变体里，不要放进 `requirements` 文件或基础部分。
 
@@ -204,3 +204,41 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 - **目标先过验收再计入**（决定 14.10）：只读检查、canary、一个真实的单卡部件、一个带 P2P 自检的真实双卡部件，全部通过后维护者才在站点配置里启用它；未启用的目标会被拒绝（`unavailable`）。
 - **安全**：部件以集群账户的身份运行，能读到这个账户在集群上的所有文件（design T19）。所以只有私有仓库、只有 org 成员，并且要用专门的 CI 账户，或者账户主人自己的账户，但要先把这个账户上给其他工具用的凭据移走（决定 14.12）；不要把 secret 传给这些任务。
 - **公开的内容**：部件在 GitHub 上显示的作业日志、原因和摘要里，集群的根目录、账户、用户、登录节点、分区和节点名都换成了 `<root>`、`<node>` 这样的占位符（design 14.4）。但部件从集群取回的文件（`CI_PART_DIR` 里的结果、`RUNNER_TEMP` 里的文件：测试结果、coverage 数据、命令自己写的日志）**不替换**，里面可能有集群上的绝对路径和节点名。把它们上传成 artifact、写进步骤摘要或 PR 正文，就等于公开这些名字；仓库是私有的时候只有 org 成员能看到。要公开就先处理：例如 coverage 用 `relative_files = true`，摘要里写 `CI_RUNNERS_HOST` 而不是节点的主机名。
+
+## 8. 计划 JSON 与 `contract`（design §4.10，决定 16.6，RUN-10 R6 起）
+
+可复用工作流 `ci.yml` 的 plan 作业在 `ci-light` 上、head 的 checkout 和项目环境里运行仓库的 `plan` 命令（它是 plan 作业里一个叫 `plan` 的部件，内层上限 30 分钟）。命令的**标准输出**必须正好是一个 JSON 文档（最多 1 MiB）；日志请写到标准错误。没有 `plan` 命令时，计划就是 `{"schema": 1, "parts": [{"id": "pytest", "command": "python -m pytest", "needs": "cpu", "minutes": 60}]}`。
+
+**计划 JSON，schema 1**（`ci-run flow plan` 检查，`ci_runners/flow.py`；键名、类型和报错都是精确的）：
+
+| 键 | 类型 | 必填 | 默认 | 不合规时的报错（plan 作业红，状态 `failure`） |
+|---|---|---|---|---|
+| `schema` | 整数 `1` | 是 | — | `plan schema 2: this release reads schema 1` |
+| `parts` | 0 到 256 个对象的数组（GitHub matrix 的上限）；空数组合法：没有部件作业，plan 作业发 `success`，描述 `nothing to run` | 是 | — | `"parts" is a list of at most 256 parts` |
+| `files` | 字符串：checkout 下的相对路径（不含 `..`、不以 `/` 开头），一个目录：plan 命令写进去的文件，plan 作业上传一次（artifact `ci-plan-files`），每个部件在命令之前下载，路径在变量 `CIRUNNERS_FILES` 里；目录里不能有符号链接，最多 1000 项、64 MiB | 否 | 无（`CIRUNNERS_FILES` 为空） | `files is a relative path below the checkout, without ".."`；`files: not a directory`；`files: <路径> is a link`；`files: more than 1000 entries or 64 MiB` |
+| `max_parallel` | 整数，[1, 256]：本次运行同时跑的部件数，只能**降低** registry 的 `max_parallel`，不能提高 | 否 | registry 的值 | `max_parallel is an integer in [1, 256]` |
+| （顶层其他键） | — | — | — | `a plan is an object with "schema" and "parts", and optionally files, max_parallel` |
+| `parts[].id` | 字符串，`[A-Za-z0-9][A-Za-z0-9_.-]*`，最多 64 个字符，计划内唯一，不能是 `plan` | 是 | — | `<id>: an id is [A-Za-z0-9][A-Za-z0-9_.-]*, unique in the plan`；`plan: the id is reserved for the plan job`；`...: an id is at most 64 characters` |
+| `parts[].command` | 非空字符串，最多 32 KiB，同 `part` 的 `command`（在 checkout 里 `bash -c`） | 是 | — | `<id>: command is a non-empty string`；`<id>: command is at most 32768 bytes` |
+| `parts[].needs` | `cpu`、`gpu`、`gpu2`、`timing`、`light` 之一（§4 的表）；`light`：跑在 `ci-light` 上，不占 slot、不用卡，`minutes` 最多 15，从不溢出到别的标签 | 是 | — | `<id>: needs 'tpu' is not one of cpu, gpu, gpu2, timing, light` |
+| `parts[].minutes` | 数，(0, 240]（`light` 为 (0, 15]）：参考主机上的时长 | 是 | — | `<id>: minutes is a number in (0, 240]`；`<id>: minutes is a number in (0, 15] for needs light` |
+| `parts[].memory_gib` | 正数（GiB），最多 4096 | 否 | registry 的 `memory` | `<id>: memory_gib is a positive number`；`<id>: memory_gib is at most 4096` |
+| `parts[].results` | 字符串（`CI_RESULTS_DIR` 下 JUnit XML 的 glob） | 否 | 无 | `<id>: results is a string (a glob)` |
+| `parts[].queue_minutes` | 数，(0, 240]：一次尝试在主机上等 slot 或租约的上限（`part` 的 `queue-timeout-minutes`）；到了就是 `unavailable`，按重试的五行处理（同丢失的尝试一样换一台） | 否 | 60 | `<id>: queue_minutes is a number in (0, 240]` |
+| `parts[].artifacts` | 对象，最多 4 项：名字（`[A-Za-z0-9][A-Za-z0-9_.]*`，最多 32 个字符，不含 `-`，不能是 `ci`）→ `RUNNER_TEMP` 下的相对路径；每次尝试结束后（红了也传）上传为 artifact `<名字>-<id>-<尝试>`，保留 7 天，路径不存在只警告；verdict 不读它们 | 否 | 无 | `<id>: artifacts maps at most 4 names ([A-Za-z0-9][A-Za-z0-9_.]*, no "-") to relative paths below RUNNER_TEMP`；`<id>: the artifact name ci is reserved (ci-part-*, ci-plan-files)` |
+| （部件的其他键 / 缺键） | — | — | — | `<id>: unknown key(s) ['gpus']`、`<id>: missing ['minutes']` |
+
+- 以上 `files`、`max_parallel`、`light`、`queue_minutes`、`artifacts` 和空的 `parts` 都是 schema 1 的可选扩展：不用它们的计划照旧。
+- 标准输出不是一个 JSON 文档：`plan: the plan command's standard output is not one JSON document (JSONDecodeError)`；超过 1 MiB：`plan: the plan is larger than 1048576 bytes`；整个部件列表（路由后）超过 900 KB（一个作业输出的上限之内）：`plan: the routed parts take <n> bytes, more than 900000`。
+- **plan 命令能读到的事件信息**（环境变量，不需要 token）：`CIRUNNERS_EVENT`（事件名）、`CIRUNNERS_PR`（PR 号，非 PR 为空）、`CIRUNNERS_PR_LABELS`（PR 标签名的 JSON 数组，非 PR 为 `[]`）、`CIRUNNERS_BASE_REF`/`CIRUNNERS_BASE_SHA`（PR 的 base；push 时为默认分支和推送前的 sha）、`CIRUNNERS_HEAD_REF`/`CIRUNNERS_HEAD_SHA`（要跑的 head）。plan 命令和部件命令都**拿不到 token**。
+- `plan` 命令自己红了是 `failure`（`plan: red (...)`），`unavailable`、`lost` 等是 `error`；路由错误（某个标签没有任何主机提供、内存连 `mem-big` 的 slot 都放不下）是 `error`，描述以 `route: <标签>: part <id>: ...` 开头。这些情况都由 plan 作业自己发状态，一个部件也不启动，verdict 不运行。
+- 每个部件之后带上路由的结果跑：`labels`（作业的 `runs-on`，只有能力标签）、作业的 `timeout-minutes`（`minutes` × 最慢 slot 的 `speed` + 15）、`gpus`（`gpu` 1、`gpu2` 2、其余 0）、`memory`（`memory_gib` 换成 MiB）。plan 作业的 summary 列出每个部件的 `needs`、标签、分钟数、作业上限和路由的理由（§16 of operations）。
+- 一次运行同时最多跑 registry 的 `max_parallel` 个部件（默认 16，1 到 256；design §7 第 1 条），由维护者写在 registry 条目里；计划的 `max_parallel` 只能把它调低。
+
+**`contract`**（决定 16.6）：默认分支的 `.github/ci-runners.toml` 可以写 `contract = N`（非负整数）。plan 作业在运行 head 的任何东西之前，用作业的 token 读默认分支和 head 的这个文件，比较两个值：
+
+- 默认分支没有这个文件或没有 `contract`：不检查；
+- head 的值更小、没有 `contract`、文件不存在或读不进来：plan 作业里直接红（`failure`），描述形如 `contract 1 here, 2 on main: merge origin/main`，一个部件也不启动，大约 20 秒；
+- 默认分支的 `contract` 不是非负整数、或文件读不进来：`error`（默认分支自己的问题）。
+
+改变计划或部件对 head 的要求的 PR，同时把 `contract` 加一；落后的分支 `merge origin/main` 之后就过了。

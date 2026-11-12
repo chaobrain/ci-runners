@@ -22,6 +22,8 @@
     ci-run pool status|run|add|check|ready ...   the machine registry's live capacity, a command on a free
                            machine, and adding a host (decision 15.1)
     ci-run route [--rows FILE]   a plan's parts to capability labels, from the capacity (decision 16.5)
+    ci-run flow contract|plan|retry|locate|status ...   the reusable workflow's own steps (actions/flow;
+                           decision 16.6), run from the action's checkout
 
 The inventory is ``$CI_RUNNERS_ETC/inventory.toml``, else ``~/data/ci-runners/etc``.
 """
@@ -70,6 +72,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'route':  # the plan job's, on a light runner: the capacity, no inventory (decision 16.5)
         from ci_runners import route
         return route.main(args, etc_dir())
+    if cmd == 'flow':  # the reusable workflow's steps: the capacity and the registry, read only (16.6)
+        from ci_runners import flow
+        return flow.main(args, etc_dir())
     if cmd == 'runner-watch':  # the maintainer's account: no inventory there (decision 15.6)
         from ci_runners import runnerwatch
         return runnerwatch.main(args)

@@ -975,7 +975,7 @@ def check_result(doc: Mapping | None, *, isolation: object, boot: str, kernel: s
     t = doc.get('time')
     if type(t) not in (int, float) or not now - CHECK_MAX_AGE <= t <= now + 300:
         return 'stale', f'the conformance check is older than {CHECK_MAX_AGE // 3600} h'
-    if doc.get('boot_id') != boot or doc.get('kernel') != kernel:
+    if not boot or doc.get('boot_id') != boot or doc.get('kernel') != kernel:
         return 'stale', 'the conformance check ran in another boot or kernel'
     if doc.get('isolation') != isolation:
         return 'failed', f'the conformance check proved {doc.get("isolation")!r}, not the inventory\'s {isolation!r}'
@@ -1015,8 +1015,9 @@ def public_row(inv: inventory.Inventory, rs: Sequence[Runner], f: Facts, why: Ma
 
 
 def stop_public(probe: Probe, data: str, units: Sequence[tuple[str, str]] | None, why: str, t: float) -> None:
-    """Stop every public runner at once (a withdrawn audience, 18.5)."""
-    for unit, _ in units or ():
+    """Stop every public runner at once (a withdrawn audience, 18.5); where they cannot be
+    read, every unit of the public runners' pattern."""
+    for unit, _ in [(f'{PUBLIC_UNIT}*', '')] if units is None else units:
         p = probe.systemctl('--no-block', 'stop', unit)
         ok = p is not None and p.returncode == 0
         log(data, {'runner': unit, 'action': 'stop' if ok else 'stop failed', 'cause': f'public audience withdrawn: {why}'}, t)
@@ -1029,7 +1030,7 @@ def public_tick(inv: inventory.Inventory, probe: Probe, data: str, enabled: bool
     doc = probe.check_record()
     check = check_result(doc, isolation=inv.host.get('isolation'), boot=boot_id(probe.read), kernel=probe.kernel(), now=t)
     withdrawn = public_audience(inv, enabled, check)
-    if withdrawn and units:
+    if withdrawn and units != []:
         stop_public(probe, data, units, withdrawn, t)
     return withdrawn, check, doc
 
@@ -1090,6 +1091,8 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
     enabled, limit = config(h)
     rs = runners(inv)
     st, read_ok = read_state(data)
+    # the public runners first: nothing below (an unread unit, the rollback) keeps a withdrawn audience up
+    pub = None if dry_run else public_tick(inv, probe, data, enabled, now())
     units = probe.units(rs)
     if units is None:
         out('presence: the runner units cannot be read; nothing done')
@@ -1101,7 +1104,6 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
         return a in DOWN and (bool(rst.get('stopped')) or res == 'exec-condition' or not read_ok)
 
     if not enabled and not dry_run:  # the rollback: start what presence stopped, and nothing else
-        public_tick(inv, probe, data, False, now())  # but stop the public runners: nothing guards their cards
         for r in rs:
             if ours_down(r):
                 p = probe.systemctl('--no-block', 'start', r.unit)
@@ -1115,7 +1117,7 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
         return 0
 
     t = now()
-    withdrawn, check, check_doc = ('', ('none', ''), None) if dry_run else public_tick(inv, probe, data, enabled, t)
+    withdrawn, check, check_doc = pub or ('', ('none', ''), None)
     f = probe.facts(rs)
     held = {n for n, v in st['runners'].items() if v.get('load')}
     why = causes(inv, rs, f, units, held)

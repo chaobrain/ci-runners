@@ -227,17 +227,20 @@ def admit(env: Mapping[str, str], event: object) -> str:
     if not isinstance(event, dict):
         return 'the event payload does not load'
     actors = [env.get('GITHUB_ACTOR'), env.get('GITHUB_TRIGGERING_ACTOR'), _login_of(event.get('sender'))]
+    users = [event.get('sender')]  # GitHub's own account type: a bot whose login has no [bot] (an agent's)
     if name == 'pull_request':
         pr = event.get('pull_request') if isinstance(event.get('pull_request'), dict) else {}
         names = [_login_of(_login_of(pr.get(side), 'repo'), 'full_name') for side in ('head', 'base')]
         if not all(isinstance(n, str) and n.lower() == repo for n in names):
             return "a fork's pull request: a public repository runs its own branches' only"
         actors.append(_login_of(pr.get('user')))
+        users.append(pr.get('user'))
     elif env.get('GITHUB_REF_PROTECTED') != 'true':
         return 'a push to a ref that is not protected: a public repository runs on a protected push only'
     else:
         actors.append(_login_of(event.get('pusher'), 'name'))
-    if not all(isinstance(x, str) and x and not x.lower().endswith('[bot]') for x in actors):
+    if not all(isinstance(x, str) and x and not x.lower().endswith('[bot]') for x in actors) \
+            or any(_login_of(u, 'type') == 'Bot' for u in users):
         return "a bot, or an actor not named: a public repository runs its members' pushes and pull requests only"
     return ''
 

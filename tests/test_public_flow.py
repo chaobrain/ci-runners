@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -72,6 +73,12 @@ class Admit(unittest.TestCase):
         self.assertIn('bot', flow.admit(env(), payload(sender='renovate[bot]')))
         self.assertIn('bot', flow.admit(env('push', protected='true'), payload('push', pusher='x[bot]')))
         self.assertIn('bot', flow.admit(env(actor=''), payload()))  # an actor not named
+        for side in ('sender', 'user'):  # a bot by its account type, whatever its login
+            ev = payload()
+            (ev['sender'] if side == 'sender' else ev['pull_request']['user'])['type'] = 'Bot'
+            self.assertIn('bot', flow.admit(env(), ev), side)
+            (ev['sender'] if side == 'sender' else ev['pull_request']['user'])['type'] = 'User'
+            self.assertEqual(flow.admit(env(), ev), '', side)
 
     def test_a_push_to_a_ref_that_is_not_protected(self):
         for protected in (None, 'false', 'True', ''):
@@ -281,6 +288,22 @@ class Hosted(unittest.TestCase):
         self.assertEqual(hosted.command_env({'GITHUB_TOKEN': 'x', 'A': 'b', 'MY_SECRET': 's', 'ACTIONS_ID_TOKEN_REQUEST_URL': 'u'},
                                             '/r', True), {'A': 'b', 'CI_RESULTS_DIR': '/r', 'CI_RESUME': '1'})
         self.assertNotIn('CI_RESUME', hosted.command_env({'CI_RESUME': '1'}, '/r', False))
+
+    def test_nothing_the_command_leaves_behind_outlives_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = os.path.join(d, 'pid')
+            code, doc, _, _ = self.run_part(f'sleep 300 & echo $! > {pidfile}')
+            self.assertEqual((code, doc['outcome']), (0, 'pass'))
+            pid = int(pathlib.Path(pidfile).read_text())
+            for _ in range(100):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)  # reaped by init, a moment after the kill
+            else:
+                os.kill(pid, signal.SIGKILL)
+                self.fail('the background child outlived the command')
 
     def test_the_bound_ends_the_command_red(self):
         with mock.patch.object(hosted, 'KILL_GRACE', 1):

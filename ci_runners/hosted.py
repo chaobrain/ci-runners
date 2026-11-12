@@ -90,6 +90,10 @@ def run(argv: list[str], env: Mapping[str, str] | None = None, *, popen: Callabl
               env=command_env(env, results, a.resume == 'true'), start_new_session=True)
     try:
         code = p.wait(timeout=a.timeout_minutes * 60)
+        try:  # what the command left behind in its session ends with it: nothing rewrites the outcome
+            os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
     except subprocess.TimeoutExpired:
         timed_out = True
         for sig, wait in ((signal.SIGTERM, KILL_GRACE), (signal.SIGKILL, None)):

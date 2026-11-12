@@ -177,6 +177,7 @@ class Fixture(unittest.TestCase):
         self.units = {f'ci-runner@{n}.service': ('active', 'success') for n in NAMES}
         self.scope_list: list[str] = []
         self.pub_fail = False
+        self.show_fail = False
         self.procs: dict[int, dict[str, str]] = {}
         self.files = {'/proc/sys/kernel/random/boot_id': 'B1\n'}
         self.smi = {SMI_Q: '0, 00000000:01:00.0, 40, 300\n1, 00000000:4D:00.0, 41, 300\n', SMI_APPS: ''}
@@ -202,6 +203,8 @@ class Fixture(unittest.TestCase):
         if argv[0] == 'nvidia-smi':
             return subprocess.CompletedProcess(argv, 0, self.smi.get(argv[1], ''), '')
         cmd = argv[2:]
+        if cmd[0] == 'show' and self.show_fail:
+            return subprocess.CompletedProcess(argv, 1, '', 'Failed to connect to bus')
         if cmd[0] == 'show':
             units = [a for a in cmd[1:] if not a.startswith('--')]
             text = '\n\n'.join(f'ActiveState={self.units.get(u, ("inactive", "success"))[0]}\n'
@@ -536,7 +539,7 @@ class Tick(Fixture):
         self.calls.clear()
         self.tick()
         # then nothing but the units' read, and the public runners' (stopped while presence is off, 18.5)
-        self.assertEqual([c[2] for c in self.calls], ['show', 'list-units'])
+        self.assertEqual([c[2] for c in self.calls], ['list-units', 'show'])
         self.assertFalse(pathlib.Path(presence.state_path(str(self.data))).exists() and
                          json.loads(pathlib.Path(presence.state_path(str(self.data))).read_text())['runners'])
 
@@ -817,6 +820,33 @@ class Public(Fixture):
         self.load_inv()
         self.assertEqual(presence.public_audience(self.inv, True, ('passed', '')), '')
         self.assertEqual(presence.public_audience(self.inv, True, ('stale', 'old')), 'old')
+
+    def test_unread_units_never_keep_them_up(self):
+        self.record(passed=False, failed=['mounts'])
+        self.pub_fail = True  # the public units cannot be listed: every unit of their pattern
+        self.tick()
+        self.assertEqual(self.actions('stop'), ['ci-pub-runner@*'])
+        self.assertEqual(self.log()[-1]['cause'], 'public audience withdrawn: the conformance check failed (mounts)')
+        self.pub_fail = False
+        self.calls.clear()
+        self.units[PUB0] = ('active', 'success')
+        self.show_fail = True  # the private runners' units cannot be read: the tick ends, after the stop
+        self.assertEqual(self.tick()[0], 1)
+        self.assertEqual(self.actions('stop'), [PUB0])
+        self.show_fail = False
+        self.load_inv(extra='presence = { enabled = false }\nisolation = "account"')
+        self.units[PUB0] = ('active', 'success')
+        self.calls.clear()
+        self.show_fail = True  # and in the rollback too
+        self.tick()
+        self.assertEqual(self.actions('stop'), [PUB0])
+
+    def test_an_unread_boot_id_is_no_boot(self):
+        doc = {'passed': True, 'failed': [], 'time': self.now, 'boot_id': '', 'kernel': 'k', 'isolation': 'account',
+               'groups': 'gpu'}
+        self.assertEqual(presence.check_result(doc, isolation='account', boot='', kernel='k', now=self.now)[0], 'stale')
+        self.assertEqual(presence.check_result({**doc, 'boot_id': 'B1'}, isolation='account', boot='B1', kernel='k',
+                                               now=self.now), ('passed', ''))
 
     def test_a_dry_run_stops_nothing(self):
         self.record(passed=False)

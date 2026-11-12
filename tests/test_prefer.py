@@ -443,10 +443,11 @@ class Burst(unittest.TestCase):
             h.tiers = tiers
         return out
 
-    def run_burst(self, *, deaf=(), stale=False, bursts=((0, 7, 200), (450, 3, 100)), end=900):
+    def run_burst(self, *, deaf=(), down=(), stale=False, bursts=((0, 7, 200), (450, 3, 100)), end=900):
         """Jobs (each with ``queued``, ``start``, ``host``), the longest wait while a runner
         of its labels idled or was yielded, and each runner's stop times. ``deaf``: hosts
-        whose rows show no listening runner; ``stale``: every published row too old."""
+        whose rows show no listening runner; ``down``: hosts whose rows have a problem;
+        ``stale``: every published row too old."""
         published: dict[str, dict] = {}
         hs = self.hosts(published)
         names = ['hz-part-1', 'hz-part-2']  # each host's two part runners (ci-cpu)
@@ -492,6 +493,7 @@ class Burst(unittest.TestCase):
                     row = offered(labels=('part', 'hz', 'ci-cpu'), listening=0 if k in deaf else listening,
                                   tier=self.TIER[k], now=T0 + t, age=600 if stale else 0)
                     row['key'] = k
+                    row['problems'] = ['drained'] if k in down else []
                     published[k] = row
             # GitHub: each queued part to an idle online runner, the latest tier first
             ready = [(k, n) for k in sorted(hs, key=lambda k: -self.TIER[k]) for n in names
@@ -540,9 +542,10 @@ class Burst(unittest.TestCase):
             self.assertTrue(all(b - a >= presence.DWELL_S for a, b in zip(times, times[1:])), stops)
 
     def test_a_black_hole_or_a_stale_row_yields_nothing(self):
-        jobs, worst, stops, _ = self.run_burst(stale=True, bursts=((0, 6, 100),), end=300)
-        self.assertEqual(sum(map(len, stops.values())), 0)
-        self.assertTrue(all(j['start'] == 0 for j in jobs))  # every runner online: none waits
+        for kw in ({'stale': True}, {'down': ('h100', 'h2')}):
+            jobs, worst, stops, _ = self.run_burst(bursts=((0, 6, 100),), end=300, **kw)
+            self.assertEqual(sum(map(len, stops.values())), 0, kw)
+            self.assertTrue(all(j['start'] == 0 for j in jobs))  # every runner online: none waits
         jobs, worst, stops, _ = self.run_burst(deaf=('h100',), bursts=((0, 6, 100),), end=300)
         self.assertFalse(any(stops[('h2', n)] for n in ('hz-part-1', 'hz-part-2')))  # h2 never yields to h100
         self.assertTrue(stops[('h3', 'hz-part-1')])  # h3 yields to h2, which listens

@@ -3,7 +3,7 @@
 **The file** is ``<data>/ci-runners/state/capacity.json`` (``path``: ``state/`` beside the
 account's ``etc``), mode 600, replaced by an atomic rename under ``capacity.lock`` beside
 it. ``pool status`` writes it, one machine's rows as soon as that machine answers
-(``merge``), and the account's ``ci-capacity.timer`` runs ``pool status`` every minute, so
+(``merge``), and the account's ``ci-capacity.timer`` runs ``pool status`` every 30 s, so
 the cluster's figures and the other hosts' rows stay cached there; presence (16.4, from
 R3) rewrites the host's own part at every tick (``pool.record_local``). Its keys:
 
@@ -75,7 +75,8 @@ def read(file: str) -> dict:
         return {'schema': SCHEMA, 'rows': []}
     if not isinstance(doc, dict) or doc.get('schema') != SCHEMA or not isinstance(doc.get('rows'), list):
         return {'schema': SCHEMA, 'rows': []}
-    doc['rows'] = [r for r in doc['rows'] if isinstance(r, dict) and isinstance(r.get('key'), str)]
+    doc['rows'] = [r for r in doc['rows'] if isinstance(r, dict) and isinstance(r.get('key'), str)
+                   and isinstance(r.get('problems', []), list)]
     return doc
 
 
@@ -141,8 +142,11 @@ def is_stale(row: Mapping, now: float) -> bool:
 
 def mark(row: Mapping, now: float) -> dict:
     """``row`` as its age leaves it: a stale one is down (problem ``stale``, nothing free,
-    no start). Pure."""
+    no start). Its ``gpu_free`` keyed by card number again (JSON keeps them as strings).
+    Pure."""
     out = dict(row)
+    if isinstance(row.get('gpu_free'), dict):
+        out['gpu_free'] = {int(k): v for k, v in row['gpu_free'].items() if str(k).isdigit()}
     if is_stale(row, now) and not any(str(p).startswith(STALE) for p in row.get('problems', [])):  # once
         a = age(row, now)
         out['problems'] = [*row.get('problems', []), STALE if a is None else f'{STALE} (read {a:.0f} s ago)']

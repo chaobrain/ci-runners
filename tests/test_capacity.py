@@ -93,7 +93,7 @@ class Writer(Account):
             capacity.merge(self.file, [{'key': 'cl:cpu', 'read_at': T0}], self.order)
             self.assertEqual([r['key'] for r in self.doc()['rows']], ['cl:cpu'])
         with open(self.file, 'w') as f:
-            f.write('{"schema": 1, "rows": [{"key": "hosta"}, {"nokey": 1}, 3]}')
+            f.write('{"schema": 1, "rows": [{"key": "hosta"}, {"nokey": 1}, 3, {"key": "b", "problems": null}]}')
         self.assertEqual(capacity.read(self.file)['rows'], [{'key': 'hosta'}])
 
     def test_writers_in_parallel_lose_no_machine(self):
@@ -128,6 +128,14 @@ class Writer(Account):
         d = self.doc()
         self.assertEqual(d['rows'], json.loads(json.dumps(rows)))  # the --json rows, in the registry's order
         self.assertEqual([r['read_at'] for r in d['rows']], [T0 - 7.5, T0, T0, T0, T0])  # hosta: its file's age
+        answered = []  # a slow cluster: its rows are dated when it answered, not when it was asked
+
+        def slow_cluster(m, run, *a, **k):
+            answered.append(1)
+            return [pool.target_row(m, t, [], {}, {}) for t in m.targets.values()]
+        with unittest.mock.patch.object(pool, 'probe_cluster', slow_cluster):
+            rows = pool.status(self.reg, run, here='', etc=self.etc, now=lambda: T0 + 50 if answered else T0)
+        self.assertTrue(all(r['read_at'] == T0 + 50 for r in rows if r['access'] == 'slurm'))
         self.assertEqual(d['local'], {'key': 'hostb', 'read_at': T0,
                                       'probe': {'slots_free': 1, 'load': 0, 'cpus': 16, 'gpu_free': {'0': 9000}}})
         self.assertEqual(d['rows'][2]['problems'], ['cluster unreachable'])
@@ -148,7 +156,7 @@ class Writer(Account):
 
 class Staleness(unittest.TestCase):
     ROW = {'key': 'cl:cpu', 'access': 'slurm', 'read_at': T0, 'problems': [], 'start_now': True, 'slots_free': 1,
-           'cpus_free': 40, 'gpu_free': {'0': 1}, 'jobs_free': 2, 'labels': {'cpu': 'cl-cpu'}, 'target': 'cpu'}
+           'cpus_free': 40, 'gpu_free': {0: 1}, 'jobs_free': 2, 'labels': {'cpu': 'cl-cpu'}, 'target': 'cpu'}
 
     def test_a_row_older_than_two_minutes_counts_as_down(self):
         self.assertEqual(capacity.STALE_S, 120)
@@ -158,6 +166,7 @@ class Staleness(unittest.TestCase):
         self.assertEqual({k: old[k] for k in ('start_now', 'slots_free', 'cpus_free', 'gpu_free', 'jobs_free')},
                          {'start_now': False, 'slots_free': 0, 'cpus_free': 0, 'gpu_free': {}, 'jobs_free': 0})
         self.assertEqual(self.ROW['problems'], [])  # pure
+        self.assertEqual(capacity.mark(dict(self.ROW, gpu_free={'0': 5, '3': 7}), T0)['gpu_free'], {0: 5, 3: 7})  # JSON's keys
         host = {k: v for k, v in self.ROW.items() if k != 'jobs_free'}
         self.assertNotIn('jobs_free', capacity.mark(host, T0 + 500))  # a host row gains none
         for when in ({k: v for k, v in self.ROW.items() if k != 'read_at'}, dict(self.ROW, read_at='1')):
@@ -383,8 +392,10 @@ class Timer(unittest.TestCase):
                      'ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run pool status --json\n',
                      'Environment=CI_RUNNERS_ETC=@CI_ETC@\n', 'NoNewPrivileges=yes\n', 'StandardOutput=null\n'):
             self.assertIn(want, service)
-        self.assertIn('OnUnitActiveSec=60s\n', timer)
-        self.assertLess(60 + 5, capacity.STALE_S)  # a tick and its accuracy within the bound
+        self.assertIn('OnCalendar=*-*-* *:*:00/30\n', timer)  # wall clock: a skipped run does not stop it
+        self.assertNotIn('OnUnitActiveSec', timer)
+        # a forced host's row in this file: its file's tick, then this one's, each with its accuracy and run
+        self.assertLess(2 * (30 + 2 + 20), capacity.STALE_S)
         self.assertIn('WantedBy=timers.target\n', timer)
         self.assertIn('ci-capacity.timer', setup.TIMERS)
         self.assertIn('ci-capacity.service', setup.UNITS)

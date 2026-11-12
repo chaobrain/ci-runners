@@ -91,7 +91,7 @@ by the association's room; positive exactly where ``start_now`` is true.
 its rows, each with ``read_at``, into ``state/capacity.json`` beside the account's ``etc``,
 one machine's as soon as it answers, with the ``local`` machine's probe; a host row also
 has ``label_runners``, each runner label's instances registered, online and free (no
-``Runner.Worker``). The account's ``ci-capacity.timer`` runs it every minute. The forced
+``Runner.Worker``). The account's ``ci-capacity.timer`` runs it every 30 s. The forced
 probe answers with that file's probe while it is fresh (``capacity.STALE_S``), without
 running anything. ``pool status --fast`` reads the files: the forced hosts' through their
 probes, the hosts this account probes itself without ``nvidia-smi`` (their cards from the
@@ -1080,8 +1080,9 @@ def status(reg: Registry, run: Runner = subprocess.run, here: str | None = None,
     def one(m: Machine) -> None:
         local = None
         if m.access == 'slurm':
-            t = round(now(), 3)
-            rows = [dict(r, read_at=t) for r in probe_cluster(m, run, cards, mem_gib, etc)]
+            rows = probe_cluster(m, run, cards, mem_gib, etc)
+            t = round(now(), 3)  # when it answered: a slow probe's rows are no older than they look
+            rows = [dict(r, read_at=t) for r in rows]
         else:
             row, p = _host(m, run, here, etc, now=now)
             rows = [row]

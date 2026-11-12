@@ -570,6 +570,34 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
         self.assertEqual([port for _, port in self.unpacked], [0, 0, 0, 0])  # no proxy to wait for
         self.assertEqual(setup.build(str(self.etc)).actions, [])  # a second run is a no-op
 
+    def test_a_home_pool_is_one_more_runner_and_restarts_nothing(self):
+        """Issue #232: the home pool's runner, ``<role>-home-1``, has its pool's labels and
+        ``CI_RUNNER_POOL_LABELS`` (not the light pool's, its class's); added to an applied
+        host, the plan unpacks and writes only its own and stops or restarts no unit."""
+        self.inv.write_text(self.inv.read_text().replace('labels = ["hx-light"]', 'labels = ["ci-light", "hx-light"]'))
+        self.unpacked = []
+        self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+        self.inv.write_text(self.inv.read_text().replace(
+            'part = {', 'home = { count = 1, class = "light", labels = ["hx-home", "hx-light"] }\npart = {'))
+        inv = inventory.load(self.inv.read_text())
+        self.assertEqual(setup.runners(inv)[:2], [('hx-light-1', ['ci-light', 'hx-light'], 'light'),
+                                                  ('hx-home-1', ['hx-home', 'hx-light'], 'light')])
+        self.assertEqual(setup.runner_pools(inv), ['light', 'home', 'part', 'cards', 'cards'])
+        self.assertIn('CI_RUNNER_POOL_LABELS=hx-home,hx-light\n', setup.env_file(inv, 'light', '/e', pool='home'))
+        self.assertIn('CI_RUNNER_POOL_LABELS=ci-light,hx-light\n', setup.env_file(inv, 'light', '/e'))
+        plan = setup.build(str(self.etc))
+        made = [(a['kind'], a.get('path', ' '.join(a.get('argv', [])))) for a in plan.actions]
+        home = str(self.data / 'actions-runner' / 'hx-home-1')
+        self.assertEqual([m for m in made if m[0] != 'run'], [('runner', home), ('file', f'{home}/.env')])
+        self.assertIn('labels hx-home,hx-light;', plan.text())
+        self.assertIn('CI_RUNNER_POOL_LABELS=hx-home,hx-light', plan.text())
+        runs = [m[1] for m in made if m[0] == 'run']
+        self.assertFalse([r for r in runs if any(w in r.split() for w in ('restart', 'stop', 'start', 'reload'))], runs)
+        self.assertEqual(runs[-1].split()[:3], ['systemctl', '--user', 'enable'])  # enable: no --now for a runner
+        self.assertNotIn('--now', runs[-1])
+        self.assertEqual(self.apply(plan.text()), 0)
+        self.assertEqual(setup.build(str(self.etc)).actions, [])
+
     def test_another_users_unit_stops_the_plan(self):
         self.units.mkdir(parents=True)
         for name in ('ci-reaper.service', 'ci-runner@.service'):

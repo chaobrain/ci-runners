@@ -405,6 +405,16 @@ presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 ru
 - **黑洞自动 drain**：15 分钟内 `presence.infra_failures`（默认 3）次基础设施失败就 drain 整台主机（和 15.2 的缺失一样，日志里是 `drained: infra`）。算数的是：部件的 `unavailable`，但不包括 busy、drained、队列满、等待超时（没有 slot、卡或主机锁：主机忙）、类别不接受的请求（调用方的 `gpus`、`lock`）和集群部件的（那是集群的问题）；主机没有重启过的 `lost` 部件；hook 的 `stale`、`policy`、`timeout`、`error` 拒绝。上次自动 drain 或上次 `drain off` 之前的失败不算。计数在停启之后进行，计数出错只记日志，不影响停启。不会自己解除 drain：修好以后运维执行 `ci-run drain off`。
 - **只在 inventory 打开的主机上生效**：主机的 inventory 写 `presence = { enabled = true }`（可选 `tick_seconds`、`infra_failures`）。每台主机都装这个定时器，但没有打开时它什么都不做。一次只打开一台主机（16.11，lead 的步骤），且 `v1` 已经指向包含 R3 的 release。
 
+**主机的 home 池**（design §5.1、决定 16.4 和 19.8，2026-11-13 随 issue #232 定）：每台主机在 light 池之外加一个 home 池，一个不带 `ci-` 标签的 light runner。presence 从不停它（drain、自动 drain 和其他原因都只停 light 池的 runner），salvage 在它上面跑，只有从它上面的作业能 `presence hold` 这台主机。没有 home 池的主机行为不变。添加步骤（lead 的步骤）：
+
+1. **先装 release、移 `v1`。** 从包含 issue #232 的 release 起（`v1.18.0` 之后的第一个）inventory 才能带 home 池。旧版本的加载器会拒绝第二个 `light` 类的池（`class light is also the class of light`），这台主机上读 inventory 的一切（部件、presence、`pool status`、setup）都会失败。所以和 `tier` 一样，要先在这台主机上装这个 release、`releases/hook` 指向它、`v1` 也移到它之后，才能加这一行。
+2. **inventory 加一行。** 在 `[hosts.<role>.pools]` 里加 `home = { count = 1, class = "light", labels = ["<role>-home", "<role>-light"] }`。light 池必须已经带 `ci-light`（16.1 的 H1 步骤），两个 light 类的池里正好一个带 `ci-` 标签，否则加载器拒绝并给出原因。home 池不能有 `slot`、`audience` 或 `per_card`，它的标签里必须有一个这台主机其他池都不带的（`<role>-home`）。标签不进 deny 清单（标签是公开的），不需要改 `tests/deny.sha256`。用 `python -m ci_runners.inventory check <inventory>` 检查。
+3. **plan 和 apply。** `plan.sh <role>` 里只多出这些：解包 `actions-runner/<role>-home-1/`、写它的 `.env`（`CI_RUNNER_CLASS=light`、`CI_RUNNER_POOL_LABELS=<role>-home,<role>-light`）、`labels <role>-home,<role>-light`，以及 `daemon-reload`、对已在运行的定时器的 `enable --now`（不会重启它们）、`enable` 各 runner 单元（只建链接，不启动）。别的 runner 的文件和单元都不变，所以 apply 不重启任何正在运行的单元。
+4. **注册这一个 runner。** `register.sh` 要求这个账户的 runner 都停着（作业和令牌在同一个账户里），所以注册时要先等 runner 都空闲（`ci-run presence --dry-run` 看 `idle`），再停掉：`systemctl --user stop 'ci-runner@*'`，然后运行 `gh api -X POST orgs/chaobrain/actions/runners/registration-token --jq .token | setup/register.sh <role>-home-1`。注册完它会自己启动。别的 runner 再手动 `systemctl --user start` 起来（还有原因的会被 `ExecCondition=` 拦下，由 presence 之后启动）。这是唯一一次停掉正在运行的 runner，前后大约一分钟。
+5. **现场检查。** `ci-run presence --dry-run` 显示 `<role>-home-1: ...; never stopped`；`ci-run pool status --json` 里这台主机那一行的 `pools` 有 `home` 这一项和它的标签（使用方按使用指南 §4 从这里找 home 标签）；在 `<role>-home` 上跑的作业 `ci-run presence hold --minutes 1` 被接受，在只能落到 light 池的作业（`ci-light`）上被拒绝。
+
+回退：按 §3 的第 2、3、5 步停掉并注销 `<role>-home-1`、删掉它的目录，再从 inventory 删掉这一行。
+
 **打开之前先观察**：以 CI 账户运行 `ci-run presence --dry-run`。它按"已经打开"的情况读本机，逐个 runner 打印状态、是否空闲、原因和这个 tick 会做什么（`stop`、`start`、`keep`、`never stopped`），以及 15 分钟内的基础设施失败数。它不写状态、不动任何单元、不 drain。
 
 **看日志**：每次停、启、`kept`、每个基础设施失败和每次自动 drain 都是 `<data>/ci-runners/logs/presence-<UTC 日期>.log` 里的一行 JSON（`runner`、`action`、`cause`，或 `infra`、`drain`），同时打到 `journalctl --user -u ci-presence.service`。reaper 14 天后删除这些文件。`state/presence.json` 里有每个 runner 的停、启次数（给 16.8 的统计）和两个 tick 的计数。

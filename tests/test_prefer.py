@@ -620,6 +620,32 @@ class Burst(unittest.TestCase):
         self.assertEqual(sorted(j['host'] for j in jobs if j['start'] == 0), ['h100', 'h100', 'h2', 'h2'])
 
 
+class HomeHold(TierHost):
+    """19.8 with issue #232: a real inventory's home pool beside its ``ci-light`` pool; a job
+    on its runner may hold the host, one on the light pool's may not."""
+    def setUp(self):
+        super().setUp()
+        text = tp.INV.format(t=self.t, data=self.data, slot=self.slot, part=self.part, extra=self.extra)
+        self.inv = inventory.load(text.replace(tp.LIGHT, f'{tp.LIGHT}, {tp.HOME}'))
+        self.units['ci-runner@hz-home-1.service'] = ('active', 'success')
+        (self.etc / 'policy.toml').write_text(POLICY)
+
+    def test_a_job_on_the_home_runner_holds_its_host(self):
+        job = {**Hold.JOB, 'RUNNER_NAME': 'hz-home-1'}
+        self.assertEqual(presence.holder(self.inv, job, str(self.etc)), ('chaobrain/a#7-1', 'chaobrain/a', ''))
+        self.assertIn('home runner', presence.holder(self.inv, {**job, 'RUNNER_NAME': 'hz-light-1'}, str(self.etc))[2])
+        (self.etc / 'policy.toml').write_text(POLICY.replace('classes = ["compile", "nightly"]', 'classes = ["compile"]'))
+        self.assertIn('lacks the class nightly', presence.holder(self.inv, job, str(self.etc))[2])
+        (self.etc / 'policy.toml').write_text(POLICY)
+        said: list[str] = []
+        self.assertEqual(presence.hold(self.inv, ['--minutes', '5'], env=job, etc=str(self.etc), now=lambda: self.now,
+                                       out=said.append), 0)
+        self.assertEqual(list(presence.read_holds(str(self.data), self.now)), ['chaobrain/a#7-1'])
+        for _ in range(3):  # held: the part runners do not yield, and the home runner never stops
+            self.tick()
+        self.assertEqual(self.actions('stop'), [])
+
+
 class Hold(TierHost):
     """19.8: a time-bounded hold suspends the cause; the maintainer, or a job on the host's
     home runner whose repository's entry carries ``nightly``, sets it."""
@@ -913,6 +939,37 @@ class Rows(unittest.TestCase):
         inv = inventory.load(inventory_text('hx').replace('labels = ["hx-gpu", "hx-gpu0"]', 'labels = ["hx-gpu"]'))
         self.assertEqual({e['pool']: e['labels'] for e in pool.pool_table(inv, p)}['cards'], ['hx-gpu'])  # not a card's
         self.assertEqual({e['pool']: (e['online'], e['free']) for e in pool.pool_table(inv, {})}['part'], (None, None))
+
+    def test_the_home_pool_in_the_row(self):
+        """Issue #232: the row's ``pools`` show the home pool with its labels, by its key (it
+        shares its class with the light pool); ``ci-light``'s free runners are the light
+        pool's alone; the consumers' rule (consumers §5.1) finds the home label; and a reader
+        of the row's older release takes the entry as any other."""
+        inv = inventory.load(inventory_text('hx').replace('light = 2', 'light = { count = 2, labels = ["ci-light", '
+                                                          '"hx-light"] }\nhome = { count = 1, class = "light", '
+                                                          'labels = ["hx-home", "hx-light"] }'))
+        p = {'runner_names': ['hx-light-1', 'hx-light-2', 'hx-home-1'], 'runner_busy': ['hx-light-1']}
+        with tempfile.TemporaryDirectory() as etc, unittest.mock.patch.object(pool, '_inventory', return_value=inv):
+            p = pool._with_inventory(p, etc)
+        got = {e['pool']: e for e in p['pools']}
+        self.assertEqual(got['home'], {'pool': 'home', 'class': 'light', 'labels': ['hx-home', 'hx-light'],
+                                       'registered': 1, 'online': 1, 'free': 1, 'yielded': 0})
+        self.assertEqual({k: got['light'][k] for k in ('labels', 'registered', 'online', 'free')},
+                         {'labels': ['ci-light', 'hx-light'], 'registered': 2, 'online': 2, 'free': 1})
+        self.assertEqual((p['label_runners']['ci-light']['free'], p['label_runners']['hx-light']['free']), (1, 2))
+
+        def home_label(pools):  # the consumers' rule, word for word
+            mine = [q for q in pools if q['class'] == 'light' and not any(x.startswith('ci-') for x in q['labels'])]
+            own = [x for q in mine for x in q['labels']
+                   if not any(x in o['labels'] for o in pools if o is not q)]
+            return own[0] if len(mine) == 1 and len(own) == 1 else None
+        self.assertEqual(home_label(p['pools']), 'hx-home')
+        self.assertIsNone(home_label(pool.pool_table(inventory.load(inventory_text('hx')), {})))  # no home pool
+        self.assertTrue(all(pool._pool_entry(e) for e in p['pools']))  # an older reader's check: no new key
+        row = {'key': 'hx', 'read_at': 1000.0, 'problems': [], 'label_runners': p['label_runners'], 'pools': p['pools']}
+        facts = rt._Facts(capacity.rows_from([row], now=1001.0))
+        self.assertEqual(facts.free(['ci-light']), 1)  # the light pool's free runner, never the home one
+        self.assertEqual(facts.free(['hx-home']), 1)
 
     def test_the_ci_accounts_probe_carries_them(self):
         with tempfile.TemporaryDirectory() as etc:

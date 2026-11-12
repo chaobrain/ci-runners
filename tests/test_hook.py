@@ -104,17 +104,22 @@ class Started(unittest.TestCase):
         text = (ROOT / 'setup' / 'inventory.example.toml').read_text()
         text = re.sub(r'^# (isolation = "[^"]*")\s.*$', r'\1', text, flags=re.M)
         text = re.sub(r'^# (pub-gpu = .*)$', r'\1', text, flags=re.M)
-        seen = 0
+        # the home runner (issue #232), once the light pool carries ci-light, as the example says
+        text = re.sub(r'^# (home = \{.*)$', r'\1', text, flags=re.M).replace(
+            'labels = ["3090b-light"] }', 'labels = ["ci-light", "3090b-light"] }', 1)
+        seen = []
         for role in inventory.load(text).hosts:
             doc = re.sub(r'^this = "[^"]*"', f'this = "{role}"', text, count=1, flags=re.M)
             (self.etc / 'inventory.toml').write_text(doc)
             i = inventory.load(doc)
-            for name, _, cls, card, slot in setup._runners(i):
-                env = dict(x.split('=', 1) for x in setup.env_file(i, cls, str(self.etc), card, slot).splitlines())
+            for (name, _, cls, card, slot), pool in zip(setup._runners(i), setup.runner_pools(i), strict=True):
+                env = dict(x.split('=', 1) for x in setup.env_file(i, cls, str(self.etc), card, slot, pool).splitlines())
                 self.assertEqual(hook.runner_facts(str(self.etc), name), (env['CI_RUNNER_CLASS'], 'private'), name)
                 self.assertNotIn('CI_RUNNER_AUDIENCE', env)  # unset: private
-                seen += 1
-        self.assertGreater(seen, 5)
+                seen.append((name, env['CI_RUNNER_CLASS']))
+        self.assertGreater(len(seen), 5)
+        self.assertIn(('3090b-home-1', 'light'), seen)  # a home runner: class light, no ci- label
+        self.assertIn(('3090b-light-1', 'light'), seen)
 
     def test_the_runner_s_class_and_audience_are_the_inventory_s(self):
         """C2c (decision 18.7): by ``RUNNER_NAME``, never the environment's word alone."""

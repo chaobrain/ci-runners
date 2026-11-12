@@ -18,19 +18,28 @@ network) and, per runner of the host, its *causes*:
   disk below ``disk_min_gib``, or the CI account's access to the shared files, 15.2);
 - an exclusive timing part runs or waits (its runner is not idle): the runners whose CPUs
   meet ``compile_cpus`` (a slot's cpuset, or the host's ``cpus`` for a ``part`` runner)
-  stop.
+  stop;
+- *tier* (decision 19.2, the tick only): on a host whose registry entry has a ``tier``, a
+  runner of class ``part``, ``gpu`` or ``multi`` with capability labels (``ci-`` ones and
+  ``mem-big``) and no other cause, while a host of an earlier tier offers them: its row,
+  read in this tick through its forced probe (``pool.probe_host``, fast), is up, read
+  within ``YIELD_FRESH_S``, has this host's repository entries, and one of its pools
+  carries every one of those labels with a ``listening`` runner (online, idle, its
+  listener connected). A runner presence started is not yielded for ``DWELL_S``.
 
 *Idle* is read without a token: no ``Runner.Worker`` below the runner's directory and no
 part scope of the runner. A runner is stopped (``systemctl --user stop``) only after
 ``TICKS`` consecutive idle ticks with a cause, after one more look for a worker or a scope
 just before the stop; one that presence stopped (or that the unit's ``ExecCondition=``
-held back, ``Result=exec-condition``) is started after ``TICKS`` ticks without one. A runner
+held back, ``Result=exec-condition``) is started after ``TICKS`` ticks without one, and one
+stopped for the tier cause alone at the first tick without one (up at once). A runner
 that is not idle is never stopped; nor is the host's light runner without a ``ci-`` label
 (the ``home`` pool of §5.1, for the host's salvage legs; until a host's light pool carries
 ``ci-light``, 16.1, every light runner there is such a runner). One tick runs at a time
 (``state/presence.json.lock``). The runner unit's
-``ExecCondition=`` runs ``ci-run presence check <runner>``, the same causes now, so that a
-restart (15.5) does not bring back a runner whose resource is still taken.
+``ExecCondition=`` runs ``ci-run presence check <runner>``, the same causes now but the
+tier (no network in a unit's start), so that a restart (15.5) does not bring back a runner
+whose resource is still taken.
 
 *Black holes.* ``presence.infra_failures`` (3) infrastructure ends within 15 min drain the
 host as 15.2's miss does (``drained: infra`` in the host's log): a part's ``unavailable``
@@ -92,6 +101,10 @@ NOT_INFRA = ('busy', 'drained', 'project queue full', drain_mod.UNREADABLE, 'que
              'this host has no compile_cpus')
 HOOK_INFRA = ('stale', 'policy', 'timeout', 'error')  # the hook's refusals that are infrastructure ends
 CLUSTER = 'slurm'  # a cluster part's unavailable is the cluster's, not the host's
+YIELD_CLASSES = ('part', 'gpu', 'multi')  # the classes whose runners yield to an earlier tier (19.2)
+YIELD_FRESH_S = 45  # s: an earlier tier's row older than this offers nothing (two of its ticks and a margin)
+DWELL_S = 300  # s: a runner presence started is not yielded before this (19.2's hysteresis)
+TIER = 'tier: '  # the cause's prefix
 
 
 # ------------------------------------------------------------------ the runners
@@ -249,7 +262,8 @@ class Probe:
                  uid: int | None = None, sleep: Callable[[float], None] = time.sleep,
                  load: Callable[[], dict | None] | None = None, disk_free: Callable[[str], float] | None = None,
                  own_access: Callable[[dict, int], list] | None = None, locks: Callable[[], str] | None = None,
-                 stat_path: Callable[[str], os.stat_result] = os.stat, etc: str = '') -> None:
+                 stat_path: Callable[[str], os.stat_result] = os.stat, etc: str = '',
+                 tiers: Callable[[], tuple | None] | None = None) -> None:
         self.inv, self.h = inv, inv.host
         self.etc = etc  # the account's etc (the environment's by default): where pool.toml is
         self.run, self.read, self.listdir, self.sleep = run, read, listdir, sleep
@@ -259,6 +273,7 @@ class Probe:
         self._own_access = own_access
         self._locks = locks or (lambda: self.read('/proc/locks'))
         self.stat_path = stat_path
+        self._tiers = tiers
 
     def mine(self, pid: int) -> bool:
         return hostload.ours(pid, self.uid, self.read)
@@ -272,6 +287,31 @@ class Probe:
             return False
         pool.record_local(pool.load_file(path), self.etc)
         return True
+
+    def tiers(self) -> tuple[int, list[dict], str] | None:
+        """Decision 19.2: ``(this host's tier, the rows of the hosts of an earlier tier read
+        now, this host's repository entries' digest)``; None where the account has no
+        registry, its local machine no tier, or no host is of an earlier tier. Each row is
+        read through its forced probe, fast (``pool.probe_host``), all at once; one that
+        does not answer is a down row."""
+        if self._tiers is not None:
+            return self._tiers()
+        import concurrent.futures
+        from ci_runners import pool
+        path = os.path.join(pool._etc(self.etc), 'pool.toml')
+        if not os.path.isfile(path):
+            return None
+        reg = pool.load_file(path)
+        me = pool._local(reg)
+        if me.tier is None:
+            return None
+        up = [m for m in reg.machines.values() if m.access == 'ssh' and m.tier is not None and m.tier < me.tier]
+        if not up:
+            return None
+        with concurrent.futures.ThreadPoolExecutor(len(up)) as ex:
+            rows = list(ex.map(lambda m: pool.probe_host(m, etc=self.etc, fast=True), up))
+        pol = pool.policy_digests(self.etc) or {}
+        return me.tier, rows, str(pol.get('repositories') or '')
 
     def systemctl(self, *argv: str) -> subprocess.CompletedProcess | None:
         try:
@@ -428,6 +468,58 @@ def causes(inv: inventory.Inventory, rs: Sequence[Runner], f: Facts, units: Mapp
     for r in rs:
         if never_stopped(r):
             out[r.name] = []
+    return out
+
+
+def capability(r: Runner) -> frozenset[str]:
+    """The runner's capability labels: its ``ci-`` labels and ``mem-big`` (16.1). Pure."""
+    return frozenset(x for x in r.labels if x.startswith('ci-') or x == 'mem-big')
+
+
+def offers(tiers: tuple | None, t: float) -> list[tuple[int, str, frozenset[str], int]]:
+    """What the earlier tiers offer now (decision 19.2): ``(tier, key, labels, listening)``
+    per pool of a host row that is of an earlier tier than this host's, up, read within
+    ``YIELD_FRESH_S``, with this host's repository entries, and with a ``listening``
+    runner; by tier, then key. Nothing where ``tiers`` is None. Pure."""
+    if not tiers:
+        return []
+    me, rows, repos = tiers
+    out = []
+    for row in rows:
+        tier, read = row.get('tier'), row.get('read_at')
+        if type(tier) is not int or type(me) is not int or tier >= me or row.get('problems') or row.get('target'):
+            continue
+        if type(read) not in (int, float) or not -5 <= t - read <= YIELD_FRESH_S:  # 5 s of clock skew
+            continue
+        pol = row.get('policy') if isinstance(row.get('policy'), dict) else {}
+        if not repos or pol.get('repositories') != repos:
+            continue
+        for p in row.get('pools') if isinstance(row.get('pools'), list) else []:
+            n = p.get('listening') if isinstance(p, dict) else None
+            if type(n) is int and n > 0 and isinstance(p.get('labels'), list):
+                out.append((tier, str(row.get('key')), frozenset(str(x) for x in p['labels']), n))
+    return sorted(out, key=lambda o: (o[0], o[1]))
+
+
+def tier_yield(rs: Sequence[Runner], why: Mapping[str, list[str]], tiers: tuple | None, st: Mapping,
+               t: float) -> dict[str, str]:
+    """The runners that yield now (decision 19.2), each with its cause: one of
+    ``YIELD_CLASSES`` with capability labels and no other cause in ``why``, not started by
+    presence within ``DWELL_S`` (``st``), whose labels a host of an earlier tier
+    ``offers``. Pure."""
+    got = offers(tiers, t)
+    out: dict[str, str] = {}
+    for r in rs:
+        caps = capability(r)
+        if r.cls not in YIELD_CLASSES or not caps or why.get(r.name) or never_stopped(r):
+            continue
+        started = (st.get('runners', {}).get(r.name) or {}).get('started')
+        if type(started) in (int, float) and 0 <= t - started < DWELL_S:
+            continue
+        for tier, key, labels, n in got:
+            if caps <= labels:
+                out[r.name] = f'{TIER}{key} (tier {tier}) has {n} idle runner(s) of {" + ".join(sorted(caps))}'
+                break
     return out
 
 
@@ -729,6 +821,16 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
     f = probe.facts(rs)
     held = {n for n, v in st['runners'].items() if v.get('load')}
     why = causes(inv, rs, f, units, held)
+    tiers = None
+    if any(r.cls in YIELD_CLASSES for r in rs):  # 19.2: read the earlier tiers' rows now
+        try:
+            tiers = probe.tiers()
+        except Exception as e:  # noqa: BLE001 - not read: nothing yields
+            if not dry_run:
+                log(data, {'tier': 'not read', 'error': f'{type(e).__name__}: {e}'[:200]}, t)
+    yields = tier_yield(rs, why, tiers, st, t)
+    for n, c in yields.items():
+        why[n] = [c]
     plan: list[tuple[str, Runner]] = []
     for r in rs:
         rst = st['runners'].setdefault(r.name, {'stop_ticks': 0, 'start_ticks': 0, 'stopped': None, 'load': False})
@@ -736,14 +838,17 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
         idle = f.busy is not None and r.name not in f.busy
         rst['load'] = any(c.startswith('load:') for c in why[r.name])
         if a in RUNNING:
-            rst['stopped'], rst['start_ticks'] = None, 0
+            rst['stopped'], rst['start_ticks'], rst['yielded'] = None, 0, False
             rst['stop_ticks'] = rst['stop_ticks'] + 1 if why[r.name] and idle else 0
             if rst['stop_ticks'] >= TICKS or dry_run and why[r.name] and idle:
                 plan.append(('stop', r))
         elif ours_down(r):
             rst['stop_ticks'] = 0
+            if why[r.name]:  # held for the tier cause alone: up at the first tick without it (19.2)
+                rst['yielded'] = r.name in yields
             rst['start_ticks'] = 0 if why[r.name] or f.busy is None else rst['start_ticks'] + 1
-            if rst['start_ticks'] >= TICKS or dry_run and not why[r.name] and f.busy is not None:
+            if rst['start_ticks'] >= (1 if rst.get('yielded') else TICKS) \
+                    or dry_run and not why[r.name] and f.busy is not None:
                 plan.append(('start', r))
         else:  # down by someone else's hand, or between states: not presence's
             rst['stop_ticks'] = rst['start_ticks'] = 0
@@ -763,6 +868,7 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
                 log(data, {'runner': r.name, 'action': 'kept', 'cause': cause, 'why': 'a job started'}, t)
                 continue
             rst['stopped'] = t  # on disk before the stop: a tick that dies after it still owns the runner
+            rst['yielded'] = r.name in yields
             write_state(data, st)
             p = probe.systemctl('--no-block', 'stop', r.unit)
             if p is not None and p.returncode == 0:
@@ -774,7 +880,7 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
         else:
             p = probe.systemctl('--no-block', 'start', r.unit)
             if p is not None and p.returncode == 0:
-                rst['stopped'], rst['start_ticks'] = None, 0
+                rst['stopped'], rst['start_ticks'], rst['yielded'], rst['started'] = None, 0, False, t
                 log(data, {'runner': r.name, 'action': 'start', 'cause': 'no cause'}, t)
                 _count(st, r.name, 'start')
     try:  # after the stops and starts, and never in their way

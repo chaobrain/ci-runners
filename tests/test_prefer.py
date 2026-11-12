@@ -1,8 +1,11 @@
-"""Decision 19 (RUN-10 R5b): the preferred host first in the route, the spill's fields, the
-rows' pools, policy, health and target bounds, the policy drift warning, the part's
-``pool-labels`` and ``cool-card``, and the slot speed check."""
+"""Decision 19 (RUN-10 R5b): the preferred host first by presence (a later tier's idle
+runners yield to an earlier tier's listening ones), the route's room with the yielded
+runners and its retries on a yielding host, a simulated burst, the rows' pools, policy,
+health and target bounds, the policy drift warning, the part's ``pool-labels`` and
+``cool-card``, and the slot speed check."""
 from __future__ import annotations
 
+import collections
 import io
 import json
 import os
@@ -12,11 +15,13 @@ import textwrap
 import unittest
 import unittest.mock
 
-from ci_runners import capacity, inventory, part, policy, pool
+from ci_runners import capacity, inventory, part, policy, pool, presence
 from ci_runners import route as rt
+from tests import test_presence as tp
 from tests.test_pool import REGISTRY, inventory_text
 
 T0 = 1_762_905_600.0
+CAPS = re.compile(r'self-hosted|ci-[a-z0-9]+|mem-big')  # the labels a plan may name (16.1)
 
 
 def P(name, labels, free=1, registered=None, **kw):
@@ -26,7 +31,7 @@ def P(name, labels, free=1, registered=None, **kw):
             'online': None if free is None else n, 'free': free, **kw}
 
 
-def host(key, *pools, prefer=None, role=None, age=10, problems=(), rep=None):
+def host(key, *pools, tier=None, role=None, age=10, problems=(), rep=None):
     """A host row whose ``label_runners`` follow its ``pools``."""
     lr: dict = {}
     for p in pools:
@@ -37,8 +42,8 @@ def host(key, *pools, prefer=None, role=None, age=10, problems=(), rep=None):
             c['free'] = None if p['free'] is None or c['free'] is None else c['free'] + p['free']
     row = {'key': key, 'access': 'ssh', 'target': '', 'read_at': T0 - age, 'problems': list(problems),
            'slots_free': 1, 'labels': {}, 'label_runners': lr, 'pools': list(pools), 'role': role or key}
-    if prefer is not None:
-        row['prefer'] = prefer
+    if tier is not None:
+        row['tier'] = tier
     if rep is not None:
         row['policy'] = {'file': 'f' * 12, 'repositories': rep}
     return row
@@ -65,161 +70,484 @@ def part_(pid='p', needs='cpu', minutes=10, **kw):
     return {'id': pid, 'command': 'python -m pytest', 'needs': needs, 'minutes': minutes, **kw}
 
 
-def routed(parts, *rs, prefer=True):
-    return rt.route(parts, rows(*rs), prefer=prefer)
+class Route(unittest.TestCase):
+    """19.3: the route counts yielded runners as room and names no host."""
+
+    def snapshot(self, yielded=3):
+        return rows(host('h1', cpu('h1', 3), tier=1), host('h2', cpu('h2', 0, registered=3, yielded=yielded), tier=2),
+                    SLURMS, target(jobs=8))
+
+    def test_yielded_runners_are_room_not_cluster(self):
+        got = rt.route([part_(f'p{i}') for i in range(7)], self.snapshot())
+        self.assertEqual([g['where'] for g in got], ['host'] * 6 + ['slurm'])
+        self.assertTrue(all(g['labels'] == ['self-hosted', 'ci-cpu'] for g in got[:6]))
+        got = rt.route([part_(f'p{i}') for i in range(4)], self.snapshot(yielded=0))
+        self.assertEqual([g['where'] for g in got], ['host'] * 3 + ['slurm'])  # without them: the cluster
+        bad = self.snapshot(yielded=0)
+        for r in bad:
+            for p in r.row.get('pools', []):
+                p['yielded'] = True  # not a count
+        self.assertEqual(rt.route([part_(f'p{i}') for i in range(4)], bad)[3]['where'], 'slurm')
+        # a pool of other labels lends no room
+        rs = rows(host('h1', cpu('h1', 0), P('gpu', ['h1-gpu', 'ci-gpu'], 0, registered=2, yielded=2)), SLURMS, target())
+        self.assertEqual(rt.route([part_()], rs)[0]['where'], 'slurm')
+
+    def test_n_plans_from_one_reading_name_only_capability_labels(self):
+        snap = self.snapshot()
+        for n in range(8):  # a batch of eight plans, each from the same reading
+            got = rt.route([part_(f'p{i}', minutes=5 + i) for i in range(3)], snap)
+            for g in got:
+                self.assertTrue(all(CAPS.fullmatch(x) for x in g['labels']), g['labels'])
+                self.assertNotIn('host', g)
+
+    def test_a_retry_never_waits_on_a_yielding_host(self):
+        gpu = lambda k, free=1: P('cards', [f'{k}-gpu', 'ci-gpu'], free, registered=2)  # noqa: E731
+        p = rt.route([part_(needs='gpu')], rows(host('h1', gpu('h1'), tier=1), host('h2', gpu('h2'), tier=2)))[0]
+        first = {'outcome': 'thermal', 'next': 'retry', 'attempt': 1, 'host': 'h2', 'cool_card': 1,
+                 'pool_labels': ['h2-gpu', 'ci-gpu']}
+        tiered = rows(host('h1', gpu('h1'), tier=1), host('h2', gpu('h2'), tier=2))
+        cc = rt.retry(p, first, tiered)
+        self.assertEqual((cc['row'], cc['labels']), ('fallback', ['self-hosted', 'ci-gpu']))
+        sh = rt.retry(p, {**first, 'outcome': 'reboot'}, tiered)
+        self.assertEqual((sh['row'], sh['labels']), ('any', ['self-hosted', 'ci-gpu']))
+        self.assertIn('yielding', sh['why'])
+        for name, rs in (('no tier', rows(host('h1', gpu('h1')), host('h2', gpu('h2')))),
+                         ('the first tier', rows(host('h1', gpu('h1'), tier=2), host('h2', gpu('h2'), tier=1))),
+                         ('equal tiers', rows(host('h1', gpu('h1'), tier=2), host('h2', gpu('h2'), tier=2))),
+                         ('earlier one down', rows(host('h1', gpu('h1'), tier=1, problems=['drained']),
+                                                   host('h2', gpu('h2'), tier=2))),
+                         ('earlier one without the label', rows(host('h1', cpu('h1'), tier=1), host('h2', gpu('h2'), tier=2))),
+                         ('rows unread', None)):
+            with self.subTest(name):
+                self.assertEqual(rt.retry(p, first, rs)['labels'], ['self-hosted', 'h2-gpu1'])
+                self.assertEqual(rt.retry(p, {**first, 'outcome': 'reboot'}, rs)['labels'], ['self-hosted', 'h2-gpu'])
+        # by role as well as by key; a bad tier is none
+        self.assertTrue(rt.may_yield(rows(host('h1', gpu('h1'), tier=1), host('k2', gpu('h2'), tier=2, role='h2')),
+                                     'h2', 'ci-gpu'))
+        self.assertFalse(rt.may_yield(rows(host('h1', gpu('h1'), tier=1), host('h2', gpu('h2'), tier=True)), 'h2', 'ci-gpu'))
+        self.assertFalse(rt.may_yield(rows(host('h1', gpu('h1'), tier=0), host('h2', gpu('h2'), tier=2)), 'h2', 'ci-gpu'))
+        self.assertFalse(rt.may_yield(tiered, '', 'ci-gpu'))
+        cl = dict(p, where='slurm', target='v100')
+        self.assertEqual(rt.retry(cl, {**first, 'outcome': 'reboot'}, tiered)['why'], 'same target v100')
 
 
-def runs_on(labels, rs):
-    """GitHub's label matching (§2): the (host, pool) whose runners carry every label."""
-    want = set(labels) - {'self-hosted'}
-    return {(r['key'], p['pool']) for r in rs if not r.get('target') for p in r['pools'] if want <= set(p['labels'])}
+class Listening(unittest.TestCase):
+    """19.2: a listener that holds an established TCP connection."""
+
+    def proc(self, d, root):
+        def listener(pid, name, sockets, ns='net:[1]', tcp=''):
+            base = os.path.join(d, str(pid))
+            os.makedirs(os.path.join(base, 'fd'))
+            os.makedirs(os.path.join(base, 'net'))
+            os.makedirs(os.path.join(base, 'ns'))
+            with open(os.path.join(base, 'cmdline'), 'wb') as f:
+                f.write(f'{root}/{name}/bin/Runner.Listener\0run\0'.encode())
+            for i, s in enumerate(sockets):
+                os.symlink(s, os.path.join(base, 'fd', str(i + 3)))
+            os.symlink(ns, os.path.join(base, 'ns', 'net'))
+            with open(os.path.join(base, 'net', 'tcp'), 'w') as f:
+                f.write('  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n' + tcp)
+            with open(os.path.join(base, 'net', 'tcp6'), 'w') as f:
+                f.write('  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n')
+        return listener
+
+    def test_an_established_socket_of_the_listener(self):
+        line = '   0: 0100007F:9C40 0100007F:0CEA {st} 00000000:00000000 00:00000000 00000000  1000        0 {ino} 1 x\n'
+        with tempfile.TemporaryDirectory() as d:
+            root = os.path.join(d, 'actions-runner')
+            os.makedirs(root)
+            proc = os.path.join(d, 'proc')
+            os.makedirs(proc)
+            add = self.proc(proc, root)
+            tcp = line.format(st='01', ino='111') + line.format(st='0A', ino='222') + line.format(st='01', ino='333')
+            add(10, 'r-up', ['socket:[111]', '/dev/null'], tcp=tcp)
+            add(11, 'r-listen-only', ['socket:[222]'], tcp=tcp)  # a listening socket is no connection
+            add(12, 'r-none', ['pipe:[333]'], tcp=tcp)  # not a socket
+            add(13, 'r-other-ns', ['socket:[111]'], ns='net:[2]', tcp='')  # its own namespace has none
+            got = pool.runner_listening(root, proc)
+            self.assertEqual(got, {'r-up'})
+            os.makedirs(os.path.join(proc, '14', 'fd'))
+            os.makedirs(os.path.join(proc, '14', 'ns'))
+            os.symlink('net:[1]', os.path.join(proc, '14', 'ns', 'net'))
+            os.symlink('socket:[111]', os.path.join(proc, '14', 'fd', '3'))
+            with open(os.path.join(proc, '14', 'cmdline'), 'wb') as f:
+                f.write(f'{root}/r-worker/bin/Runner.Worker\0'.encode())
+            self.assertEqual(pool.runner_listening(root, proc), {'r-up'})  # a worker is not a listener
+            self.assertIsNone(pool.runner_listening(root, os.path.join(d, 'none')))
+        self.assertIn('def runner_listening', pool._probe_src())
+
+    def test_the_probe_and_the_pool_table(self):
+        with unittest.mock.patch.object(pool, 'runner_procs', lambda r: ({'a', 'b', 'c'}, {'a'})), \
+                unittest.mock.patch.object(pool, 'runner_listening', lambda r: {'a', 'b', 'z'}):
+            p = pool.probe('/nonexistent/x.lock', 1, '', runners='/nonexistent', smi=False)
+        self.assertEqual(p['runner_listening'], ['a', 'b'])
+        with unittest.mock.patch.object(pool, 'runner_procs', lambda r: ({'a'}, set())), \
+                unittest.mock.patch.object(pool, 'runner_listening', lambda r: None):
+            self.assertNotIn('runner_listening', pool.probe('/nonexistent/x.lock', 1, '', runners='/nonexistent', smi=False))
+        inv = inventory.load(inventory_text('hx'))
+        p = {'runner_names': ['hx-part-1', 'hx-part-2', 'hx-gpu0'], 'runner_busy': ['hx-part-2'],
+             'runner_listening': ['hx-part-1', 'hx-part-2', 'hx-gpu0']}
+        got = {e['pool']: e for e in pool.pool_table(inv, p, {'hx-part-3', 'hx-part-1', 'hx-gpu3'})}
+        self.assertEqual((got['part']['listening'], got['part']['yielded']), (1, 1))  # busy is not; online is not yielded
+        self.assertEqual((got['cards']['listening'], got['cards']['yielded']), (1, 1))
+        got = {e['pool']: e for e in pool.pool_table(inv, {k: v for k, v in p.items() if k != 'runner_listening'})}
+        self.assertNotIn('listening', got['part'])  # not read: not proven
+        self.assertNotIn('yielded', got['part'])
+        self.assertNotIn('yielded', {e['pool']: e for e in pool.pool_table(inv, {}, set())}['part'])  # runners unknown
+        m = pool.load(REGISTRY).machines['hosta']
+        good = P('part', ['hosta-cpu', 'ci-cpu'], 1, listening=1, yielded=0)
+        self.assertEqual(pool.host_row(m, {'pools': [good]})['pools'], [good])
+        for bad in (dict(good, listening=-1), dict(good, yielded=True), dict(good, listening=1.0)):
+            self.assertNotIn('pools', pool.host_row(m, {'pools': [bad]}), msg=repr(bad))
+
+    def test_the_yielded_runners_from_presences_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            inv = inventory.load(inventory_text('hx').replace('data = "/srv/ci/hx/data"', f'data = "{d}"'))
+            data = str(inv.host['data'])
+            self.assertEqual(data, d)
+            self.assertEqual(pool.yielded_runners(inv), set())  # no state yet: nothing yielded
+            presence.write_state(data, {'runners': {'hx-part-1': {'stopped': 1.0, 'yielded': True},
+                                                    'hx-part-2': {'stopped': 1.0, 'yielded': False},
+                                                    'hx-part-3': {'stopped': None, 'yielded': True}},
+                                        'counts': {}, 'infra': {'since': 0.0, 'drained': False, 'seen': {}}})
+            self.assertEqual(pool.yielded_runners(inv), {'hx-part-1'})
+            with open(presence.state_path(data), 'w') as f:
+                f.write('{')
+            self.assertIsNone(pool.yielded_runners(inv))
 
 
-class Prefer(unittest.TestCase):
-    def test_a_preferred_host_with_room_gets_the_part_on_its_own_label(self):
-        got = routed([part_()], host('hosta', cpu('hosta', 2), prefer=1), host('hostb', cpu('hostb', 3)))[0]
-        self.assertEqual(got['labels'], ['self-hosted', 'ci-cpu', 'hosta-cpu'])
-        self.assertEqual((got['host'], got['spill_labels'], got['spill_after_s']),
-                         ('hosta', ['self-hosted', 'ci-cpu'], rt.SPILL_S))
-        self.assertIn('prefer hosta: 2 free of hosta-cpu', got['why'])
-        self.assertEqual(rt.SPILL_S, 60)
-        fast = cpu('hosta', 2, memory_gib=48, speed=1.0)
-        slow = cpu('hostb', 3, memory_gib=48, speed=2.0)
-        got = routed([part_(minutes=10)], host('hosta', fast, prefer=1), host('hostb', slow))[0]
-        self.assertEqual((got['host'], got['timeout_minutes']), ('hosta', 35))  # the shared labels' largest speed: both legs
+EARLIER = 'r' * 12  # the repository entries' digest both hosts hold
 
-    def test_without_the_flag_no_host_label(self):
-        got = routed([part_()], host('hosta', cpu('hosta', 2), prefer=1), prefer=False)[0]
-        self.assertEqual((got['labels'], got['host'], got['spill_labels'], got['spill_after_s']),
-                         (['self-hosted', 'ci-cpu'], '', ['self-hosted', 'ci-cpu'], 0))
 
-    def test_the_plans_parts_fill_the_order_then_the_shared_label_then_the_cluster(self):
-        rs = (host('hosta', cpu('hosta', 2), prefer=1), host('hostb', cpu('hostb', 1), prefer=2),
-              host('hostc', cpu('hostc', 1)), SLURMS, target())
-        got = routed([part_(f'p{i}') for i in range(6)], *rs)
-        self.assertEqual([g['host'] for g in got], ['hosta', 'hosta', 'hostb', '', '', ''])
-        self.assertEqual([g['labels'][-1] for g in got], ['hosta-cpu', 'hosta-cpu', 'hostb-cpu', 'ci-cpu',
-                                                          'ci-slurm', 'ci-slurm'])
-        self.assertEqual([g['where'] for g in got], ['host'] * 4 + ['slurm'] * 2)  # the host bookings count
-        self.assertEqual([g['spill_after_s'] for g in got], [60, 60, 60, 0, 0, 0])
-        self.assertEqual(got[4]['spill_labels'], ['self-hosted', 'ci-slurm'])
+def offered(labels=('part', 'h1', 'ci-cpu'), listening=1, age=5, tier=1, problems=(), rep=EARLIER, now=None):
+    """An earlier tier's row as its forced probe gives it."""
+    row = {'key': 'h1', 'tier': tier, 'read_at': (now or 0) - age, 'problems': list(problems), 'target': '',
+           'pools': [{'pool': 'part', 'class': 'part', 'labels': list(labels), 'registered': 3, 'online': 3,
+                      'free': listening, 'listening': listening}]}
+    if rep is not None:
+        row['policy'] = {'file': 'f' * 12, 'repositories': rep}
+    return row
 
-    def test_lower_first_and_equal_values_in_the_registrys_order(self):
-        a, b, c = cpu('hosta'), cpu('hostb'), cpu('hostc')
-        self.assertEqual(routed([part_()], host('hosta', a, prefer=2), host('hostb', b, prefer=1))[0]['host'], 'hostb')
-        self.assertEqual(routed([part_()], host('hostc', c, prefer=1), host('hosta', a, prefer=1))[0]['host'], 'hostc')
-        self.assertEqual(routed([part_()], host('hosta', a), host('hostb', b, prefer=3))[0]['host'], 'hostb')
-        for bad in (0, 100, True, '1', 1.0):  # a malformed value: in no order
-            self.assertEqual(routed([part_()], host('hosta', a, prefer=bad))[0]['host'], '', msg=repr(bad))
-        self.assertEqual(routed([part_()], host('hosta', a, prefer=99))[0]['host'], 'hosta')
 
-    def test_a_host_offers_only_up_fresh_reported_and_without_drift(self):
-        other = host('hostb', cpu('hostb', 2))
-        cases = {'up': ({}, 'hosta'), 'drained': ({'problems': ['drained']}, ''), 'stale': ({'age': 130}, ''),
-                 'older than 60 s': ({'age': 61}, ''), 'drift': ({'rep': 'y'}, ''), 'at 60 s': ({'age': 60}, 'hosta')}
-        for why, (kw, want) in cases.items():
-            with self.subTest(why):
-                norm = (host('hostc', cpu('hostc'), rep='x'), host('hoste', cpu('hoste'), rep='x'))
-                got = routed([part_()], host('hosta', cpu('hosta'), prefer=1, **kw), other, *norm)[0]
-                self.assertEqual(got['host'], want)
-        for why, p in {'free unknown': cpu('hosta', None, registered=2), 'no free': cpu('hosta', 0),
-                       'free true': cpu('hosta', True, registered=2), 'free negative': cpu('hosta', -1, registered=2),
-                       'no capability': P('part', ['hosta-cpu'], 1), 'no host label': P('part', ['ci-cpu', 'x-cpu'], 1)}.items():
-            with self.subTest(why):
-                self.assertEqual(routed([part_()], host('hosta', p, prefer=1), other)[0]['host'], '')
-        noroles = host('hosta', cpu('hosta'), prefer=1)
-        noroles.pop('role')
-        self.assertEqual(routed([part_()], noroles, other)[0]['host'], '')
-        nopools = host('hosta', cpu('hosta'), prefer=1)
-        nopools.pop('pools')
-        self.assertEqual(routed([part_()], nopools, other)[0]['host'], '')
+class TierHost(tp.Fixture):
+    """test_presence's host with capability labels on its part pool, a tier of 2 and the
+    earlier tier's row given by ``self.earlier`` (None: no row)."""
+    part = '{ count = 2, labels = ["ci-cpu"] }'
 
-    def test_the_host_label_is_the_roles_never_a_shared_one(self):
-        r = host('k', P('part', ['ci-cpu', 'ci-x', 'shared', 'h1', 'h1-cpu'], 1), role='h1', prefer=1)
-        self.assertEqual(routed([part_()], r)[0]['labels'], ['self-hosted', 'ci-cpu', 'h1'])  # the bare role
-        r = host('k', P('part', ['ci-cpu', 'h1x-cpu', 'h1-cpu'], 1), role='h1', prefer=1)
-        self.assertEqual(routed([part_()], r)[0]['labels'], ['self-hosted', 'ci-cpu', 'h1-cpu'])
-        r = host('k', P('part', ['ci-cpu', 'ci-cpu2'], 1), role='ci', prefer=1)  # a role named like the shared ones
-        self.assertEqual(routed([part_()], r)[0]['host'], '')
-        r = host('k', P('part', ['ci-cpu', 'mem-big'], 1), role='mem', prefer=1)
-        self.assertEqual(routed([part_()], r)[0]['host'], '')
+    def setUp(self):
+        super().setUp()
+        self.earlier: dict | None = offered()
+        self.age = 5  # s: how old the earlier tier's row is when this host's tick reads it
+        self.me = 2
 
-    def test_the_needs_it_covers(self):
-        pools = (cpu('hosta'), P('cards', ['hosta-gpu', 'ci-gpu'], 2, cls='gpu'), P('compile', ['hosta-compile', 'ci-timing'], 1))
-        rs = (host('hosta', *pools, prefer=1), host('hostb', P('multi', ['hostb-multi', 'ci-gpu2'], 1)))
-        got = routed([part_('c'), part_('g', 'gpu'), part_('t', 'timing'), part_('m', 'gpu2')], *rs)
-        self.assertEqual([g['labels'] for g in got],
-                         [['self-hosted', 'ci-cpu', 'hosta-cpu'], ['self-hosted', 'ci-gpu', 'hosta-gpu'],
-                          ['self-hosted', 'ci-timing'], ['self-hosted', 'ci-gpu2']])  # timing never; gpu2 not offered
-        rs = (host('hosta', *pools, P('multi', ['hosta-multi', 'ci-gpu2'], 1), prefer=1),)
-        self.assertEqual(routed([part_('m', 'gpu2')], *rs)[0]['labels'], ['self-hosted', 'ci-gpu2', 'hosta-multi'])
+    def probe(self):
+        p = super().probe()
+        p._tiers = lambda: None if self.earlier is None else (
+            self.me, [dict(self.earlier, read_at=self.now - self.age)], EARLIER)
+        return p
 
-    def test_a_plain_part_leaves_the_big_pool_to_the_parts_that_need_it(self):
-        big = P('big', ['hosta-big', 'ci-cpu', 'mem-big'], 1, memory_gib=256, speed=1.0)
-        small = cpu('hosta', 1, memory_gib=48, speed=1.0)
-        got = routed([part_('a'), part_('b', memory_gib=100)], host('hosta', big, small, prefer=1),
-                     host('hostb', cpu('hostb', 2, memory_gib=48, speed=1.0)))
-        self.assertEqual([g['labels'][-1] for g in got], ['hosta-cpu', 'hosta-big'])
 
-    def test_a_mem_big_part_needs_a_pool_with_both(self):
-        small = cpu('hosta', 3, memory_gib=48, speed=1.0)
-        big = P('big', ['hosta-big', 'ci-cpu', 'mem-big'], 1, memory_gib=256, speed=1.0)
-        other = host('hostb', P('part', ['hostb-cpu', 'ci-cpu', 'mem-big'], 1, memory_gib=200, speed=1.0))
-        got = routed([part_('a', memory_gib=100), part_('b', memory_gib=100), part_('c', memory_gib=10)],
-                     host('hosta', small, big, prefer=1), other)
-        self.assertEqual([g['labels'] for g in got], [['self-hosted', 'ci-cpu', 'mem-big', 'hosta-big'],
-                                                       ['self-hosted', 'ci-cpu', 'mem-big'],
-                                                       ['self-hosted', 'ci-cpu', 'hosta-cpu']])
+class Yield(TierHost):
+    """19.2: a later tier's idle runners yield, come back at once, and do not flap."""
+    PARTS = ['ci-runner@hz-part-1.service', 'ci-runner@hz-part-2.service']
 
-    def test_unreadable_or_stale_capacity_prefers_nothing(self):
-        p = [part_()]
-        self.assertEqual(rt.route(p, None, 'no file', prefer=True)[0]['labels'], ['self-hosted', 'ci-cpu'])
-        self.assertEqual(rt.route(p, [], prefer=True)[0]['host'], '')
-        allstale = rows(host('hosta', cpu('hosta', 3), prefer=1, age=500), host('hostb', cpu('hostb'), age=500))
-        got = rt.route(p, allstale, prefer=True)[0]
-        self.assertEqual((got['labels'], got['host'], got['spill_after_s']), (['self-hosted', 'ci-cpu'], '', 0))
+    def state(self):
+        st, ok = presence.read_state(str(self.data))
+        self.assertTrue(ok)
+        return st
 
-    def test_github_matching_reaches_that_hosts_pool_and_the_spill_every_host(self):
-        rs = [host('hosta', cpu('hosta', 1), P('light', ['hosta', 'ci-light'], 2), prefer=1, role='hosta'),
-              host('hostb', cpu('hostb', 2), prefer=2), host('hostc', cpu('hostc', 1))]
-        got = routed([part_(f'p{i}') for i in range(4)], *rs)
-        for g in got:
-            first, spill = runs_on(g['labels'], rs), runs_on(g['spill_labels'], rs)
-            self.assertTrue(first, g)  # a runner takes it
-            self.assertEqual(spill, {('hosta', 'part'), ('hostb', 'part'), ('hostc', 'part')})
-            if g['host']:
-                self.assertEqual(first, {(g['host'], 'part')})  # that host's pool of the class only
-            else:
-                self.assertEqual(first, spill)
+    def test_down_after_two_ticks_and_up_at_once(self):
+        self.tick()
+        self.assertEqual(self.actions('stop'), [])
+        self.tick()
+        self.assertEqual(sorted(self.actions('stop')), self.PARTS)  # only the part runners: the others have no ci- label
+        st = self.state()['runners']
+        self.assertTrue(st['hz-part-1']['yielded'])
+        self.assertIn('tier: h1 (tier 1) has 1 idle runner(s) of ci-cpu',
+                      [x['cause'] for x in self.log() if x.get('action') == 'stop'])
+        self.assertEqual(pool.yielded_runners(self.inv), {'hz-part-1', 'hz-part-2'})
+        self.tick()
+        self.assertEqual(self.actions('start'), [])
+        self.earlier = offered(listening=0)  # the earlier tier is full
+        self.tick()
+        self.assertEqual(sorted(self.actions('start')), self.PARTS)  # at the first tick
+        self.assertEqual(pool.yielded_runners(self.inv), set())
+        self.earlier = offered()  # idle again: the dwell holds them
+        for _ in range(presence.DWELL_S // 20 - 1):
+            self.tick()
+        self.assertEqual(len(self.actions('stop')), 2)
+        for _ in range(3):
+            self.tick()
+        self.assertEqual(len(self.actions('stop')), 4)
 
-    def test_retries_never_prefer(self):
-        rs = rows(host('hosta', cpu('hosta', 2), P('big', ['hosta-big', 'ci-cpu', 'mem-big'], 1), prefer=1))
-        p = rt.route([part_()], rs, prefer=True)[0]
-        self.assertEqual(p['host'], 'hosta')
-        first = {'outcome': 'lost', 'next': 'retry', 'attempt': 1, 'host': 'hosta', 'pool_labels': ['hosta-cpu', 'ci-cpu']}
-        self.assertEqual(rt.retry(p, first, rs)['labels'], ['self-hosted', 'ci-cpu'])  # any
-        mm = rt.retry(p, {**first, 'outcome': 'oom'}, rs)
-        self.assertEqual((mm['row'], mm['labels']), ('more-memory', ['self-hosted', 'ci-cpu', 'mem-big']))
-        fb = rt.retry(p, {**first, 'outcome': 'unavailable', 'next': 'fallback'}, rs)
-        self.assertEqual((fb['row'], fb['labels']), ('fallback', ['self-hosted', 'ci-cpu']))
-        sh = rt.retry(p, {**first, 'outcome': 'reboot'}, rs)
-        self.assertEqual(sh['labels'], ['self-hosted', 'hosta-cpu'])  # same-host keeps its host label (16.5)
-        old = {k: v for k, v in p.items() if k != 'spill_labels'}  # a part routed before 19: its labels
-        self.assertEqual(rt.retry(old, first, rs)['labels'], p['labels'])
+    def test_a_runner_stopped_for_another_cause_starts_after_two_ticks(self):
+        st = {'runners': {'hz-part-1': {'stopped': self.now - 100, 'yielded': False, 'stop_ticks': 0, 'start_ticks': 0,
+                                        'load': False}}, 'counts': {}, 'infra': {'since': 0.0, 'drained': False, 'seen': {}}}
+        presence.write_state(str(self.data), st)
+        self.units['ci-runner@hz-part-1.service'] = ('inactive', 'success')
+        self.earlier = None
+        self.tick()
+        self.assertEqual(self.actions('start'), [])  # two ticks without a cause, as before
+        self.tick()
+        self.assertEqual(self.actions('start'), ['ci-runner@hz-part-1.service'])
+        # held by another cause, then by the tier alone: up at the first tick once that clears
+        st['runners']['hz-part-1'].update(stopped=self.now - 100, yielded=False)
+        presence.write_state(str(self.data), st)
+        self.units['ci-runner@hz-part-1.service'] = ('inactive', 'success')
+        self.calls.clear()
+        self.earlier = offered()
+        self.tick()
+        self.assertEqual(self.actions('start'), [])
+        self.earlier = offered(listening=0)
+        self.tick()
+        self.assertEqual(self.actions('start'), ['ci-runner@hz-part-1.service'])
 
-    def test_ci_run_route_prefer(self):
-        rs = [host('hosta', cpu('hosta', 2), prefer=1, age=0)]
-        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
-            json.dump([dict(r, read_at=T0 + 10 ** 9) for r in rs], f)  # read "now", whatever the clock
-        self.addCleanup(os.unlink, f.name)
-        plan = json.dumps({'schema': 1, 'parts': [part_()]})
-        for argv, want in ((['--rows', f.name, '--prefer'], ['self-hosted', 'ci-cpu', 'hosta-cpu']),
-                           (['--rows', f.name], ['self-hosted', 'ci-cpu'])):
-            out, err = io.StringIO(), io.StringIO()
-            self.assertEqual(rt.main(argv, '', io.StringIO(plan), out, err), 0, err.getvalue())
-            got = json.loads(out.getvalue())['parts'][0]
-            self.assertEqual(got['labels'], want)
-            self.assertEqual(got['spill_labels'], ['self-hosted', 'ci-cpu'])
+    def test_what_offers_nothing(self):
+        cases = {
+            'no tier here or no registry': None,
+            'stale': 'stale',
+            'a problem': offered(problems=['drained']),
+            'other repository entries': offered(rep='x' * 12),
+            'no policy': offered(rep=None),
+            'an older release (no listening)': {**offered(), 'pools': [{k: v for k, v in offered()['pools'][0].items()
+                                                                        if k != 'listening'}]},
+            'none listening': offered(listening=0),
+            'not all of its labels': offered(labels=('part', 'h1', 'ci-gpu')),
+            'the same tier': offered(tier=2),
+            'a later tier': offered(tier=3),
+            'a cluster row': {**offered(), 'target': 'cpu'},
+        }
+        for name, row in cases.items():
+            with self.subTest(name):
+                self.calls.clear()
+                self.age = presence.YIELD_FRESH_S + 30 if row == 'stale' else 5
+                self.earlier = offered() if row == 'stale' else row
+                for _ in range(3):
+                    self.tick()
+                self.assertEqual(self.actions('stop'), [])
+
+    def test_a_yielded_runner_comes_back_when_the_row_goes_bad(self):
+        self.tick()
+        self.tick()
+        self.assertEqual(len(self.actions('stop')), 2)
+        self.age = 120  # stale: unproven
+        self.tick()
+        self.assertEqual(sorted(self.actions('start')), self.PARTS)
+
+    def test_a_read_that_fails_yields_nothing_and_is_logged(self):
+        def boom():
+            raise OSError('ssh')
+        p = self.probe()
+        p._tiers = boom
+        presence.tick(self.inv, p, now=lambda: self.now)
+        self.now += 20
+        presence.tick(self.inv, p, now=lambda: self.now)
+        self.assertEqual(self.actions('stop'), [])
+        self.assertTrue(any(x.get('tier') == 'not read' for x in self.log()))
+
+    def test_the_condition_ignores_it_and_the_dry_run_shows_it(self):
+        out: list[str] = []
+        self.assertEqual(presence.check(self.inv, self.probe(), 'hz-part-1', out.append), 0)
+        _, lines, _ = self.tick(dry_run=True)
+        self.assertIn('tier: h1 (tier 1)', '\n'.join(lines))
+        self.assertEqual(self.actions('stop'), [])
+
+    def test_offers_and_tier_yield_are_pure(self):
+        rs = presence.runners(self.inv)
+        t = 1000.0
+        tiers = (2, [offered(now=t)], EARLIER)
+        why = {r.name: [] for r in rs}
+        got = presence.tier_yield(rs, why, tiers, {'runners': {}}, t)
+        self.assertEqual(sorted(got), ['hz-part-1', 'hz-part-2'])
+        why['hz-part-1'] = ['slot: x']
+        self.assertEqual(sorted(presence.tier_yield(rs, why, tiers, {'runners': {}}, t)), ['hz-part-2'])
+        st = {'runners': {'hz-part-2': {'started': t - 299}}}  # the 300 s dwell
+        self.assertEqual(presence.tier_yield(rs, why, tiers, st, t), {})
+        st = {'runners': {'hz-part-2': {'started': t - 300}}}
+        self.assertEqual(sorted(presence.tier_yield(rs, why, tiers, st, t)), ['hz-part-2'])
+        self.assertEqual(presence.offers((2, [offered(now=t, age=45)], EARLIER), t)[0][:2], (1, 'h1'))  # 45 s
+        self.assertEqual(presence.offers((2, [offered(now=t, age=46)], EARLIER), t), [])
+        light = (2, [offered(labels=('ci-light', 'ci-cpu'), now=t)], EARLIER)  # a light runner never yields
+        self.assertEqual(sorted(presence.tier_yield(rs, {r.name: [] for r in rs}, light, {'runners': {}}, t)),
+                         ['hz-part-1', 'hz-part-2'])
+        big = presence.Runner('hz-big-1', 'big', 'part', ('ci-cpu', 'mem-big', 'hz'), (), None, frozenset())
+        self.assertEqual(presence.tier_yield([big], {}, tiers, {'runners': {}}, t), {})  # it needs mem-big too
+        both = (2, [offered(labels=('ci-cpu', 'mem-big'), now=t)], EARLIER)
+        self.assertEqual(list(presence.tier_yield([big], {}, both, {'runners': {}}, t)), ['hz-big-1'])
+        self.assertEqual(presence.offers((2, [offered(now=t, age=-6)], EARLIER), t), [])  # from the future
+        self.assertEqual(presence.offers((2, [offered(now=t)], ''), t), [])  # this host's entries unknown
+        self.assertEqual(presence.offers((2, [offered(now=t, rep='')], ''), t), [])  # unknown on both: not equal
+        self.assertEqual(presence.offers((None, [offered(now=t)], EARLIER), t), [])
+        two = (3, [dict(offered(now=t), key='h2', tier=2), offered(now=t)], EARLIER)
+        self.assertEqual([o[1] for o in presence.offers(two, t)], ['h1', 'h2'])  # the earliest first
+        self.assertEqual(presence.capability(rs[0]), frozenset({'ci-light'}))
+
+
+class ProbeTiers(unittest.TestCase):
+    def test_the_earlier_tiers_rows_read_now(self):
+        reg = REGISTRY.replace('[machine.hostb]\naccess = "local"\n', '[machine.hostb]\naccess = "local"\ntier = 3\n')
+        reg = reg.replace('numerics_ok = true\n', 'numerics_ok = true\ntier = 1\n', 1)
+        reg += '\n[machine.hoste]\naccess = "ssh"\nssh = "alias-e"\ncpus = 8\nmemory_gib = 32\npython = "/p"\n' \
+               'work = "/w"\nslots = { lock = "/tmp/y.lock", count = 1 }\ntier = 5\n'
+        inv = inventory.load(inventory_text('hx'))
+        with tempfile.TemporaryDirectory() as etc:
+            path = os.path.join(etc, 'pool.toml')
+            with open(path, 'w') as f:
+                f.write(reg.replace('access = "local"\ntier = 3\n', 'access = "local"\n'))
+            p = presence.Probe(inv, etc=etc)
+            self.assertIsNone(p.tiers())  # this host has no tier
+            with open(path, 'w') as f:
+                f.write(reg)
+            seen = []
+            with unittest.mock.patch.object(pool, 'probe_host', lambda m, **kw: seen.append((m.key, kw)) or
+                                            {'key': m.key, 'tier': m.tier}):
+                me, got, rep = p.tiers()
+            self.assertEqual((me, [r['key'] for r in got], rep), (3, ['hosta'], ''))
+            self.assertEqual(seen, [('hosta', {'etc': etc, 'fast': True})])
+            with open(path, 'w') as f:
+                f.write(reg.replace('tier = 1\n', ''))
+            self.assertIsNone(p.tiers())  # no earlier tier
+        with tempfile.TemporaryDirectory() as etc:
+            self.assertIsNone(presence.Probe(inv, etc=etc).tiers())  # no registry
+
+
+class Burst(unittest.TestCase):
+    """The design's claim, simulated: plans of one minute routed from one reading; GitHub
+    hands each queued part to an idle online runner of its labels, the latest tier's first
+    (the order least favourable to h100); each host's presence ticks every 20 s at its own
+    phase with the real tick (``presence.tick``, its stubs from test_presence), reading the
+    earlier tiers' rows as their last ticks published them; a started runner takes jobs
+    ``START_S`` later. h100 (tier 1) takes the parts first, no part waits more than 60 s
+    while a runner of its labels idles or is yielded anywhere, and nothing flaps."""
+    START_S = 15
+    PHASE = {'h100': 0, 'h2': 7, 'h3': 13}
+    TIER = {'h100': 1, 'h2': 2, 'h3': 3}
+
+    class Host(TierHost):
+        def runTest(self):  # noqa: D102 - an instance of the fixture, not a test
+            pass
+
+    def hosts(self, published):
+        out = {}
+        for name in self.TIER:
+            h = self.Host()
+            h.setUp()
+            self.addCleanup(h.tearDown)
+            h.me = self.TIER[name]
+            h.name = name
+            out[name] = h
+        for name, h in out.items():
+            def tiers(h=h):
+                earlier = [published[k] for k in self.TIER if self.TIER[k] < h.me and k in published]
+                return (h.me, earlier, EARLIER) if h.me > 1 else None
+            h.tiers = tiers
+        return out
+
+    def run_burst(self, *, deaf=(), stale=False, bursts=((0, 7, 200), (450, 3, 100)), end=900):
+        """Jobs (each with ``queued``, ``start``, ``host``), the longest wait while a runner
+        of its labels idled or was yielded, and each runner's stop times. ``deaf``: hosts
+        whose rows show no listening runner; ``stale``: every published row too old."""
+        published: dict[str, dict] = {}
+        hs = self.hosts(published)
+        names = ['hz-part-1', 'hz-part-2']  # each host's two part runners (ci-cpu)
+        up_since = {(k, n): -10 ** 6 for k in hs for n in names}
+        busy_until: dict[tuple[str, str], int] = {}
+        queue: list[dict] = []
+        jobs: list[dict] = []
+        log = []
+        idle_waits = 0
+        worst = 0
+        stops: dict[tuple[str, str], list[int]] = collections.defaultdict(list)
+        t0 = -200
+        for t in range(t0, end):
+            for when, n, dur in bursts:
+                if t == when:
+                    for i in range(n):
+                        j = {'id': f'{when}-{i}', 'queued': t, 'dur': dur}
+                        queue.append(j)
+                        jobs.append(j)
+            for (k, n), until in list(busy_until.items()):  # jobs that end
+                if t >= until:
+                    h = hs[k]
+                    for pid, proc in list(h.procs.items()):
+                        if f'/{n}/bin/Runner.Worker' in proc.get('cmdline', ''):
+                            del h.procs[pid]
+                    del busy_until[(k, n)]
+            for k, h in hs.items():  # each host's tick at its phase
+                if (t - self.PHASE[k]) % 20 == 0:
+                    before = {n: h.units[f'ci-runner@{n}.service'][0] for n in names}
+                    h.now = T0 + t
+                    p = h.probe()
+                    p._tiers = h.tiers
+                    with unittest.mock.patch('builtins.print'):
+                        presence.tick(h.inv, p, now=lambda h=h: h.now)
+                    for n in names:
+                        a = h.units[f'ci-runner@{n}.service'][0]
+                        if before[n] != 'active' and a == 'active':
+                            up_since[(k, n)] = t
+                        if before[n] == 'active' and a != 'active':
+                            stops[(k, n)].append(t)
+                    listening = sum(1 for n in names if h.units[f'ci-runner@{n}.service'][0] == 'active'
+                                    and t - up_since[(k, n)] >= self.START_S and (k, n) not in busy_until)
+                    row = offered(labels=('part', 'hz', 'ci-cpu'), listening=0 if k in deaf else listening,
+                                  tier=self.TIER[k], now=T0 + t, age=600 if stale else 0)
+                    row['key'] = k
+                    published[k] = row
+            # GitHub: each queued part to an idle online runner, the latest tier first
+            ready = [(k, n) for k in sorted(hs, key=lambda k: -self.TIER[k]) for n in names
+                     if hs[k].units[f'ci-runner@{n}.service'][0] == 'active' and t - up_since[(k, n)] >= self.START_S
+                     and (k, n) not in busy_until]
+            while queue and ready:
+                j = queue.pop(0)
+                k, n = ready.pop(0)
+                hs[k].job(n)
+                busy_until[(k, n)] = t + j['dur']
+                j.update(start=t, host=k)
+                log.append((t, j['id'], k))
+            # the wait the design bounds: a part queued while a runner of its labels idles or is yielded
+            spare = any((k, n) not in busy_until and (hs[k].units[f'ci-runner@{n}.service'][0] == 'active'
+                                                      or self.yielded(hs[k], n)) for k in hs for n in names)
+            idle_waits = idle_waits + 1 if queue and spare else 0
+            worst = max(worst, idle_waits)
+        return jobs, worst, stops, hs
+
+    @staticmethod
+    def yielded(h, n):
+        try:
+            st, _ = presence.read_state(str(h.data))
+        except Exception:  # noqa: BLE001
+            return False
+        v = st['runners'].get(n) or {}
+        return bool(v.get('stopped') and v.get('yielded'))
+
+    def test_the_burst_goes_to_h100_first_and_never_waits_long(self):
+        snap = rows(host('h100', cpu('h100', 2), tier=1), host('h2', cpu('h2', 0, registered=2, yielded=2), tier=2),
+                    host('h3', cpu('h3', 0, registered=2, yielded=2), tier=3), SLURMS, target(jobs=8))
+        plans = [rt.route([part_(f'p{i}') for i in range(3)], snap) for _ in range(8)]  # one reading, eight plans
+        for got in plans:
+            self.assertTrue(all(set(g['labels']) == {'self-hosted', 'ci-cpu'} for g in got))
+        self.assertEqual(sum(g['where'] == 'slurm' for g in plans[0]), 0)  # yielded runners are room
+        jobs, worst, stops, hs = self.run_burst()
+        first = sorted(jobs[:7], key=lambda j: j['start'])
+        self.assertEqual([j['host'] for j in first[:2]], ['h100', 'h100'])  # h100 first, though GitHub favours the others
+        self.assertTrue(all(j['start'] == 0 for j in first[:2]))
+        self.assertLessEqual(max(j['start'] - j['queued'] for j in first[2:6]), 60)  # the overflow: one reaction
+        self.assertEqual({j['host'] for j in first[2:6]}, {'h2', 'h3'})  # both later tiers at once
+        self.assertLessEqual(worst, 60)
+        second = [j for j in jobs if j['queued'] == 450]
+        self.assertEqual([j['host'] for j in second[:2]], ['h100', 'h100'])  # at rest again: h100 first
+        for times in stops.values():  # no flapping: a yielded runner stays down; one started stays the dwell
+            self.assertTrue(all(b - a >= presence.DWELL_S for a, b in zip(times, times[1:])), stops)
+
+    def test_a_black_hole_or_a_stale_row_yields_nothing(self):
+        jobs, worst, stops, _ = self.run_burst(stale=True, bursts=((0, 6, 100),), end=300)
+        self.assertEqual(sum(map(len, stops.values())), 0)
+        self.assertTrue(all(j['start'] == 0 for j in jobs))  # every runner online: none waits
+        jobs, worst, stops, _ = self.run_burst(deaf=('h100',), bursts=((0, 6, 100),), end=300)
+        self.assertFalse(any(stops[('h2', n)] for n in ('hz-part-1', 'hz-part-2')))  # h2 never yields to h100
+        self.assertTrue(stops[('h3', 'hz-part-1')])  # h3 yields to h2, which listens
+        self.assertLessEqual(worst, 60)
+        self.assertEqual(sorted(j['host'] for j in jobs if j['start'] == 0), ['h100', 'h100', 'h2', 'h2'])
 
 
 POLICY = textwrap.dedent('''\
@@ -274,7 +602,7 @@ class Drift(unittest.TestCase):
         self.assertEqual(capacity.policy_drift([*rs[:2], odd]), {})  # a cluster row is no host
 
     def test_a_warning_not_a_problem_and_judged_afresh(self):
-        rs = [host('a', cpu('a'), rep='x', prefer=1), host('b', cpu('b'), rep='x'), host('c', cpu('c'), rep='y')]
+        rs = [host('a', cpu('a'), rep='x', tier=1), host('b', cpu('b'), rep='x'), host('c', cpu('c'), rep='y')]
         got = rows(*rs)
         c = got[2]
         self.assertFalse(c.down)
@@ -288,9 +616,6 @@ class Drift(unittest.TestCase):
         shown = pool.table([dict(pool.host_row(pool.load(REGISTRY).machines['hosta'], {'slots_free': 1, 'drained': True}),
                                  warnings=['policy: x'])])
         self.assertIn('drained; warn: policy: x', shown)
-        # the route names no part to it
-        rs = [host('c', cpu('c', 3), rep='y', prefer=1), host('a', cpu('a'), rep='x'), host('b', cpu('b'), rep='x')]
-        self.assertEqual(routed([part_()], *rs)[0]['host'], '')
 
 
 class PoolStatus(unittest.TestCase):
@@ -326,19 +651,19 @@ class Action(unittest.TestCase):
 
 
 class Rows(unittest.TestCase):
-    def test_the_registrys_prefer(self):
-        text = REGISTRY.replace('numerics_ok = true\n', 'numerics_ok = true\nprefer = 2\n', 1)
+    def test_the_registrys_tier(self):
+        text = REGISTRY.replace('numerics_ok = true\n', 'numerics_ok = true\ntier = 2\n', 1)
         r = pool.load(text)
-        self.assertEqual((r.machines['hosta'].prefer, r.machines['hostb'].prefer), (2, None))
-        self.assertEqual(pool.host_row(r.machines['hosta'], None)['prefer'], 2)
-        self.assertNotIn('prefer', pool.host_row(r.machines['hostb'], None))
-        self.assertEqual(pool.load(text.replace('prefer = 2', 'prefer = 99')).machines['hosta'].prefer, 99)
-        for bad in ('prefer = 0', 'prefer = 100', 'prefer = true', 'prefer = "1"', 'prefer = 1.5'):
-            with self.subTest(bad), self.assertRaisesRegex(pool.RegistryError, 'prefer'):
-                pool.load(text.replace('prefer = 2', bad))
-        with self.assertRaisesRegex(pool.RegistryError, 'prefer'):
-            pool.load(REGISTRY.replace('price = 0.04\n', 'price = 0.04\n', 1).replace(
-                'access = "slurm"\n', 'access = "slurm"\nprefer = 1\n'))
+        self.assertEqual((r.machines['hosta'].tier, r.machines['hostb'].tier), (2, None))
+        self.assertEqual(pool.host_row(r.machines['hosta'], None)['tier'], 2)
+        self.assertNotIn('tier', pool.host_row(r.machines['hostb'], None))
+        self.assertEqual(pool.load(text.replace('tier = 2', 'tier = 99')).machines['hosta'].tier, 99)
+        self.assertEqual(pool.load(text.replace('tier = 2', 'tier = 1')).machines['hosta'].tier, 1)
+        for bad in ('tier = 0', 'tier = 100', 'tier = true', 'tier = "1"', 'tier = 1.5'):
+            with self.subTest(bad), self.assertRaisesRegex(pool.RegistryError, 'tier'):
+                pool.load(text.replace('tier = 2', bad))
+        with self.assertRaisesRegex(pool.RegistryError, 'tier'):
+            pool.load(REGISTRY.replace('access = "slurm"\n', 'access = "slurm"\ntier = 1\n'))
 
     def test_a_host_row_takes_role_pools_policy_and_health(self):
         m = pool.load(REGISTRY).machines['hosta']
@@ -420,7 +745,8 @@ class PartOutputs(unittest.TestCase):
         out = os.path.join(tempfile.mkdtemp(), 'o')
         self.addCleanup(lambda: os.path.exists(out) and os.unlink(out))
         part.write_outputs({'pool-labels': ['a', 'b'], 'cool-card': '3'}, out)
-        lines = open(out, encoding='utf-8').read().splitlines()
+        with open(out, encoding='utf-8') as f:
+            lines = f.read().splitlines()
         self.assertIn('pool-labels=["a", "b"]', lines)
         self.assertIn('cool-card=3', lines)
 

@@ -36,27 +36,14 @@ step on a guess):
   A part that needs ``mem-big`` overflows only to a target that reports enough memory.
   Targets are tried by ``price``, then key;
 - *slots*: a host row may carry ``pools`` (decision 19.4, ``pool.pool_table``), one per
-  runner pool: its ``labels``, ``free``, and where it has a ``slot`` table (16.2) its
-  ``memory_gib`` and ``speed``. ``mem-big`` and the memory error need every serving host
-  to report its pools of the label, each with its memory; a label whose speeds are not
-  reported counts 1.0, as a pool without ``slot`` runs its minutes unscaled.
-
-**The preferred host first** (decision 19; ``prefer=True``, ``ci-run route --prefer``, which
-the reusable workflow passes). A host row may carry ``prefer`` (1 to 99, lower first: the
-registry's order, 19.1). A host *offers* a part's labels (``ci-<need>``, with ``mem-big``
-where it is added) when its row is up, read within ``PREFER_FRESH_S``, without
-``policy_drift`` (19.6), and one of its ``pools`` carries every one of those labels and a
-*host label* (one equal to the row's ``role`` or starting with ``<role>-``, never a ``ci-``
-label), with its ``free`` known. Its room is that ``free`` less the parts this plan already
-placed in that pool. In plan order a part goes to the first host in the order that offers
-its labels with room, with ``[self-hosted, ci-<need>, (mem-big,) <host label>]``; it books
-one runner of the pool and one of its capability label. Else its shared labels and the
-overflow rule, as above. ``timing`` is never preferred (one host serves it by contract), and
-a cluster part stays on ``ci-slurm``. Each part's output carries ``host`` (the preferred
-host's key, else ''), ``spill_labels`` (its shared labels: what the workflow's spill leg
-runs on when the first attempt is still queued after ``spill_after_s``, 19.3) and
-``spill_after_s`` (``SPILL_S`` where a host label is named, else 0); its ``timeout_minutes``
-is its shared labels', so one bound holds for both. Capacity unread: nothing is preferred.
+  runner pool: its ``labels``, and where it has a ``slot`` table (16.2) its ``memory_gib``
+  and ``speed``. ``mem-big`` and the memory error need every serving host to report its
+  pools of the label, each with its memory; a label whose speeds are not reported counts
+  1.0, as a pool without ``slot`` runs its minutes unscaled;
+- *yielded runners* (decision 19.3): a pool's ``yielded`` runners, which presence holds
+  offline while an earlier tier has idle ones (19.2) and starts within a tick once it has
+  none, count as free: a burst past the preferred host's room stays on the shared labels
+  instead of going to the cluster. The route names no host.
 
 **Unreadable capacity** (the reader's ``CapacityError``, no rows, or every host row stale): every part
 goes to its shared label, without ``mem-big``, overflow or the plan-time error, and its
@@ -70,19 +57,21 @@ or derived from its outcome and ``next``) and its routed part give the retry's l
                       part; else as fallback)
 ``same-host``         the first attempt's host label of its class; a cluster part
                       ``ci-slurm`` and its target
-``more-memory``       the part's shared labels plus ``mem-big`` (a cluster part: its
+``more-memory``       the part's labels plus ``mem-big`` (a cluster part: its
                       need's label plus ``mem-big``), with ``resume``; without a
                       host proven to serve that, the labels without ``mem-big``
-``any``               the part's shared labels again
-``fallback``          the part's needs routed again, without the order
+``any``               the part's labels again
+``fallback``          the part's needs routed again
 ====================  ==========================================================
 
-A part is retried at most once, and a retry never goes to a preferred host's label (19.3):
-it has no spill leg. The part's shared labels are its ``spill_labels`` (its ``labels``
-where it has none). The host labels come from the first attempt's record
-(``host``, ``pool_labels``, ``cool_card``), never from ``retry-on``.
+A part is retried at most once. The host labels come from the first attempt's record
+(``host``, ``pool_labels``, ``cool_card``), never from ``retry-on``. A ``cool-card`` or
+``same-host`` retry never waits on a host that may be yielding (19.3): where the first
+attempt's host row has a ``tier`` and an up host of an earlier tier serves the part's
+capability label, ``cool-card`` takes its other branch (as fallback) and ``same-host``
+becomes ``any``.
 
-``ci-run route [--rows FILE] [--prefer]`` reads the plan (schema 1, design §4.10) on stdin and
+``ci-run route [--rows FILE]`` reads the plan (schema 1, design §4.10) on stdin and
 writes the routed plan on stdout: exit 0; 1 for a plan-time route error (each named on
 stderr, the label first); 2 for a plan that does not load. Stdlib only.
 """
@@ -105,12 +94,8 @@ MEM_BIG = 'mem-big'
 SHARED = frozenset({BASE, SLURM, MEM_BIG, *NEEDS.values()})
 #: a job's bound past its parts' scaled minutes (16.2)
 GRACE_MIN = 15
-#: s a part may wait on a preferred host's label before the workflow runs it on its shared labels (19.3)
-SPILL_S = 60
-#: s within which a preferred host's row must have been read: two readings of ci-capacity.timer (19.2)
-PREFER_FRESH_S = 60
-#: the largest ``prefer`` (``pool.PREFER_MAX``)
-PREFER_MAX = 99
+#: the largest ``tier`` of a host row (``pool.TIER_MAX``)
+TIER_MAX = 99
 MAX_MINUTES = 240
 MAX_PARTS = 256
 PART_KEYS = {'id': True, 'command': True, 'needs': True, 'minutes': True, 'memory_gib': False, 'results': False}
@@ -187,8 +172,8 @@ def _has(r, labels: Sequence[str]) -> bool:
 
 def _pools(r) -> list[dict] | None:
     """A host row's ``pools`` (19.4) where well-formed, else None (not reported): each with
-    its ``labels`` (a set), ``order`` (the list), ``pool``, ``memory_gib`` (None where not
-    reported), ``speed`` (1.0 where not) and ``free`` (None where not known)."""
+    its ``labels`` (a set), ``memory_gib`` (None where not reported), ``speed`` (1.0 where
+    not) and ``yielded`` (0 where not reported)."""
     v = r.row.get('pools')
     if not isinstance(v, list):
         return None
@@ -196,29 +181,12 @@ def _pools(r) -> list[dict] | None:
     for p in v:
         if not isinstance(p, dict) or not isinstance(p.get('labels'), list):
             return None
-        mem, speed, free = p.get('memory_gib'), p.get('speed', 1.0), p.get('free')
-        out.append({'labels': {str(x) for x in p['labels']}, 'order': [str(x) for x in p['labels']],
-                    'pool': str(p.get('pool') or ''),
+        mem, speed, y = p.get('memory_gib'), p.get('speed', 1.0), p.get('yielded')
+        out.append({'labels': {str(x) for x in p['labels']},
                     'memory_gib': mem if _num(mem) and mem > 0 else None,
                     'speed': speed if _num(speed) and speed > 0 else 1.0,
-                    'free': free if type(free) is int and free >= 0 else None})
+                    'yielded': y if type(y) is int and y > 0 else 0})
     return out
-
-
-def _prefer(r) -> int | None:
-    """A host row's place in the order (19.1), or None where it is in none."""
-    v = r.row.get('prefer')
-    return v if type(v) is int and 1 <= v <= PREFER_MAX else None
-
-
-def _host_label(r, pool: Mapping) -> str:
-    """The pool's host label: its first label equal to the row's ``role`` or starting with
-    ``<role>-`` (design §5.1's naming), never a shared or ``ci-`` label; '' where none."""
-    role = r.row.get('role')
-    if not isinstance(role, str) or not role:
-        return ''
-    return next((x for x in pool['order'] if (x == role or x.startswith(role + '-'))
-                 and x not in SHARED and not x.startswith('ci-')), '')
 
 
 class _Facts:
@@ -230,9 +198,6 @@ class _Facts:
         self.unknown = [r for r in self.up if not r.runners]  # up, its runner table not read
         self.booked: dict[str, int] = {}  # capability label (or ci-slurm) -> runners booked by this plan
         self.jobs: dict[tuple[str, str], int] = {}  # (machine, partition) -> cluster jobs booked
-        self.placed: dict[tuple[str, str], int] = {}  # (host key, pool) -> parts this plan placed there (19.2)
-        rank = {r.key: i for i, r in enumerate(self.rows)}
-        self.order = sorted((r for r in self.up if _prefer(r) is not None), key=lambda r: (_prefer(r), rank[r.key]))
 
     def serving(self, labels: Sequence[str]) -> list:
         return [r for r in self.up if _has(r, labels)]
@@ -242,7 +207,8 @@ class _Facts:
         return not self.serving(labels) and not self.unknown
 
     def free(self, labels: Sequence[str]) -> int | None:
-        """The free runners of ``labels`` left after the bookings, or None where unknown."""
+        """The free runners of ``labels`` and the yielded ones (19.3) left after the
+        bookings, or None where unknown."""
         if self.unknown:
             return None
         total = 0
@@ -250,7 +216,7 @@ class _Facts:
             counts = [r.runners[lb].free for lb in labels]
             if any(c is None for c in counts):
                 return None
-            total += min(counts)
+            total += min(counts) + sum(p['yielded'] for p in _pools(r) or [] if set(labels) <= p['labels'])
         return max(0, total - self.booked.get(labels[0], 0))
 
     def book(self, label: str) -> None:
@@ -268,22 +234,6 @@ class _Facts:
                 return None
             out += mine
         return out
-
-    def preferred(self, labels: Sequence[str]) -> tuple[object, dict, str, int] | None:
-        """The first host in the order that offers ``labels`` with room (19.2): ``(row,
-        pool, host label, room)``, or None. A part that does not need ``mem-big`` tries a
-        host's pools without it first, so that it leaves the big slots to the parts that do."""
-        for r in self.order:
-            if r.age is None or r.age > PREFER_FRESH_S or r.row.get('policy_drift'):
-                continue
-            for p in sorted(_pools(r) or [], key=lambda p: MEM_BIG not in labels and MEM_BIG in p['labels']):
-                hl = _host_label(r, p)
-                if not hl or not set(labels) <= p['labels'] or p['free'] is None:
-                    continue
-                room = p['free'] - self.placed.get((r.key, p['pool']), 0)
-                if room > 0:
-                    return r, p, hl, room
-        return None
 
     def speed(self, labels: Sequence[str]) -> float:
         """The largest speed of the runners ``labels`` reach, on every host row that
@@ -331,11 +281,10 @@ def _overflow(f: _Facts, part: Mapping, labels: Sequence[str]) -> tuple[object, 
     return None, why
 
 
-def _route_one(f: _Facts | None, part: Mapping, unread: str, errors: list[str], prefer: bool = False) -> dict:
+def _route_one(f: _Facts | None, part: Mapping, unread: str, errors: list[str]) -> dict:
     cap = NEEDS[part['needs']]
     labels = [BASE, cap]
-    out = {**part, 'labels': labels, 'where': 'host', 'target': '', 'timeout_minutes': _timeout(part['minutes'], 1.0),
-           'host': '', 'spill_labels': labels, 'spill_after_s': 0}
+    out = {**part, 'labels': labels, 'where': 'host', 'target': '', 'timeout_minutes': _timeout(part['minutes'], 1.0)}
     if f is None:
         out['why'] = f'capacity unreadable ({unread}): {cap}, no overflow'
         return out
@@ -366,14 +315,6 @@ def _route_one(f: _Facts | None, part: Mapping, unread: str, errors: list[str], 
         out['why'] = 'no host serves it'
         return out
     out['timeout_minutes'] = _timeout(part['minutes'], f.speed(labels[1:]))
-    got = f.preferred(labels[1:]) if prefer and part['needs'] != 'timing' else None
-    if got is not None:  # 19.2: the first host in the order with room, on its own label
-        r, p, hl, room = got
-        f.book(cap)
-        f.placed[(r.key, p['pool'])] = f.placed.get((r.key, p['pool']), 0) + 1
-        out.update(labels=[*labels, hl], host=r.key, spill_after_s=SPILL_S,
-                   why='; '.join([*notes, f'prefer {r.key}: {room} free of {hl}']))
-        return out
     free = f.free(labels[1:])
     if free is None or free > 0:
         f.book(cap)
@@ -387,17 +328,14 @@ def _route_one(f: _Facts | None, part: Mapping, unread: str, errors: list[str], 
         return out
     f.book(SLURM)
     speed = float(t.row.get('speed') or 1.0)
-    out.update(labels=[BASE, SLURM], spill_labels=[BASE, SLURM], where='slurm', target=t.target,
-               timeout_minutes=_timeout(part['minutes'], speed),
+    out.update(labels=[BASE, SLURM], where='slurm', target=t.target, timeout_minutes=_timeout(part['minutes'], speed),
                why='; '.join([*notes, f'0 free; {t.key} can start it now']))
     return out
 
 
-def route(parts: Sequence[Mapping], rows: Sequence | None, unread: str = '', prefer: bool = False) -> list[dict]:
+def route(parts: Sequence[Mapping], rows: Sequence | None, unread: str = '') -> list[dict]:
     """Each part with its ``labels``, ``timeout_minutes``, ``where`` (``host`` or ``slurm``),
-    ``target`` (a cluster part's, else ''), ``why``, and ``host``, ``spill_labels`` and
-    ``spill_after_s`` (19.2; with ``prefer`` a preferred host's label first), in plan
-    order. ``rows`` are
+    ``target`` (a cluster part's, else '') and ``why``, in plan order. ``rows`` are
     ``capacity.Row``\\ s; None (or empty) where the capacity could not be read, ``unread``
     the reader's reason. Raises ``RouteError`` with every plan-time error. Pure and
     deterministic: the plan's earlier parts book the runners and cluster jobs they take.
@@ -412,7 +350,7 @@ def route(parts: Sequence[Mapping], rows: Sequence | None, unread: str = '', pre
     f = _Facts(rows) if rows else None
     unread = unread or 'no rows'
     errors: list[str] = []
-    out = [_route_one(f, p, unread, errors, prefer) for p in parts]
+    out = [_route_one(f, p, unread, errors) for p in parts]
     if errors:
         raise RouteError(errors)
     return out
@@ -431,6 +369,23 @@ def row_of(outcome: str, next_: str) -> str:
             'lost': 'any', 'stopped': 'any'}.get(outcome, '')
 
 
+def _tier(r) -> int | None:
+    """A host row's ``tier`` (19.1), or None where it has none."""
+    v = r.row.get('tier')
+    return v if type(v) is int and 1 <= v <= TIER_MAX else None
+
+
+def may_yield(rows: Sequence | None, host: str, cap: str) -> bool:
+    """Whether the runners of ``cap`` on ``host`` (a host row's ``role`` or key) may be
+    yielding (19.2): its row has a tier and an up host row of an earlier tier serves
+    ``cap``. False where the rows or the host's row are not known. Pure."""
+    mine = [r for r in _hosts(rows or []) if host and host in (r.key, r.row.get('role'))]
+    t = _tier(mine[0]) if mine else None
+    if t is None:
+        return False
+    return any(_tier(r) is not None and _tier(r) < t and _has(r, [cap]) for r in _Facts(rows).up)
+
+
 def _host_labels(first: Mapping) -> list[str]:
     host = str(first.get('host') or '')
     own = [str(x) for x in first.get('pool_labels') or ()]
@@ -445,15 +400,15 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
     ``rows``: the capacity now, for the fallback's route and a check that a ``mem-big``
     retry has a host. Pure."""
     row = str(first.get('where') or '') or row_of(str(first.get('outcome', '')), str(first.get('next', '')))
-    shared = list(part.get('spill_labels') or part['labels'])  # never a preferred host's label (19.3)
-    same = {'retry': True, 'row': row, 'labels': shared, 'where': part.get('where', 'host'),
+    same = {'retry': True, 'row': row, 'labels': list(part['labels']), 'where': part.get('where', 'host'),
             'target': part.get('target', ''), 'timeout_minutes': part['timeout_minutes'], 'resume': False}
     if int(first.get('attempt') or 1) > 1 or first.get('next') not in ('retry', 'fallback') or row not in ROWS:
         return {**same, 'retry': False, 'row': row, 'labels': [], 'why': 'no retry: final, or retried once already'}
     host = str(first.get('host') or '')
+    yielding = part.get('where') != 'slurm' and may_yield(rows, host, NEEDS[part['needs']])
     if row == 'cool-card':
         card = first.get('cool_card')
-        if host and type(card) is int and card >= 0 and part['needs'] == 'gpu':  # a card's runner: one card
+        if host and type(card) is int and card >= 0 and part['needs'] == 'gpu' and not yielding:  # a card's runner: one card
             return {**same, 'labels': [BASE, f'{host}-gpu{card}'], 'where': 'host', 'target': '',
                     'why': f'thermal: a cool card of {host}'}
         row = 'fallback'  # no cool card recorded, or a two-card part: the thermal row's other branch
@@ -461,11 +416,14 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
         if part.get('where') == 'slurm':
             return {**same, 'why': f'same target {part.get("target")}'}
         own = _host_labels(first)
+        if yielding:
+            return {**same, 'row': 'any', 'why': f'same host: {host} may be yielding to an earlier tier; '
+                                                 'the part\'s labels again'}
         if own:
             return {**same, 'labels': [BASE, *own], 'where': 'host', 'target': '', 'why': f'same host {host}'}
         return {**same, 'row': 'any', 'why': 'same host: its labels not recorded; the part\'s labels again'}
     if row == 'more-memory':
-        labels = [BASE, NEEDS[part['needs']]] if part.get('where') == 'slurm' else list(shared)
+        labels = [BASE, NEEDS[part['needs']]] if part.get('where') == 'slurm' else list(part['labels'])
         labels += [] if MEM_BIG in labels else [MEM_BIG]
         if not rows or not _Facts(rows).serving(labels[1:]):  # unproven: mem-big would wait 24 h
             plain = [x for x in labels if x != MEM_BIG]
@@ -473,7 +431,7 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
                     'why': f'oom: no host proven to serve {" + ".join(labels[1:])}; {" + ".join(plain[1:])} with resume'}
         return {**same, 'labels': labels, 'where': 'host', 'target': '', 'resume': True, 'why': 'oom: more memory'}
     if row == 'any':
-        return {**same, 'why': 'the part\'s shared labels again'}
+        return {**same, 'why': 'the part\'s labels again'}
     plan = {k: v for k, v in part.items() if k in PART_KEYS}
     try:
         again = route([plan], rows, unread)[0]
@@ -495,13 +453,11 @@ def redact(text: str) -> str:
 
 
 def main(argv: Sequence[str], etc: str, stdin=None, stdout=None, stderr=None) -> int:
-    """``ci-run route [--rows FILE] [--prefer]``: the plan on stdin, the routed plan on stdout."""
+    """``ci-run route [--rows FILE]``: the plan on stdin, the routed plan on stdout."""
     import argparse
     stdin, stdout, stderr = stdin or sys.stdin, stdout or sys.stdout, stderr or sys.stderr
     ap = argparse.ArgumentParser(prog='ci-run route')
     ap.add_argument('--rows', default='', help='pool status --fast --json output to read instead of the capacity')
-    ap.add_argument('--prefer', action='store_true',
-                    help='a preferred host\'s own label first where it has room (decision 19; the workflow spills)')
     a = ap.parse_args(list(argv))
     try:
         parts = load_plan(json.load(stdin))
@@ -521,7 +477,7 @@ def main(argv: Sequence[str], etc: str, stdin=None, stdout=None, stderr=None) ->
     except (capacity.CapacityError, OSError, ValueError) as e:
         unread = redact(str(e) or type(e).__name__)
     try:
-        out = route(parts, rows, unread, prefer=a.prefer)
+        out = route(parts, rows, unread)
     except RouteError as e:
         for line in e.errors:
             print(f'route: {line}', file=stderr)

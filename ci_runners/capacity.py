@@ -22,9 +22,9 @@ R3) rewrites the host's own part at every tick (``pool.record_local``). Its keys
 read: each runner instance counts once for each label it carries; ``online`` the ones
 with a live process, ``free`` those without a ``Runner.Worker`` (no job), ``None`` where
 ``/proc`` hides them. From decision 19.4 a host row read by the CI account's own probe also
-has ``role``, ``pools`` (``pool.pool_table``: each runner pool's labels, counts and slot),
-``policy`` (``pool.policy_digests``) and its health gate's problem, and ``prefer`` from the
-registry that read it; a cluster target row has ``memory_gib``, ``max_minutes`` and an
+has ``role``, ``pools`` (``pool.pool_table``: each runner pool's labels, counts, its
+``listening`` and ``yielded`` runners and its slot), ``policy`` (``pool.policy_digests``)
+and its health gate's problem, and ``tier`` from the registry that read it; a cluster target row has ``memory_gib``, ``max_minutes`` and an
 opaque ``partition``. Every one is optional: schema 1 stays. A cluster target row has
 ``jobs_free`` (decision 15.7). ``local``
 is the raw probe of the registry's ``local`` machine, which ``ci-run pool probe`` (the

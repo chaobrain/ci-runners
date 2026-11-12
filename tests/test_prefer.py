@@ -6,6 +6,7 @@ health and target bounds, the policy drift warning, the part's ``pool-labels`` a
 from __future__ import annotations
 
 import collections
+import contextlib
 import io
 import json
 import os
@@ -328,6 +329,7 @@ class Yield(TierHost):
                                                                         if k != 'listening'}]},
             'none listening': offered(listening=0),
             'not all of its labels': offered(labels=('part', 'h1', 'ci-gpu')),
+            'a pool without a capability label': offered(labels=('part', 'h1', 'h1-cpu')),
             'the same tier': offered(tier=2),
             'a later tier': offered(tier=3),
             'a cluster row': {**offered(), 'target': 'cpu'},
@@ -483,11 +485,12 @@ class Burst(unittest.TestCase):
             h.tiers = tiers
         return out
 
-    def run_burst(self, *, deaf=(), down=(), stale=False, bursts=((0, 7, 200), (450, 3, 100)), end=900):
+    def run_burst(self, *, deaf=(), down=(), stale=False, held=(), bursts=((0, 7, 200), (450, 3, 100)), end=900):
         """Jobs (each with ``queued``, ``start``, ``host``), the longest wait while a runner
         of its labels idled or was yielded, and each runner's stop times. ``deaf``: hosts
         whose rows show no listening runner; ``down``: hosts whose rows have a problem;
-        ``stale``: every published row too old."""
+        ``stale``: every published row too old; ``held``: hosts under a hold (19.8) for the
+        whole run. A burst ``(t, n, seconds, host)`` names that host's own label."""
         published: dict[str, dict] = {}
         hs = self.hosts(published)
         machine = pool.load(REGISTRY).machines['hosta']
@@ -501,11 +504,15 @@ class Burst(unittest.TestCase):
         worst = 0
         stops: dict[tuple[str, str], list[int]] = collections.defaultdict(list)
         t0 = -200
+        for k in held:
+            with unittest.mock.patch('builtins.print'):
+                self.assertEqual(presence.hold(hs[k].inv, ['--minutes', '720'], env={}, now=lambda: T0 + t0), 0)
         for t in range(t0, end):
-            for when, n, dur in bursts:
+            for when, n, dur, *only in bursts:
                 if t == when:
                     for i in range(n):
-                        j = {'id': f'{when}-{i}', 'queued': t, 'dur': dur}
+                        j = {'id': f'{when}-{i}{"-" + only[0] if only else ""}', 'queued': t, 'dur': dur,
+                             'only': only[0] if only else None}
                         queue.append(j)
                         jobs.append(j)
             for (k, n), until in list(busy_until.items()):  # jobs that end
@@ -543,9 +550,13 @@ class Burst(unittest.TestCase):
             ready = [(k, n) for k in sorted(hs, key=lambda k: -self.TIER[k]) for n in names
                      if hs[k].units[f'ci-runner@{n}.service'][0] == 'active' and t - up_since[(k, n)] >= self.START_S
                      and (k, n) not in busy_until]
-            while queue and ready:
-                j = queue.pop(0)
-                k, n = ready.pop(0)
+            for j in list(queue):  # in order, each to the first ready runner its labels reach
+                fit = [x for x in ready if j['only'] in (None, x[0])]
+                if not fit:
+                    continue
+                k, n = fit[0]
+                ready.remove((k, n))
+                queue.remove(j)
                 hs[k].job(n)
                 busy_until[(k, n)] = t + j['dur']
                 j.update(start=t, host=k)
@@ -585,6 +596,17 @@ class Burst(unittest.TestCase):
         for times in stops.values():  # no flapping: a yielded runner stays down; one started stays the dwell
             self.assertTrue(all(b - a >= presence.DWELL_S for a, b in zip(times, times[1:])), stops)
 
+    def test_a_held_later_tier_takes_its_host_label_parts_at_once(self):
+        night = ((0, 2, 300, 'h3'), (0, 2, 300, 'h2'))  # parts on the 3090 hosts' own labels; h100 idles
+        jobs, _, stops, _ = self.run_burst(held=('h2', 'h3'), bursts=night, end=400)
+        self.assertEqual(sorted((j['host'], j['start']) for j in jobs), [('h2', 0), ('h2', 0), ('h3', 0), ('h3', 0)])
+        self.assertFalse(any(stops.values()))  # held all along: nothing yields
+        jobs, _, _, _ = self.run_burst(held=('h3',), bursts=night, end=400)
+        self.assertEqual(sorted(j['host'] for j in jobs if 'start' in j), ['h3', 'h3'])  # h2, not held, yields
+        self.assertFalse(any('start' in j for j in jobs if j['only'] == 'h2'))  # its parts wait while h100 idles
+        jobs, _, _, _ = self.run_burst(held=('h3',), bursts=((0, 2, 100),), end=200)  # the cost: shared parts too
+        self.assertIn('h3', {j['host'] for j in jobs})
+
     def test_a_black_hole_or_a_stale_row_yields_nothing(self):
         for kw in ({'stale': True}, {'down': ('h100', 'h2')}):
             jobs, worst, stops, _ = self.run_burst(bursts=((0, 6, 100),), end=300, **kw)
@@ -595,6 +617,125 @@ class Burst(unittest.TestCase):
         self.assertTrue(stops[('h3', 'hz-part-1')])  # h3 yields to h2, which listens
         self.assertLessEqual(worst, 60)
         self.assertEqual(sorted(j['host'] for j in jobs if j['start'] == 0), ['h100', 'h100', 'h2', 'h2'])
+
+
+class Hold(TierHost):
+    """19.8: a time-bounded hold suspends the cause; the maintainer, or a job on the host's
+    home runner whose repository's entry carries ``nightly``, sets it."""
+    JOB = {'GITHUB_ACTIONS': 'true', 'GITHUB_REPOSITORY': 'chaobrain/a', 'GITHUB_REPOSITORY_ID': '1',
+           'GITHUB_RUN_ID': '7', 'GITHUB_RUN_ATTEMPT': '1', 'RUNNER_NAME': 'hz-light-1'}
+
+    def setUp(self):
+        super().setUp()  # its light runner without a ci- label: the home runner
+        self.inv = inventory.load(tp.INV.format(t=self.t, data=self.data, slot=self.slot, part=self.part,
+                                                extra=self.extra).replace('["ci-light", "hz-light"]', '["hz-light"]'))
+        (self.etc / 'policy.toml').write_text(POLICY)
+        self.said: list[str] = []
+        self.now = float(int(self.now))  # whole seconds: a hold's until is rounded to the ms
+
+    def hold(self, *argv, env=None):
+        return presence.hold(self.inv, list(argv), env={} if env is None else env, etc=str(self.etc),
+                             now=lambda: self.now, out=self.said.append)
+
+    def test_set_extend_release_and_expiry(self):
+        data = str(self.data)
+        self.assertEqual(self.hold(), 0)
+        self.assertEqual(self.said[-1], 'presence: no hold on this host')
+        self.assertEqual(self.hold('--minutes', '30'), 0)
+        self.assertEqual(presence.hold_until(data, self.now), self.now + 1800)
+        self.assertEqual(self.hold('--minutes', '720'), 0)  # extends; 720 at most
+        self.assertEqual(presence.hold_until(data, self.now), self.now + 720 * 60)
+        for bad in (('--minutes', '0'), ('--minutes', '721'), ('--minutes', 'x'), ('--until', '1'), ('--release', 'x')):
+            with self.subTest(bad):
+                self.assertEqual(self.hold(*bad), 2)
+        self.assertEqual(self.hold('--minutes', '5', env=self.JOB), 0)
+        self.assertEqual(sorted(presence.read_holds(data, self.now)), ['chaobrain/a#7-1', 'maintainer'])
+        self.hold()
+        self.assertTrue(any('held by chaobrain/a#7-1 until' in x for x in self.said))
+        self.assertEqual(self.hold('--release'), 0)  # the maintainer's own: the job's stays
+        self.assertEqual(list(presence.read_holds(data, self.now)), ['chaobrain/a#7-1'])
+        self.assertEqual(presence.hold_until(data, self.now + 5 * 60), None)  # it ends by itself
+        self.now += 5 * 60 + 1
+        self.assertEqual(self.hold('--minutes', '1'), 0)  # a write drops the expired entry
+        with open(presence.hold_path(data)) as f:
+            self.assertEqual(list(json.load(f)['holders']), ['maintainer'])
+        self.assertTrue(any(x.get('hold') == 'set' for x in self.log()))
+        for junk in ('{', '[]', '{"holders": []}', '{"holders": {"m": {"until": "x"}}}'):
+            with open(presence.hold_path(data), 'w') as f:
+                f.write(junk)
+            self.assertEqual(presence.read_holds(data, self.now), {}, junk)
+
+    def test_who_may_hold(self):
+        self.assertEqual(presence.holder(self.inv, self.JOB, str(self.etc)), ('chaobrain/a#7-1', 'chaobrain/a', ''))
+        self.assertEqual(presence.holder(self.inv, {}, str(self.etc)), ('maintainer', 'maintainer', ''))
+        no_class = POLICY.replace('classes = ["compile", "nightly"]', 'classes = ["compile"]')
+        cases = {
+            'a part runner': ({**self.JOB, 'RUNNER_NAME': 'hz-part-1'}, POLICY, 'home runner'),
+            'no runner': ({**self.JOB, 'RUNNER_NAME': ''}, POLICY, 'home runner'),
+            'no entry': ({**self.JOB, 'GITHUB_REPOSITORY': 'chaobrain/b'}, POLICY, 'no entry'),
+            'paused': (self.JOB, POLICY.replace('bot_dispatch = true', 'bot_dispatch = true\npaused = true'), 'no entry'),
+            'another id': ({**self.JOB, 'GITHUB_REPOSITORY_ID': '2'}, POLICY, 'repository id'),
+            'no nightly class': (self.JOB, no_class, 'lacks the class nightly'),
+            'no policy': (self.JOB, None, 'does not load'),
+        }
+        for name, (env, pol, why) in cases.items():
+            with self.subTest(name):
+                if pol is None:
+                    (self.etc / 'policy.toml').unlink(missing_ok=True)
+                else:
+                    (self.etc / 'policy.toml').write_text(pol)
+                self.assertIn(why, presence.holder(self.inv, env, str(self.etc))[2])
+                self.assertEqual(self.hold('--minutes', '5', env=env), 1)
+                self.assertIn('hold refused', self.said[-1])
+        self.assertIsNone(presence.hold_until(str(self.data), self.now))
+
+    def test_at_most_32_holders(self):
+        for i in range(presence.HOLD_ENTRIES):
+            self.assertEqual(self.hold('--minutes', '5', env={**self.JOB, 'GITHUB_RUN_ID': str(i)}), 0)
+        self.assertEqual(self.hold('--minutes', '5', env={**self.JOB, 'GITHUB_RUN_ID': 'x'}), 1)
+        self.assertEqual(self.hold('--minutes', '9', env={**self.JOB, 'GITHUB_RUN_ID': '0'}), 0)  # its own: extended
+        self.assertEqual(presence.HOLD_ENTRIES, 32)
+
+    def test_a_hold_suspends_the_cause(self):
+        self.tick()
+        self.tick()
+        self.assertEqual(sorted(self.actions('stop')), Yield.PARTS)
+        self.hold('--minutes', '10')
+        self.earlier = offered()  # an earlier tier still idles
+        _, lines, _ = self.tick(dry_run=True)
+        self.assertIn('held until', '\n'.join(lines))
+        self.tick()
+        self.assertEqual(sorted(self.actions('start')), Yield.PARTS)  # at the next tick
+        for _ in range(10):
+            self.tick()
+        self.assertEqual(len(self.actions('stop')), 2)  # nothing yields while held
+        self.assertNotIn('tier: ', json.dumps(self.log()[-3:]))
+        self.now += 600
+        for _ in range(presence.DWELL_S // 20 + 3):  # the hold ended: the dwell, then two ticks
+            self.tick()
+        self.assertEqual(len(self.actions('stop')), 4)
+
+    def test_the_row_and_pool_status_show_it(self):
+        self.assertIsNone(pool.holds_of(self.inv))
+        self.hold('--minutes', '30')
+        until, n = pool.holds_of(self.inv, self.now)
+        self.assertEqual((until, n), (self.now + 1800, 1))
+        m = pool.load(REGISTRY).machines['hosta']
+        row = pool.host_row(m, {'slots_free': 1, 'hold_until': until, 'holds': n})
+        self.assertEqual((row['hold_until'], row['holds']), (until, 1))
+        self.assertIn('hold until ', pool.table([row]))
+        for bad in ({'hold_until': 'x', 'holds': 1}, {'hold_until': until, 'holds': 0}, {'hold_until': until}):
+            self.assertNotIn('hold_until', pool.host_row(m, {'slots_free': 1, **bad}), bad)
+        self.assertNotIn('hold until', pool.table([pool.host_row(m, {'slots_free': 1})]))
+        with unittest.mock.patch.object(pool, '_inventory', return_value=self.inv), \
+                unittest.mock.patch.object(pool, 'policy_digests', return_value=None), \
+                unittest.mock.patch.object(pool, 'host_health', return_value=''):
+            p = pool._with_inventory({'runner_names': [], 'runner_busy': []}, str(self.etc))
+        self.assertEqual(p['holds'], 1)
+        buf = io.StringIO()
+        with unittest.mock.patch.dict(os.environ, {'GITHUB_ACTIONS': ''}), contextlib.redirect_stdout(buf):
+            self.assertEqual(presence.main(['hold'], lambda: self.inv), 0)
+        self.assertIn('held by maintainer', buf.getvalue())
 
 
 POLICY = textwrap.dedent('''\

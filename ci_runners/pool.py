@@ -94,7 +94,8 @@ tier's idle runners yield to an earlier tier's listening ones (presence, 19.2), 
 carries it. The CI account's own probe (``_with_inventory``) adds
 the host's ``role``, its ``pools`` (``pool_table``), its hook policy's digests
 (``policy_digests``: a policy that does not load is the problem ``policy: does not load``)
-and its health gate's failure (the problem ``health: ...``); a cluster target's row has
+and its health gate's failure (the problem ``health: ...``), and its hold (19.8:
+``hold_until``, ``holds``; ``pool status`` prints ``hold until``); a cluster target's row has
 its ``memory_gib``, ``max_minutes`` and an opaque ``partition`` (``partition_key``). ``pool
 status`` flags a host whose repository entries differ from most hosts' (``capacity.flag_policy``).
 
@@ -172,6 +173,7 @@ Stdlib only.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import hashlib
 import io
 import json
@@ -918,6 +920,9 @@ def _with_inventory(p: dict, etc: str) -> dict:
     p['label_runners'] = _label_counts(pairs, p)
     p['role'] = inv.this
     p['pools'] = pool_table(inv, p, yielded_runners(inv))
+    hold = holds_of(inv)
+    if hold is not None:
+        p['hold_until'], p['holds'] = hold
     pol = policy_digests(etc)
     if pol is not None:
         p['policy'] = pol
@@ -925,6 +930,17 @@ def _with_inventory(p: dict, etc: str) -> dict:
     if health:
         p['health'] = health
     return p
+
+
+def holds_of(inv, now: float | None = None) -> tuple[float, int] | None:
+    """The host's hold (decision 19.8): ``(the latest until, how many holders)``, or None
+    where none is active or the marker cannot be read."""
+    from ci_runners import presence
+    try:
+        held = presence.read_holds(str(inv.host['data']), time.time() if now is None else now)
+    except Exception:  # noqa: BLE001 - not known: no hold shown
+        return None
+    return (max(v['until'] for v in held.values()), len(held)) if held else None
 
 
 def yielded_runners(inv) -> set[str] | None:
@@ -1016,6 +1032,8 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
         row['policy'] = {k: pol[k] for k in ('file', 'repositories', 'error') if isinstance(pol.get(k), str)}
         if 'error' in row['policy']:
             row['problems'].append('policy: does not load')
+    if type(p.get('hold_until')) in (int, float) and type(p.get('holds')) is int and p['holds'] > 0:
+        row['hold_until'], row['holds'] = p['hold_until'], p['holds']  # 19.8
     if isinstance(p.get('health'), str) and p['health']:
         row['problems'].append(p['health'] if p['health'].startswith('health') else f'health: {p["health"]}')
     free = int(p.get('slots_free', 0))
@@ -1416,6 +1434,13 @@ def fast_status(reg: Registry, run: Runner = subprocess.run, here: str | None = 
     return [capacity.mark(row, t) for m in reg.machines.values() for row in out.get(m.key) or [not_read(m)]]
 
 
+def _hold_time(t: object) -> str:
+    try:
+        return datetime.datetime.fromtimestamp(float(t), datetime.timezone.utc).strftime('%H:%MZ')
+    except (TypeError, ValueError, OverflowError, OSError):
+        return '?'
+
+
 def table(rows: Sequence[Mapping]) -> str:
     """``pool status`` for people. Pure."""
     head = ('machine', 'slots', 'queue', 'cores', 'mem GiB', 'cards free', 'model', 'billed', 'start', 'numerics', 'problems')
@@ -1428,7 +1453,8 @@ def table(rows: Sequence[Mapping]) -> str:
                       f'{r["price"]:g}/h' if r['billed'] else 'free',
                       ('now' + (f' ({r["jobs_free"]})' if 'jobs_free' in r else '')) if r['start_now'] else 'no',
                       'ok' if r['numerics_ok'] else 'not passed',
-                      '; '.join([*r['problems'], *(f'warn: {w}' for w in r.get('warnings') or ())]) or '-'))
+                      '; '.join([*r['problems'], *(f'warn: {w}' for w in r.get('warnings') or ()),
+                                 *([f'hold until {_hold_time(r["hold_until"])}'] if r.get('hold_until') else [])]) or '-'))
     w = [max(len(x[i]) for x in lines) for i in range(len(head))]
     return '\n'.join('  '.join(c.ljust(w[i]) for i, c in enumerate(x)).rstrip() for x in lines)
 

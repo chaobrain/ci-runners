@@ -1,0 +1,243 @@
+# A public caller's run of the reusable workflow (decision 18.7), called by ci.yml's public job:
+# *admit*, on a hosted runner, refuses a repository of another owner than this organisation and
+# every event but a same-repository pull request or a protected push, before anything of the
+# head runs (decided 2026-11-13: the hosted legs need no opt-in). Then the same three pickups as
+# ci.yml's own: *plan* with a read-only token, *parts* (public-part.yml: CPU parts on hosted
+# runners, gpu parts on the repository's own confined pool, [self-hosted, ci-pub-gpu]) with
+# *pending* beside them, and *verdict*; a gpu part only for a repository the lead opted in to the
+# public GPU pool (flow.PUBLIC_CALLERS; else the plan is red). Every job but a gpu part runs on GitHub's hosted
+# runners and reads nothing of our hosts. workflow_call only; each job's permissions narrow
+# the caller's grant, and no secret is taken or passed.
+name: ci-runners public
+
+on:
+  workflow_call:
+    inputs:
+      context:
+        description: the status context, such as myproj/ci
+        type: string
+        required: true
+      plan:
+        description: a command, run in the head's checkout on a hosted runner, that prints the plan JSON (§4.10); empty, one pytest part
+        type: string
+        default: ''
+      project:
+        description: the project's name; empty, the repository's name
+        type: string
+        default: ''
+      sha:
+        description: the head to run; empty, the pull request's head, else github.sha
+        type: string
+        default: ''
+      plan-only:
+        description: plan, route and summary only, no part; posts success "plan only"
+        type: boolean
+        default: false
+    outputs:
+      state:
+        description: the state the verdict job posted (success, failure or error); empty where the claim skipped a green head
+        value: ${{ jobs.verdict.outputs.state }}
+
+jobs:
+  # this organisation's repositories and the events of 16.7: the run ends here otherwise
+  admit:
+    name: admit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: chaobrain/ci-runners/actions/flow@v1
+        env:
+          CIRUNNERS_PUBLIC: 'true'
+        with:
+          command: admit
+          token: ''
+
+  # read-only: nothing of the head runs with a token that can post a status
+  plan:
+    name: plan
+    needs: admit
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      statuses: read
+      actions: read
+      pull-requests: read
+    outputs:
+      run: ${{ inputs.plan-only && 'true' || steps.claim.outputs.run }}
+      seen: ${{ steps.claim.outputs.seen }}
+      sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+      parts: ${{ steps.plan.outputs.parts }}
+      ids: ${{ steps.plan.outputs.ids }}
+      max_parallel: ${{ steps.plan.outputs.max-parallel }}
+      routed: ${{ steps.plan.outputs.routed }}
+      state: ${{ steps.contract.outputs.state || steps.plan.outputs.state }}
+      description: ${{ steps.contract.outputs.description || steps.plan.outputs.description }}
+      project: ${{ steps.project.outputs.name }}
+      files: ${{ steps.files.outcome }}
+    env:
+      CIRUNNERS_PUBLIC: 'true'
+    steps:
+      - id: project
+        shell: bash
+        env:
+          CIRUNNERS_PROJECT: ${{ inputs.project }}
+        run: |
+          p="${CIRUNNERS_PROJECT:-${GITHUB_REPOSITORY#*/}}"
+          case "$p" in ''|*[!A-Za-z0-9._-]*) echo "::error::the project input is not a project name"; exit 1;; esac
+          echo "name=$p" >> "$GITHUB_OUTPUT"
+      - id: claim
+        if: ${{ !inputs.plan-only }}
+        uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: claim
+          context: ${{ inputs.context }}
+          sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+      - id: contract
+        if: steps.claim.outputs.run == 'true' || inputs.plan-only
+        uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: contract
+          context: ${{ inputs.context }}
+          sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+          default-branch: ${{ github.event.repository.default_branch || '' }}
+      - if: steps.contract.outcome == 'success' && inputs.plan != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - if: steps.contract.outcome == 'success' && inputs.plan != ''
+        shell: bash
+        run: git sparse-checkout disable 2> /dev/null || true
+      # the plan command on this hosted runner, with no token; its standard output is the plan
+      - id: command
+        if: steps.contract.outcome == 'success' && inputs.plan != ''
+        timeout-minutes: 30
+        shell: bash
+        env:
+          CIRUNNERS_PLAN: ${{ inputs.plan }}
+          CIRUNNERS_EVENT: ${{ github.event_name }}
+          CIRUNNERS_PR: ${{ github.event.pull_request.number }}
+          CIRUNNERS_PR_LABELS: ${{ github.event.pull_request && toJSON(github.event.pull_request.labels.*.name) || '[]' }}
+          CIRUNNERS_BASE_REF: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+          CIRUNNERS_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CIRUNNERS_HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          CIRUNNERS_HEAD_SHA: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+        run: mkdir -p "$RUNNER_TEMP/ci-runners-plan" && eval "$CIRUNNERS_PLAN" > "$RUNNER_TEMP/ci-runners-plan/plan.json"
+      - id: plan
+        if: always() && steps.contract.outcome == 'success'
+        uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: plan
+          context: ${{ inputs.context }}
+          sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+          project: ${{ steps.project.outputs.name }}
+          plan-file: ${{ inputs.plan != '' && format('{0}/ci-runners-plan/plan.json', runner.temp) || '' }}
+          plan-outcome: ${{ inputs.plan != '' && (steps.command.outcome == 'success' && 'pass' || 'red') || '' }}
+          plan-reason: ${{ inputs.plan != '' && steps.command.outcome != 'success' && format('the plan command {0}', steps.command.outcome) || '' }}
+          plan-only: ${{ inputs.plan-only }}
+          workspace: ${{ github.workspace }}
+      - id: files
+        if: ${{ !cancelled() && steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-plan-files
+          path: ${{ github.workspace }}/${{ steps.plan.outputs.files }}
+          retention-days: 7
+          if-no-files-found: error
+
+  pending:
+    name: pending
+    needs: plan
+    if: >-
+      !cancelled() && needs.plan.outputs.routed == 'true' && needs.plan.outputs.files != 'failure' &&
+      needs.plan.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      statuses: write
+    steps:
+      - uses: chaobrain/ci-runners/actions/flow@v1
+        env:
+          CIRUNNERS_PUBLIC: 'true'
+        with:
+          command: pending
+          context: ${{ inputs.context }}
+          sha: ${{ needs.plan.outputs.sha }}
+          seen: ${{ needs.plan.outputs.seen || '0.0' }}
+
+  parts:
+    name: part ${{ matrix.part.id }}
+    needs: plan
+    if: >-
+      !cancelled() && needs.plan.outputs.routed == 'true' && needs.plan.outputs.files != 'failure' &&
+      needs.plan.outputs.run == 'true'
+    permissions:
+      contents: read
+      statuses: write
+      actions: read
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.plan.outputs.max_parallel) }}
+      matrix:
+        part: ${{ fromJSON(needs.plan.outputs.parts) }}
+    uses: chaobrain/ci-runners/.github/workflows/public-part.yml@v1
+    with:
+      part: ${{ toJSON(matrix.part) }}
+      context: ${{ inputs.context }}
+      sha: ${{ needs.plan.outputs.sha }}
+      project: ${{ needs.plan.outputs.project }}
+
+  verdict:
+    name: verdict
+    needs: [plan, pending, parts]
+    if: >-
+      always() && !cancelled() && needs.plan.result != 'skipped' && needs.plan.outputs.run != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      statuses: write
+      actions: read
+    outputs:
+      state: ${{ needs.plan.outputs.state || (needs.plan.outputs.routed == 'true' && steps.verdict.outputs.state) || 'error' }}
+    env:
+      CIRUNNERS_PUBLIC: 'true'
+    steps:
+      - if: needs.plan.outputs.state != ''
+        uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: status
+          context: ${{ inputs.context }}
+          sha: ${{ needs.plan.outputs.sha }}
+          state: ${{ needs.plan.outputs.state }}
+          description: ${{ needs.plan.outputs.description }}
+      - if: needs.plan.outputs.state == '' && needs.plan.outputs.routed != 'true'
+        uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: status
+          context: ${{ inputs.context }}
+          sha: ${{ needs.plan.outputs.sha }}
+          state: error
+          description: 'plan: the plan job ended without a plan (${{ needs.plan.result }}); no part ran'
+      # the parts' artifacts; a public part has no record on any host to salvage (18.7)
+      - if: needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: ci-part-*
+          path: ${{ runner.temp }}/ci-verdict
+      - id: verdict
+        if: needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'
+        uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: verdict
+          context: ${{ inputs.context }}
+          sha: ${{ needs.plan.outputs.sha || inputs.sha || github.event.pull_request.head.sha || github.sha }}
+          parts: ${{ needs.plan.outputs.ids }}
+          artifacts: ${{ runner.temp }}/ci-verdict

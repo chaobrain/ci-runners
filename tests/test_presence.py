@@ -4,6 +4,7 @@ black-hole self-drain. ``systemctl`` and ``nvidia-smi`` are stubbed: no unit is 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime
 import io
 import json
@@ -175,6 +176,8 @@ class Fixture(unittest.TestCase):
         self.load_inv()
         self.units = {f'ci-runner@{n}.service': ('active', 'success') for n in NAMES}
         self.scope_list: list[str] = []
+        self.pub_fail = False
+        self.show_fail = False
         self.procs: dict[int, dict[str, str]] = {}
         self.files = {'/proc/sys/kernel/random/boot_id': 'B1\n'}
         self.smi = {SMI_Q: '0, 00000000:01:00.0, 40, 300\n1, 00000000:4D:00.0, 41, 300\n', SMI_APPS: ''}
@@ -200,11 +203,18 @@ class Fixture(unittest.TestCase):
         if argv[0] == 'nvidia-smi':
             return subprocess.CompletedProcess(argv, 0, self.smi.get(argv[1], ''), '')
         cmd = argv[2:]
+        if cmd[0] == 'show' and self.show_fail:
+            return subprocess.CompletedProcess(argv, 1, '', 'Failed to connect to bus')
         if cmd[0] == 'show':
             units = [a for a in cmd[1:] if not a.startswith('--')]
             text = '\n\n'.join(f'ActiveState={self.units.get(u, ("inactive", "success"))[0]}\n'
                                f'Result={self.units.get(u, ("inactive", "success"))[1]}\nId={u}' for u in units)
             return subprocess.CompletedProcess(argv, 0, text + '\n', '')
+        if cmd[0] == 'list-units' and cmd[-1] == 'ci-pub-runner@*':  # the public runners' units (18.4)
+            if self.pub_fail:
+                return subprocess.CompletedProcess(argv, 1, '', 'Failed to connect to bus')
+            return subprocess.CompletedProcess(argv, 0, ''.join(f'{u} loaded {a} x x\n' for u, (a, _) in self.units.items()
+                                                                if u.startswith('ci-pub-runner@')), '')
         if cmd[0] == 'list-units':
             return subprocess.CompletedProcess(argv, 0, ''.join(f'{s} loaded active running x\n' for s in self.scope_list), '')
         if cmd[:1] == ['--no-block'] and cmd[1] in ('stop', 'start'):
@@ -528,7 +538,8 @@ class Tick(Fixture):
         self.assertEqual(sorted(self.actions('start')), ['ci-runner@hz-gpu0.service', 'ci-runner@hz-gpu1.service'])
         self.calls.clear()
         self.tick()
-        self.assertEqual([c[2] for c in self.calls], ['show'])  # then nothing but the units' read
+        # then nothing but the units' read, and the public runners' (stopped while presence is off, 18.5)
+        self.assertEqual([c[2] for c in self.calls], ['list-units', 'show'])
         self.assertFalse(pathlib.Path(presence.state_path(str(self.data))).exists() and
                          json.loads(pathlib.Path(presence.state_path(str(self.data))).read_text())['runners'])
 
@@ -711,6 +722,320 @@ class Check(Fixture):
             fake.chmod(0o755)
             r = subprocess.run(['/bin/sh', '-c', m.group(1), 'presence', 'hz-gpu0'], capture_output=True, timeout=30)
             self.assertEqual(r.returncode, want, rc)
+
+PUB_POOL = 'compile = 1, pub-gpu = { per_card = true, class = "gpu", audience = "public", labels = ["ci-pub-gpu", "hz-pub-gpu"] } }'
+PUB0, PUB_OTHER = 'ci-pub-runner@hz-pub-gpu0-17.service', 'ci-pub-runner@hy-pub-gpu0-3.service'
+PUB1 = 'ci-pub-runner@hz-pub-gpu1-18.service'
+
+
+class Public(Fixture):
+    """The public runners (decisions 18.4, 18.5, 18.7): their audience, its withdrawal within
+    one tick, the card a public runner holds, and the row presence writes for the issuer."""
+    extra = 'presence = { enabled = true }\nisolation = "account"'
+
+    def setUp(self):
+        super().setUp()
+        self.load_inv()
+        self.record()
+
+    def load_inv(self, extra=None, part=None, public=True):
+        text = INV.format(t=self.t, data=self.data, slot=self.slot, part=part or self.part,
+                          extra=self.extra if extra is None else extra)
+        self.inv = inventory.load(text.replace('compile = 1 }', PUB_POOL) if public else text)
+
+    def record(self, **kw):
+        """The conformance check's record (18.5): passed, now, in this boot and kernel."""
+        doc = {'passed': True, 'failed': [], 'time': self.now, 'boot_id': 'B1', 'kernel': os.uname().release,
+               'isolation': 'account', 'groups': 'gpu', 'versions': {'ci-runners': 'v1.0.0'}, **kw}
+        path = self.data / 'ci-runners' / 'state' / presence.CHECK_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({k: v for k, v in doc.items() if v is not None}))
+
+    def row(self):
+        return json.loads((self.data / 'ci-runners' / 'state' / presence.PUBLIC_FILE).read_text())
+
+    def test_a_withdrawn_audience_stops_the_public_runners_within_one_tick(self):
+        self.units[PUB0] = ('active', 'success')
+        self.tick()
+        self.assertEqual(self.actions('stop'), [])  # the audience holds: it runs on
+        self.assertEqual(self.row()['offered'], True)
+        self.record(passed=False, failed=['egress'])
+        self.tick()  # one tick, busy or not, no second look
+        self.assertEqual(self.actions('stop'), [PUB0])
+        self.assertEqual([(x['action'], x['cause']) for x in self.log() if x.get('runner') == PUB0],
+                         [('stop', 'public audience withdrawn: the conformance check failed (egress)')])
+        self.assertEqual(self.row()['offered'], False)
+        self.assertEqual(self.row()['cards'], [])
+
+    def test_each_reason_withdraws_it(self):
+        old = self.now - presence.CHECK_MAX_AGE - 1
+        cases = [({'passed': False, 'failed': []}, 'the conformance check failed (its record)'),
+                 ({'failed': ['gpu', 'mounts']}, 'the conformance check failed (gpu, mounts)'),
+                 ({'failed': None}, 'the conformance check failed (its record)'),
+                 ({'passed': 'true'}, 'the conformance check failed (its record)'),
+                 ({'time': old}, 'the conformance check is older than 26 h'),
+                 ({'time': self.now + 3600}, 'the conformance check is older than 26 h'),
+                 ({'time': True}, 'the conformance check is older than 26 h'),
+                 ({'time': None}, 'the conformance check is older than 26 h'),
+                 ({'boot_id': 'B0'}, 'the conformance check ran in another boot or kernel'),
+                 ({'kernel': '1.0.0'}, 'the conformance check ran in another boot or kernel'),
+                 ({'isolation': 'ns-subuid'}, "the conformance check proved 'ns-subuid', not the inventory's 'account'"),
+                 ({'groups': 'gpu,ci'}, 'the job keeps more than the GPU group (mode (a) is required, 18.4)'),
+                 ({'groups': None}, 'the job keeps more than the GPU group (mode (a) is required, 18.4)'),
+                 ({'groups': 'kept'}, 'the job keeps more than the GPU group (mode (a) is required, 18.4)')]
+        for kw, why in cases:
+            with self.subTest(kw=kw):
+                self.units[PUB0] = ('active', 'success')
+                self.calls.clear()
+                self.record(**kw)
+                self.tick()
+                self.assertEqual(self.actions('stop'), [PUB0])
+                self.assertEqual(self.log()[-1]['cause'], f'public audience withdrawn: {why}')
+                self.assertEqual(self.row()['why'], why)
+        self.units[PUB0] = ('active', 'success')
+        self.calls.clear()
+        (self.data / 'ci-runners' / 'state' / presence.CHECK_FILE).unlink()
+        self.tick()
+        self.assertEqual(self.actions('stop'), [PUB0])
+        self.assertEqual(self.row()['check'], 'none')
+        # a check of a moment ago, within a clock's skew, holds
+        self.record(time=self.now + 200)
+        self.assertEqual(presence.check_result(json.loads((self.data / 'ci-runners' / 'state' /
+                                                           presence.CHECK_FILE).read_text()),
+                                               isolation='account', boot='B1', kernel=os.uname().release,
+                                               now=self.now), ('passed', ''))
+
+    def pub_job(self, pid, unit, argv0='/work/runner/bin/Runner.Worker'):
+        """A process of ``unit``'s cgroup (in a cgroup the confinement made beneath it)."""
+        self.procs[pid] = {'cmdline': f'{argv0}\0spawnclient\0', 'cgroup':
+                           f'0::/user.slice/user-{UID}.slice/user@{UID}.service/app.slice/{unit}/job\n'}
+
+    def test_a_host_wide_stop_stops_the_idle_public_runners_and_a_job_finishes(self):
+        def drain_host():
+            drain_mod.change(str(self.data), True)  # a self-drain (drained: infra) is this drain
+
+        def unreadable():
+            (self.data / 'ci-runners' / 'state' / 'drain.json').write_text('{')
+
+        cases = [(drain_host, 'drained: host'),
+                 (lambda: drain_mod.change(str(self.data), True, 'gpu'), 'drained: pool gpu'),
+                 (lambda: setattr(self, 'disk', 1.0), 'health: 1 GiB free under the data directory, below 10'),
+                 (unreadable, drain_mod.UNREADABLE)]
+        for make, why in cases:
+            with self.subTest(why=why):
+                drain_mod.change(str(self.data), False)
+                self.disk = 100.0
+                self.units = {PUB0: ('active', 'success'), PUB1: ('active', 'success')}
+                self.procs.clear()
+                self.pub_job(41, PUB1)  # its job runs: it finishes
+                self.pub_job(42, PUB0, '/work/runner/bin/Runner.Listener')  # no job yet
+                self.calls.clear()
+                self.tick()
+                self.assertEqual(self.actions('stop'), [])
+                self.assertEqual(self.row()['offered'], True)
+                make()
+                self.tick()  # no second look: the private runners' drain holds at once too
+                self.assertEqual(self.actions('stop'), [PUB0])
+                self.assertEqual(self.row()['offered'], False)
+                self.assertEqual(self.row()['why'], why)
+                self.assertEqual(self.row()['cards'], [])
+                self.assertIn({'runner': PUB0, 'action': 'stop', 'cause': why},
+                              [{k: x.get(k) for k in ('runner', 'action', 'cause')} for x in self.log()])
+                self.assertNotIn(PUB1, [x.get('runner') for x in self.log()])  # never looked at again
+
+    def test_a_held_host_stops_no_public_runner_it_cannot_prove_idle(self):
+        drain_mod.change(str(self.data), True)
+        self.units[PUB0] = ('active', 'success')
+        self.calls.clear()
+        real, looks = self.listdir, []
+
+        def no_proc(path):
+            if path == '/proc':
+                raise OSError('no /proc')
+            return real(path)
+
+        self.listdir = no_proc
+        self.tick()
+        self.assertEqual(self.actions('stop'), [])
+        self.assertEqual(self.row()['offered'], False)
+        self.assertNotIn(PUB0, [x.get('runner') for x in self.log()])  # no look, no second one
+
+        def late_job(path):  # a job comes between the tick's look and the stop
+            if path == '/proc':
+                looks.append(path)
+                if len(looks) == 2:
+                    self.pub_job(43, PUB0)
+            return real(path)
+
+        self.listdir = late_job
+        self.tick()
+        self.assertEqual(self.actions('stop'), [])
+        self.assertIn('a job started', [x.get('why') for x in self.log() if x.get('runner') == PUB0])
+
+    def test_the_inventory_or_presence_off_withdraws_it(self):
+        for extra, public, why in (('presence = { enabled = true }\nisolation = "account"', False,
+                                    'the inventory names no public pool'),
+                                   ('presence = { enabled = false }\nisolation = "account"', True, 'presence is off'),
+                                   ('isolation = "account"', True, 'presence is off')):
+            with self.subTest(why=why):
+                self.load_inv(extra=extra, public=public)
+                self.units[PUB0] = ('active', 'success')
+                self.calls.clear()
+                self.tick()
+                self.assertEqual(self.actions('stop'), [PUB0])
+                self.assertEqual(self.log()[-1]['cause'], f'public audience withdrawn: {why}')
+        inv = dataclasses.replace(self.inv, hosts={'hz': {k: v for k, v in self.inv.host.items() if k != 'isolation'}})
+        self.assertEqual(presence.public_audience(inv, True, ('passed', '')), 'the inventory names no isolation')
+        self.load_inv()
+        self.assertEqual(presence.public_audience(self.inv, True, ('passed', '')), '')
+        self.assertEqual(presence.public_audience(self.inv, True, ('stale', 'old')), 'old')
+
+    def test_unread_units_never_keep_them_up(self):
+        self.record(passed=False, failed=['mounts'])
+        self.pub_fail = True  # the public units cannot be listed: every unit of their pattern
+        self.tick()
+        self.assertEqual(self.actions('stop'), ['ci-pub-runner@*'])
+        self.assertEqual(self.log()[-1]['cause'], 'public audience withdrawn: the conformance check failed (mounts)')
+        self.pub_fail = False
+        self.calls.clear()
+        self.units[PUB0] = ('active', 'success')
+        self.show_fail = True  # the private runners' units cannot be read: the tick ends, after the stop
+        self.assertEqual(self.tick()[0], 1)
+        self.assertEqual(self.actions('stop'), [PUB0])
+        self.show_fail = False
+        self.load_inv(extra='presence = { enabled = false }\nisolation = "account"')
+        self.units[PUB0] = ('active', 'success')
+        self.calls.clear()
+        self.show_fail = True  # and in the rollback too
+        self.tick()
+        self.assertEqual(self.actions('stop'), [PUB0])
+
+    def test_an_unread_boot_id_is_no_boot(self):
+        doc = {'passed': True, 'failed': [], 'time': self.now, 'boot_id': '', 'kernel': 'k', 'isolation': 'account',
+               'groups': 'gpu'}
+        self.assertEqual(presence.check_result(doc, isolation='account', boot='', kernel='k', now=self.now)[0], 'stale')
+        self.assertEqual(presence.check_result({**doc, 'boot_id': 'B1'}, isolation='account', boot='B1', kernel='k',
+                                               now=self.now), ('passed', ''))
+
+    def test_a_dry_run_stops_nothing(self):
+        self.record(passed=False)
+        self.units[PUB0] = ('active', 'success')
+        self.tick(dry_run=True)
+        self.assertEqual(self.actions('stop'), [])
+        self.assertFalse((self.data / 'ci-runners' / 'state' / presence.PUBLIC_FILE).exists())
+
+    def test_a_public_runner_holds_its_card_against_the_private_runners(self):
+        self.units[PUB0] = ('active', 'success')
+        why = self.causes()
+        held = 'public: card 0 is held by a public runner'
+        self.assertEqual(why['hz-gpu0'], [held])
+        self.assertEqual(why['hz-multi-1'], [held])  # every card
+        self.assertEqual(why['hz-gpu1'], [])
+        self.assertEqual(why['hz-part-1'], [])
+        self.units[PUB0] = ('inactive', 'success')
+        self.assertEqual(self.causes()['hz-gpu0'], [])
+        self.units[PUB0] = ('failed', 'exit-code')
+        self.assertEqual(self.causes()['hz-gpu0'], [])
+        self.units[PUB0] = ('deactivating', 'success')  # still holding its lease
+        self.assertEqual(self.causes()['hz-gpu0'], [held])
+        self.assertEqual(self.check_of('hz-gpu0'), presence.HOLD)  # its ExecCondition= keeps it down
+        self.assertEqual(self.check_of('hz-gpu1'), 0)
+
+    def test_an_unread_or_unknown_unit_holds_every_card(self):
+        unread = 'public: the public runners cannot be read'
+        self.pub_fail = True
+        why = self.causes()
+        self.assertEqual((why['hz-gpu0'], why['hz-gpu1'], why['hz-multi-1']), ([unread], [unread], [unread]))
+        self.assertEqual(why['hz-part-1'], [])  # no card, nothing read
+        self.pub_fail = False
+        for unit in (PUB_OTHER, 'ci-pub-runner@hz-pub-gpu-1.service', 'ci-pub-runner@hz-pub-gpu0.service',
+                     'ci-pub-runner@hz-gpu0-1.service'):
+            with self.subTest(unit=unit):
+                self.units = {u: v for u, v in self.units.items() if not u.startswith('ci-pub-')}
+                self.units[unit] = ('active', 'success')
+                self.assertEqual(self.causes()['hz-gpu1'], [unread])
+        self.assertEqual(presence.public_card('ci-pub-runner@hz-pub-gpu1-9', 'hz'), 1)
+        self.assertEqual(presence.public_card('ci-pub-runner@hz-pub-gpu12-9.service', 'hz'), 12)
+        self.assertIsNone(presence.public_card('ci-runner@hz-pub-gpu1-9.service', 'hz'))
+        self.assertIsNone(presence.public_card('ci-pub-runner@hz-pub-gpu1-9.service.x', 'hz'))
+        self.assertEqual(presence.public_cards([], 'hz'), set())
+        self.assertIsNone(presence.public_cards(None, 'hz'))
+
+    def test_a_light_runner_s_start_reads_no_public_unit(self):
+        self.pub_fail = True
+        self.assertEqual(self.check_of('hz-light-1'), 0)
+        self.assertEqual(self.check_of('hz-part-1'), 0)
+        self.assertFalse([c for c in self.calls if c[-1] == 'ci-pub-runner@*'])
+
+    def test_the_row_offers_the_free_cards_only(self):
+        self.units[PUB0] = ('active', 'success')
+        self.tick()
+        r = self.row()
+        self.assertEqual({k: r[k] for k in ('offered', 'cards', 'running', 'check', 'isolation', 'proven', 'groups', 'why')},
+                         {'offered': True, 'cards': [1], 'running': [0], 'check': 'passed', 'isolation': 'account',
+                          'proven': 'account', 'groups': 'gpu', 'why': ''})
+        self.assertEqual(r['age_s'], 0)
+        self.assertEqual(r['time'], self.now - 20)
+        self.job('hz-gpu1')  # a private job on card 1
+        self.tick()
+        self.assertEqual(self.row()['cards'], [])
+        self.procs.clear()
+        self.job('hz-multi-1')  # a two-card part holds every card
+        self.units[PUB0] = ('inactive', 'success')
+        self.tick()
+        self.assertEqual(self.row()['cards'], [])
+        self.procs.clear()
+        self.tick()
+        self.assertEqual(self.row()['cards'], [0, 1])
+        self.smi[SMI_Q] = '0, 00000000:01:00.0, 90, 0\n1, 00000000:4D:00.0, 41, 0\n'  # card 0 too hot
+        self.tick()
+        self.assertEqual(self.row()['cards'], [1])
+        self.listdir_hook = lambda: (_ for _ in ()).throw(OSError('no /proc'))  # idle not known: none
+        self.tick()
+        self.assertEqual(self.row()['cards'], [])
+        self.listdir_hook = None
+        self.pub_fail = True
+        self.tick()
+        self.assertEqual((self.row()['cards'], self.row()['running']), ([], None))
+
+    def test_no_row_without_a_public_pool(self):
+        self.load_inv(public=False)
+        self.tick()
+        self.assertFalse((self.data / 'ci-runners' / 'state' / presence.PUBLIC_FILE).exists())
+
+    def test_a_row_that_cannot_be_written_is_logged(self):
+        with mock.patch.object(presence, 'write_public', side_effect=OSError('disk full')):
+            self.assertEqual(self.tick()[0], 0)
+        self.assertEqual(self.log()[-1], {**self.log()[-1], 'public': 'not written', 'error': 'OSError: disk full'})
+
+    def test_the_capacity_row_carries_it_fresh(self):
+        self.assertIsNone(pool.public_of(dataclasses.replace(self.inv, public={})))
+        stale = pool.public_of(self.inv, now=self.now)
+        self.assertEqual((stale['offered'], stale['cards'], stale['check']), (False, [], 'none'))
+        self.tick()
+        t = self.now - 20
+        fresh = pool.public_of(self.inv, now=t + 30)
+        self.assertEqual({k: fresh[k] for k in ('offered', 'cards', 'check', 'isolation', 'age_s', 'why')},
+                         {'offered': True, 'cards': [0, 1], 'check': 'passed', 'isolation': 'account', 'age_s': 0, 'why': ''})
+        self.assertFalse(pool.public_of(self.inv, now=t + pool.PUBLIC_MAX_AGE + 1)['offered'])
+        self.assertFalse(pool.public_of(self.inv, now=t - 60)['offered'])  # from the future
+        path = self.data / 'ci-runners' / 'state' / presence.PUBLIC_FILE
+        for bad in ({'cards': [0, '1']}, {'cards': 1}, {'offered': 'yes'}):
+            with self.subTest(bad=bad):
+                path.write_text(json.dumps({**self.row(), **bad}))
+                got = pool.public_of(self.inv, now=t + 1)
+                self.assertEqual((got['offered'], got['cards']), (False, []))
+        path.write_text(json.dumps({**self.row(), 'offered': True}))
+        etc = self.t / 'etc'
+        with mock.patch.object(pool, '_inventory', return_value=self.inv), \
+                mock.patch.object(pool, '_runners_of', return_value=[]), \
+                mock.patch.object(pool, 'public_of', return_value={'offered': True}) as pub:
+            self.assertEqual(pool._with_inventory({}, str(etc))['public'], {'offered': True})
+            pub.return_value = None
+            self.assertNotIn('public', pool._with_inventory({}, str(etc)))
+
+    def check_of(self, name):
+        return presence.check(self.inv, self.probe(), name, out=lambda _: None)
 
 
 def _iso(t):

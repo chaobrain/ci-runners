@@ -33,27 +33,33 @@ on:
         type: boolean
         default: false
       plan-token:
-        description: hand the plan job's read-only token to the plan command alone, as GH_TOKEN (never to a part; a public caller is refused in any case)
+        description: hand the plan job's read-only token to the plan command alone, as GH_TOKEN (never to a part; never for a public caller)
         type: boolean
         default: false
     outputs:
       state:
         description: the state the verdict job posted (success, failure or error); empty where the claim skipped a green head
-        value: ${{ jobs.verdict.outputs.state }}
+        value: ${{ jobs.verdict.outputs.state || jobs.public.outputs.state }}
 
 jobs:
-  # a public repository's legs (hosted CPU, the confined GPU pool) come with decision 18's C2:
-  # until then its call fails here, on a hosted runner, instead of queueing on ours for a day
+  # a public caller's run (decision 18.7): public.yml, its plan, claim, verdict and CPU parts on
+  # GitHub-hosted runners and its gpu parts on its own confined pool (a repository opted in to
+  # it only); it refuses there, on a hosted runner, another owner's. The jobs below are a private caller's
   public:
     name: public
     if: github.event.repository.visibility == 'public'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
     permissions:
       contents: read
-    steps:
-      - shell: bash
-        run: echo "::error::ci-runners ci.yml serves private repositories only until decision 18's C2" && exit 1
+      statuses: write
+      actions: read
+      pull-requests: read
+    uses: chaobrain/ci-runners/.github/workflows/public.yml@v1
+    with:
+      context: ${{ inputs.context }}
+      plan: ${{ inputs.plan }}
+      project: ${{ inputs.project }}
+      sha: ${{ inputs.sha }}
+      plan-only: ${{ inputs.plan-only }}
 
   # read-only (16.6 as amended): nothing of the head runs with a token that can post a status
   plan:

@@ -2849,6 +2849,8 @@ MUTANTS = [
      [f'{TRW}.Watch.test_a_check_by_hand_soon_after_a_tick_does_not_count_again']),
     (RWP, "            count, last = prev['offline'], prev['last']", "            count = prev['offline']",
      [f'{TRW}.Watch.test_a_check_by_hand_soon_after_a_tick_does_not_count_again']),
+    (STA, "                again = int(last.get('run_attempt') or 1) > 1", "                again = latest > 1",
+     [f'{TSA}.Report.test_a_rerun_that_kept_its_verdict_measures_it_from_its_own_attempt']),
     (STA, 'self.queue.append(s - c)', 'self.queue.append(e - c)',
      [f'{TSA}.Acceptance.test_the_delays_per_label_and_per_repository_equal_an_independent_count']),
     (STA, 'self.run.append(e - s)', 'self.run.append(e - c)',

@@ -436,6 +436,15 @@ class Report(unittest.TestCase):
         self.assertEqual(got['retries'], {'more-memory': 2})
         self.assertEqual((got['wall']['max'], got['verdict']['max'], got['verdict_from']['rerun']), (60, 60, 1))
 
+    def test_a_rerun_that_kept_its_verdict_measures_it_from_its_own_attempt(self):
+        run = {'id': 10, 'event': 'workflow_dispatch', 'created_at': stats.iso(T0), 'run_started_at': stats.iso(T0 + 900),
+               'run_attempt': 2, 'status': 'completed', 'jobs': [
+                   self.j('part p / first', 0, 5, 100), self.j('verdict', 101, 102, 120),
+                   self.j('part q / first', 901, 905, 950, att=2)]}
+        got = self.one(run)
+        self.assertEqual((got['wall']['max'], got['verdict']['max'], got['verdict_from'], got['negative']),
+                         (50, 120, {'push': 0, 'created': 1, 'rerun': 0}, 0))  # the verdict of attempt 1: from creation
+
     def test_a_run_in_progress_has_no_wall_and_no_verdict_yet(self):
         run = {'id': 8, 'event': 'push', 'created_at': stats.iso(T0), 'run_attempt': 1, 'status': 'in_progress',
                'jobs': [self.j('part p / first', 0, 5, None, status='in_progress')]}

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import math
 import os
 import re
 import subprocess
@@ -83,7 +84,8 @@ def _int(v: object, lo: int = 0) -> bool:
 
 
 def _num(v: object) -> bool:
-    return type(v) in (int, float) and v > 0
+    """A finite positive number (TOML also has ``inf`` and ``nan``; decision 19.7)."""
+    return type(v) in (int, float) and math.isfinite(v) and v > 0
 
 
 def cpu_ranges(v: object) -> list[tuple[int, int]] | None:
@@ -103,7 +105,7 @@ def cpu_ranges(v: object) -> list[tuple[int, int]] | None:
 
 def _slot(v: object) -> bool:
     """A pool's ``slot`` table (decision 16.2): ``cpus``, one cpuset per runner, no CPU in
-    two of them; ``workers``, a count; ``memory``, a size; ``speed``, a positive number; and
+    two of them; ``workers``, a count; ``memory``, a size; ``speed``, a finite positive number; and
     an optional ``isa``. Accepted and inert until R2 (16.3); its count is checked in load."""
     if not isinstance(v, dict) or set(v) - set(SLOT_KEYS) or any(r and k not in v for k, r in SLOT_KEYS.items()):
         return False

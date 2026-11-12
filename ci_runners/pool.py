@@ -42,6 +42,7 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
     numerics_ok = true                   # its numerics check passed
     cache = "/abs/compile/cache"         # its compile cache (optional)
     ready = true                         # pool add writes false, pool ready true; no key: ready
+    prefer = 1                           # its place in the route's order, 1 to 99, lower first (optional; 19.1)
 
     [machine.cluster]                    # a Slurm cluster: access through the account's gate
     access = "slurm"
@@ -162,6 +163,7 @@ Stdlib only.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import io
 import json
 import math
@@ -260,6 +262,8 @@ class LeaseDir:
 #: the interpreter the host side (the probe, ``remote``) runs on a host whose entry names no
 #: ``host_python``: the system's, 3.11 or later on the 3090 hosts (h100's is 3.10, decision 15.8)
 HOST_PYTHON = '/usr/bin/python3'
+#: the largest ``prefer`` of a host entry (decision 19.1)
+PREFER_MAX = 99
 
 
 @dataclasses.dataclass(frozen=True)
@@ -294,6 +298,7 @@ class Machine:
     site: str = ''  # a cluster through its CI key: the site config's site and account (item 8)
     account: str = ''
     probe: str = ''  # 'forced': a host whose key is forced to ``ci-run pool probe`` (item 8)
+    prefer: int | None = None  # a host's place in the route's order, lower first; None: in no order (19.1)
 
     @property
     def status_only(self) -> bool:
@@ -353,7 +358,7 @@ def _labels(t: Mapping, where: str) -> dict[str, str]:
 
 _MACHINE = {'access', 'ssh', 'hostname', 'cpus', 'memory_gib', 'gpus', 'gpu_model', 'gpu_mib', 'cuda', 'p2p', 'billed',
             'price', 'python', 'host_python', 'work', 'slots', 'labels', 'numerics_ok', 'cache', 'gate', 'targets', 'ready',
-            'max_slots', 'drain', 'leases', 'site', 'account', 'probe', 'runners'}
+            'max_slots', 'drain', 'leases', 'site', 'account', 'probe', 'runners', 'prefer'}
 _TARGET = {'partition', 'cpus', 'memory_gib', 'max_minutes', 'variant', 'price', 'numerics_ok', 'labels', 'gpu_model',
            'cards', 'max_cards', 'gpu_mib', 'cuda'}
 _TOP = {'schema', 'project', 'repository', 'check', 'gpu_need_mib', 'machine', 'warm', 'numerics', 'capacity'}
@@ -399,11 +404,14 @@ def _machine(key: str, t: Mapping) -> Machine:
         raise RegistryError(f'{where}: probe is "forced", on an ssh machine')
     if access in ('ssh', 'slurm') and not site and not _get(t, 'ssh', str, where, ''):
         raise RegistryError(f'{where}: an {access} machine needs its ssh alias')
+    prefer = _get(t, 'prefer', int, where)
+    if prefer is not None and (access == 'slurm' or not 1 <= prefer <= PREFER_MAX):
+        raise RegistryError(f'{where}: prefer is an integer from 1 to {PREFER_MAX}, on a host (decision 19.1)')
     m = dict(key=key, access=access, ssh=_get(t, 'ssh', str, where, ''), hostname=_get(t, 'hostname', str, where, ''),
              billed=_get(t, 'billed', bool, where, access == 'slurm'), price=float(_get(t, 'price', float, where, 0.0)),
              labels=_labels(t, where), numerics_ok=_get(t, 'numerics_ok', bool, where, False),
              cache=_abs(t, 'cache', where), ready=_get(t, 'ready', bool, where, True), site=site, account=account,
-             probe=probe_kind)
+             probe=probe_kind, prefer=prefer)
     if access == 'slurm':
         targets = _get(t, 'targets', dict, where, required=True)
         if not targets:
@@ -678,27 +686,40 @@ def runner_labels(etc: str = '') -> dict[str, int] | None:
     return out
 
 
-def _inventory_runners(etc: str) -> list[tuple[str, list[str]]] | None:
-    from ci_runners import inventory, setup
+def _inventory(etc: str):
+    """This account's inventory (``inventory.Inventory``), or None where it is missing or
+    does not load."""
+    from ci_runners import inventory
     try:
         with open(os.path.join(_etc(etc), 'inventory.toml'), encoding='utf-8') as f:
-            return [(n, labels) for n, labels, _ in setup.runners(inventory.load(f.read()))]
-    except (OSError, ValueError):  # InventoryError is a ValueError, as are two runners of one name
+            return inventory.load(f.read())
+    except (OSError, ValueError):  # InventoryError is a ValueError
         return None
 
 
-def label_runners(etc: str, p: Mapping) -> dict[str, dict] | None:
-    """Each label's runner instances that this account's inventory registers (as
-    ``runner_labels``), with how many of them are online and free by the probe ``p``'s
-    names (``runner_names``: a live process; ``runner_busy``: running a job), decision
-    16.5: ``{label: {"registered": n, "online": n, "free": n}}``, ``online`` and ``free``
-    None where the probe does not know them. None where the inventory does not load."""
-    rs = _inventory_runners(etc)
-    if rs is None:
+def _runners_of(inv) -> list[tuple[str, list[str], str]] | None:
+    from ci_runners import setup
+    try:
+        return setup.runners(inv)
+    except ValueError:  # two runners of one name
         return None
+
+
+def _inventory_runners(etc: str) -> list[tuple[str, list[str]]] | None:
+    inv = _inventory(etc)
+    rs = None if inv is None else _runners_of(inv)
+    return None if rs is None else [(n, labels) for n, labels, _ in rs]
+
+
+def _known(p: Mapping) -> tuple[bool, set[str], set[str]]:
+    """Whether the probe ``p`` knows its runners, and their names alive and busy."""
     alive, busy = p.get('runner_names'), p.get('runner_busy')
     known = isinstance(alive, list) and isinstance(busy, list)
-    alive, busy = (set(alive), set(busy)) if known else (set(), set())
+    return known, (set(alive) if known else set()), (set(busy) if known else set())
+
+
+def _label_counts(rs: Sequence[tuple[str, list[str]]], p: Mapping) -> dict[str, dict]:
+    known, alive, busy = _known(p)
     out: dict[str, dict] = {}
     for name, labels in rs:
         for label in set(labels):
@@ -710,12 +731,102 @@ def label_runners(etc: str, p: Mapping) -> dict[str, dict] | None:
     return out
 
 
+def label_runners(etc: str, p: Mapping) -> dict[str, dict] | None:
+    """Each label's runner instances that this account's inventory registers (as
+    ``runner_labels``), with how many of them are online and free by the probe ``p``'s
+    names (``runner_names``: a live process; ``runner_busy``: running a job), decision
+    16.5: ``{label: {"registered": n, "online": n, "free": n}}``, ``online`` and ``free``
+    None where the probe does not know them. None where the inventory does not load."""
+    rs = _inventory_runners(etc)
+    return None if rs is None else _label_counts(rs, p)
+
+
+def pool_table(inv, p: Mapping) -> list[dict]:
+    """One entry per runner pool of the inventory ``inv``'s host (decision 19.4): ``pool``,
+    ``class``, ``labels`` (those every runner of the pool carries, in the pool's order: a
+    per-card runner's ``<role>-gpu<N>`` is not among them where the pool has two cards or
+    more), ``registered``, and ``online`` and ``free`` by the probe ``p``'s names (as
+    ``label_runners``; None where it does not know them); a pool with a ``slot`` table adds
+    its ``memory_gib``, ``speed`` and ``workers`` (16.2). Pure."""
+    from ci_runners import inventory, registry
+    known, alive, busy = _known(p)
+    rs = _runners_of(inv) or []
+    out = []
+    for name, v in inv.host['pools'].items():
+        cls = inventory.pool_class(inv.host, name)
+        mine = [r for r in rs if r[2] == cls]
+        common = [x for x in mine[0][1] if all(x in r[1] for r in mine[1:])] if mine else []
+        e = {'pool': name, 'class': cls, 'labels': common, 'registered': len(mine),
+             'online': sum(r[0] in alive for r in mine) if known else None,
+             'free': sum(r[0] in alive and r[0] not in busy for r in mine) if known else None}
+        slot = v.get('slot') if isinstance(v, dict) else None
+        if isinstance(slot, dict):
+            e.update(memory_gib=round(registry.memory_bytes(slot['memory']) / (1 << 30), 3), speed=float(slot['speed']),
+                     workers=int(slot['workers']))
+        out.append(e)
+    return out
+
+
+#: the most of a policy file the probe reads (the hook's own bound, ``hook.MAX_POLICY``)
+POLICY_MAX = 1 << 20
+
+
+def policy_digests(etc: str) -> dict | None:
+    """This account's hook policy (``<etc>/policy.toml``) as the capacity row shows it
+    (decision 19.6): ``file``, the first 12 hex digits of its SHA-256 (the hook's
+    ``policy=``), and ``repositories``, those of its repository entries
+    (``policy.repositories_digest``); ``{"error": ...}`` where it does not load (the hook
+    then refuses every job); None where there is none (a maintainer's account)."""
+    from ci_runners import policy
+    try:
+        with open(os.path.join(_etc(etc), 'policy.toml'), 'rb') as f:
+            raw = f.read(POLICY_MAX + 1)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return {'error': f'unreadable ({type(e).__name__})'}
+    try:
+        if len(raw) > POLICY_MAX:
+            raise policy.PolicyError('too large')
+        pol = policy.load(raw)
+    except policy.PolicyError:
+        return {'error': 'does not load'}
+    return {'file': pol.digest[:12], 'repositories': policy.repositories_digest(pol)[:12]}
+
+
+def host_health(inv, etc: str) -> str:
+    """Why the host's health gate fails (the data directory's free space below
+    ``disk_min_gib``, the CI account's access to the shared files; presence's reading,
+    16.4), or ''. A reading that fails proves nothing: ''."""
+    from ci_runners import presence
+    try:
+        return presence.Probe(inv, etc=etc).health()
+    except Exception:  # noqa: BLE001 - no proven miss: the part's own gate is the backstop
+        return ''
+
+
 def _with_inventory(p: dict, etc: str) -> dict:
-    """``p`` with this account's ``runner_labels`` and ``label_runners``, where its inventory loads."""
-    labels = runner_labels(etc)
-    if labels is not None:
-        p['runner_labels'] = labels
-        p['label_runners'] = label_runners(etc, p)
+    """``p`` with this account's ``runner_labels`` and ``label_runners``, where its inventory
+    loads, and from decision 19.4 its ``role``, ``pools``, ``policy`` and ``health``."""
+    inv = _inventory(etc)
+    rs = None if inv is None else _runners_of(inv)
+    if rs is None:
+        return p
+    pairs = [(n, labels) for n, labels, _ in rs]
+    counts: dict[str, int] = {}
+    for _, labels in pairs:
+        for label in set(labels):
+            counts[label] = counts.get(label, 0) + 1
+    p['runner_labels'] = counts
+    p['label_runners'] = _label_counts(pairs, p)
+    p['role'] = inv.this
+    p['pools'] = pool_table(inv, p)
+    pol = policy_digests(etc)
+    if pol is not None:
+        p['policy'] = pol
+    health = host_health(inv, etc)
+    if health:
+        p['health'] = health
     return p
 
 
@@ -766,6 +877,8 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
     ``runners``: its ``runner_labels``, where it has a well-formed one. Pure."""
     row = _base_row(m.key, m, here)
     row.update(gpu_model=m.gpu_model, cuda=m.cuda, multi_gpu=m.p2p, price=m.price, slots=m.slots.count if m.slots else 0)
+    if m.prefer is not None:
+        row['prefer'] = m.prefer  # the reading registry's order (19.1)
     if p is None:
         row['problems'] = [why or 'not read']
         return row
@@ -783,6 +896,18 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
     table = p.get('label_runners')  # and how many are online and free (16.5)
     if isinstance(table, dict) and all(isinstance(k, str) and _counts(v) for k, v in table.items()):
         row['label_runners'] = {k: dict(v) for k, v in table.items()}
+    if isinstance(p.get('role'), str) and p['role']:  # 19.4: the host's role, its pools, policy and health
+        row['role'] = p['role']
+    pools = p.get('pools')
+    if isinstance(pools, list) and all(_pool_entry(x) for x in pools):
+        row['pools'] = [dict(x) for x in pools]
+    pol = p.get('policy')
+    if isinstance(pol, dict):
+        row['policy'] = {k: pol[k] for k in ('file', 'repositories', 'error') if isinstance(pol.get(k), str)}
+        if 'error' in row['policy']:
+            row['problems'].append('policy: does not load')
+    if isinstance(p.get('health'), str) and p['health']:
+        row['problems'].append(p['health'] if p['health'].startswith('health') else f'health: {p["health"]}')
     free = int(p.get('slots_free', 0))
     cores = max(0, (m.cpus or int(p.get('cpus', 0))) - math.ceil(float(p.get('load', 0.0))))
     gpu_free = {int(k): int(v) for k, v in p.get('gpu_free', {}).items()}
@@ -794,6 +919,19 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
     row.update(slots_free=free, queue=int(p.get('queue', 0)), cpus_free=cores if free else 0,
                mem_free_gib=int(p.get('mem_free_gib', 0)), gpu_free=gpu_free, scope=bool(p.get('scope')))
     return row
+
+
+def _pool_entry(v: object) -> bool:
+    """A well-formed ``pools`` entry (``pool_table``): names, its labels, its counts as
+    ``_counts`` and, where present, a positive ``memory_gib``, ``speed`` and ``workers``."""
+    if not isinstance(v, dict) or not isinstance(v.get('pool'), str) or not isinstance(v.get('class'), str):
+        return False
+    if not isinstance(v.get('labels'), list) or not all(isinstance(x, str) for x in v['labels']):
+        return False
+    if not _counts({k: v.get(k) for k in ('registered', 'online', 'free')}):
+        return False
+    return all(type(v[k]) in (int, float) and math.isfinite(v[k]) and v[k] > 0
+               for k in ('memory_gib', 'speed', 'workers') if k in v)
 
 
 def _counts(v: object) -> bool:
@@ -890,6 +1028,12 @@ def parse_squeue(text: str) -> dict[str, dict[str, int]]:
     return out
 
 
+def partition_key(machine: str, partition: str) -> str:
+    """A cluster target row's ``partition``: an opaque key, equal for the targets of one
+    machine that share a partition, which names no partition (decision 19.4, §3.3). Pure."""
+    return hashlib.sha256(f'{machine}\0{partition.lower()}'.encode()).hexdigest()[:12]
+
+
 def target_row(m: Machine, t: Target, nodes: Sequence[Node], assoc: Mapping[str, Mapping[str, int]],
                used: Mapping[str, Mapping[str, int]], cards: int = 1, mem_gib: int = 1) -> dict:
     """A cluster target's row: its best node's idle cores and free cards (an ``idle`` or
@@ -900,7 +1044,8 @@ def target_row(m: Machine, t: Target, nodes: Sequence[Node], assoc: Mapping[str,
     ``mem_gib`` GiB (at most the target's). Pure."""
     row = _base_row(f'{m.key}:{t.name}', m, '')
     row.update(target=t.name, gpu_model=t.gpu_model, cuda=t.cuda or t.variant, price=t.price,
-               numerics_ok=t.numerics_ok, labels=dict(t.labels), multi_gpu=t.max_cards >= 2)
+               numerics_ok=t.numerics_ok, labels=dict(t.labels), multi_gpu=t.max_cards >= 2,
+               memory_gib=t.memory_gib, max_minutes=t.max_minutes, partition=partition_key(m.key, t.partition))
     part = t.partition.lower()
     lim, u = assoc.get(part, {}), used.get(part, {})
     room_cpu = lim['cpu'] - u.get('cpu', 0) if 'cpu' in lim else None
@@ -1169,7 +1314,8 @@ def table(rows: Sequence[Mapping]) -> str:
                       str(r['mem_free_gib']) if r['access'] != 'slurm' else '-', cards, r['gpu_model'] or '-',
                       f'{r["price"]:g}/h' if r['billed'] else 'free',
                       ('now' + (f' ({r["jobs_free"]})' if 'jobs_free' in r else '')) if r['start_now'] else 'no',
-                      'ok' if r['numerics_ok'] else 'not passed', '; '.join(r['problems']) or '-'))
+                      'ok' if r['numerics_ok'] else 'not passed',
+                      '; '.join([*r['problems'], *(f'warn: {w}' for w in r.get('warnings') or ())]) or '-'))
     w = [max(len(x[i]) for x in lines) for i in range(len(head))]
     return '\n'.join('  '.join(c.ljust(w[i]) for i, c in enumerate(x)).rstrip() for x in lines)
 
@@ -2016,6 +2162,8 @@ def main(argv: Sequence[str], etc: str) -> int:
         return 0
     if a.cmd == 'status':
         rows = fast_status(reg, etc=etc) if a.fast else status(reg, etc=etc, on_rows=_writer(reg, etc), cached=_cached(etc))
+        from ci_runners import capacity
+        rows = capacity.flag_policy(rows)  # a host whose repository entries differ from the others' (19.6)
         print(json.dumps(rows, indent=1, sort_keys=True) if a.json else table(rows))
         return 0
     cmd = a.command[1:] if a.command[:1] == ['--'] else a.command

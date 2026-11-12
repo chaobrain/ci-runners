@@ -23,7 +23,7 @@ def host(key='hosta', problems=(), age=10, pools=None, **labels):
     row = {'key': key, 'access': 'ssh', 'target': '', 'read_at': T0 - age, 'problems': list(problems),
            'slots_free': 1, 'labels': {}, 'label_runners': {k.replace('_', '-'): v for k, v in labels.items()}}
     if pools is not None:
-        row['slot_pools'] = pools
+        row['pools'] = pools
     return row
 
 

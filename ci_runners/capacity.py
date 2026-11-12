@@ -21,7 +21,12 @@ R3) rewrites the host's own part at every tick (``pool.record_local``). Its keys
 ``{label: {"registered": n, "online": n, "free": n}}``, where the host's inventory is
 read: each runner instance counts once for each label it carries; ``online`` the ones
 with a live process, ``free`` those without a ``Runner.Worker`` (no job), ``None`` where
-``/proc`` hides them. A cluster target row has ``jobs_free`` (decision 15.7). ``local``
+``/proc`` hides them. From decision 19.4 a host row read by the CI account's own probe also
+has ``role``, ``pools`` (``pool.pool_table``: each runner pool's labels, counts and slot),
+``policy`` (``pool.policy_digests``) and its health gate's problem, and ``prefer`` from the
+registry that read it; a cluster target row has ``memory_gib``, ``max_minutes`` and an
+opaque ``partition``. Every one is optional: schema 1 stays. A cluster target row has
+``jobs_free`` (decision 15.7). ``local``
 is the raw probe of the registry's ``local`` machine, which ``ci-run pool probe`` (the
 forced probe, 15.1 item 8) returns while it is fresh instead of probing again, so no
 ``nvidia-smi`` runs for another host's ``pool status --fast``.
@@ -32,6 +37,11 @@ the problem ``stale``, no free slot or core, ``start_now`` false and no free job
 stale cluster row says "the cluster cannot start it now", and the route keeps the part on
 its shared label. ``pool status --fast`` applies it to its rows, and ``load`` to what it
 returns.
+
+**Policy drift** (decision 19.6): ``flag_policy`` compares the ``repositories`` digests of
+the host rows that report one; where they differ, each host off the norm (the value most of
+them hold; none on a tie) gets ``policy_drift`` and a warning in ``warnings``. A warning is
+not a problem: the row stays up. ``rows_from`` applies it, and ``pool status`` prints it.
 
 **The reader** (for the route, R5): ``load(etc)`` returns one ``Row`` per host and per
 cluster target, from ``pool status --fast`` (``fast=True``, the default: the other hosts'
@@ -87,6 +97,49 @@ def read(file: str) -> dict:
     doc['rows'] = [r for r in doc['rows'] if isinstance(r, dict) and isinstance(r.get('key'), str)
                    and isinstance(r.get('problems', []), list)]
     return doc
+
+
+#: the warning of a host whose hook policy's repository entries differ from the others' (19.6)
+DRIFT = 'policy: repository entries differ from {n} other host(s)'
+
+
+def policy_drift(rows: Sequence[Mapping]) -> dict[str, int]:
+    """The host rows whose repository entries' digest (``policy.repositories``) is off the
+    norm, the digest most of the reporting host rows hold (none where two or more tie), each
+    with how many other reporting hosts hold another digest than its own. Pure."""
+    digs = {str(r['key']): r['policy']['repositories'] for r in rows
+            if r.get('access') != 'slurm' and not r.get('target') and isinstance(r.get('policy'), dict)
+            and isinstance(r['policy'].get('repositories'), str)}
+    counts: dict[str, int] = {}
+    for d in digs.values():
+        counts[d] = counts.get(d, 0) + 1
+    if len(counts) < 2:
+        return {}
+    top = max(counts.values())
+    norm = [d for d, c in counts.items() if c == top]
+    norm_d = norm[0] if len(norm) == 1 else None
+    return {k: sum(1 for d2 in digs.values() if d2 != d) for k, d in digs.items() if d != norm_d}
+
+
+def flag_policy(rows: Sequence[Mapping]) -> list[dict]:
+    """``rows`` with ``policy_drift`` and its warning on each host off the norm
+    (``policy_drift``), and neither on the others (a row read back from a file is judged
+    afresh). Pure."""
+    drift = policy_drift(rows)
+    out = []
+    for r in rows:
+        r = dict(r)
+        warnings = [w for w in r.get('warnings') or () if not str(w).startswith(DRIFT.split('{')[0])]
+        r.pop('policy_drift', None)
+        if r.get('key') in drift:
+            warnings.append(DRIFT.format(n=drift[r['key']]))
+            r['policy_drift'] = True
+        if warnings:
+            r['warnings'] = warnings
+        else:
+            r.pop('warnings', None)
+        out.append(r)
+    return out
 
 
 def machine_of(key: str) -> str:
@@ -213,7 +266,7 @@ def rows_from(rows: Sequence[Mapping], now: float | None = None) -> list[Row]:
     applied. Pure but for the clock."""
     now = time.time() if now is None else now
     out = []
-    for r in rows:
+    for r in flag_policy(rows):
         m = mark(r, now)
         jf = m.get('jobs_free')
         out.append(Row(key=m['key'], machine=machine_of(m['key']), target=str(m.get('target') or ''),

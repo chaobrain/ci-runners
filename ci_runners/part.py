@@ -83,7 +83,7 @@ _LEASE_TICKET = re.compile(r'([0-9]{12})\.json\Z')  # a lease ticket in ``state/
 #: the step's own files: the command must not write the part's outputs or the job's env
 STEP_FILES = frozenset({'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'GITHUB_ENV', 'GITHUB_PATH', 'GITHUB_STATE'})
 OUTPUTS = ('outcome', 'reason', 'next', 'retry-on', 'host', 'gpus', 'queue-seconds', 'run-seconds',
-           'record', 'summary', 'attempt', 'resume')
+           'record', 'summary', 'attempt', 'resume', 'pool-labels', 'cool-card')
 
 
 class Refused(Exception):
@@ -910,7 +910,8 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
             'run-seconds': run_seconds,
             'record': f'{role}:{record_ref(record)}', 'summary': f'{record_ref(record)}/summary.md', 'attempt': attempt,
             'run-attempt': record_run_attempt(record),
-            'resume': h.resume, 'peak': ', '.join(f'card {c} {t:g} C' for c, t in sorted(peak.items()))
+            'resume': h.resume, 'pool-labels': own, 'cool-card': str(cool_card) if h.where == 'cool-card' and cool_card is not None else '',
+            'peak': ', '.join(f'card {c} {t:g} C' for c, t in sorted(peak.items()))
             if isinstance(peak, dict) else '', 'slurm': slurm_line(rec)}
 
 

@@ -3,6 +3,7 @@ infrastructure end the retry did not cure is an error; a part with no artifact i
 from its record, else it is lost."""
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import os
@@ -111,6 +112,33 @@ class Latest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 verdict.latest(d, lambda *a: {'artifacts': ISSUE_169}, lambda url, tok: b'not a zip', 'https://api',
                                'o/r', '7', 't')
+            # a zip that fails while it is read (here its CRC) leaves the downloaded files as they were
+            art(root, 'ci-part-gpu-3-1', {'outcome': 'red'}, 'red')
+            bad = bytearray(zipped({'outcome.json': '{"outcome": "pass"}'}))
+            at = bad.index(b'{"outcome"')
+            bad[at + 2] ^= 1
+            with self.assertRaisesRegex(ValueError, 'cannot be read'):
+                verdict.latest(d, lambda *a: {'artifacts': ISSUE_169}, lambda url, tok: bytes(bad), 'https://api',
+                               'o/r', '7', 't')
+            self.assertEqual(verdict.collect(d)['gpu-3'][1], ({'outcome': 'red'}, 'red'))
+            buf = io.BytesIO()  # a broken deflate stream: zlib's own error, not zipfile's
+            with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+                z.writestr('outcome.json', '{"outcome": "pass"}' * 50)
+            broken = bytearray(buf.getvalue())
+            broken[30 + len('outcome.json')] = 0xff  # the first byte of the data: an invalid block type
+            with self.assertRaisesRegex(ValueError, 'cannot be read'):
+                verdict.unpack(d, 'ci-part-gpu-3-1', bytes(broken))
+            self.assertEqual(verdict.collect(d)['gpu-3'][1], ({'outcome': 'red'}, 'red'))
+
+            def short(url, tok):
+                raise http.client.IncompleteRead(b'')
+            with self.assertRaises(verdict.github.ApiError):
+                verdict.latest(d, lambda *a: {'artifacts': ISSUE_169}, short, 'https://api', 'o/r', '7', 't')
+            os.rename(root / 'ci-part-gpu-3-1', root / 'elsewhere')  # a planted link in its place is replaced
+            os.symlink(root / 'elsewhere', root / 'ci-part-gpu-3-1')
+            verdict.unpack(d, 'ci-part-gpu-3-1', zipped({'outcome.json': '{"outcome": "pass"}'}))
+            self.assertFalse((root / 'ci-part-gpu-3-1').is_symlink())
+            self.assertEqual((root / 'elsewhere' / 'summary.md').read_text(), 'red')
 
 
 class Decide(unittest.TestCase):

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import http.client
 import io
 import json
 import os
@@ -208,24 +209,32 @@ def fetch_zip(url: str, token: str, opener: Callable | None = None) -> bytes:
 
 def unpack(root: str, name: str, data: bytes) -> None:
     """``outcome.json`` and ``summary.md`` of an artifact's zip ``data`` into ``root/name``,
-    in place of what was there; nothing else of the zip is read."""
+    in place of what was there; nothing else of the zip is read. Both are read whole
+    before anything is replaced, so a zip that cannot be read (raises ValueError) leaves
+    the directory as it was."""
+    got: dict[str, bytes] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for member in ('outcome.json', 'summary.md'):
+                try:
+                    info = z.getinfo(member)
+                except KeyError:
+                    continue
+                if info.file_size <= MAX_FILE:
+                    got[member] = z.read(info)
+    except Exception as e:  # a bad zip, CRC, compression method, encryption: zipfile, zlib, ...
+        raise ValueError(f'{name}: the zip cannot be read ({type(e).__name__})') from None
     d = os.path.join(root, name)
     if os.path.islink(d):
         os.unlink(d)
     os.makedirs(d, exist_ok=True)
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
-        for member in ('outcome.json', 'summary.md'):
-            path = os.path.join(d, member)
-            if os.path.lexists(path):
-                os.unlink(path)
-            try:
-                info = z.getinfo(member)
-            except KeyError:
-                continue
-            if info.file_size > MAX_FILE:
-                continue
+    for member in ('outcome.json', 'summary.md'):
+        path = os.path.join(d, member)
+        if os.path.lexists(path):
+            os.unlink(path)
+        if member in got:
             with open(path, 'xb') as f:
-                f.write(z.read(info))
+                f.write(got[member])
 
 
 def latest(root: str, call: Callable, fetch: Callable, base: str, repo: str, run_id: str, token: str) -> list[str]:
@@ -236,12 +245,9 @@ def latest(root: str, call: Callable, fetch: Callable, base: str, repo: str, run
     for name, aid in sorted(stale(run_artifacts(call, base, repo, run_id, token)).items()):
         try:
             data = fetch(f'{base}/repos/{repo}/actions/artifacts/{aid}/zip', token)
-        except OSError as e:  # urllib's errors
+        except (OSError, http.client.HTTPException) as e:  # urllib's errors, a short read
             raise github.ApiError(f'GET artifact {aid}: {type(e).__name__}') from None
-        try:
-            unpack(root, name, data)
-        except zipfile.BadZipFile:
-            raise ValueError(f'artifact {aid}: not a zip') from None
+        unpack(root, name, data)
         done.append(name)
     return done
 
@@ -343,8 +349,9 @@ def main(argv: list[str], inv: inventory.Inventory, call: Callable | None = None
                 print(f'ci-run verdict: {name}: the latest run attempt\'s artifact, not the downloaded one',
                       file=sys.stderr)
         except (OSError, ValueError, github.ApiError) as e:
+            hint = '; give the job actions: read' if 'HTTP 403' in str(e) or 'HTTP 404' in str(e) else ''
             print(f'ci-run verdict: the run\'s artifacts could not be listed or fetched ({e}): a part re-run in '
-                  'this run attempt may be read from an earlier one; give the job actions: read', file=sys.stderr)
+                  f'this run attempt may be read from an earlier one{hint}', file=sys.stderr)
         items = ends(ids, collect(a.artifacts), salvage)
         v = decide(items)
         (call or github.api)('POST', f'{base}/repos/{repo}/statuses/{a.sha}', token,

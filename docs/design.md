@@ -3065,6 +3065,44 @@ every rule of §4.1 to §4.5 holds inside it.
 | `context` | required | the project's status context, e.g. `myproj/ci` |
 | `plan` | none | a command, run in the head's checkout and env on `ci-light`, that prints the plan; none: one `pytest` part |
 | `project` | the repository's name | registry key, as `part`'s |
+| `sha` | the pull request's head, else `github.sha` | the head to run (a dispatch of a given head) |
+| `plan-only` | `false` | the plan job without its claim: contract, plan command, checks, route and summary; no part; posts `success` "plan only: N part(s) routed, none run" (a context of its own) |
+
+Its output `state` is the verdict's (`success`, `failure` or `error`), empty where the
+plan job posted the state itself. Its own steps that are not an action of §4 (the
+contract check, the plan's checks and route, the retry's row, the salvage leg's host, a
+red attempt's status) are `ci-run flow` commands (`ci_runners/flow.py`), run through
+`actions/flow` from the action's own checkout, the release the workflow names (§9):
+they read the host's capacity and registry and change nothing on it, so a proof branch
+runs them on hosts that have only the `hook` release. `actions/flow` is internal to the
+two workflows; a consumer that composes the actions does not call it.
+
+*The lost path* (§4.5). The first attempt's job has no outputs, or its outcome reached
+no artifact (the part action's upload and one retry of it failed). A `locate` job on
+`ci-light` (`actions: read`) reads the job's `runner_name` and finds its host role
+among the capacity rows' (the longest that the name starts with); the salvage leg runs
+on that host's `<role>-light` label (its `home` runner, or a light runner of the same
+host, which reads the same records), waits for the part's scope up to the part's job
+bound, uploads its outcome, and decides the retry from it. Where the host is not known,
+the attempt counts as `lost` and the retry runs at once. The retry names the first
+attempt's record in `attempt-of`, or, without one, the name the record would have
+(decision 13.3), so it is attempt 2 wherever it runs. The lost path takes two more
+pickups than the three of a run; a retry's own lost attempt is read by the verdict's
+salvage of its own host only (§4.8 rule 5). A known outcome is never read as lost: the
+retry takes the first attempt's own decision where its job made one (its upload may still
+have failed), else the salvage leg's, which reads its own upload of the attempt, else the
+attempt's artifact of this run attempt where it arrived after all, else `lost`. A caller's
+workflow calls `ci.yml` once (the `locate` job finds the attempt by its job's name, `part
+<id> / first`).
+
+*A red attempt* posts `failure` from its own job (`statuses: write` there; the token
+reaches no part command), and the verdict posts the run's state after every part:
+`failure` where a part's last attempt is `red` ("red: <id> red, ..."), `error` where none
+is red and one is not `pass` ("infrastructure: <id> <outcome>, ..."), else `success`; the
+consumers' guide lists every description. That step and the retry's decision run after
+the part command in its job, as the same account, so the command can rewrite their files
+(T13): what decides the head's state is the verdict, which reads the artifacts and the
+host's records from a job of its own.
 
 **The plan** is one JSON document on the command's standard output; anything that does
 not load is a red plan job with the reason:
@@ -3119,9 +3157,10 @@ changes what its plan or its parts expect of the head.
 
 **Onboarding** is at most 20 workflow lines and one registry entry (`etc/projects/
 <project>.toml`, §4.9's env). A private repository of the org needs no policy entry (the
-snapshot holds it, §6.5); a public one needs the lead's entry (16.7), and `ci.yml` runs its
-CPU work on GitHub-hosted runners and its GPU parts on the confined public pool (18). The
-whole workflow:
+snapshot holds it, §6.5); a public one needs the lead's entry (16.7), and `ci.yml` is to
+run its CPU work on GitHub-hosted runners and its GPU parts on the confined public pool
+(18). Until 18's C2 builds those legs, a public caller's run fails in `ci.yml`'s `public`
+job, on a GitHub-hosted runner, and no job of it waits for ours. The whole workflow:
 
 ```yaml
 name: ci

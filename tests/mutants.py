@@ -121,6 +121,11 @@ SBC = 'experiments/sandbox/check.py'
 TSB = 'tests.test_sandbox'
 FLW = 'ci_runners/flow.py'
 TFL = 'tests.test_flow'
+STP = 'ci_runners/stamp.py'
+TRU = 'tests.test_reusable'
+CIW = '.github/workflows/ci.yml'
+PTW = '.github/workflows/part.yml'
+AFL = 'actions/flow/action.yml'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
@@ -3797,7 +3802,70 @@ MUTANTS = [
     (RGY, "       'max_parallel'}", "       }", [f'{TFL}.Plan.test_the_registry_max_parallel']),
     (RGY, "doc.get('max_parallel', MAX_PARALLEL), 1, MAX_PARALLEL_BOUND)", "doc.get('max_parallel', MAX_PARALLEL), 0, 999)",
      [f'{TFL}.Plan.test_the_registry_max_parallel']),
-    # R6, after the rulings: a reserved artifact name
+    (STP, "    if not ref and not RELEASE.match(release):", "    if False:", [f'{TRU}.Stamp.test_a_bad_release_or_ref_is_refused']),
+    (STP, "    if ref and not GIT_REF.match(ref) or '..' in ref:", "    if False:", [f'{TRU}.Stamp.test_a_bad_release_or_ref_is_refused']),
+    (STP, "    target = ref or (MAJOR if release == 'hook' else release)", "    target = ref or release",
+     [f'{TRU}.Stamp.test_a_stamped_tree_differs_only_in_its_references_and_restores']),
+    (STP, "WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml')", "WORKFLOWS = ('.github/workflows/ci.yml',)",
+     [f'{TRU}.Stamp.test_a_stamped_tree_differs_only_in_its_references_and_restores']),
+    (STP, r"|\.github/workflows/part\.yml))@", "))@", [f'{TRU}.Stamp.test_main_names_v1_and_hook',
+                                                       f'{TRU}.Stamp.test_a_stamped_tree_differs_only_in_its_references_and_restores']),
+    (AFL, "        [ -z \"$IN_ROLE\" ] || args+=(\"--role=$IN_ROLE\")\n", "", [f'{TRU}.Flow.test_each_input_reaches_its_flag']),
+    (AFL, "exec sh \"$GITHUB_ACTION_PATH/../../bin/ci-run\" flow", "exec \"$GITHUB_ACTION_PATH/../lib/ci-run.sh\" flow",
+     [f'{TRU}.Flow.test_each_input_reaches_its_flag']),
+    (CIW, "on:\n  workflow_call:", "on:\n  pull_request:\n  workflow_call:", [f'{TRU}.Structure.test_workflow_call_only']),
+    (CIW, "    runs-on: [self-hosted, ci-light]\n    timeout-minutes: 45", "    runs-on: [self-hosted, hosta-light]\n    timeout-minutes: 45",
+     [f'{TRU}.Structure.test_runs_on_a_capability_label_or_a_computed_one_never_a_host']),
+    (CIW, "    uses: chaobrain/ci-runners/.github/workflows/part.yml@v1\n",
+     "    uses: chaobrain/ci-runners/.github/workflows/part.yml@v1\n    secrets: inherit\n",
+     [f'{TRU}.Structure.test_no_secret_reaches_a_part']),
+    (CIW, "      - if: steps.contract.outcome == 'success' && inputs.plan != ''\n        shell: bash\n        run: git sparse-checkout disable",
+     "      - if: steps.contract.outcome == 'success' && inputs.plan != ''\n        shell: bash\n        run: echo ${{ inputs.plan }}; git sparse-checkout disable",
+     [f'{TRU}.Structure.test_no_expression_in_a_shell_script']),
+    (CIW, " && github.event_name != 'pull_request_target' &&\n", " &&\n", [f'{TRU}.Structure.test_the_plan_job_refuses_a_fork_and_pull_request_target']),
+    (CIW, "      always() && !cancelled() && needs.plan.result != 'skipped' &&", "      always() && !cancelled() &&",
+     [f'{TRU}.Structure.test_the_plan_job_refuses_a_fork_and_pull_request_target']),
+    (CIW, "      fail-fast: false", "      fail-fast: true", [f'{TRU}.Structure.test_ci_calls_part_with_its_inputs']),
+    (CIW, "    permissions:\n      contents: read\n      statuses: write\n    outputs:\n      run:",
+     "    permissions:\n      contents: write\n      statuses: write\n    outputs:\n      run:",
+     [f'{TRU}.Structure.test_permissions_explicit_and_least']),
+    (PTW, "    runs-on: ${{ fromJSON(inputs.part).labels }}", "    runs-on: [self-hosted, hosta-cpu]",
+     [f'{TRU}.Structure.test_runs_on_a_capability_label_or_a_computed_one_never_a_host']),
+    (PTW, "    timeout-minutes: ${{ fromJSON(inputs.part).salvage_minutes }}\n    permissions:\n      contents: read\n",
+     "    timeout-minutes: ${{ fromJSON(inputs.part).salvage_minutes }}\n    permissions:\n      contents: read\n      statuses: write\n",
+     [f'{TRU}.Structure.test_permissions_explicit_and_least']),
+    (PTW, "    if: always() && !cancelled() && needs.first.outputs.uploaded != 'true'", "    if: always() && !cancelled()",
+     [f'{TRU}.Structure.test_the_salvage_leg_only_on_the_lost_path_and_before_the_retry']),
+    (PTW, "      always() && !cancelled() &&\n      (needs.first", "      always() &&\n      (needs.first",
+     [f'{TRU}.Structure.test_the_salvage_leg_only_on_the_lost_path_and_before_the_retry']),
+    (PTW, "          attempt-of: ${{ fromJSON(env.RETRY).attempt_of }}", "          attempt-of: ''",
+     [f'{TRU}.Structure.test_the_retry_names_the_first_attempt']),
+    (PTW, "          description: red at part ${{ fromJSON(inputs.part).id }}; the other parts run on",
+     "          description: red at part ${{ fromJSON(inputs.part).id }}; the other parts run on\n          token: ${{ secrets.X }}",
+     [f'{TRU}.Structure.test_no_secret_reaches_a_part']),
+    (PTW, "  first:\n    name: first\n    runs-on: ${{ fromJSON(inputs.part).labels }}\n    timeout-minutes: ${{ fromJSON(inputs.part).timeout_minutes }}\n    permissions:\n      contents: read\n      statuses: write\n    outputs:\n      outcome: ${{ steps.part.outputs.outcome }}\n      # its outcome reached an artifact: the part step's own upload, or the second try below\n      uploaded: ${{ steps.part.outcome == 'success' || steps.again.outcome == 'success' }}\n      retry: ${{ steps.retry.outputs.retry }}\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          persist-credentials: false",
+     "  first:\n    name: first\n    runs-on: ${{ fromJSON(inputs.part).labels }}\n    timeout-minutes: ${{ fromJSON(inputs.part).timeout_minutes }}\n    permissions:\n      contents: read\n      statuses: write\n    outputs:\n      outcome: ${{ steps.part.outputs.outcome }}\n      # its outcome reached an artifact: the part step's own upload, or the second try below\n      uploaded: ${{ steps.part.outcome == 'success' || steps.again.outcome == 'success' }}\n      retry: ${{ steps.retry.outputs.retry }}\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          persist-credentials: true",
+     [f'{TRU}.Structure.test_no_secret_reaches_a_part']),
+    # R6, after the rulings and the review: the first attempt's decision first, the salvage
+    # leg's fallback file, the files and the artifacts, the queue bound, the public refusal
+    (PTW, "RETRY: ${{ needs.first.outputs.retry || needs.salvage.outputs.retry || needs.locate.outputs.retry }}",
+     "RETRY: ${{ needs.salvage.outputs.retry || needs.locate.outputs.retry || needs.first.outputs.retry }}",
+     [f'{TRU}.Structure.test_the_first_attempts_decision_comes_first']),
+    (PTW, "          fallback-file: ", "          outcome-file-2: ", [f'{TRU}.Structure.test_the_first_attempts_decision_comes_first']),
+    (AFL, '        [ -z "$IN_FALLBACK_FILE" ] || args+=("--outcome-file=$IN_FALLBACK_FILE")\n', "",
+     [f'{TRU}.Flow.test_each_input_reaches_its_flag']),
+    (PTW, "          queue-timeout-minutes: ${{ fromJSON(inputs.part).queue || '60' }}\n          results: ${{ fromJSON(inputs.part).results }}\n          target: ${{ fromJSON(env.RETRY)",
+     "          results: ${{ fromJSON(inputs.part).results }}\n          target: ${{ fromJSON(env.RETRY)",
+     [f'{TRU}.Structure.test_each_attempt_gets_the_files_the_queue_bound_and_uploads_its_artifacts']),
+    (PTW, "artifacts[3].name }}-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '2' }}",
+     "artifacts[3].name }}-${{ fromJSON(inputs.part).id }}-2",
+     [f'{TRU}.Structure.test_each_attempt_gets_the_files_the_queue_bound_and_uploads_its_artifacts']),
+    (CIW, "    if: github.event.repository.visibility == 'public'", "    if: github.event.repository.private",
+     [f'{TRU}.Structure.test_a_public_caller_is_refused_on_a_hosted_runner']),
+    (CIW, "      - if: steps.plan.outputs.files != '' && steps.plan.outputs.posted == 'false'",
+     "      - if: steps.plan.outputs.files != ''", [f'{TRU}.Structure.test_the_plan_job_hands_on_its_outcome_and_files']),
+    (CIW, "          parts: ${{ needs.plan.outputs.ids }}\n", "          parts: ${{ needs.plan.outputs.ids }}\n          wait-seconds: '120'\n",
+     [f'{TRU}.Structure.test_the_verdict_runs_unless_cancelled_or_posted']),
     (FLW, "        elif arts and 'ci' in arts:", "        elif False:", [f'{TFL}.Plan.test_bad_options_are_named']),
 ]
 

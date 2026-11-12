@@ -144,11 +144,13 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 一次发布的六步（design §9）：
 
 1. **功能 PR**：带单元测试、夹具和一台主机上的现场检查，合并进 `main`。
-2. **stamp PR**：把 `actions/RELEASE` 改成 `vX.Y.Z`。本仓库的工作流不调用 action，所以没有 ref 要改；`tests/test_actions.py` 会检查工作流里的 ref 与 stamp 一致、文档示例引用 `@v1`。合并。
+2. **stamp PR**：`python -m ci_runners.stamp vX.Y.Z`：把 `actions/RELEASE` 改成 `vX.Y.Z`，并把可复用工作流 `ci.yml`、`part.yml` 里对本仓库 action 的引用和 `ci.yml` 对 `part.yml` 的引用都改成 `@vX.Y.Z`（design §9、决定 16.6），其他文件不动；`tests/test_actions.py` 和 `tests/test_reusable.py` 会检查工作流里的 ref 与 stamp 一致、文档示例引用 `@v1`。合并。
 3. **打 tag**：在 stamp 的合并 commit 上打 `vX.Y.Z`。
 4. **安装**：在每台主机上运行 `install.sh --tag vX.Y.Z --expect <sha>`，包括 egress 主机（以 root 身份，`CI_RUNNERS_ETC=/opt/ci-runners/etc`）。这一步不会切换任何东西。主机的计划有变化时，先看 `plan.sh`，再 `apply`。
 5. **金丝雀**：金丝雀仓库的一个分支把各 action 引用为 `@vX.Y.Z`，跑一个绿的 head 和一个红的 head。
-6. **移动 `v1`** 到 `vX.Y.Z`，然后开 restore PR，把 stamp 改回 `hook`。
+6. **移动 `v1`** 到 `vX.Y.Z`，然后开 restore PR：`python -m ci_runners.stamp hook`，stamp 改回 `hook`，两个工作流里的引用改回 `@v1`。
+
+**上线之前在金丝雀上试可复用工作流**：在一个不合并的证明分支上运行 `python -m ci_runners.stamp hook --ref <分支名>`（只把两个工作流里的引用改成 `@<分支名>`，`actions/RELEASE` 仍是 `hook`，action 跑主机上的 `hook` 版本），推送这个分支，金丝雀的工作流调用 `ci.yml@<分支名>`。只引用 `ci.yml@<分支名>` 而不改里面的引用，跑的是 `@v1` 的 `part.yml` 和 action。
 
 回滚：把 `v1` 移回旧 tag 即可，旧 release 仍装在主机上。
 

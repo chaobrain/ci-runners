@@ -242,3 +242,60 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 - 默认分支的 `contract` 不是非负整数、或文件读不进来：`error`（默认分支自己的问题）。
 
 改变计划或部件对 head 的要求的 PR，同时把 `contract` 加一；落后的分支 `merge origin/main` 之后就过了。
+
+## 9. 接入可复用工作流 `ci.yml`（design §4.10，决定 16.6，RUN-10 R6 起）
+
+一个仓库接入只要下面这 20 行工作流，加维护者写的一个 registry 条目（§3 第 2 步）：
+
+```yaml
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+jobs:
+  ci:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: chaobrain/ci-runners/.github/workflows/ci.yml@v1
+    permissions:
+      contents: read
+      statuses: write
+      actions: read
+    with:
+      context: myproj/ci
+      plan: python scripts/ci_plan.py
+```
+
+**输入**：`context`（必填，状态上下文）；`plan`（可选，打印计划 JSON 的命令，见 §8；不写就是一个 `pytest` 部件）；`project`（可选，registry 的键，默认仓库名）；`sha`（可选，要跑的 head，默认 PR 的 head，否则 `github.sha`；给手动派发一个指定的 head 用）；`plan-only`（可选，布尔，默认 `false`：只做 claim 之外的 plan 作业，即 `contract`、plan 命令、检查、路由和 summary，不跑部件，发 `success` `plan only: N part(s) routed, none run`；请给它一个单独的 `context`）。**输出**：`state`，verdict 的结论（`success`、`failure`、`error`），plan 作业自己发了状态时为空。
+
+**一次运行三次取 runner**（关键路径上）：
+
+1. **plan**（`ci-light`）：claim（已经绿的 head 跳过）→ `contract` 检查（§8）→ checkout head、跑 `plan` 命令 → 检查计划、按能力标签路由 → summary 里列出每个部件。
+2. **parts**：每个部件调用一次 `part.yml`，同时最多 registry 的 `max_parallel` 个。部件第一次尝试跑在路由给的标签上；按 `outcome.hint` 的五行（§2 的结果表）最多重试一次；第一次尝试没留下结果（runner 被停、上传失败）时，先在那台主机上 salvage（它的记录只在那台主机上），再决定重试。一次尝试红了，立刻在 `context` 上发 `failure`（"red at part <id>"），其他部件照常跑完，summary 完整。
+3. **verdict**（`ci-light`）：读每个部件的 artifact，每个部件以最后一次尝试为准，合并 summary，发状态。
+
+**状态的描述**（精确字符串，测试红和基础设施红分开）：
+
+| 谁发 | 状态 | 描述 |
+|---|---|---|
+| 部件的一次尝试红了（立刻） | `failure` | `red at part <id>; the other parts run on`；重试红了：`red at part <id> (its retry); the other parts run on` |
+| verdict | `success` | `passed: <id>, <id>, ...`，超过 140 个字符时 `passed: all N parts` |
+| verdict | `failure`（测试红：有部件最后一次尝试是 `red`） | `red: <id> red, ...` |
+| verdict | `error`（基础设施：没有红，但有部件最后是 `lost`、`unavailable`、`oom`、`thermal`、`reboot`、`stopped`） | `infrastructure: <id> <outcome>, ...` |
+| plan 作业 | `failure` | `contract ...: merge origin/<分支>`（§8）、`plan: red (...)`、`plan: <计划的错误>` |
+| plan 作业 | `error` | `plan: <outcome> (...)`（plan 命令 `lost`、`unavailable` 等）、`route: ...`、`plan: no plan output`、默认分支的 `contract` 读不进来 |
+| plan 作业 | `success` | `nothing to run`（空的 `parts`）、`plan only: N part(s) routed, none run` |
+
+描述超过 140 个字符时截断，以 `...` 结尾。
+
+`pull_request_target`、fork 的 PR 在 plan 作业的 guard 里就跳过；**公开仓库**现在不能调用 `ci.yml`：它的 `public` 作业在 GitHub 托管的 runner 上直接失败（公开仓库的 CPU 部件走托管 runner、GPU 走隔离的池，等决定 18 的 C2 实现）。一个工作流里只调用一次 `ci.yml`（定位丢失尝试的主机时按作业名找 `part <id> / first`）。运行被取消（同一个 PR 推了新 head）时不重试、不发结论，新 head 的运行会发。不要把 secret 传进来：`ci.yml` 不接收也不转发任何 secret；部件的作业只有 `contents: read` 和发红色状态用的 `statuses: write`，token 不进 plan 命令和部件命令的环境，checkout 不保存凭据。注意：部件命令以 CI 账户运行（design T13），它能改写同一个作业里之后的步骤用到的文件，所以同一作业里发红色状态、重试决定这些后续步骤并不防部件命令本身；结论以 verdict 读到的 artifact 和主机记录为准。
+
+**自己组合的部分**（`ci.yml` 不做，design §4.8）：`ci.yml` 只管测试部件和它们的结论。
+
+- 所有部件之后再跑、读部件 artifact 的作业（合并覆盖率、bisect、报告、上传影响图）：在调用 `ci.yml` 的作业后面另加一个作业（`needs: ci`，`if: always()` 视需要），用 `actions/download-artifact` 读部件的 `artifacts`（§8）、用 `part` action 在 `ci-light` 上跑命令；它不计入 verdict。
+- 指定集群目标（`target`）、`exclude` 之类的强制选择：`ci.yml` 不提供，需要时按 §3 自己组合 `claim`、`part`、`salvage`、`verdict`，只写能力标签。
+- 自己格式的 summary：在自己的作业里写；`ci.yml` 的 summary 格式是固定的。`ci.yml` 自己用的 `actions/flow` 是它内部的步骤，不要在自己的工作流里调用。

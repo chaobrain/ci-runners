@@ -341,6 +341,7 @@ class Stamp(unittest.TestCase):
     def tree(self, d: str) -> pathlib.Path:
         t = pathlib.Path(d) / 'tree'
         shutil.copytree(ROOT, t, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+        stamp.stamp(t, 'hook')  # main's state, also when this tree is a stamp PR's (operations §5 step 2)
         return t
 
     def files(self, t: pathlib.Path) -> dict[str, str]:
@@ -348,12 +349,15 @@ class Stamp(unittest.TestCase):
                 if p.is_file() and '__pycache__' not in p.parts}
 
     def test_main_names_v1_and_hook(self):
-        self.assertEqual((ROOT / 'actions' / 'RELEASE').read_text().strip(), 'hook')
+        # main is `hook` with `@v1`; a stamp PR's tree (operations §5 step 2) is `vX.Y.Z` with `@vX.Y.Z`
+        release = (ROOT / 'actions' / 'RELEASE').read_text().strip()
+        self.assertRegex(release, r'\Ahook\Z|\Av[0-9]+\.[0-9]+\.[0-9]+\Z')
+        ref = 'v1' if release == 'hook' else release
         for name in REUSABLE:
             got = stamp.refs((WF / name).read_text())
             self.assertTrue(got, name)
-            self.assertEqual({r for _, r in got}, {'v1'}, name)
-        self.assertIn(('chaobrain/ci-runners/.github/workflows/part.yml', 'v1'), stamp.refs((WF / 'ci.yml').read_text()))
+            self.assertEqual({r for _, r in got}, {ref}, name)
+        self.assertIn(('chaobrain/ci-runners/.github/workflows/part.yml', ref), stamp.refs((WF / 'ci.yml').read_text()))
 
     def test_a_stamped_tree_differs_only_in_its_references_and_restores(self):
         with tempfile.TemporaryDirectory() as d:

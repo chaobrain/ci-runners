@@ -3716,7 +3716,8 @@ Rules:
      `v1` went back to `v1.14.1` after its canary again (a compile part waits for a CPU part's shared hold), 3090b's
      `cpus` to every CPU and its units without `CPUAffinity`; `main` reverts #170, so decision 15.10 is gone.
 - **`v1.16.0`** (minor, stamped 2026-11-12; decisions 16.2–16.5 and 17, RUN-10 R1–R5, #173, #179, #181, #183,
-  #186–#189, #192; brainspike's coordinator under the lead's delegation of 2026-11-12): the back-out of 15.10 (no
+  #186–#189, #192; brainspike's coordinator under the lead's delegation of 2026-11-12; `v1` moved to it after the
+  3090 canary at `@v1.16.0`, green and red, 2026-11-12): the back-out of 15.10 (no
   `CPUAffinity` in the units); the new inventory keys accepted and ignored, `CI_RUNNER_SLOT`, the verdict reads a
   part's latest attempt (R1); the capacity file, `pool status --fast` and `ci-capacity.{service,timer}` (R4); a part
   runner is one slot where its pool has a `slot` table (R2); presence and the black-hole self-drain, inert unless a
@@ -3729,6 +3730,14 @@ Rules:
      presence check to the runner unit and `ci-presence.{service,timer}` (inert: no inventory has a `presence`
      table), and `ci-capacity.{service,timer}` (skipped where the account has no registry). `v1.14.1`'s host layer
      reads every host file this plan writes, so the apply can come before the move of `v1`.
+  3. **The rollout.** The egress host first: no moment without a running job came in 30 minutes, so the proxy
+     restarted with two cluster legs of a cache warm-up running, which finished; its start line read "at most 1024
+     connections" and no descriptor warning. Every host's units already lacked `CPUAffinity=`, so no plan changed
+     it; each plan wrote the runner unit's presence check, the capacity and presence units and, with the new
+     host's pool probes in both directions, the probe lines; no runner restarted. The presence ticks wrote
+     nothing, and each account with a registry wrote its capacity file within a minute.
+  4. **The canary** (`canary-3090-v1160`): green on every part (claim, cpu, gpu, multi-a, multi-b, compile, slow,
+     oom, salvage, verdict; no retry); the red head was red on compile, cpu, gpu, multi-a and multi-b.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

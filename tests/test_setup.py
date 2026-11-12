@@ -13,6 +13,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
 import subprocess
@@ -25,7 +26,7 @@ import unittest
 import uuid
 from unittest import mock
 
-from ci_runners import hookcopy, inventory, setup
+from ci_runners import bridge, hookcopy, inventory, setup
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SYSTEM_DIRS = setup.SYSTEM_DIRS  # before any test patches it
@@ -963,8 +964,11 @@ direct = ["localhost", "127.0.0.1", "::1"]
                      '--allow /opt/ci-runners/etc/egress-allow\n', 'Environment=CI_RUNNERS_PYTHON=/usr/bin/python3\n',
                      'NoNewPrivileges=yes\n', 'ProtectSystem=strict\n', 'ProtectHome=yes\n', 'PrivateTmp=yes\n',
                      'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n', 'CapabilityBoundingSet=\n',
-                     'MemoryMax=512M\n', 'Restart=always\n'):
+                     'MemoryMax=1G\n', 'TasksMax=128\n', 'Restart=always\n'):
             self.assertIn(want, unit)
+        # decision 17: descriptors for the default cap, two a connection
+        nofile = int(re.search(r'^LimitNOFILE=(\d+)$', unit, re.M).group(1))
+        self.assertGreaterEqual(nofile, 2 * bridge.MAX_CONNECTIONS + bridge.FD_SPARE)
         example = (ROOT / 'setup' / 'inventory.example.toml').read_text()
         self.assertIn('egress_port = 18443', example)  # the unit's port
 

@@ -169,6 +169,15 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
   3. `systemctl restart ci-egress`。
 - 查看拒绝了什么：在 egress 主机上运行 `journalctl -u ci-egress`，每个连接一行。
 
+**egress 代理的连接上限**（design 决定 17）：
+
+- 同时最多 `--max-connections` 个连接，默认 1024，unit 不传这个参数。unit 的 `LimitNOFILE=4096`：每个连接两个文件描述符，另加约 40 个；要调高上限，`LimitNOFILE` 至少要 2 × N + 64，否则代理启动时在 journal 里写一行 `egress: warning: the file-descriptor limit …`。
+- 一端已经结束（EOF）的连接，另一个方向 60 秒没有数据就关掉，最长 300 秒；两个方向都还开着的连接（long poll、上传、下载）不受影响。
+- 超过上限的连接收到 503。journal 里每分钟最多一行：`egress: refused 503: too many connections, <open> open of <cap>; <n> refused since the last such line`，`<n>` 是上一行之后被拒的个数。
+- 每 5 分钟一行峰值（只在峰值变了或有拒绝时写）：`egress: peak <p> open of <cap> in the last 300 s, <r> refused at the cap`。`<p>` 接近 `<cap>` 时，在它被打满之前就要加上限（同时加 `LimitNOFILE`），或者查是哪台主机的连接变多了。
+- 查看：`journalctl -u ci-egress -g 'peak|503'`。
+- 发布时 egress 主机先装（§5 第 4 步）：`install.sh` 之后，以 root 把新 release 的 `setup/egress/ci-egress.service` 复制到 `/etc/systemd/system/`，然后 `systemctl daemon-reload`、`systemctl restart ci-egress`。重启会断开当前所有隧道一次，runner 会自己重连。
+
 **主机的隧道**：
 
 - `ci-tunnel.service` 运行 `ssh -N -L 127.0.0.1:<http_port>:127.0.0.1:<egress_port>`，连到 egress 主机上一个受限账户。
@@ -203,7 +212,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 | 现象 | 原因与处理 |
 |---|---|
-| runner 掉线 | 先查 `systemctl --user status ci-tunnel`：隧道断了，runner 的流量就断。再查 egress 主机的 `ci-egress` 和 `journalctl -u ci-egress`。隧道恢复后 runner 会自己重连。 |
+| runner 掉线 | 先查 `systemctl --user status ci-tunnel`：隧道断了，runner 的流量就断。再查 egress 主机的 `ci-egress` 和 `journalctl -u ci-egress`，有 `refused 503: too many connections` 就是连接上限满了（§6）。隧道恢复后 runner 会自己重连。 |
 | 所有任务在 "Set up runner" 被拒，原因 `stale` | 快照太旧。查工作站的 `systemctl --user status ci-orgsync-push.service`、gh 登录和 ssh。手动推一次：`systemctl --user start ci-orgsync-push.service`。 |
 | GitHub 的定时任务停了，当晚没有 nightly | 先看 3090b 维护者账户的 `journalctl --user -u ci-nightly-backstop`：每次运行先打印 checkout 的分支和 commit，再打印 gate 的一行结论。失败多半是 gh 登录、代理或 GitHub 出错，下一次触发会再试；过了 23:00 UTC 就手动派发。 |
 | ci-runners 里出现 `No runner of <host> online` | 那台主机的 runner 在 GitHub 看来全部离线，已经连续两次检查（约 15 分钟）。到那台主机的 CI 账户看 `systemctl --user status 'ci-runner@*' ci-hooks ci-tunnel` 和日志，再看 `ci-run pool status`。runner 恢复后，下一次检查会自动评论并关闭 issue。监视器自身的记录在 3090b 维护者账户的 `journalctl --user -u ci-runner-watch`。 |

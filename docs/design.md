@@ -151,7 +151,8 @@ the first path.
           host's 127.0.0.1. It passes only names on its allowlist (`setup/egress/allow`,
           installed root-owned), on port 443, and connects to them directly. It resolves
           a name itself and connects only to global addresses. It answers 200 only once
-          its connection is open.
+          its connection is open. *Amended by 17: at most `--max-connections`
+          connections, 1024 by default, where this said 256.*
         - **The key** opens one forward, to that port: `restrict,port-forwarding,
           permitopen="127.0.0.1:<egress port>",permitlisten="127.0.0.1:9",
           command="/usr/sbin/nologin"`.
@@ -1715,6 +1716,64 @@ Each item names what it supersedes or amends.
   equal-verdict classes need one per capability. (e) A pull queue of our own in front of
   GitHub's: a service to run and secure, where presence keeps GitHub's queue.
 
+## Lead decision (2026-11-12): the egress proxy's connection cap (decision 17, issue #190)
+
+Approved by the lead on 2026-11-12, with the day's CI programme; it amends 11.10's bound
+(at most 256 connections, a constant of the code). Measured on the egress host's journal on
+2026-11-12, 06:09 to 06:14 UTC: one more runner host had been added, so about 80 runner
+listeners held a long poll each, and several runs were in flight (a main-branch run, a
+cache warm-up, pull-request runs), each job opening connections for its logs, results,
+artifacts and action downloads. The proxy sat at 243 established connections and refused
+5,014 connections in one hour, 2,741 of them in one minute, with `503 too many
+connections`. Runner listeners lost their sessions (most of the organisation's runners
+showed offline for several minutes), parts started and were lost, and a main-branch run
+ended `error: infrastructure: … lost`. The journal shows smaller bursts of the same
+refusal on 2026-11-11 (173, 149 and 147 in three hours). The storm ended once the new
+host's eight runners were stopped.
+
+17. **The egress proxy's connection cap.**
+    1. **An option, 1024 by default.** `ci-run egress --max-connections N` (N ≥ 1), 1024
+       when not given; the unit passes nothing new. Its descriptor limit is
+       `LimitNOFILE=4096`: two descriptors a connection and about 40 more (the listener,
+       stdio, the event loop's epoll and self-pipe, up to 32 name lookups), 2 × 1024 + 39 =
+       2087, so twice that leaves room for refusals in flight. The proxy warns in the
+       journal at start when its limit is under 2 × N + 64 (the 39 with a margin). Its memory cap is `MemoryMax=1G`
+       (it was 512 MB): measured as the proxy's resident memory, about 15 KiB an idle
+       connection and about 455 KiB one whose client stops reading while its far end
+       sends, so 1024 × 455 KiB = 455 MiB and the interpreter, with the kernel's socket
+       buffers on top; a connection stalled both ways costs about twice that. `TasksMax=128`
+       stays: one thread runs every connection (an asyncio task each), and name lookups
+       take at most 32 threads of the default executor. The kernel's ephemeral ports (about
+       28,000 per destination) are no bound at this size.
+    2. **A half-closed connection gives its slot back once it is quiet.** Through a host's
+       tunnel a client's close reaches the proxy as an end of file on one direction (ssh
+       half-closes a forwarded socket), not as a reset, and a far end's close reaches the
+       client the same way. Until now the other direction then had `LINGER`, 300 s, whether or not anything still flowed,
+       so each short post whose far end did not close at once held a slot for five
+       minutes. Now, once one side has finished, the connection is closed when the other
+       direction is quiet for 60 s (`HALF_IDLE`, longer than a long poll's about 50 s),
+       and after 300 s at most as before. A direction that still carries data (a chunk read
+       and handed on within 60 s) is not cut before the 300 s; a connection open both ways is not touched (long polls,
+       uploads and downloads); a connection whose both directions are done, or that fails,
+       frees its slot at once, as before.
+    3. **The cap is seen before it bites.** A refusal at the cap writes `egress: refused
+       503: too many connections, <open> open of <cap>; <n> refused since the last such
+       line`, one line a minute at most (each other refusal keeps its own line). Every
+       5 min, when the peak changed or some were refused at the cap, `egress: peak <p>
+       open of <cap> in the last 300 s, <r> refused at the cap`. Stdlib only.
+    4. **Unchanged:** the allowlist, the 443-only rule, the global-address rule, the head
+       and connect timeouts, and the answers (403, 400, 408, 431, 502, 503). A local user
+       who fills the cap through a tunnel (T15) is now seen in the refusal line.
+    5. **Rollout.** A release installs on the egress host first (§9 step 4): `install.sh`,
+       the release's unit copied to `/etc/systemd/system/`, `systemctl daemon-reload` and
+       `systemctl restart ci-egress` (the restart ends the open tunnels once; the runners
+       reconnect on their own). The stopped runners start again after it.
+- *Options weighed.* (a) Raise the constant only: the next host would need another code
+  change, and the lingering slots would stay. (b) No cap: a misbehaving client could
+  exhaust the descriptors and fail every connection with `EMFILE` instead of one with
+  503. (c) Close a half-closed connection at once: TLS gives no reason to keep it, but a
+  client that half-closes and still awaits an answer would lose it; 60 s quiet keeps that.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -2504,7 +2563,7 @@ credential of theirs.
 | `authorized_keys` | one line per host's tunnel key (h100, and from decision 12.3 3090b and 3090a), each restricted as decision 11.10 states: one `permitopen`, to the egress proxy's port. A host's plan prints its line: `restrict,port-forwarding,permitopen="127.0.0.1:<egress port>",permitlisten="127.0.0.1:9",command="/usr/sbin/nologin" <key>` |
 | the release | `setup/install.sh` run by root with `CI_RUNNERS_ETC=/opt/ci-runners/etc`, so the release is root-owned under `/opt/ci-runners/releases/`, readable by others (mode 555); `/usr/bin/python3` is 3.11 or later; git is installed |
 | `/opt/ci-runners/etc/egress-allow` | a root-owned copy of the release's `setup/egress/allow`, mode 644, in a directory of mode 755 |
-| `ci-egress.service` | the release's `setup/egress/ci-egress.service` in `/etc/systemd/system/`, enabled: `ci-run egress` as a dynamic user on 127.0.0.1:<egress port>, at most 256 connections, journal lines per connection (refused, or open and closed, with the name); hardened (no new privileges, a read-only system, no home, its own `/tmp`, IP and Unix sockets only, no capabilities) and capped at 512 MB |
+| `ci-egress.service` | the release's `setup/egress/ci-egress.service` in `/etc/systemd/system/`, enabled: `ci-run egress` as a dynamic user on 127.0.0.1:<egress port>, at most 1024 connections (`--max-connections`, its default, 17), journal lines per connection (refused, or open and closed, with the name), refusals at the cap one line a minute at most and the peak of open connections every 5 min when it changed; hardened (no new privileges, a read-only system, no home, its own `/tmp`, IP and Unix sockets only, no capabilities), 4096 file descriptors and capped at 1 GB |
 | unchanged | the egress host's sshd configuration |
 
 **The maintainer's workstation** (decision 11.9), as the maintainer, not as a CI
@@ -2759,6 +2818,7 @@ Rules:
 | thermal kill or early stop | the part's processes die, or we stop them | `thermal`: one retry on a cool card |
 | OOM | the scope's processes are killed | `oom`: one retry with `resume` |
 | h100's tunnel down | the runners go offline for its length (their own traffic goes through it, decision 11.10); a running part goes on, but its job cannot report and may end `lost`, then is salvaged | ssh's keep-alive ends a dead link in 90 s, and systemd restarts it after 10 s; the runner app retries its connection on its own. The egress proxy answers 502 when its own connection fails |
+| the egress proxy at its cap (17) | a new connection through it gets 503: a runner's long poll or a job's post fails, and runners may show offline | one journal line a minute with the open count and the cap; the peak line every 5 min shows it coming; raise `--max-connections` with `LimitNOFILE` (2 × N + 64 at least) |
 | the backstop timer failing, or 3090b down, on an evening whose schedule stalls (15.3) | no dispatch from the host | the gate's event wakes dispatch the night on a busy evening; else the maintainer dispatches it by hand; a failed run is in the maintainer's journal and the next tick tries again |
 | no runner of a host online at GitHub (15.6) | jobs labelled for that host wait in GitHub's queue | after two consecutive quarter-hour checks the runner watch on 3090b opens `No runner of <host> online` in ci-runners, and closes it with a comment once a runner is back; 3090b down as a whole is not reported by it |
 | the runner watch failing, or 3090b down (15.6) | no alert | a failed run is in the maintainer's journal and changes nothing; the next tick tries again; `pool status` still shows `no runner online` (15.5) |
@@ -2792,6 +2852,7 @@ Rules:
 | P2P self-test | 60 s |
 | env refresh | every 30 min; one refresh at a time per project |
 | tunnel | keep-alive 30 s × 3; restart after 10 s |
+| egress proxy | 1024 connections (option, 17), 4096 descriptors, 1 GB; head 30 s, connect 30 s; a half-closed connection 60 s quiet, 300 s at most; a refusal line at the cap a minute apart at most; the peak line every 5 min |
 | org snapshot | pushed every 10 min; stale after 60 min |
 | reaper | every 10 min, which also checks the hook copies (13.5) |
 | load record | a sample every 60 s, bounded at 30 s; kept 2 days; busy window 10 min (inventory) |
@@ -2817,7 +2878,7 @@ Rules:
   2. The stamp PR: `actions/RELEASE` set to `v1.N.0`, and, from R6, the action refs in
      `ci.yml` and `part.yml` and `ci.yml`'s ref to `part.yml` (16.6).
   3. The lead tags `v1.N.0` on the stamp's merge commit.
-  4. `install.sh` on every host, the egress host included; nothing switches yet.
+  4. `install.sh` on every host, the egress host first (17); nothing switches yet.
   5. A canary consumer branch composes the actions at `@v1.N.0` on both 3090 hosts and
      passes.
   6. The lead moves `v1`. The hosts already have the release, so the order is safe.

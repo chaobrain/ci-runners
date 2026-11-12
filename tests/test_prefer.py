@@ -135,7 +135,7 @@ class Listening(unittest.TestCase):
     """19.2: a listener that holds an established TCP connection."""
 
     def proc(self, d, root):
-        def listener(pid, name, sockets, ns='net:[1]', tcp=''):
+        def listener(pid, name, sockets, ns='net:[1]', tcp='', tcp6=''):
             base = os.path.join(d, str(pid))
             os.makedirs(os.path.join(base, 'fd'))
             os.makedirs(os.path.join(base, 'net'))
@@ -148,7 +148,7 @@ class Listening(unittest.TestCase):
             with open(os.path.join(base, 'net', 'tcp'), 'w') as f:
                 f.write('  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n' + tcp)
             with open(os.path.join(base, 'net', 'tcp6'), 'w') as f:
-                f.write('  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n')
+                f.write('  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n' + tcp6)
         return listener
 
     def test_an_established_socket_of_the_listener(self):
@@ -164,15 +164,27 @@ class Listening(unittest.TestCase):
             add(11, 'r-listen-only', ['socket:[222]'], tcp=tcp)  # a listening socket is no connection
             add(12, 'r-none', ['pipe:[333]'], tcp=tcp)  # not a socket
             add(13, 'r-other-ns', ['socket:[111]'], ns='net:[2]', tcp='')  # its own namespace has none
-            got = pool.runner_listening(root, proc)
-            self.assertEqual(got, {'r-up'})
+            six = ('   0: 0000000000000000FFFF00000100007F:9C40 0000000000000000FFFF00000100007F:0CEA 01 00000000:00000000 '
+                   '00:00000000 00000000  1000        0 444 1 x\n')
+            add(15, 'r-six', ['socket:[444]'], ns='net:[3]', tcp6=six)  # a dual-mode socket shows in tcp6
+            add(16, 'r-theirs', ['socket:[111]'], tcp=tcp)  # another account's process naming the path
+            real = os.stat
+
+            def stat(path, *a, **kw):
+                st = real(path, *a, **kw)
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid + 1, *st[5:10])) \
+                    if str(path).endswith(os.sep + '16') else st
+            with unittest.mock.patch('os.stat', stat):
+                got = pool.runner_listening(root, proc)
+            self.assertEqual(got, {'r-up', 'r-six'})
             os.makedirs(os.path.join(proc, '14', 'fd'))
             os.makedirs(os.path.join(proc, '14', 'ns'))
             os.symlink('net:[1]', os.path.join(proc, '14', 'ns', 'net'))
             os.symlink('socket:[111]', os.path.join(proc, '14', 'fd', '3'))
             with open(os.path.join(proc, '14', 'cmdline'), 'wb') as f:
                 f.write(f'{root}/r-worker/bin/Runner.Worker\0'.encode())
-            self.assertEqual(pool.runner_listening(root, proc), {'r-up'})  # a worker is not a listener
+            with unittest.mock.patch('os.stat', stat):
+                self.assertEqual(pool.runner_listening(root, proc), {'r-up', 'r-six'})  # a worker is not a listener
             self.assertIsNone(pool.runner_listening(root, os.path.join(d, 'none')))
         self.assertIn('def runner_listening', pool._probe_src())
 
@@ -190,6 +202,9 @@ class Listening(unittest.TestCase):
         got = {e['pool']: e for e in pool.pool_table(inv, p, {'hx-part-3', 'hx-part-1', 'hx-gpu3'})}
         self.assertEqual((got['part']['listening'], got['part']['yielded']), (1, 1))  # busy is not; online is not yielded
         self.assertEqual((got['cards']['listening'], got['cards']['yielded']), (1, 1))
+        got = {e['pool']: e for e in pool.pool_table(inv, {**p, 'cards_leased': {'0': 1, '3': 0}})}
+        self.assertEqual(got['cards']['listening'], 0)  # its card is leased, our own parts' too: it cannot start a job
+        self.assertEqual(got['part']['listening'], 1)
         got = {e['pool']: e for e in pool.pool_table(inv, {k: v for k, v in p.items() if k != 'runner_listening'})}
         self.assertNotIn('listening', got['part'])  # not read: not proven
         self.assertNotIn('yielded', got['part'])
@@ -339,11 +354,35 @@ class Yield(TierHost):
             raise OSError('ssh')
         p = self.probe()
         p._tiers = boom
+        out: list[str] = []
+        presence.tick(self.inv, p, dry_run=True, now=lambda: self.now, out=out.append)
+        self.assertEqual(self.log(), [])  # a dry run writes nothing
         presence.tick(self.inv, p, now=lambda: self.now)
         self.now += 20
         presence.tick(self.inv, p, now=lambda: self.now)
         self.assertEqual(self.actions('stop'), [])
         self.assertTrue(any(x.get('tier') == 'not read' for x in self.log()))
+
+    def test_the_freshness_is_judged_after_the_probes(self):
+        def slow():  # the probes take 10 s; the row is read at their end, stamped by this host's clock
+            self.now += 10
+            return self.me, [dict(offered(), read_at=self.now)], EARLIER
+        for _ in range(2):
+            p = self.probe()
+            p._tiers = slow
+            presence.tick(self.inv, p, now=lambda: self.now)
+            self.now += 20
+        self.assertEqual(sorted(self.actions('stop')), Yield.PARTS)
+
+    def test_a_yielded_runner_comes_back_without_proc(self):
+        self.tick()
+        self.tick()
+        self.assertEqual(len(self.actions('stop')), 2)
+        self.earlier = offered(listening=0)
+        p = self.probe()
+        p.busy = lambda rs: None  # the processes cannot be read
+        presence.tick(self.inv, p, now=lambda: self.now)
+        self.assertEqual(sorted(self.actions('start')), Yield.PARTS)
 
     def test_the_condition_ignores_it_and_the_dry_run_shows_it(self):
         out: list[str] = []
@@ -438,6 +477,7 @@ class Burst(unittest.TestCase):
             out[name] = h
         for name, h in out.items():
             def tiers(h=h):
+                h.now += 1.5  # the probes take their bound; the tick's clock moves on
                 earlier = [published[k] for k in self.TIER if self.TIER[k] < h.me and k in published]
                 return (h.me, earlier, EARLIER) if h.me > 1 else None
             h.tiers = tiers
@@ -450,6 +490,7 @@ class Burst(unittest.TestCase):
         ``stale``: every published row too old."""
         published: dict[str, dict] = {}
         hs = self.hosts(published)
+        machine = pool.load(REGISTRY).machines['hosta']
         names = ['hz-part-1', 'hz-part-2']  # each host's two part runners (ci-cpu)
         up_since = {(k, n): -10 ** 6 for k in hs for n in names}
         busy_until: dict[tuple[str, str], int] = {}
@@ -488,12 +529,15 @@ class Burst(unittest.TestCase):
                             up_since[(k, n)] = t
                         if before[n] == 'active' and a != 'active':
                             stops[(k, n)].append(t)
-                    listening = sum(1 for n in names if h.units[f'ci-runner@{n}.service'][0] == 'active'
-                                    and t - up_since[(k, n)] >= self.START_S and (k, n) not in busy_until)
-                    row = offered(labels=('part', 'hz', 'ci-cpu'), listening=0 if k in deaf else listening,
-                                  tier=self.TIER[k], now=T0 + t, age=600 if stale else 0)
-                    row['key'] = k
-                    row['problems'] = ['drained'] if k in down else []
+                    # its row as its probe makes it (pool.pool_table, pool.host_row): online, busy, listening
+                    online = [n for n in names if h.units[f'ci-runner@{n}.service'][0] == 'active']
+                    probe = {'slots_free': 1, 'runner_names': online, 'runner_busy': [n for n in online if (k, n) in busy_until],
+                             'runner_listening': [] if k in deaf else
+                             [n for n in online if t - up_since[(k, n)] >= self.START_S],
+                             'policy': {'file': 'f' * 12, 'repositories': EARLIER}, 'drained': k in down}
+                    probe['pools'] = pool.pool_table(h.inv, probe, pool.yielded_runners(h.inv))
+                    row = dict(pool.host_row(machine, probe), key=k, tier=self.TIER[k],
+                               read_at=T0 + t - (600 if stale else 0))
                     published[k] = row
             # GitHub: each queued part to an idle online runner, the latest tier first
             ready = [(k, n) for k in sorted(hs, key=lambda k: -self.TIER[k]) for n in names

@@ -829,13 +829,21 @@ def pool_table(inv, p: Mapping, yielded: set[str] | None = None) -> list[dict]:
     ``label_runners``; None where it does not know them); ``listening``, its free runners
     whose listener holds a connection (``runner_listening``), where the probe read them;
     ``yielded``, its runners that are not online and that presence holds offline for the
-    ``tier`` cause alone (19.2, 19.3), where ``yielded`` (their names) is known; a pool with
+    ``tier`` cause alone (19.2, 19.3), where ``yielded`` (their names) is known; a card
+    runner (``gpu``, ``multi``) one of whose cards holds a lease (``cards_leased``, our own
+    parts' too) is not listening: it cannot start a job now; a pool with
     a ``slot`` table adds its ``memory_gib``, ``speed`` and ``workers`` (16.2). Pure."""
     from ci_runners import inventory, registry
     known, alive, busy = _known(p)
     heard = p.get('runner_listening')
     heard = set(heard) if known and isinstance(heard, list) else None
     rs = _runners_of(inv) or []
+    leased = {str(c) for c, n in (p.get('cards_leased') or {}).items() if n} if isinstance(p.get('cards_leased'), dict) \
+        else set()
+    held = set()
+    if leased:
+        from ci_runners import presence
+        held = {r.name for r in presence.runners(inv) if {str(c) for c in r.cards} & leased}
     out = []
     for name, v in inv.host['pools'].items():
         cls = inventory.pool_class(inv.host, name)
@@ -845,7 +853,7 @@ def pool_table(inv, p: Mapping, yielded: set[str] | None = None) -> list[dict]:
              'online': sum(r[0] in alive for r in mine) if known else None,
              'free': sum(r[0] in alive and r[0] not in busy for r in mine) if known else None}
         if heard is not None:
-            e['listening'] = sum(r[0] in alive and r[0] not in busy and r[0] in heard for r in mine)
+            e['listening'] = sum(r[0] in alive and r[0] not in busy and r[0] in heard and r[0] not in held for r in mine)
         if yielded is not None and known:
             e['yielded'] = sum(r[0] in yielded and r[0] not in alive for r in mine)
         slot = v.get('slot') if isinstance(v, dict) else None

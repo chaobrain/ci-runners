@@ -405,10 +405,12 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
     if int(first.get('attempt') or 1) > 1 or first.get('next') not in ('retry', 'fallback') or row not in ROWS:
         return {**same, 'retry': False, 'row': row, 'labels': [], 'why': 'no retry: final, or retried once already'}
     host = str(first.get('host') or '')
-    yielding = part.get('where') != 'slurm' and may_yield(rows, host, NEEDS[part['needs']])
+
+    def yielding() -> bool:  # 19.3: the first attempt's host may be yielding to an earlier tier
+        return part.get('where') != 'slurm' and may_yield(rows, host, NEEDS.get(part.get('needs'), ''))
     if row == 'cool-card':
         card = first.get('cool_card')
-        if host and type(card) is int and card >= 0 and part['needs'] == 'gpu' and not yielding:  # a card's runner: one card
+        if host and type(card) is int and card >= 0 and part['needs'] == 'gpu' and not yielding():  # a card's runner: one card
             return {**same, 'labels': [BASE, f'{host}-gpu{card}'], 'where': 'host', 'target': '',
                     'why': f'thermal: a cool card of {host}'}
         row = 'fallback'  # no cool card recorded, or a two-card part: the thermal row's other branch
@@ -416,7 +418,7 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
         if part.get('where') == 'slurm':
             return {**same, 'why': f'same target {part.get("target")}'}
         own = _host_labels(first)
-        if yielding:
+        if yielding():
             return {**same, 'row': 'any', 'why': f'same host: {host} may be yielding to an earlier tier; '
                                                  'the part\'s labels again'}
         if own:

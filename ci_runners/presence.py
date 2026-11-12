@@ -489,7 +489,9 @@ def offers(tiers: tuple | None, t: float) -> list[tuple[int, str, frozenset[str]
         tier, read = row.get('tier'), row.get('read_at')
         if type(tier) is not int or type(me) is not int or tier >= me or row.get('problems') or row.get('target'):
             continue
-        if type(read) not in (int, float) or not -5 <= t - read <= YIELD_FRESH_S:  # 5 s of clock skew
+        # ``read_at`` is in this host's clock (``pool.probe_host``: now less the file's age), and
+        # ``t`` is read after the probes: a row past ``t`` is not proven fresh
+        if type(read) not in (int, float) or not 0 <= t - read <= YIELD_FRESH_S:
             continue
         pol = row.get('policy') if isinstance(row.get('policy'), dict) else {}
         if not repos or pol.get('repositories') != repos:
@@ -828,7 +830,7 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
         except Exception as e:  # noqa: BLE001 - not read: nothing yields
             if not dry_run:
                 log(data, {'tier': 'not read', 'error': f'{type(e).__name__}: {e}'[:200]}, t)
-    yields = tier_yield(rs, why, tiers, st, t)
+    yields = tier_yield(rs, why, tiers, st, now())  # the clock after the probes: their rows are stamped by it
     for n, c in yields.items():
         why[n] = [c]
     plan: list[tuple[str, Runner]] = []
@@ -838,7 +840,7 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
         idle = f.busy is not None and r.name not in f.busy
         rst['load'] = any(c.startswith('load:') for c in why[r.name])
         if a in RUNNING:
-            rst['stopped'], rst['start_ticks'], rst['yielded'] = None, 0, False
+            rst['stopped'], rst['start_ticks'] = None, 0
             rst['stop_ticks'] = rst['stop_ticks'] + 1 if why[r.name] and idle else 0
             if rst['stop_ticks'] >= TICKS or dry_run and why[r.name] and idle:
                 plan.append(('stop', r))
@@ -846,7 +848,9 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
             rst['stop_ticks'] = 0
             if why[r.name]:  # held for the tier cause alone: up at the first tick without it (19.2)
                 rst['yielded'] = r.name in yields
-            rst['start_ticks'] = 0 if why[r.name] or f.busy is None else rst['start_ticks'] + 1
+            # a yielded runner needs no reading of /proc to come back (an unproven fact counts as false)
+            rst['start_ticks'] = 0 if why[r.name] or f.busy is None and not rst.get('yielded') \
+                else rst['start_ticks'] + 1
             if rst['start_ticks'] >= (1 if rst.get('yielded') else TICKS) \
                     or dry_run and not why[r.name] and f.busy is not None:
                 plan.append(('start', r))

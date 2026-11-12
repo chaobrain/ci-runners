@@ -5,14 +5,16 @@ Experimental: wired into nothing. Standard library only, plus ``newuidmap`` /
 ``newgidmap`` (package ``uidmap``) and ``setpriv`` (util-linux). Linux, x86-64.
 
     sandbox.py run --tree DIR [--card N] [--relay HOST:PORT] [--policy DIR] [--env DIR]
-                   [--map subuid|single] [--groups gpu|none] [--setenv K=V]... -- CMD...
-    sandbox.py probe        # can this account build the sandbox here? (exit 0 yes, 125 no)
+                   [--map subuid|single] [--groups gpu|kept|none] [--setenv K=V]... -- CMD...
+    sandbox.py probe [--card N]   # can this account build the sandbox here (exit 0 yes, 125 no),
+                                  # and in which group modes?
 
 Processes:
 
 * L, the launcher, stays outside. It forks S, waits until S has a new user namespace,
   writes S's id maps (``newuidmap`` / ``newgidmap`` for ``--map subuid``, the account's own
-  ids for ``--map single``), and relays TCP connections from the sandbox's loopback
+  ids for ``--map single``; ``--groups gpu`` adds the GPU group's gid, which the account's
+  ``/etc/subgid`` must list), and relays TCP connections from the sandbox's loopback
   (``127.0.0.1:3128`` inside) to ``--relay`` outside. The listening socket lives in the
   sandbox's network namespace, but only L holds it (passed over a socketpair).
 * S, the sandbox's root, unshares mount, pid, ipc, network and uts namespaces, brings up
@@ -22,7 +24,8 @@ Processes:
   namespace), hands the tree to the job's uid, forks the job and reaps; when the job ends
   it gives the tree back to the account and exits, which kills whatever the job left.
 * J, the job: ``setpriv`` drops to uid/gid 1000 (``--map subuid``; under ``--map single``
-  it stays the account's uid), empties the capability bounding, inheritable and ambient
+  it stays the account's uid), sets its supplementary groups (``gpu``: the GPU group alone;
+  ``kept``: those inherited; ``none``: none), empties the capability bounding, inheritable and ambient
   sets, sets no-new-privileges and execs the command.
 
 Layout inside: ``/job`` the tree (read-write), ``/usr`` and the ``/lib*`` and ``/bin``
@@ -256,48 +259,142 @@ def _chown_tree(path: str, uid: int, gid: int) -> None:
 
 # ----------------------------------------------------------------------------- id maps
 
-def _subids(path: str, pw) -> tuple[int, int]:
-    with open(path) as f:
-        for line in f:
-            parts = line.strip().split(':')
-            if len(parts) == 3 and parts[0] in (pw.pw_name, str(pw.pw_uid)):
-                return int(parts[1]), int(parts[2])
-    raise Cannot(f'no range for {pw.pw_name} in {path}')
+def subid_lines(text: str, name: str, uid: int) -> list[tuple[int, int]]:
+    """The account's ``(first id, count)`` lines of a subuid or subgid file, in file order
+    (by name or by uid; an account may have several)."""
+    out = []
+    for line in text.splitlines():
+        parts = line.strip().split(':')
+        if len(parts) == 3 and parts[0] in (name, str(uid)):
+            try:
+                first, count = int(parts[1]), int(parts[2])
+            except ValueError:
+                continue
+            if count > 0:
+                out.append((first, count))
+    return out
 
 
-def write_maps(pid: int, mode: str) -> dict:
-    """Write the child's uid and gid maps; return what was mapped."""
+def subordinate_range(lines: list[tuple[int, int]], what: str) -> tuple[int, int]:
+    """The first line large enough for the job's ids (the subordinate pair's range)."""
+    for first, count in lines:
+        if count > JOB_UID:
+            return first, count
+    raise Cannot(f'no subordinate range of more than {JOB_UID} ids for the account in {what}')
+
+
+def _opens(st, gid: int) -> bool:
+    """Whether a node of stat ``st`` is read-write for everyone or for group ``gid``."""
+    return st.st_mode & 0o006 == 0o006 or (st.st_gid == gid and st.st_mode & 0o060 == 0o060)
+
+
+def gpu_group(card: int, node=None, ctl=None, uvm=None) -> int:
+    """The GPU group: the group the leased card's node opens to (``os.stat`` results of the
+    card's node, the control node and the UVM nodes; read from ``/dev`` when not given).
+    The control and UVM nodes must open to it too, or to everyone."""
+    try:
+        node = node if node is not None else os.stat(f'/dev/nvidia{card}')
+        ctl = ctl if ctl is not None else os.stat('/dev/nvidiactl')
+        if uvm is None:
+            uvm = [os.stat(p) for p in ('/dev/nvidia-uvm', '/dev/nvidia-uvm-tools') if os.path.exists(p)]
+    except OSError as e:
+        raise Cannot(f'the card\'s nodes: {e}')
+    if node.st_mode & 0o006 == 0o006:
+        raise Cannot(f'/dev/nvidia{card} is open to everyone: the job needs no group (use --groups none)')
+    if node.st_mode & 0o060 != 0o060:
+        raise Cannot(f'/dev/nvidia{card} is not open to its group: no group gives the job the card')
+    if node.st_gid == 0:
+        raise Cannot(f'/dev/nvidia{card} belongs to the root group: mode gpu would give the job gid 0')
+    if not all(_opens(st, node.st_gid) for st in [ctl] + list(uvm)):
+        raise Cannot(f'the control or UVM node does not open to the group of /dev/nvidia{card} or to '
+                     'everyone: one group cannot give the card')
+    return node.st_gid
+
+
+def id_plan(mapping: str, groups: str, name: str, uid: int, gid: int, subuid: str, subgid: str,
+            gpu_gid=None) -> dict:
+    """The id maps and the job's groups, from the account and its ``/etc/subuid`` and
+    ``/etc/subgid`` texts.
+
+    ``subuid``: the account's uid and gid at 0, the subordinate range at 1..n (n at most
+    65536); the job runs as 1000. Its groups: ``gpu`` maps the GPU group's gid (a
+    single-gid line of the account in ``/etc/subgid``) at n + 1, outside every other
+    inside id, and sets the job's groups to it alone; ``kept`` leaves the groups the
+    launcher inherited; ``none`` clears them. ``single``: the account's own ids, groups
+    kept (``setgroups`` is denied without a privileged map).
+    """
+    if mapping == 'single':
+        if groups != 'kept':
+            raise Cannot('--map single keeps every group of the account (setgroups is denied without '
+                         'newgidmap): only --groups kept')
+        return {'uid_map': ['0', str(uid), '1'], 'gid_map': ['0', str(gid), '1'], 'setgroups': 'deny',
+                'job_groups': None, 'gpu_inside': None}
+    su, sn = subordinate_range(subid_lines(subuid, name, uid), '/etc/subuid')
+    glines = subid_lines(subgid, name, uid)
+    sg, gn = subordinate_range(glines, '/etc/subgid')
+    n = min(sn, gn, 65536)
+    um = ['0', str(uid), '1', '1', str(su), str(n)]
+    gm = ['0', str(gid), '1', '1', str(sg), str(n)]
+    plan = {'uid_map': um, 'gid_map': gm, 'setgroups': 'allow', 'job_groups': [] if groups == 'none' else None,
+            'gpu_inside': None, 'job_kernel_uid': su + JOB_UID - 1, 'job_kernel_gid': sg + JOB_GID - 1}
+    if groups != 'gpu':
+        return plan
+    if gpu_gid is None:
+        raise Cannot('--groups gpu needs --card (the GPU group is the group of the card node)')
+    if gpu_gid == gid:
+        raise Cannot(f'the GPU group (gid {gpu_gid}) is the account\'s primary group: mode gpu cannot '
+                     'tell it from the account')
+    if sg <= gpu_gid < sg + n:
+        raise Cannot(f'the GPU group (gid {gpu_gid}) lies in the subordinate range {sg}:{n}')
+    if not any(first <= gpu_gid < first + count for first, count in glines):
+        raise Cannot(f'mode gpu needs the GPU group (gid {gpu_gid}, the group of the card node) among the '
+                     f'account\'s lines in /etc/subgid; its administrator adds the line "{name}:{gpu_gid}:1"')
+    inside = n + 1 if n + 1 not in (65534, 65535) else 65536  # never 65534 or 65535: the overflow gid and (gid_t) -1
+    gm += [str(inside), str(gpu_gid), '1']
+    plan.update(job_groups=[inside], gpu_inside=inside, gpu_gid=gpu_gid)
+    return plan
+
+
+def make_plan(a) -> dict:
+    """``id_plan`` for this account, its files and, in mode gpu, the leased card's group."""
     pw = pwd.getpwuid(os.getuid())
-    uid, gid = os.getuid(), os.getgid()
-    if mode == 'single':
+    texts = []
+    for path in ('/etc/subuid', '/etc/subgid'):
+        try:
+            with open(path) as f:
+                texts.append(f.read())
+        except OSError:
+            texts.append('')
+    if a.map == 'subuid' and os.getgid() != pw.pw_gid:
+        raise Cannot('newgidmap maps only the primary group: run the launcher with its primary gid')
+    gg = gpu_group(a.card) if a.map == 'subuid' and a.groups == 'gpu' and a.card is not None else None
+    return id_plan(a.map, a.groups, pw.pw_name, os.getuid(), os.getgid(), *texts, gpu_gid=gg)
+
+
+def write_maps(pid: int, plan: dict) -> dict:
+    """Write the child's uid and gid maps as ``plan`` says; return what was mapped."""
+    um, gm = plan['uid_map'], plan['gid_map']
+    if plan['setgroups'] == 'deny':
         try:
             with open(f'/proc/{pid}/uid_map', 'w') as f:
-                f.write(f'0 {uid} 1\n')
+                f.write(' '.join(um) + '\n')
             with open(f'/proc/{pid}/setgroups', 'w') as f:
                 f.write('deny\n')
             with open(f'/proc/{pid}/gid_map', 'w') as f:
-                f.write(f'0 {gid} 1\n')
+                f.write(' '.join(gm) + '\n')
         except OSError as e:
             raise Cannot(f'writing the id map failed ({e}){_why_userns()}')
-        return {'uid_map': f'0 {uid} 1', 'gid_map': f'0 {gid} 1', 'setgroups': 'deny'}
-    if gid != pw.pw_gid:
-        raise Cannot('newgidmap maps only the primary group: run the launcher with its primary gid')
+        return {'uid_map': ' '.join(um), 'gid_map': ' '.join(gm), 'setgroups': 'deny'}
     for tool in ('newuidmap', 'newgidmap'):
         if not shutil.which(tool):
             raise Cannot(f'{tool} is not installed (package uidmap){_why_userns()}')
-    su, sn = _subids('/etc/subuid', pw)
-    sg, gn = _subids('/etc/subgid', pw)
-    n = min(sn, gn, 65536)
-    if n <= JOB_UID:
-        raise Cannot('the subordinate id range is too small')
-    um = ['0', str(uid), '1', '1', str(su), str(n)]
-    gm = ['0', str(gid), '1', '1', str(sg), str(n)]
     for tool, args in (('newuidmap', um), ('newgidmap', gm)):
         r = subprocess.run([tool, str(pid)] + args, capture_output=True, text=True)
         if r.returncode:
             raise Cannot(f'{tool} failed: {r.stderr.strip()}{_why_userns()}')
     return {'uid_map': ' '.join(um), 'gid_map': ' '.join(gm), 'setgroups': 'allow',
-            'job_kernel_uid': su + JOB_UID - 1, 'job_kernel_gid': sg + JOB_GID - 1}
+            'job_kernel_uid': plan['job_kernel_uid'], 'job_kernel_gid': plan['job_kernel_gid'],
+            'job_groups': plan['job_groups']}
 
 
 def _why_userns() -> str:
@@ -380,8 +477,17 @@ def _setpriv(a) -> list[str]:
         cmd.append('--ambient-caps=-all')
     if a.map == 'subuid':
         cmd += [f'--reuid={JOB_UID}', f'--regid={JOB_GID}']
-        cmd.append('--keep-groups' if a.groups == 'gpu' else '--clear-groups')
-    return cmd + ['--']
+    return cmd + _groups_arg(a.plan['job_groups']) + ['--']
+
+
+def _groups_arg(job_groups) -> list[str]:
+    """setpriv's groups argument: ``None`` keeps the inherited groups (no ``setgroups``),
+    ``[]`` clears them, a list sets exactly those (inside ids)."""
+    if job_groups is None:
+        return ['--keep-groups']
+    if not job_groups:
+        return ['--clear-groups']
+    return ['--groups=' + ','.join(str(g) for g in job_groups)]
 
 
 def _ambient_supported() -> bool:
@@ -503,7 +609,8 @@ def _sandbox_root(a, sync: socket.socket, root: str) -> int:
     socket.send_fds(sync, [b'L'], [lst.fileno()] if lst else [])
     if lst:
         lst.close()
-    groups_line = ''
+    inside = a.plan['gpu_inside']
+    groups_line = f'gpu:x:{inside}:job\n' if inside is not None else ''
     build_root(root, a, groups_line)
     sys.stdout.flush()
     sys.stderr.flush()
@@ -538,6 +645,11 @@ def run(a) -> int:
     if a.relay:
         host, _, port = a.relay.rpartition(':')
         target = (host, int(port))
+    try:
+        a.plan = make_plan(a)
+    except Cannot as e:
+        print(f'sandbox: {e}', file=sys.stderr)
+        return EXIT_CANNOT
     root = tempfile.mkdtemp(prefix='.sandbox-root-', dir=os.path.dirname(os.path.realpath(a.tree)))
     mine, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     sys.stdout.flush()
@@ -557,7 +669,7 @@ def run(a) -> int:
     try:
         if mine.recv(1) != b'U':
             raise Cannot('the sandbox did not start')
-        maps = write_maps(pid, a.map)
+        maps = write_maps(pid, a.plan)
         if a.verbose:
             print(f'sandbox: maps {maps}', file=sys.stderr)
         mine.send(b'M')
@@ -593,47 +705,95 @@ def _rmdir(path: str) -> None:
         pass
 
 
-def probe() -> int:
-    """Exit 0 when this account can build the sandbox here, else 125 and why."""
-    with tempfile.TemporaryDirectory(prefix='sandbox-probe-') as d:
-        ns = argparse.Namespace(tree=os.path.join(d, 'tree'), card=None, relay=None, policy=None, env=None,
-                                map='subuid', groups='none', setenv=[], tmp_size='16m', verbose=False,
-                                cmd=['/bin/true'])
-        code = run(ns)
-    print('sandbox: usable' if code == 0 else 'sandbox: not usable here')
-    return 0 if code == 0 else EXIT_CANNOT
+def _cards() -> list[int]:
+    """The device minors of the host's card nodes, lowest first."""
+    out = []
+    for n in os.listdir('/dev'):
+        if n.startswith('nvidia') and n[6:].isdigit():
+            out.append(int(n[6:]))
+    return sorted(out)
 
 
-def main(argv=None) -> int:
+def probe(card=None) -> int:
+    """Exit 0 when this account can build the sandbox here, else 125 and why; then say which
+    group modes it can build (``card``: the card node whose group is the GPU group; the
+    lowest minor when not given; the card is not opened)."""
+    def attempt(**kw) -> int:
+        with tempfile.TemporaryDirectory(prefix='sandbox-probe-') as d:
+            ns = argparse.Namespace(tree=os.path.join(d, 'tree'), card=None, relay=None, policy=None, env=None,
+                                    map='subuid', groups='none', setenv=[], tmp_size='16m', verbose=False,
+                                    cmd=['/bin/true'])
+            vars(ns).update(kw)
+            return run(ns)
+    if attempt() != 0:
+        print('sandbox: not usable here')
+        return EXIT_CANNOT
+    print('sandbox: usable')
+    print('sandbox: --groups none: usable (the job holds no group)')  # the sandbox just built
+    cards = _cards()
+    if card is None and cards:
+        card = cards[0]
+    if card is None:
+        print('sandbox: --groups gpu, kept: no card node here')
+        return 0
+    try:
+        gg = gpu_group(card)
+    except Cannot as e:
+        print(f'sandbox: --groups gpu, kept: not usable ({e})')
+        return 0
+    others = sorted(set(os.getgroups()) - {gg, os.getgid()})
+    if gg in os.getgroups() or gg == os.getgid():
+        print(f'sandbox: --groups kept: usable, not built (the account is in the GPU group; the job keeps '
+              f'every group of the account: the GPU group and {len(others)} other(s))')
+    else:
+        print('sandbox: --groups kept: no card (the account is not in the GPU group)')
+    if attempt(card=card, groups='gpu') == 0:
+        print('sandbox: --groups gpu: usable (the job holds the GPU group alone)')
+    else:
+        print('sandbox: --groups gpu: not usable (the reason is above)')
+    return 0
+
+
+def parse(argv=None):
+    """The arguments, with the group mode's default filled in."""
     p = argparse.ArgumentParser(prog='sandbox.py', description=__doc__.split('\n\n')[0])
     sub = p.add_subparsers(dest='verb', required=True)
     r = sub.add_parser('run', help='run CMD in a sandbox')
     r.add_argument('--tree', required=True, help='the per-job tree, read-write at /job')
-    r.add_argument('--card', type=int, help='the leased GPU index: /dev/nvidia<N> is the only card node')
+    r.add_argument('--card', type=int, help='the leased card\'s device minor: /dev/nvidia<N> is the only card node')
     r.add_argument('--relay', help='HOST:PORT outside that 127.0.0.1:3128 inside forwards to (the proxy)')
     r.add_argument('--policy', help='a directory mounted read-only at /ci/policy (hook and policy)')
     r.add_argument('--env', help='a Python environment mounted read-only at /opt/env')
     r.add_argument('--map', choices=('subuid', 'single'), default='subuid',
                    help='subuid: the job runs as a subordinate uid; single: as the account itself')
-    r.add_argument('--groups', choices=('gpu', 'none'), default=None,
-                   help='gpu: keep the supplementary groups the card node needs (default with --card); '
-                        'none: drop every supplementary group')
+    r.add_argument('--groups', choices=('gpu', 'kept', 'none'), default=None,
+                   help='gpu: the GPU group alone (needs its line in /etc/subgid; default with --card); '
+                        'kept: every group of the account (default with --map single); '
+                        'none: no group (default without --card)')
     r.add_argument('--setenv', action='append', default=[], metavar='K=V')
     r.add_argument('--tmp-size', default='4g')
     r.add_argument('-v', '--verbose', action='store_true')
     r.add_argument('cmd', nargs=argparse.REMAINDER)
-    sub.add_parser('probe', help='can this account build the sandbox here?')
+    pr = sub.add_parser('probe', help='can this account build the sandbox here, and in which group modes?')
+    pr.add_argument('--card', type=int, help='the card node whose group is the GPU group (not opened)')
     a = p.parse_args(argv)
     if a.verb == 'probe':
-        return probe()
+        return a
     if a.cmd and a.cmd[0] == '--':
         a.cmd = a.cmd[1:]
     if a.groups is None:
-        a.groups = 'gpu' if a.card is not None else 'none'
-    if a.map == 'single' and a.groups == 'none':
-        print('sandbox: --map single cannot drop groups (setgroups is denied without a subgid map); '
-              'the job keeps every supplementary group of the account', file=sys.stderr)
-    return run(a)
+        a.groups = 'kept' if a.map == 'single' else 'gpu' if a.card is not None else 'none'
+    if a.map == 'single' and a.groups != 'kept':
+        p.error('--map single keeps every group of the account (setgroups is denied without a subgid map): '
+                'only --groups kept')
+    if a.groups == 'gpu' and a.card is None:
+        p.error('--groups gpu needs --card (the GPU group is the group of the card node)')
+    return a
+
+
+def main(argv=None) -> int:
+    a = parse(argv)
+    return probe(a.card) if a.verb == 'probe' else run(a)
 
 
 if __name__ == '__main__':

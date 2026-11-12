@@ -1,0 +1,43 @@
+# The reusable sweeper a consumer schedules (design §4.10, decision 19 item 9): it cancels a
+# run of the consumer's workflow whose job has queued at GitHub past `minutes` (no runner
+# took it) and posts `error` on the run's context, so that its verdict does not wait for
+# GitHub's 24 hours. One job on a hosted runner: it holds a token that cancels runs and
+# posts statuses, so it runs where nothing of any head ever ran, and it works when the
+# self-hosted pools are what is wrong. It checks out nothing and downloads nothing. Only a
+# schedule, or a dispatch on the default branch, runs it; any other event skips the job.
+# workflow_call only: no event of this repository starts it (AGENTS.md).
+name: ci-runners sweep
+
+on:
+  workflow_call:
+    inputs:
+      workflow:
+        description: the workflow file whose runs to sweep, such as ci.yml (the one that calls ci.yml)
+        type: string
+        required: true
+      context:
+        description: the status context that workflow posts on, such as myproj/ci
+        type: string
+        required: true
+      minutes:
+        description: the bound on a job's wait in GitHub's queue, in minutes (5 to 1440); not the plan's queue_minutes
+        type: number
+        default: 60
+
+jobs:
+  sweep:
+    name: sweep
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      statuses: write
+    steps:
+      - uses: chaobrain/ci-runners/actions/sweep@v1
+        with:
+          workflow: ${{ inputs.workflow }}
+          context: ${{ inputs.context }}
+          minutes: ${{ inputs.minutes }}

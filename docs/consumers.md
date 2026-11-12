@@ -296,13 +296,54 @@ jobs:
 | verdict（plan 作业结束运行时） | `failure` | `contract ...: merge origin/<分支>`（§8）、`plan: red (...)`、`plan: <计划的错误>` |
 | verdict（plan 作业结束运行时） | `error` | `plan: <outcome> (...)`（plan 命令 `lost`、`unavailable` 等）、`route: ...`、`plan: no plan output`、默认分支的 `contract` 读不进来、`a public repository: ci-runners runs private ones only until decision 18 C2` |
 | verdict（plan 作业结束运行时） | `success` | `nothing to run`（空的 `parts`）、`plan only: N part(s) routed, none run` |
+| `sweep.yml`（§10，取消了运行之后） | `error` | `queued past <N> min: part <id> on <labels>`、`... plan on <labels>`、`... <n> jobs, first part <id> on <labels>` |
 
 描述超过 140 个字符时截断，以 `...` 结尾。
 
-`pull_request_target`、fork 的 PR 在 plan 作业的 guard 里就跳过；**公开仓库**现在不能调用 `ci.yml`：它的 `public` 作业在 GitHub 托管的 runner 上直接失败（公开仓库的 CPU 部件走托管 runner、GPU 走隔离的池，等决定 18 的 C2 实现）；事件的 payload 里没有仓库信息时（如 `schedule`），plan 作业的 `contract` 步骤用 API 查仓库是否私有，公开的就结束运行（verdict 作业发 `error`），head 的任何东西都不运行。部件在 GitHub 的队列里一直没有 runner 接的情况，现在没有上限（GitHub 不能取消单个作业；计划中的定时 sweeper 见 issue #213），在那之前请用自己的 sweeper。一个工作流里只调用一次 `ci.yml`（定位丢失尝试的主机时按作业名找 `part <id> / first`）。运行被取消（同一个 PR 推了新 head）时不重试、不发结论，新 head 的运行会发。不要把 secret 传进来：`ci.yml` 不接收也不转发任何 secret；plan 作业的 token 只读（`contents`、`statuses`、`actions`、`pull-requests` 都是 `read`），所以调用方要给 `pull-requests: read`（GitHub 拒绝被调用的作业要的权限超过调用方给的）；跑部件的作业只有 `contents: read`，token 不进部件命令的环境，只在 `plan-token` 打开时以只读的形式进 plan 命令；checkout 不保存凭据。注意：部件命令以 CI 账户运行（design T13），它能改写同一个作业里之后的步骤用到的文件，所以同一作业里的重试决定、作业的输出并不防部件命令本身（plan 命令对 plan 作业的输出也一样）；结论以 verdict 读到的 artifact 和主机记录为准。手动取消的运行不发最终状态，它发过的 pending 留到下一次运行。
+`pull_request_target`、fork 的 PR 在 plan 作业的 guard 里就跳过；**公开仓库**现在不能调用 `ci.yml`：它的 `public` 作业在 GitHub 托管的 runner 上直接失败（公开仓库的 CPU 部件走托管 runner、GPU 走隔离的池，等决定 18 的 C2 实现）；事件的 payload 里没有仓库信息时（如 `schedule`），plan 作业的 `contract` 步骤用 API 查仓库是否私有，公开的就结束运行（verdict 作业发 `error`），head 的任何东西都不运行。部件在 GitHub 的队列里一直没有 runner 接的情况，由定时调用的 `sweep.yml` 限制（§10；GitHub 不能取消单个作业，它取消整个运行并发 `error`）；不调用它的仓库没有上限（GitHub 的 24 小时），只能靠自己的 sweeper。一个工作流里只调用一次 `ci.yml`（定位丢失尝试的主机时按作业名找 `part <id> / first`）。运行被取消（同一个 PR 推了新 head）时不重试、不发结论，新 head 的运行会发。不要把 secret 传进来：`ci.yml` 不接收也不转发任何 secret；plan 作业的 token 只读（`contents`、`statuses`、`actions`、`pull-requests` 都是 `read`），所以调用方要给 `pull-requests: read`（GitHub 拒绝被调用的作业要的权限超过调用方给的）；跑部件的作业只有 `contents: read`，token 不进部件命令的环境，只在 `plan-token` 打开时以只读的形式进 plan 命令；checkout 不保存凭据。注意：部件命令以 CI 账户运行（design T13），它能改写同一个作业里之后的步骤用到的文件，所以同一作业里的重试决定、作业的输出并不防部件命令本身（plan 命令对 plan 作业的输出也一样）；结论以 verdict 读到的 artifact 和主机记录为准。手动取消的运行不发最终状态，它发过的 pending 留到下一次运行。
 
 **自己组合的部分**（`ci.yml` 不做，design §4.8）：`ci.yml` 只管测试部件和它们的结论。
 
 - 所有部件之后再跑、读部件 artifact 的作业（合并覆盖率、bisect、报告、上传影响图）：在调用 `ci.yml` 的作业后面另加一个作业（`needs: ci`，`if: always()` 视需要），用 `actions/download-artifact` 读部件的 `artifacts`（§8）、用 `part` action 在 `ci-light` 上跑命令；它不计入 verdict。
 - 指定集群目标（`target`）、`exclude` 之类的强制选择：`ci.yml` 不提供，需要时按 §3 自己组合 `claim`、`part`、`salvage`、`verdict`，只写能力标签。
 - 自己格式的 summary：在自己的作业里写；`ci.yml` 的 summary 格式是固定的。`ci.yml` 自己用的 `actions/flow` 是它内部的步骤，不要在自己的工作流里调用。
+
+## 10. 定时 sweeper `sweep.yml`（design §4.10、决定 19.9，issue #213）
+
+部件的作业在 GitHub 的队列里一直没有 runner 接（没有带这些标签的 runner 在听，或者决定 19.9 的黑洞：一个在听却从来接不到作业的 runner），GitHub 要等 24 小时才结束它，运行的结论也跟着等。计划的 `queue_minutes`（§8）管不到这一段：它只限制 runner 接走作业**之后**在主机上等槽位或租约的时间（而且要读它，每次 sweep 对每个运行都要列一次 artifact、下载一次）。`sweep.yml` 给这一段一个上限：仓库定时调用它，它找出指定工作流里在 GitHub 队列里等了超过 `minutes` 分钟的作业，取消那个运行（GitHub 不能取消单个作业，只能取消整个运行），并在运行的 context 上发 `error`。
+
+```yaml
+name: ci-sweep
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+jobs:
+  sweep:
+    uses: chaobrain/ci-runners/.github/workflows/sweep.yml@v1
+    permissions: { actions: write, statuses: write }
+    with:
+      workflow: ci.yml
+      context: myproj/ci
+      minutes: 60
+```
+
+**输入**：`workflow`（必填，要扫的工作流文件名，即调用 `ci.yml` 的那个，如 `ci.yml`；字母、数字和 `._-`，以 `.yml` 或 `.yaml` 结尾）；`context`（必填，那个工作流发状态用的 context）；`minutes`（可选，数字，5 到 1440，默认 60：一个作业在 GitHub 队列里最多等多久）。调用方的作业要给 `actions: write`（取消运行）和 `statuses: write`（发状态），别的都不要：被调用的作业要的权限超过调用方给的，GitHub 会拒绝整个运行。
+
+**谁能触发**：只有 `schedule`，或者默认分支上的 `workflow_dispatch`（手动试一次）；别的事件、别的分支上，作业直接跳过，不报错，也不占 runner。它不 checkout、不下载 artifact，不跑任何 head 的东西；输入只经 `env:` 进 shell。
+
+**在哪跑，花多少**：所有调用方都在 GitHub 托管的 `ubuntu-latest` 上跑。原因：作业的 token 能取消运行、发状态，托管 VM 上从没跑过任何 head 的代码（`ci-light` 上跑过 plan 命令，也就是 head 的代码，以 runner 的账户运行，head 留下的进程可能读到之后作业的 token）；而且它要在我们的池子出问题时也能跑，这正是它存在的场合。公开仓库本来只能用托管 runner，这正好是。代价：每次 sweep 一个不到一分钟的托管作业，按一分钟计：每 15 分钟一次，每月约 4 × 24 × 30 = 2,880 分钟；每 30 分钟一次约 1,440 分钟。私有仓库的托管分钟算进组织的额度（公开仓库不算），建议每 15 到 30 分钟一次，`minutes` 比最长的正常排队长一些（默认 60）。cron 避开整点：GitHub 在整点排的定时运行最多，延迟也最大。
+
+**每次 sweep 做什么**：
+
+1. 列出 `workflow` 排队中（`queued`）和进行中（`in_progress`）的运行：创建在上限之前的（`created=<T`）和之后的分开列，各读一页 100 个（更多的只在日志和 summary 里报告，不再翻页），所以年轻的运行挤不掉老的；年轻的只用来看同一个 head 上有没有更新的运行，它们的作业不读。
+2. 读每个老运行最新一次尝试的作业：状态是 `queued`、创建超过 `minutes` 分钟的作业算卡住。只算 `queued`：`waiting`、`pending`、`requested` 是 environment 的审批或并发组的等待，换 runner 也不会结束。被 `max-parallel` 压着的矩阵作业显示成 `pending` 还是 `queued`，**还没有核实**：发布时由维护者先查清楚，在那之前不要定时调用它。
+3. 运行的 head：`push` 和 `pull_request` 的运行就是它的 `head_sha`（`ci.yml` 的默认 sha；这假定调用方在这两种事件上不传 `sha` 输入），否则要那个 sha 上已经有这个运行发的状态（`target_url` 是这个运行）。都不是（比如用 `ci.yml` 的 `sha` 输入手动派发另一个 commit）：不知道它测的是哪个 head，只报告，不取消（取消了，那个 head 的 `pending` 就永远留着）。
+4. 读 head 的状态（第一页 100 个，最新的在前；合并状态 `GET .../status` 不带发布者，所以不用它），只算 job token 的身份 `github-actions[bot]` 发的；这个运行在本次尝试开始（`run_started_at`）之前发的状态属于更早的尝试，当作没有。然后：同一个 head 上有这个工作流更新的运行（排队中或进行中），或者 `context` 最新的状态是**别的运行**的：只取消，不发（更新的运行拥有这个 context；verdict 作业跳过被取消的运行）；没有状态，或者是这个运行自己的 `pending`：先发 `error`，再取消；这个运行自己的 `failure`（有部件红了）或别的最终状态：只取消（红的就是最终状态）；这个运行自己之前被 sweep 发的 `error`（上次的取消没生效）：`force-cancel`，不再发。
+5. 先发后取消：sweep 在两步之间停下（到了上限、取消失败）时，`error` 已经在了，下一次 sweep 看到运行还在列表里、上面是自己的 sweep `error`，就 `force-cancel`。取消被 GitHub 回 409（运行已结束，或者取消不生效）时，接着 `force-cancel` 一次。
+
+**发的状态**：`error`，`target_url` 是被取消的运行，描述是 `queued past <N> min: part <id> on <labels>`；卡住的是 plan 作业时是 `queued past <N> min: plan on <labels>`；几个作业卡住时是 `queued past <N> min: <n> jobs, first part <id> on <labels>`（最早排队的那个）。`<labels>` 是作业的标签去掉 `self-hosted`，用 `+` 连起来。作业名和标签来自 head 的工作流文件，所以只用校验过的部分：部件 id 要像 `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`，否则写 `a job`；标签都要像 `[a-z0-9][a-z0-9-]{0,63}`，否则不写 `on <labels>`；总长不超过 140 个字符。运行被取消了，verdict 作业不再发任何状态，所以这个 `error` 就是这次运行的最终状态。自己的重新派发按描述的开头 `queued past ` 认它：它和测试红（`failure`）、`infrastructure: `、`plan: ` 开头的 `error` 都不一样，标签说明是哪个池子没有接；重新派发（或者重跑那个被取消的运行）时 claim 读到的是 `error`，会照常运行。
+
+**上限**：每次 sweep 最多 50 个请求（重试也算）、取消 10 个运行、8 分钟（作业的 `timeout-minutes` 是 10）；GitHub 回的 `X-RateLimit-Remaining` 低于 100 时也停（job token 每小时 1,000 次调用，和 `ci.yml` 自己的调用共用）。到了任一上限，已做的保留，作业以状态 1 结束（红）。只有剩下的请求够做完一整套（发状态、取消、可能的 `force-cancel`）才会动一个运行。GitHub 读不到、发状态失败时作业也是红的，那个运行不会被取消（没有 `error` 就不取消），下一次 sweep 再看。每次 sweep 在日志里每个处理过或留下的运行一行，summary 里一张表。
+
+**从哪个版本起**：`v1.18.0` 之后的第一个发布；`v1` 指向它之前，`sweep.yml@v1` 不存在，调用会失败。

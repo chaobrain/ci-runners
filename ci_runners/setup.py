@@ -100,22 +100,39 @@ EGRESS_LINE = 'restrict,port-forwarding,permitopen="127.0.0.1:{port}",permitlist
 SSH_CONFIG_LINE = re.compile(r'\s*(?:#.*)?|\s*(?:HostName|User|Port)[ \t=]+[A-Za-z0-9._-]+\s*|Host egress\s*')
 
 
-def _runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str, int | None]]:
+def _runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str, int | None, int | None]]:
+    """``(name, labels, class, card, slot)`` of this host's runners: ``slot`` is the runner's
+    index in its pool's ``slot.cpus`` (from 0, in the order of the pool's runners: its cards'
+    order in ``gpus`` for a per-card pool), or None where the pool has no ``slot`` (16.2)."""
     out = []
     for pool, v in inv.host['pools'].items():
         spec = v if isinstance(v, dict) else {'count': v}
         cls = inventory.pool_class(inv.host, pool)  # the pool's key unless it names its class (12.5)
         labels = inventory.pool_labels(inv, cls) or list(dict.fromkeys([pool, inv.this]))
+        slotted = 'slot' in spec
         if spec.get('per_card'):
-            for card in inv.host['gpus']:
-                out.append((f'{inv.this}-gpu{card}', [*labels, f'{inv.this}-gpu{card}'], cls, card))
+            for i, card in enumerate(inv.host['gpus']):
+                out.append((f'{inv.this}-gpu{card}', [*labels, f'{inv.this}-gpu{card}'], cls, card,
+                            i if slotted else None))
         else:
             for i in range(1, spec['count'] + 1):
-                out.append((f'{inv.this}-{pool}-{i}', labels, cls, None))
-    names = [n for n, _, _, _ in out]
+                out.append((f'{inv.this}-{pool}-{i}', labels, cls, None, i - 1 if slotted else None))
+    names = [r[0] for r in out]
     if len(set(names)) != len(names):
         raise ValueError('two runners of this host have the same name')
     return out
+
+
+def check_units(release: str) -> None:
+    """Every unit the release ships is one setup installs, and every timer one it enables:
+    a unit shipped but left out of ``UNITS`` or ``TIMERS`` would never reach a host (issue
+    #49: the env-refresh units), so each host's plan, and so its apply, refuses the release
+    instead. ``ci-project.slice`` is the template of the projects' slices."""
+    shipped = sorted(os.listdir(os.path.join(release, 'setup', 'units')))
+    left = [n for n in shipped if n not in UNITS and n != 'ci-project.slice']
+    left += [n for n in UNITS if n.endswith('.timer') and n not in TIMERS]
+    if left:
+        raise ValueError(f'the release ships units setup would not install or enable: {", ".join(left)}')
 
 
 def timers(h: dict) -> list[str]:
@@ -129,7 +146,7 @@ def runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str]]:
     labelled with the pool and the host role, or with the pool's own ``labels``; a
     ``per_card`` pool has one runner per card, ``<role>-gpu<N>``, labelled also
     ``<role>-gpu<N>``. The class is the pool's ``class``, else its key (decision 12.5)."""
-    return [(n, labels, cls) for n, labels, cls, _ in _runners(inv)]
+    return [(n, labels, cls) for n, labels, cls, _, _ in _runners(inv)]
 
 
 def python_of(inv: inventory.Inventory) -> str:
@@ -170,7 +187,7 @@ def runners_now(inv: inventory.Inventory) -> str:
     """The plan's line on standard error: how many of the inventory's runners have a live
     process now, and the names of those without (decision 15.5). Not part of the plan."""
     from ci_runners import pool
-    names = [n for n, _, _, _ in _runners(inv)]
+    names = [r[0] for r in _runners(inv)]
     alive = pool.runners_alive(os.path.join(inv.host['data'], 'actions-runner'))
     if alive is None:
         return '# runners now: not known (/proc hides them here)'
@@ -247,10 +264,11 @@ def check_tunnel(etc: str) -> None:
         raise ValueError(f'{d}/ssh_config must have one "Host egress" with its HostName')
 
 
-def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = None) -> str:
+def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = None, slot: int | None = None) -> str:
     """A runner's ``.env`` (design §5.3): the runner app reads it into its environment,
     which its hooks and its jobs' steps inherit. A per-card runner names its card in
-    ``CI_RUNNER_CARD``."""
+    ``CI_RUNNER_CARD``; a runner of a pool with a ``slot`` table its slot in
+    ``CI_RUNNER_SLOT`` (decision 16.2; nothing reads it until R2)."""
     h = inv.host
     hooks = hookcopy.hooks_dir(h)  # the copies in the private /tmp on a 3090 host (decision 13.5)
     lines = []
@@ -266,6 +284,8 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
         lines.append(f'CI_RUNNER_POOL_LABELS={",".join(own)}')
     if card is not None:
         lines.append(f'CI_RUNNER_CARD={card}')
+    if slot is not None:
+        lines.append(f'CI_RUNNER_SLOT={slot}')
     if h.get('python'):
         lines.append(f'CI_RUNNERS_PYTHON={h["python"]}')
     lines.append('LANG=C.UTF-8')
@@ -848,6 +868,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
             return
         _file(plan, path, content, 0o644)
 
+    check_units(release)
     for name in UNITS:
         if (name.startswith('ci-orgsync') and not h.get('orgsync') or name == 'ci-tunnel.service' and 'tunnel' not in h
                 or name == 'ci-hooks.service' and not hookcopy.used(h)):
@@ -920,7 +941,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
         unit = f'user@{"<uid>" if uid is None else uid}.service'
         private = private_state(h, uid)
         mark = 'done ' if not private else 'to do'
-        names = [f'ci-runner@{n}.service' for n, _, _, _ in _runners(inv)]
+        names = [f'ci-runner@{r[0]}.service' for r in _runners(inv)]
         plan.add(f'  {"done " if uid is not None and all(p != path for p, _ in private) else "to do"}  write {path} '
                  f'mode 644 owner root, sha256 {_sha(text.encode())[:16]} (decision 12.16):')
         for line in text.splitlines():
@@ -951,7 +972,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
     rs = _runners(inv)
     # every unit the plan enables is wanted by its target, on every host (decision 15.5): a
     # missing link (a 3090 host's root step disables the runners, 12.16) plans the enable again
-    missing = [u for u, target in wanted(h, [n for n, _, _, _ in rs])
+    missing = [u for u, target in wanted(h, [r[0] for r in rs])
                if not os.path.lexists(os.path.join(unit_dir, f'{target}.wants', u))]
     egress = ['ci-tunnel.service'] if 'tunnel' in h else []
     # egress units already running with an older file: enable --now leaves them as they are
@@ -972,7 +993,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
     plan.add(f'runners (actions/runner {RUNNER_VERSION}, sha256 {RUNNER_SHA256[:16]}, {via}):')
     cache = os.path.join(base, 'state', 'cache', os.path.basename(RUNNER_URL))
     waited = 'tunnel' not in h
-    for name, labels, cls, card in rs:
+    for name, labels, cls, card, slot in rs:
         rdir = os.path.join(data, 'actions-runner', name)
         if runner_complete(rdir):
             plan.add(f'  keep   {rdir}/ (runner app present)')
@@ -982,7 +1003,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
                 plan.add(f'  wait   127.0.0.1:{t["http_port"]} (tunnel)', kind='wait', ports=[t['http_port']])
                 waited = True
             plan.add(f'  unpack {RUNNER_URL} -> {rdir}/', kind='runner', path=rdir, cache=cache, port=port)
-        _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc, card), 0o600)
+        _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc, card, slot), 0o600)
         plan.add(f'         labels {",".join(labels)}; work {os.path.join(data, "ci-work", name)} (at registration)')
     if plan.actions or missing:  # nothing changed and all enabled: a second apply is a no-op
         plan.add('systemd --user (timers, runners):')
@@ -994,7 +1015,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
             cmds.append(['systemctl', '--user', 'enable', '--now', 'ci-hooks.service'])
             if hooks_changed:  # a reload, not a restart: a runner starting meanwhile would fail its check
                 cmds.append(['systemctl', '--user', 'reload', 'ci-hooks.service'])
-        cmds.append(['systemctl', '--user', 'enable', *[f'ci-runner@{n}.service' for n, _, _, _ in rs]])
+        cmds.append(['systemctl', '--user', 'enable', *[f'ci-runner@{r[0]}.service' for r in rs]])
         for c in cmds:
             plan.add(f'  run    {" ".join(c)}', kind='run', argv=c)
     plan.add('  (a runner starts at its registration: setup/register.sh, run by the lead)')

@@ -4,6 +4,7 @@ tree; the systemctl commands are recorded, not run."""
 from __future__ import annotations
 
 import contextlib
+import difflib
 import errno
 import glob
 import hashlib
@@ -195,6 +196,66 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         self.assertIn('host_lock', text)
         inv.write_text(text + '[hosts.hb.proxy]\nclient = "/usr/bin/x -c /tmp/y"\nhttp_port = 20809\n')
         self.assertEqual(setup.build(str(self.etc)).text(), before)
+
+    def test_the_keys_of_decision_16_plan_nothing_but_the_slot_line(self):
+        """Decision 16.3 (R1): a pool's ``audience`` and a host's ``presence`` plan nothing,
+        and a pool's ``slot`` only ``CI_RUNNER_SLOT=<i>`` in its runners' ``.env``: every
+        other byte of the plan is the plan without them (a released host layer's)."""
+        inv = self.etc / 'inventory.toml'
+        before = setup.build(str(self.etc)).text()
+        env = self.data / 'actions-runner'
+        today = (f'ACTIONS_RUNNER_HOOK_JOB_STARTED={self.data}/ci-runners/hooks/job-started.sh\n'
+                 f'ACTIONS_RUNNER_HOOK_JOB_COMPLETED={self.data}/ci-runners/hooks/job-completed.sh\n'
+                 f'CI_RUNNER_CLASS=part\nCI_RUNNERS_ETC={self.etc}\nLANG=C.UTF-8\n')
+        self.assertEqual(setup.env_file(inventory.load(inv.read_text()), 'part', str(self.etc)), today)
+        old = inv.read_text()
+        inv.write_text(old.replace('slots = 2\n', 'presence = { enabled = false, tick_seconds = 20, '
+                                   'infra_failures = 3 }\nslots = 2\n', 1).replace(
+            'pools = { light = 1, part = 2 }', 'pools = { light = { count = 1, audience = "private" }, part = 2 }'))
+        self.assertEqual(setup.build(str(self.etc)).text(), before)  # byte-equal
+        inv.write_text(old.replace('part = 2 }', 'part = { count = 2, slot = { cpus = ["0-3", "4-7"], workers = 4, '
+                                   'memory = "40G", speed = 1.5 } } }'))
+        text = setup.build(str(self.etc)).text()
+        self.assertEqual(self.apply(text), 0)
+        self.assertEqual((env / 'hb-part-1' / '.env').read_text(), today.replace('LANG=', 'CI_RUNNER_SLOT=0\nLANG='))
+        self.assertEqual((env / 'hb-part-2' / '.env').read_text(), today.replace('LANG=', 'CI_RUNNER_SLOT=1\nLANG='))
+        self.assertNotIn('CI_RUNNER_SLOT', (env / 'hb-light-1' / '.env').read_text())  # a pool without slot
+        changed = [d for d in difflib.ndiff(before.splitlines(), text.splitlines()) if d[:1] in '+-']
+        self.assertEqual(len(changed), 6)  # per slotted runner: its .env's sha256 line and the slot line
+        self.assertTrue(all('CI_RUNNER_SLOT=' in d or '/.env mode 600 sha256' in d for d in changed), changed)
+
+    def test_the_release_s_units_are_all_installed(self):
+        """Issue #49: a unit the release ships but setup leaves out (the env-refresh units of
+        v1.4.0) never reached a host. Each host's plan, and so its apply, now refuses such a
+        release; and a host whose apply predates units gets them, timer enabled, from its plan."""
+        setup.check_units(str(ROOT))  # this release: every unit installed, every timer enabled
+        release = pathlib.Path(self.tmp.name) / 'release'
+        shutil.copytree(ROOT / 'hooks', release / 'hooks')
+        shutil.copytree(ROOT / 'setup' / 'units', release / 'setup' / 'units')
+        (release / 'setup' / 'units' / 'ci-new.timer').write_text('[Timer]\n')
+        with mock.patch.dict(os.environ, {'CI_RUNNERS_RELEASE': str(release)}):
+            with self.assertRaisesRegex(ValueError, 'ci-new.timer'):
+                setup.build(str(self.etc))
+        with mock.patch.object(setup, 'TIMERS', tuple(t for t in setup.TIMERS if 'envrefresh' not in t)):
+            with self.assertRaisesRegex(ValueError, 'ci-envrefresh.timer'):  # shipped, installed, never enabled
+                setup.check_units(str(ROOT))
+        # a host applied before the env-refresh units (issue #49's reproduction)
+        first = setup.build(str(self.etc)).text()
+        self.assertEqual(self.apply(first), 0)
+        units = self.home / '.config' / 'systemd' / 'user'
+        for f in ('ci-envrefresh.service', 'ci-envrefresh.timer', 'timers.target.wants/ci-envrefresh.timer'):
+            (units / f).unlink()
+        text = setup.build(str(self.etc)).text()
+        for want in (f'write  {units}/ci-envrefresh.service', f'write  {units}/ci-envrefresh.timer',
+                     'not enabled now: ci-envrefresh.timer',
+                     'run    systemctl --user enable --now ci-reaper.timer ci-envrefresh.timer ci-hostload.timer\n'):
+            self.assertIn(want, text)
+        self.assertEqual(self.apply(first), 1)  # an approved plan that is not this one is refused
+        self.assertFalse((units / 'ci-envrefresh.timer').exists())
+        self.assertEqual(self.apply(text), 0)
+        self.assertTrue((units / 'timers.target.wants' / 'ci-envrefresh.timer').is_symlink())
+        self.assertIn('ci-run env refresh --all', (units / 'ci-envrefresh.service').read_text())
+        self.assertEqual(setup.build(str(self.etc)).actions, [])
 
     def test_the_runner_app_is_checked_and_unpacked_whole(self):
         t = pathlib.Path(self.tmp.name)
@@ -408,6 +469,20 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
                                                                      'more': {'per_card': True, 'class': 'gpu'}}}})
         with self.assertRaisesRegex(ValueError, 'same name'):
             setup.runners(two)  # both per-card pools would name their runners hx-gpu0, hx-gpu3
+
+    def test_a_slot_names_each_runner_s_index(self):
+        """Decision 16.2: a pool's ``slot`` gives each runner its index in ``slot.cpus``, in
+        the order of the pool's runners (a per-card pool's: its cards' order in ``gpus``)."""
+        text = self.inv.read_text().replace(
+            'cards = { per_card = true, class = "gpu", labels = ["hx-gpu"] }',
+            'cards = { per_card = true, class = "gpu", labels = ["hx-gpu"], slot = { cpus = ["0-3", "4-7"], '
+            'workers = 4, memory = "64G", speed = 1.0, isa = "x86-64-v3" } }')
+        inv = inventory.load(text)
+        self.assertEqual([r[3:] for r in setup._runners(inv)], [(None, None), (None, None), (0, 0), (3, 1)])
+        self.assertEqual(setup.runners(inv), setup.runners(inventory.load(self.inv.read_text())))  # names, labels
+        self.assertEqual(setup.env_file(inv, 'gpu', '/e', 3, 1).splitlines()[5:7], ['CI_RUNNER_CARD=3', 'CI_RUNNER_SLOT=1'])
+        self.assertIn('CI_RUNNER_SLOT=0\n', setup.env_file(inv, 'gpu', '/e', 0, 0))  # slot 0 is a slot
+        self.assertEqual(setup.env_file(inv, 'gpu', '/e', 3), setup.env_file(inventory.load(self.inv.read_text()), 'gpu', '/e', 3))
 
     def test_a_3090_host_s_runners(self):
         """Decision 12.5, design §5.1: the 3090 pools, each labelled with the host's own

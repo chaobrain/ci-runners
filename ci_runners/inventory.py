@@ -42,8 +42,18 @@ LABEL = re.compile(r'[a-z0-9][a-z0-9-]{0,39}\Z')
 RESERVED_LABELS = frozenset({'self-hosted', 'linux', 'x64', 'light', 'part', 'compile', 'nightly', 'gpu', 'multi',
                              'slurm'})
 #: what a pool's runners run with, besides the count (RUN-5), and their class where it is
-#: not the pool's key (decision 12.5)
-POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class'})
+#: not the pool's key (decision 12.5); from RUN-10's R1 (decision 16.3) also a pool's ``slot``
+#: (16.2) and ``audience`` (16.7), checked for shape and read by nothing but setup's inert
+#: ``CI_RUNNER_SLOT`` until R2 and P1, so that a host's inventory may gain them before then
+POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class', 'slot', 'audience'})
+#: a pool's ``slot`` table (decision 16.2): key -> required
+SLOT_KEYS = {'cpus': True, 'workers': True, 'memory': True, 'speed': True, 'isa': False}
+#: the runner audiences (decision 16.7): every pool is ``private`` but the public pool's
+AUDIENCES = frozenset({'private', 'public'})
+#: a slot's ``isa``: the name of the highest instruction-set level a part may use
+ISA = re.compile(r'[a-z0-9][a-z0-9_.-]{0,31}\Z')
+#: the highest CPU number a cpuset of a slot may name
+MAX_CPU = 65535
 #: the classes whose runners lease one card each, the runner's own: a per-card pool's
 PER_CARD_CLASSES = frozenset({'gpu'})
 
@@ -76,13 +86,46 @@ def _num(v: object) -> bool:
     return type(v) in (int, float) and v > 0
 
 
+def cpu_ranges(v: object) -> list[tuple[int, int]] | None:
+    """A cpuset list such as ``0-3,8-9`` as its ``(first, last)`` ranges, or None where it
+    is not one (a range downwards, a CPU above MAX_CPU). Pure."""
+    if not isinstance(v, str) or not _CPUS.match(v):
+        return None
+    out = []
+    for part in v.split(','):
+        lo, _, hi = part.partition('-')
+        r = (int(lo), int(hi or lo))
+        if r[0] > r[1] or r[1] > MAX_CPU:
+            return None
+        out.append(r)
+    return out
+
+
+def _slot(v: object) -> bool:
+    """A pool's ``slot`` table (decision 16.2): ``cpus``, one cpuset per runner, no CPU in
+    two of them; ``workers``, a count; ``memory``, a size; ``speed``, a positive number; and
+    an optional ``isa``. Accepted and inert until R2 (16.3); its count is checked in load."""
+    if not isinstance(v, dict) or set(v) - set(SLOT_KEYS) or any(r and k not in v for k, r in SLOT_KEYS.items()):
+        return False
+    sets = [cpu_ranges(c) for c in v['cpus']] if isinstance(v['cpus'], list) else []
+    if not sets or None in sets:
+        return False
+    ranges = sorted(r for s in sets for r in s)
+    if any(a[1] >= b[0] for a, b in zip(ranges, ranges[1:])):
+        return False  # two cpusets share a CPU (or one names a CPU twice)
+    return (_int(v['workers'], 1) and isinstance(v['memory'], str) and bool(_SIZE.match(v['memory']))
+            and _num(v['speed']) and ('isa' not in v or isinstance(v['isa'], str) and bool(ISA.match(v['isa']))))
+
+
 def _pool(v: object) -> bool:
     """A pool: a runner count, or a table (RUN-5) of ``count``, ``labels`` (the runners'
     labels instead of ``<pool>, <role>``) and ``per_card`` (one runner per card of the
-    host's ``gpus``, with no ``count``)."""
+    host's ``gpus``, with no ``count``); from R1 also ``slot`` and ``audience`` (16.3)."""
     if _int(v, 1):
         return True
     if not isinstance(v, dict) or not v or set(v) - POOL_KEYS:
+        return False
+    if 'slot' in v and not _slot(v['slot']) or 'audience' in v and v['audience'] not in AUDIENCES:
         return False
     per_card = v.get('per_card', False)
     if type(per_card) is not bool or per_card == ('count' in v):
@@ -112,6 +155,16 @@ BUSY_KEYS = {'window_minutes': int, 'lock_minutes': int, 'cpu_cores': float, 'me
 def _busy(v: object) -> bool:
     return isinstance(v, dict) and set(v) <= set(BUSY_KEYS) and all(
         (_int(x, 1) if BUSY_KEYS[k] is int else _num(x)) for k, x in v.items())
+
+
+#: a host's ``presence`` table (decision 16.4): ``presence = { enabled = false }`` is its
+#: rollback; accepted and inert until R3 (16.3)
+PRESENCE_KEYS = {'enabled': bool, 'tick_seconds': int, 'infra_failures': int}
+
+
+def _presence(v: object) -> bool:
+    return isinstance(v, dict) and set(v) <= set(PRESENCE_KEYS) and all(
+        (type(x) is bool if PRESENCE_KEYS[k] is bool else _int(x, 1)) for k, x in v.items())
 
 
 def peer_labels(inv: 'Inventory', cls: str) -> list[str] | None:
@@ -162,6 +215,8 @@ HOST_KEYS = {
     'peer_labels': (lambda v: _peer_labels(v), False),
     # the busy rule's thresholds (decision 13.2); each optional, with the rule's defaults
     'busy': (lambda v: _busy(v), False),
+    # the presence controller's switch and bounds (decision 16.4): accepted, inert until R3 (16.3)
+    'presence': (lambda v: _presence(v), False),
 }
 #: the first path's keys (decision 11.12): accepted and ignored in v1.3, so that a host's
 #: inventory needs no change in the release's window (design §9); nothing reads them
@@ -235,6 +290,11 @@ def load(text: str) -> Inventory:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: per_card for a class of {sorted(PER_CARD_CLASSES)} only')
             if cls in seen:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: class {cls} is also the class of {seen[cls]}')
+            if isinstance(v, dict) and 'slot' in v:  # one cpuset per runner (16.2)
+                n = len(h['gpus']) if v.get('per_card') else v['count']
+                if len(v['slot']['cpus']) != n:
+                    raise InventoryError(f'hosts.{role}.pools.{pool}: slot.cpus has {len(v["slot"]["cpus"])} '
+                                         f'cpusets for {n} runners')
             seen[cls] = pool
         if 'local_accounts' in h:  # shared with local accounts: root's step names /tmp only
             for k, p in h['files'].items():
@@ -287,7 +347,7 @@ def pool_labels(inv: 'Inventory', cls: str) -> list[str] | None:
 #: string values that are not inventory: they appear in the design already. Every other string value of the inventory and the policy is denied.
 PUBLIC_KEYS = frozenset({'this', 'memory_max', 'cpus', 'compile_cpus', 'host_lock', 'slot_lock', 'slot_queue', 'bot',
                          'visibility', 'extra_events', 'labels', 'default_project', 'class', 'classes',
-                         'peer_labels'})
+                         'peer_labels', 'memory', 'isa', 'audience'})
 #: ``tunnel.direct`` values the repository holds (the example, the tests): public, so not
 #: denied. Every other ``direct`` value is denied, as any inventory value is.
 #: the policy's ``[org] name`` is the org's, public as the repository is.

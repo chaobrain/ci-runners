@@ -36,7 +36,7 @@ P_COMPILE = policy.load(POLICY.replace('id = 1001\n', 'id = 1001\nclasses = ["co
 
 REPOS = {'chaobrain/brainkit': '1001', 'chaobrain/brainevent': '2002'}
 #: the public repository, as a payload names it
-PUBLIC = {'id': 2002, 'full_name': 'chaobrain/brainevent'}
+PUBLIC = {'id': 2002, 'full_name': 'chaobrain/brainevent', 'private': False}
 
 
 def event(name: str) -> dict:
@@ -356,6 +356,12 @@ class Public(unittest.TestCase):
         self.assertEqual(reason(paused, pub_env(), public('pr_same_repo')), 'paused')
 
     def test_the_payload_must_name_the_public_repository(self):
+        for private in (True, None, 'false', 0):  # its payload must say it is public
+            ev = public('pr_same_repo')
+            ev['repository'] = {**ev['repository'], 'private': private}
+            if private is None:
+                del ev['repository']['private']
+            self.assertEqual(reason(P_PUB, pub_env(), ev), 'repository', private)
         ev = public('pr_same_repo')
         ev['repository'] = {'id': 1001, 'full_name': 'chaobrain/brainkit'}
         self.assertEqual(reason(P_PUB, pub_env(), ev), 'repository-id')

@@ -109,11 +109,14 @@ class Merge(unittest.TestCase):
         private_only = {k: v for k, v in SNAP['repositories'].items() if k != 'chaobrain/brainevent'}
         m = policy.with_snapshot(policy.load(text), snap(repositories=private_only), NOW)
         self.assertTrue(m.repos['chaobrain/brainevent'].org_members)
+        public = push('dave', 'chaobrain/brainevent', 2002)
+        public['repository']['private'] = False
         e = env('chaobrain/brainevent', '2002', 'push', 'dave', 'gpu')
         e.update(CI_RUNNER_AUDIENCE='public', GITHUB_REF_PROTECTED='true')
-        self.assertEqual(reason(m, e, push('dave', 'chaobrain/brainevent', 2002)), 'ok')
+        self.assertEqual(reason(m, e, public), 'ok')
         e.update(GITHUB_ACTOR='mallory', GITHUB_TRIGGERING_ACTOR='mallory')
-        self.assertEqual(reason(m, e, push('mallory', 'chaobrain/brainevent', 2002)), 'actor')
+        public['pusher']['name'] = public['sender']['login'] = 'mallory'
+        self.assertEqual(reason(m, e, public), 'actor')
         # not opted in, or the snapshot says it is private now: the hand-kept actors alone
         for t, repos in ((POLICY2, private_only), (text, SNAP['repositories'])):
             m = policy.with_snapshot(policy.load(t), snap(repositories=repos), NOW)

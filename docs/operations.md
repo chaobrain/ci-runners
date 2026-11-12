@@ -38,7 +38,7 @@
    - `pools` 给出每个池子的 `labels`，不要用 `light`/`part` 这种裸类名；
    - 需要隧道时加 `[hosts.<role>.tunnel]`，并把密钥、`ssh_config`、`known_hosts` 放进 `etc/tunnel/`。
 
-   再写 `policy.toml`，格式见 `setup/policy.org.example.toml`，schema 2。
+   再写 `policy.toml`，格式见 `setup/policy.org.example.toml`，schema 2。**`[repositories]` 的条目从一台在用主机的 `policy.toml` 原样拷过来**（例如某个仓库的 `bot_dispatch`、`classes`）：少了一条，那个仓库的部分作业（例如合并机器人触发的）在这台主机上会在 "Set up runner" 被拒，整个 run 丢掉（2026-11-12 的事故，design 决定 19.6）。注册 runner 之前，在任一 CI 账户上跑 `ci-run pool status`，确认这台主机那一行没有 `warn: policy: repository entries differ ...`。
 4. **更新 deny 清单。** 运行 `python -m ci_runners.inventory deny <inventory> <policy>`，把输出的哈希合进仓库的 `tests/deny.sha256`，用一个 PR 提交，保证新主机的名字永远不会进入仓库。
 5. **看计划。** 手动运行时要先导出 `CI_RUNNERS_ETC` 和 `CI_RUNNERS_PYTHON`：
    ```
@@ -314,6 +314,20 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 - 这两种项只给 `pool status` 用，`pool run` 不会选它们。每个探测有自己的上限（主机 60 秒，集群 90 秒），并行运行，所以整张表在 plan 那一步的 120 秒之内出来。
 - 紧急关闭：以每个 CI 账户运行 `ci-run drain on --pool slurm`，或者把注册表移走（plan 会退回静态池并留一条说明）。
 
+**主机的层级 `tier`**（design 决定 19.1，R5b 起）：主机项（`local` 或 `ssh`，不能是集群）可以写 `tier = N`（1 到 99，1 最先）。后面层级的主机在前面层级有空闲、在听的 runner 时，把自己同类的空闲 runner 停着（presence 的 `tier` 原因，§15），所以作业先到前面的主机；不写 `tier` 的主机既不让也不被让（和以前一样），同一层级之间也不让。每个 CI 账户的注册表（每台主机的 presence 读自己账户的）和维护者自己的注册表要写一样的值。建议的值：h100 `1`，新主机（6000pro）`2`，3090a `3`，3090b `4`（它的计时 runner 从不让）。**顺序**（design 决定 19.9，主机上的步骤由负责人做）：
+1. 装 release、`v1` 移过去：这一步不改变任何行为；旧版本的加载器不认识 `tier` 键，会让这个账户的 `pool status`、路由和 presence 写容量文件失败，所以在这之前不能加这个键。
+2. 给 runner 加能力标签（`ci-cpu`、`ci-gpu`、`ci-gpu2`，和今天的主机标签、同类标签并存；16.1 的 H1 步骤，改各主机的 inventory 后 `ci-run setup`）。没有能力标签的池既不让也不提供。
+3. 演练，然后逐台主机打开 presence。
+4. h100 写 `tier = 1`：第 1 层不让给任何主机，这一步本身不改变什么。
+5. 后面层级的主机（6000pro `2`、3090a `3`、3090b `4`）写 `tier`。每台主机都要等写它自己主机标签的使用方（§15 保持一条列出的那些）都已经用保持、或已经改成能力标签之后才写。brainspike 的放置和一个金丝雀分支也写 6000pro，所以新主机和 3090 主机一样要等。
+6. `pool status` 警告的主机，把它们的 `[repositories]` 条目改成一样；要用保持的仓库，在它们的条目里加 `nightly` 类。
+
+在第 5 步之前什么都不会让，混合版本的机群和以前一样。
+
+**行里新加的字段**（design 决定 19.4，都是可选的，容量文件仍是 schema 1）：CI 账户自己的探测（本机，和强制探测）给主机行加上 `role`（inventory 的 `this`）、`pools`（每个 runner 池一项：`pool`、`class`、池里每个 runner 都带的 `labels`、`registered`/`online`/`free`；`listening`：空闲、卡上没有租约（我们自己部件的也算）、且 listener 持有一个已建立的 TCP 连接（IPv4 或 IPv6）的 runner 数（读得到 `/proc` 时才有）；`yielded`：presence 只因 `tier` 原因停着的 runner 数；有 `slot` 表的再加 `memory_gib`、`speed`、`workers`）、`policy`（`file`：`policy.toml` 的 SHA-256 前 12 位，和 hook 行里的 `policy=` 一样；`repositories`：它的 `[repositories]` 条目的摘要）和健康门：数据目录剩余空间低于 `disk_min_gib`，或 CI 账户对共享文件的访问缺失时，问题里加 `health: ...`，这台主机就不接部件。`policy.toml` 读不进来时问题是 `policy: does not load`（hook 会拒绝所有作业）。注册表里写了 `tier` 的主机行带 `tier`。主机有保持时行里带 `hold_until`（最晚的到期时间）和 `holds`（几个持有者，§15）。集群目标行加上 `memory_gib`、`max_minutes` 和一个不透明的 `partition`（机器名和分区名的哈希前 12 位，同分区的目标相同，分区名不出现）。维护者账户发代码过去的探测读不到 CI 账户的 inventory 和 policy，所以那样的行没有这些字段。
+
+**策略漂移的警告**（design 决定 19.6）：`pool status` 比较各主机行的 `policy.repositories`，多数主机持有的那个值是基准（并列就没有基准）；不一样的主机在问题一栏里显示 `warn: policy: repository entries differ from N other host(s)`，`--json` 里有 `policy_drift: true` 和 `warnings`。这只是警告，不是问题：这台主机仍算在线，它的 runner 照样接共享标签的作业；但任何主机都不会让给 `[repositories]` 条目和自己不一样的主机（那些作业它可能会拒）。处理：把多数主机的 `[repositories]` 条目拷过去（每个 CI 账户的 `etc/policy.toml`），下一次 `pool status` 警告就消失。
+
 **容量文件与 `--fast`**（design 决定 16.5，RUN-10 R4）：plan 时的路由（R5）读的数据。
 
 - `pool status` 每跑一次就把它的行写进 `state/capacity.json`（`etc` 旁边的 `state/`，模式 600，加锁后原子改名，带 `schema`）：每台机器一回答就写它那几行，每行带 `read_at`（读到的时间）；`local` 那一项还存下原始探测结果。主机行另有 `label_runners`：每个 runner 标签注册了几个实例、几个在线（有活的 `Runner.Listener`）、几个空闲（在线且没有 `Runner.Worker`，即没在跑作业）；`/proc` 看不到时在线和空闲是 `null`。集群目标行有 `jobs_free`。
@@ -377,9 +391,11 @@ cards = { per_card = true, class = "gpu", labels = ["<host>-gpu"], slot = { cpus
 
 ## 15. presence：按资源停启空闲的 runner（design 决定 16.4，RUN-10 R3 起）
 
-presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 runner 的资源暂时用不了时，它把这个空闲的 runner 停掉（`systemctl --user stop`），资源恢复后再启动。它以 CI 账户的 `ci-presence.timer` 运行，默认每 20 秒一次（`ci-run presence`，一次一个 tick），只读本机状态，不用令牌也不联网。
+presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 runner 的资源暂时用不了时，它把这个空闲的 runner 停掉（`systemctl --user stop`），资源恢复后再启动。它以 CI 账户的 `ci-presence.timer` 运行，默认每 20 秒一次（`ci-run presence`，一次一个 tick），读本机状态，不用令牌；只有注册表里有 `tier` 的主机，tick 才通过强制探测读前面层级主机的行（下面的 `tier` 原因）。
 
 - **原因**（每个 runner 单独判断）：它的卡被别人占用（卡上有不属于我们的计算进程，或不属于我们的显存达到 `busy.gpu_mib`），或卡的健康门不通过（每卡一个 runner 的主机上：温度达到 `max_temp_c` 或读不到）；没有空闲的 CI slot 给它（slot 总数减去不属于我们的进程持有的，再减去我们忙着的部件 runner 占的；剩下的 slot 先给每个池一个 runner，在线的优先、再按顺序；所以 2 个空闲 slot、某池 2 个在线 runner、另一池 1 个停着时，前者的第二个 runner 会被停一次，让后者启动，之后就稳定了）；它的 slot 的 CPU 被不属于我们的进程占着（1 秒的采样，达到这些 CPU 的一半算，降到四分之一以下才解除；cgroup v2 上不会超过整机忙时减去我们所有单元的 CPU 时间，所以我们自己的短进程不算）；主机或它的池被 drain，或主机的健康门不通过（数据盘剩余低于 `disk_min_gib`，或 CI 账户对共享文件的访问缺失，决定 15.2）；一个独占的计时部件在跑或在等：CPU 和 `compile_cpus` 重叠的 runner（有 slot 的看 slot 的 cpuset，没有 slot 的 `part` runner 看主机的 `cpus`）停。
+- **`tier` 原因**（design 决定 19.2，R5b 起，只在 tick 里判断）：本机在注册表里有 `tier` 时，`part`、`gpu`、`multi` 类的空闲 runner，只要带能力标签（`ci-` 开头的和 `mem-big`）且没有别的原因，在某台前面层级的主机"提供"这些标签时就让：那台主机的行是这个 tick 用快速强制探测现读的（`pool status --fast` 那样，2 秒内连上、1.5 秒内答完），没有问题项，45 秒内读过，`[repositories]` 条目和本机的一样，并且有一个池带全这个 runner 的能力标签、至少有一个 `listening` 的 runner。让的 runner 和别的原因一样，连续 2 个空闲 tick 后停；只因 `tier` 停着的 runner，在第一个没有原因的 tick 就启动（不用等 2 个）；presence 启动过的 runner 300 秒内不再让（不来回抖；手动或 15.5 的自动恢复启动的不在此列）；`/proc` 读不到时，让着的 runner 照样在没有原因的第一个 tick 启动。读不到、超时、太旧、有问题、旧版本（没有 `listening`）、条目不一样：都不让，已经让的在这个 tick 就启动。light、计时、集群驱动和 `home` runner 从不让。卡也一样：每张卡的 runner 看前面层级有没有在听的 `ci-gpu` runner，双卡 runner 看 `ci-gpu2`。`ExecCondition=` 不看这个原因（单元启动时不联网），手动重启的 runner 会在之后的 tick 里再让。前面层级最后一个在听的 runner 被占用后，大约 55 秒内（它的 tick 20 秒、本机的 tick 20 秒、runner 启动约 10–15 秒）后面层级的 runner 就上线接作业；同时，所有前面层级都没有空闲的后面层级会一起上线。**注意**：发到后面层级主机自己主机标签上的作业（金丝雀、组合工作流），在它让着的时候会一直等；`route.retry` 的 `cool-card`、`same-host` 遇到可能在让的主机时改走共享标签（§16）。这些作业要用下一条的保持。
+- **保持（hold）**（design 决定 19.8，R5b 起）：有些作业故意写某台后面层级主机自己的标签（brainspike 的 nightly 和它的 bisect、R6 之前 PR 与 main 层的部件、金丝雀、维护者的演练），那台主机让着的时候它们会一直等。`ci-run presence hold --minutes N`（1 到 720）让这台主机在 N 分钟内不因 `tier` 停 runner（已经让着的在下一个 tick 启动），`ci-run presence hold --release` 结束自己的保持，不带参数打印当前的保持。标记在 `state/hold.json`，每个持有者一项（作业的键是仓库、run id 和 attempt；维护者是 `maintainer`），所以一个 run 的 release 不会结束别人的。同一个 run 的作业共用一项：再设一次只会延长，不会缩短；`--release` 结束整个 run 的保持，所以只在 run 的最后一个作业里 release。到期自己失效（最长 720 分钟，标记里更晚的、不是有限数的到期时间都不算），最多 32 项。谁能设：维护者在 shell 里以 CI 账户运行；或者跑在这台主机 `home` runner（没有 `ci-` 标签的 light runner）上的作业，它的仓库在这台主机的 policy 里有条目、没暂停、id 一致（作业没有 `GITHUB_REPOSITORY_ID` 也拒绝）、`classes` 里有 `nightly`；其他一律拒绝并说明原因（退出 1）。用法错退出 2；标记写不进去或 inventory 读不到时打印一行原因，退出 3。保持期间这台主机的 runner 也接共享标签的作业（就是以前的行为，只限保持期间）。主机行带 `hold_until` 和 `holds`，`pool status` 显示 `hold until <UTC 时间>`，`presence --dry-run` 也会写出来。作业被取消或丢失时，它的保持到点就结束，不留别的东西。
 - **"我们的"进程**按 systemd 单元和 cgroup 判断，不按 Unix 账户：在本账户 user manager（`user@<uid>.service`）下某个 `ci-` 服务或 scope 里的进程（runner、部件的 scope、定时器的服务）。cgroup v1 的主机读 `/proc/<pid>/cgroup` 里 `name=systemd` 那一行。共享账户的主机（h100）上同一个 uid 的登录会话、别人的 `systemd-run` 都不算我们的。看不到的进程不算我们的。
 - **空闲**：runner 目录下没有 `Runner.Worker` 进程，也没有这个 runner 的部件 scope。连续 2 个 tick 空闲且有原因才停；停之前再看一次，这时出现了 `Runner.Worker` 就不停（日志里记一条 `kept`）。presence 停掉的、或被单元的 `ExecCondition=` 拦下的（`Result=exec-condition`），连续 2 个 tick 没有原因就启动。忙着的 runner 永远不停；没有 `ci-` 标签的 light runner（§5.1 的 `home` 池，给本机的 salvage）永远不停；主机的 light 池还没有 `ci-light`（16.1）之前，那里的每个 light runner 都算这种 runner，drain 时也不停，所以先加能力标签、再打开 presence。别人手动停掉的 runner presence 不管。
 - **单元的 `ExecCondition=`**：runner 每次启动（包括 15.5 的自动恢复、开机）先跑 `ci-run presence check <runner>`，有原因时退出 77，systemd 跳过这次启动，等 presence 的 tick 再启动它。其他任何结果（出错、旧 release 没有这个命令）都让 runner 照常启动。systemd 243 以前不认识这个键，会忽略它。
@@ -401,8 +417,9 @@ presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 ru
 可复用工作流的 plan 作业在 `ci-light` 上跑 `ci-run route`：标准输入是计划（schema 1），标准输出是路由后的计划。容量用 `capacity.load()` 读（`pool status --fast` 的行）；`--rows FILE` 读一份事先存下的 `pool status --fast --json`，用来复现某次决定。
 
 - **输出**：`{"schema": 1, "capacity": "read" | "unreadable: <原因>", "parts": [...]}`，每个部件保留计划里的键，另加 `labels`（作业的 `runs-on`）、`timeout_minutes`（作业的 `timeout-minutes`）、`where`（`host` 或 `slurm`）、`target`（集群部件的目标，否则空）和 `why`。
-- **`why` 怎么读**：`N free`：去掉本计划前面部件订掉的之后，这组标签还有 N 个空闲 runner；`free runner unknown`：有主机 `/proc` 看不到空闲数，或者某台在线主机的 runner 表没读到，这时不溢出；`0 free; <key> can start it now`：主机上没有空闲 runner 了，这个集群目标现在就能起，部件去了 `ci-slurm`；`0 free; no cluster target can start it now`（或 `no host serves ci-slurm`、`no free ci-slurm runner`、`timing never overflows`）：留在共享标签上排队；`<m> GiB > <n> GiB`：加了 `mem-big`；`slot memory not reported`：主机行没有 `slot_pools`，没法判断要不要 `mem-big`。
+- **`why` 怎么读**：`N free`：去掉本计划前面部件订掉的之后，这组标签还有 N 个空闲 runner；`free runner unknown`：有主机 `/proc` 看不到空闲数，或者某台在线主机的 runner 表没读到，这时不溢出；`0 free; <key> can start it now`：主机上没有空闲 runner 了，这个集群目标现在就能起，部件去了 `ci-slurm`；`0 free; no cluster target can start it now`（或 `no host serves ci-slurm`、`no free ci-slurm runner`、`timing never overflows`）：留在共享标签上排队；`<m> GiB > <n> GiB`：加了 `mem-big`；`slot memory not reported`：有主机行没有 `pools`，或者这个标签的池没有 `slot` 表的内存，没法判断要不要 `mem-big`。
 - **退出码**：0 已路由；1 计划时的路由错误，标准错误里每行一个，先写标签，例如 `route: ci-gpu2: part gpu.1: no host serves the label (...)`（带这个标签的主机全部掉线、drained、连不上或过期），或者某个部件的内存连 `mem-big` 的 slot 都放不下；2 计划读不进来（键不对、`needs` 不认识、id 重复等），是使用方的问题。
 - **容量读不到**（没有注册表、没有容量文件、行全空，或者所有主机行都过期）：每个部件都走它的共享标签，不加 `mem-big`、不溢出、不报"没有主机提供"，退出码 0，`capacity` 和标准错误里写明原因（路径只保留文件名）。这时先查 `ci-capacity.timer`（§11）。
 - **"提供"的含义**：主机行在线（没有问题项）并且它的 inventory 给这个标签注册了 runner，就算提供，哪怕 presence 因为卡被占用、slot 被占用或 timing 部件在跑而暂时停掉了全部 runner。所以"没有主机提供"只说明这些主机本身不能用（掉线、drained、过期、连不上），不是忙。
-- **重试**（`route.retry`）：按 `outcome.hint` 的五行：`cool-card` 去首次尝试那台主机上凉的那张卡（`<host>-gpu<M>`，只限单卡部件，双卡部件按 fallback）；`same-host` 去首次尝试所在主机这一类的主机标签，集群部件回同一个目标；`more-memory` 原标签加 `mem-big`（并 `resume`），容量证明不了有主机同时提供这两个标签时，就用不带 `mem-big` 的标签加 `resume` 重试，免得排队 24 小时；`any` 原标签；fallback 用现在的容量重新路由。每个部件最多重试一次；主机标签取自首次尝试的记录（`host`、`pool_labels`、`cool_card`），不读 `retry-on`。
+- **优先主机**（design 决定 19，R5b）：路由从不写主机标签，每个计划的部件都只带能力标签；顺序由 presence 定（§15 的 `tier` 原因）：前面层级有空闲 runner 时，后面层级的空闲 runner 停着，GitHub 只能把作业交给前面层级。主机行 `pools` 里的 `yielded`（只因 `tier` 停着的 runner）算作空位：`N free` 里包含它们，所以一个突发里超过 h100 空位的部件留在共享标签上，等后面层级的 runner 在一个反应时间内上线，而不是去集群。
+- **重试**（`route.retry`）：按 `outcome.hint` 的五行：`cool-card` 去首次尝试那台主机上凉的那张卡（`<host>-gpu<M>`，只限单卡部件，双卡部件按 fallback）；`same-host` 去首次尝试所在主机这一类的主机标签，集群部件回同一个目标；`more-memory` 原标签加 `mem-big`（并 `resume`），容量证明不了有主机同时提供这两个标签时，就用不带 `mem-big` 的标签加 `resume` 重试，免得排队 24 小时；`any` 原标签；fallback 用现在的容量重新路由。首次尝试所在主机有 `tier`、而一台在线的前面层级主机也提供这个部件的能力标签时（它可能正在让），`cool-card` 按 fallback、`same-host` 按 `any`，不在让着的主机上等。每个部件最多重试一次；主机标签取自首次尝试的记录（`host`、`pool_labels`、`cool_card`），不读 `retry-on`；part action 的输出 `pool-labels` 和 `cool-card`（design 19.5）就是这两个值。

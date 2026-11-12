@@ -367,6 +367,18 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
     return Decision(True, 'ok')
 
 
+def repositories_digest(policy: Policy) -> str:
+    """The SHA-256 of the policy's own ``[repositories]`` entries as loaded (before any
+    snapshot is merged): each name with its keys, in a canonical JSON, so that two hosts
+    whose files differ only in comments, actors or layout give the same digest, and a host
+    that lacks an entry, or holds another one, gives another (decision 19.6). Pure."""
+    canon = {name: {'id': r.id, 'visibility': r.visibility, 'paused': r.paused,
+                    'extra_events': sorted(r.extra_events), 'bot_dispatch': r.bot_dispatch,
+                    'classes': sorted(r.classes)}
+             for name, r in policy.repos.items()}
+    return hashlib.sha256(json.dumps(canon, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
 def line(decision: Decision, policy_digest: str, snapshot_digest: str = '') -> str:
     """The one line the hook prints: ``ci-runners: accepted|refused <reason> policy=<hash>``,
     and `` org=<hash>`` when the org snapshot was merged."""

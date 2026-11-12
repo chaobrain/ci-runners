@@ -77,6 +77,12 @@ outputs:
   attempt:
     description: "the attempt number"
     value: ${{ steps.part.outputs.attempt }}
+  pool-labels:
+    description: "JSON array: the labels of the pool the part ran on, for the same-host retry (decision 19.5)"
+    value: ${{ steps.part.outputs.pool-labels }}
+  cool-card:
+    description: "the card of this host a thermal retry goes to (one that passes the health gate); empty where none (decision 19.5)"
+    value: ${{ steps.part.outputs.cool-card }}
 runs:
   using: composite
   steps:

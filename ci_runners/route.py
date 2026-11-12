@@ -35,10 +35,15 @@ step on a guess):
   ``memory_gib`` that holds the part's memory and a ``max_minutes`` that holds its bound.
   A part that needs ``mem-big`` overflows only to a target that reports enough memory.
   Targets are tried by ``price``, then key;
-- *slots*: a host row may carry ``slot_pools``, ``[{"labels": [...], "memory_gib": n,
-  "speed": x}]``, one per pool with a ``slot`` table (16.2). ``mem-big`` and the memory
-  error need every serving host to report its pools of the label; a label whose speeds
-  are not reported counts 1.0, as a pool without ``slot`` runs its minutes unscaled.
+- *slots*: a host row may carry ``pools`` (decision 19.4, ``pool.pool_table``), one per
+  runner pool: its ``labels``, and where it has a ``slot`` table (16.2) its ``memory_gib``
+  and ``speed``. ``mem-big`` and the memory error need every serving host to report its
+  pools of the label, each with its memory; a label whose speeds are not reported counts
+  1.0, as a pool without ``slot`` runs its minutes unscaled;
+- *yielded runners* (decision 19.3): a pool's ``yielded`` runners, which presence holds
+  offline while an earlier tier has idle ones (19.2) and starts within a tick once it has
+  none, count as free: a burst past the preferred host's room stays on the shared labels
+  instead of going to the cluster. The route names no host.
 
 **Unreadable capacity** (the reader's ``CapacityError``, no rows, or every host row stale): every part
 goes to its shared label, without ``mem-big``, overflow or the plan-time error, and its
@@ -60,7 +65,11 @@ or derived from its outcome and ``next``) and its routed part give the retry's l
 ====================  ==========================================================
 
 A part is retried at most once. The host labels come from the first attempt's record
-(``host``, ``pool_labels``, ``cool_card``), never from ``retry-on``.
+(``host``, ``pool_labels``, ``cool_card``), never from ``retry-on``. A ``cool-card`` or
+``same-host`` retry never waits on a host that may be yielding (19.3): where the first
+attempt's host row has a ``tier`` and an up host of an earlier tier serves the part's
+capability label, ``cool-card`` takes its other branch (as fallback) and ``same-host``
+becomes ``any``.
 
 ``ci-run route [--rows FILE]`` reads the plan (schema 1, design §4.10) on stdin and
 writes the routed plan on stdout: exit 0; 1 for a plan-time route error (each named on
@@ -85,6 +94,8 @@ MEM_BIG = 'mem-big'
 SHARED = frozenset({BASE, SLURM, MEM_BIG, *NEEDS.values()})
 #: a job's bound past its parts' scaled minutes (16.2)
 GRACE_MIN = 15
+#: the largest ``tier`` of a host row (``pool.TIER_MAX``)
+TIER_MAX = 99
 MAX_MINUTES = 240
 MAX_PARTS = 256
 PART_KEYS = {'id': True, 'command': True, 'needs': True, 'minutes': True, 'memory_gib': False, 'results': False}
@@ -160,18 +171,21 @@ def _has(r, labels: Sequence[str]) -> bool:
 
 
 def _pools(r) -> list[dict] | None:
-    """A host row's ``slot_pools`` where well-formed, else None (not reported)."""
-    v = r.row.get('slot_pools')
+    """A host row's ``pools`` (19.4) where well-formed, else None (not reported): each with
+    its ``labels`` (a set), ``memory_gib`` (None where not reported), ``speed`` (1.0 where
+    not) and ``yielded`` (0 where not reported)."""
+    v = r.row.get('pools')
     if not isinstance(v, list):
         return None
     out = []
     for p in v:
         if not isinstance(p, dict) or not isinstance(p.get('labels'), list):
             return None
-        mem, speed = p.get('memory_gib'), p.get('speed', 1.0)
+        mem, speed, y = p.get('memory_gib'), p.get('speed', 1.0), p.get('yielded')
         out.append({'labels': {str(x) for x in p['labels']},
                     'memory_gib': mem if _num(mem) and mem > 0 else None,
-                    'speed': speed if _num(speed) and speed > 0 else 1.0})
+                    'speed': speed if _num(speed) and speed > 0 else 1.0,
+                    'yielded': y if type(y) is int and y > 0 else 0})
     return out
 
 
@@ -193,7 +207,8 @@ class _Facts:
         return not self.serving(labels) and not self.unknown
 
     def free(self, labels: Sequence[str]) -> int | None:
-        """The free runners of ``labels`` left after the bookings, or None where unknown."""
+        """The free runners of ``labels`` and the yielded ones (19.3) left after the
+        bookings, or None where unknown."""
         if self.unknown:
             return None
         total = 0
@@ -201,7 +216,7 @@ class _Facts:
             counts = [r.runners[lb].free for lb in labels]
             if any(c is None for c in counts):
                 return None
-            total += min(counts)
+            total += min(counts) + sum(p['yielded'] for p in _pools(r) or [] if set(labels) <= p['labels'])
         return max(0, total - self.booked.get(labels[0], 0))
 
     def book(self, label: str) -> None:
@@ -354,6 +369,23 @@ def row_of(outcome: str, next_: str) -> str:
             'lost': 'any', 'stopped': 'any'}.get(outcome, '')
 
 
+def _tier(r) -> int | None:
+    """A host row's ``tier`` (19.1), or None where it has none."""
+    v = r.row.get('tier')
+    return v if type(v) is int and 1 <= v <= TIER_MAX else None
+
+
+def may_yield(rows: Sequence | None, host: str, cap: str) -> bool:
+    """Whether the runners of ``cap`` on ``host`` (a host row's ``role`` or key) may be
+    yielding (19.2): its row has a tier and an up host row of an earlier tier serves
+    ``cap``. False where the rows or the host's row are not known. Pure."""
+    mine = [r for r in _hosts(rows or []) if host and host in (r.key, r.row.get('role'))]
+    t = _tier(mine[0]) if mine else None
+    if t is None:
+        return False
+    return any(_tier(r) is not None and _tier(r) < t and _has(r, [cap]) for r in _Facts(rows).up)
+
+
 def _host_labels(first: Mapping) -> list[str]:
     host = str(first.get('host') or '')
     own = [str(x) for x in first.get('pool_labels') or ()]
@@ -373,9 +405,12 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
     if int(first.get('attempt') or 1) > 1 or first.get('next') not in ('retry', 'fallback') or row not in ROWS:
         return {**same, 'retry': False, 'row': row, 'labels': [], 'why': 'no retry: final, or retried once already'}
     host = str(first.get('host') or '')
+
+    def yielding() -> bool:  # 19.3: the first attempt's host may be yielding to an earlier tier
+        return part.get('where') != 'slurm' and may_yield(rows, host, NEEDS.get(part.get('needs'), ''))
     if row == 'cool-card':
         card = first.get('cool_card')
-        if host and type(card) is int and card >= 0 and part['needs'] == 'gpu':  # a card's runner: one card
+        if host and type(card) is int and card >= 0 and part['needs'] == 'gpu' and not yielding():  # a card's runner: one card
             return {**same, 'labels': [BASE, f'{host}-gpu{card}'], 'where': 'host', 'target': '',
                     'why': f'thermal: a cool card of {host}'}
         row = 'fallback'  # no cool card recorded, or a two-card part: the thermal row's other branch
@@ -383,6 +418,9 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
         if part.get('where') == 'slurm':
             return {**same, 'why': f'same target {part.get("target")}'}
         own = _host_labels(first)
+        if yielding():
+            return {**same, 'row': 'any', 'why': f'same host: {host} may be yielding to an earlier tier; '
+                                                 'the part\'s labels again'}
         if own:
             return {**same, 'labels': [BASE, *own], 'where': 'host', 'target': '', 'why': f'same host {host}'}
         return {**same, 'row': 'any', 'why': 'same host: its labels not recorded; the part\'s labels again'}

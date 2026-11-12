@@ -1572,3 +1572,260 @@ class CIAccount(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+DEV = '\ndev_slots = { lock = "/tmp/dev.lock", cpus = ["8-11", "12-15"], memory_gib = 16 }\n'
+INV_DEV = '''schema = 1
+this = "hz"
+[hosts.hz]
+account = "acct-x"
+home = "{t}"
+data = "{t}/data"
+slots = 2
+memory_max = "120G"
+disk_min_gib = 10
+gpus = []
+max_temp_c = 80
+cpus = "0-7"
+compile_cpus = "{compile}"
+pools = {{ light = {{ count = 1 }}, part = {{ count = 2, slot = {{ cpus = ["0-3", "4-7"], workers = 2, memory = "8G", speed = 1 }} }} }}
+files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
+'''
+
+
+def reg_dev(extra=DEV):
+    """The registry with ``extra`` in hostb's entry (a local host of 16 CPUs and 64 GiB)."""
+    return pool.load(REGISTRY.replace('slots = { lock = "/tmp/x.lock", count = 1 }\n',
+                                      'slots = { lock = "/tmp/x.lock", count = 1 }' + extra))
+
+
+class DevSlotsRegistry(unittest.TestCase):
+    """Decision 16.8: the registry's ``dev_slots``, outside every CI slot."""
+
+    def test_a_host_names_its_dev_slots(self):
+        m = reg_dev().machines['hostb']
+        self.assertEqual(m.dev_slots, pool.DevSlots('/tmp/dev.lock', ('8-11', '12-15'), 16))
+        self.assertIsNone(reg().machines['hostb'].dev_slots)  # none named: 15.1's claim
+        self.assertIsNone(reg().machines['hosta'].dev_slots)
+
+    def test_malformed_dev_slots_are_refused(self):
+        for extra, why in (
+                ('\ndev_slots = { lock = "/tmp/dev.lock", cpus = ["8-11", "11-15"], memory_gib = 16 }\n', 'overlap'),
+                ('\ndev_slots = { lock = "/tmp/dev.lock", cpus = ["8-16"], memory_gib = 16 }\n', 'beyond'),
+                ('\ndev_slots = { lock = "/tmp/dev.lock", cpus = ["8-11"], memory_gib = 65 }\n', 'memory_gib'),
+                ('\ndev_slots = { lock = "/tmp/dev.lock", cpus = ["8-11"], memory_gib = 0 }\n', 'memory_gib'),
+                ('\ndev_slots = { lock = "/tmp/dev.lock", cpus = [], memory_gib = 4 }\n', 'cpusets'),
+                ('\ndev_slots = { lock = "/tmp/dev.lock", cpus = ["8-x"], memory_gib = 4 }\n', 'not a cpuset'),
+                ('\ndev_slots = { lock = "/tmp/dev.lock", cpus = ["11-8"], memory_gib = 4 }\n', 'not a cpuset'),
+                ('\ndev_slots = { lock = "/tmp/x.lock", cpus = ["8-11"], memory_gib = 4 }\n', "CI slots'"),
+                ('\ndev_slots = { lock = "/tmp/dev.lock", queue = "/tmp/x.queue", cpus = ["8-11"], memory_gib = 4 }\n',
+                 "CI slots'"),
+                ('\ndev_slots = { lock = "tmp/dev.lock", cpus = ["8-11"], memory_gib = 4 }\n', 'absolute'),
+                ('\ndev_slots = { lock = "/tmp/dev.lock", cpus = ["8-11"], memory_gib = 4, share = 1 }\n', 'unknown'),
+                ('\ndev_slots = { cpus = ["8-11"], memory_gib = 4 }\n', 'lock is missing')):
+            with self.assertRaises(pool.RegistryError, msg=extra) as e:
+                reg_dev(extra)
+            self.assertIn(why, str(e.exception), extra)
+        two_ci = REGISTRY.replace('slots = { lock = "/tmp/x.lock", count = 1 }\n',
+                                  'slots = { lock = "/tmp/x.lock", count = 2 }' + DEV.replace('/tmp/dev.lock', '/tmp/x.2.lock'))
+        with self.assertRaises(pool.RegistryError):
+            pool.load(two_ci)
+
+    def test_dev_slots_on_a_cluster_or_a_status_only_entry_are_refused(self):
+        with self.assertRaises(pool.RegistryError) as e:
+            pool.load(REGISTRY.replace('gate = "/fs/root/ci-runners/releases/hook/bin/ci-slurm-gate"\n',
+                                       'gate = "/fs/root/ci-runners/releases/hook/bin/ci-slurm-gate"' + DEV))
+        self.assertIn('host only', str(e.exception))
+        with self.assertRaises(pool.RegistryError) as e:
+            pool.load(REGISTRY.replace('labels = { cpu = "hosta-cpu" }\n', 'labels = { cpu = "hosta-cpu" }\nprobe = "forced"'
+                                       + DEV))
+        self.assertIn('pool status only', str(e.exception))
+
+    def test_an_overlap_with_the_inventorys_ci_cpusets(self):
+        from ci_runners import inventory
+        inv = inventory.load(INV_DEV.format(t='/tmp/t', compile='8-9'))
+        got = pool.dev_overlaps(['8-11', '12-15'], inv)
+        self.assertEqual(got, ["dev slot 1 (CPUs 8-11) meets the inventory's compile_cpus (CPUs [8, 9])"])
+        self.assertEqual(pool.dev_overlaps(['10-11', '12-15'], inv), [])
+        self.assertEqual([n for n, _ in pool.ci_cpusets(inv)],
+                         ['cpus', 'compile_cpus', 'pools.part.slot.cpus[0]', 'pools.part.slot.cpus[1]'])
+        self.assertEqual(pool.dev_overlaps(['3'], inventory.load(
+            INV_DEV.format(t='/tmp/t', compile='8-9').replace('cpus = "0-7"\n', ''))),
+            ["dev slot 1 (CPUs 3) meets the inventory's pools.part.slot.cpus[0] (CPUs [3])"])
+
+    def test_the_host_spec_names_the_dev_slots_for_a_cpu_run_only(self):
+        r = reg_dev()
+        a = pool.RunArgs('true', '/x', pool.Ask(cpus=4, memory_gib=8))
+        spec = pool.host_spec(r, r.machines['hostb'], a, wait=False)
+        self.assertEqual(spec['dev'], {'lock': '/tmp/dev.lock', 'cpus': ['8-11', '12-15'], 'queue': '', 'memory_gib': 16,
+                                       'inventory': ''})
+        self.assertIsNone(pool.host_spec(r, r.machines['hostb'], dataclasses.replace(a, ask=pool.Ask(cards=1)), True)['dev'])
+        self.assertIsNone(pool.host_spec(reg(), reg().machines['hostb'], a, True)['dev'])
+
+
+class DevSlotsPick(unittest.TestCase):
+    def test_a_dev_row_is_free_by_its_dev_slots_not_its_ci_slots(self):
+        r = reg_dev()
+        full = row('hostb', access='local', slots_free=0, cpus_free=0, queue=4, dev_slots=2, dev_free=1, dev_queue=0)
+        now, later, _ = pool.pick([full], pool.Ask(cpus=4, memory_gib=8), r)
+        self.assertEqual([x['key'] for x in now], ['hostb'])
+        busy = dict(full, slots_free=2, cpus_free=16, dev_free=0, dev_queue=1)
+        now, later, _ = pool.pick([busy], pool.Ask(cpus=4, memory_gib=8), r)
+        self.assertEqual(([x['key'] for x in now], [x['key'] for x in later]), ([], ['hostb']))
+        self.assertFalse(pool.free_now(busy, pool.Ask(cpus=4, memory_gib=8), 0))
+        self.assertFalse(pool.free_now(dict(full, mem_free_gib=4), pool.Ask(cpus=4, memory_gib=8), 0))
+
+    def test_a_run_larger_than_a_dev_slot_is_skipped(self):
+        r = reg_dev()
+        rows = [row('hostb', access='local', dev_slots=2, dev_free=2, dev_queue=0)]
+        _, _, skipped = pool.pick(rows, pool.Ask(cpus=5, memory_gib=8), r)
+        self.assertEqual(skipped, ['hostb: 4 cores a dev slot, 5 asked'])
+        _, _, skipped = pool.pick(rows, pool.Ask(cpus=4, memory_gib=17), r)
+        self.assertEqual(skipped, ['hostb: 16 GiB a dev slot, 17 asked'])
+
+    def test_waiting_in_line_by_the_dev_queue(self):
+        r = reg_dev()
+        r = dataclasses.replace(r, machines={**r.machines, 'hosta': dataclasses.replace(r.machines['hosta'],
+                                                                                         dev_slots=r.machines['hostb'].dev_slots)})
+        rows = [row('hosta', dev_slots=2, dev_free=0, dev_queue=3, queue=0), row('hostb', access='local', dev_slots=2,
+                                                                                 dev_free=0, dev_queue=1, queue=9)]
+        _, later, _ = pool.pick(rows, pool.Ask(cpus=2, memory_gib=4), r)
+        self.assertEqual([x['key'] for x in later], ['hostb', 'hosta'])
+
+    def test_the_row_and_the_table_show_the_dev_slots(self):
+        m = reg_dev().machines['hostb']
+        p = {'slots_free': 0, 'queue': 2, 'load': 1.0, 'cpus': 16, 'mem_free_gib': 30, 'dev_free': 1, 'dev_queue': 0}
+        got = pool.host_row(m, p)
+        self.assertEqual((got['slots_free'], got['cpus_free'], got['dev_slots'], got['dev_free'], got['dev_queue']),
+                         (0, 0, 2, 1, 0))  # the CI figures stay the CI slots'
+        self.assertEqual(pool.host_row(m, None, 'unreachable')['dev_free'], 0)
+        self.assertNotIn('dev_slots', pool.host_row(reg().machines['hostb'], p))
+        self.assertIn('0/1 dev 1/2', pool.table([dict(got, key='hostb', access='local')]))
+
+    def test_the_probe_reads_the_dev_slots_without_taking_them(self):
+        with tempfile.TemporaryDirectory() as d:
+            ci, dev = os.path.join(d, 's.lock'), os.path.join(d, 'dev.lock')
+            open(ci, 'w').close()
+            os.makedirs(os.path.join(d, 'dev.queue'))
+            open(os.path.join(d, 'dev.queue', '000000000001.ticket'), 'w').close()
+            got = pool.probe(ci, 1, '', dev_lock=dev, dev_count=2)
+            self.assertEqual((got['slots_free'], got['dev_free'], got['dev_queue']), (1, 2, 1))  # missing: free
+            fd = os.open(os.path.join(d, 'dev.2.lock'), os.O_CREAT | os.O_WRONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                self.assertEqual(pool.probe(ci, 1, '', dev_lock=dev, dev_count=2)['dev_free'], 1)
+            finally:
+                os.close(fd)
+            self.assertNotIn('dev_free', pool.probe(ci, 1, ''))
+
+
+    def test_the_probe_of_a_host_reads_its_dev_slots(self):
+        with tempfile.TemporaryDirectory() as d:
+            m = dataclasses.replace(reg().machines['hosta'], slots=pool.Slots(os.path.join(d, 's.lock'), 1),
+                                    dev_slots=pool.DevSlots(os.path.join(d, 'dev.lock'), ('8-11', '12-15'), 16))
+            open(m.slots.lock, 'w').close()
+            seen = {}
+
+            def run(argv, **kw):  # the probe's source, run here for real
+                seen['input'] = kw['input']
+                return subprocess.run([sys.executable, '-I', '-'], input=kw['input'], capture_output=True, text=True)
+            got = pool.probe_host(m, run)
+            self.assertIn(f", dev_lock={m.dev_slots.lock!r}, dev_count=2, dev_queue=''", seen['input'])
+            self.assertEqual((got['slots_free'], got['dev_slots'], got['dev_free'], got['dev_queue']), (1, 2, 2, 0))
+            pool.probe_host(reg().machines['hosta'], run)
+            self.assertNotIn('dev_lock=', seen['input'].strip().splitlines()[-1])  # the call: none without dev_slots
+
+
+class DevSlotsClaim(unittest.TestCase):
+    """R7's acceptance: a pool run on a host with ``dev_slots`` takes no CI slot."""
+    spec, remote, finish = Claim.spec, Claim.remote, staticmethod(Claim.finish)
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.lock = os.path.join(self.d, 'slot.lock')
+        open(self.lock, 'w').close()
+        self.dev = os.path.join(self.d, 'dev.lock')
+        self.inv = os.path.join(self.d, 'inventory.toml')
+
+    def tearDown(self):
+        subprocess.run(['rm', '-rf', self.d])
+
+    def dev_spec(self, cmd, cpus=('0',), **kw):
+        return self.spec(cmd, dev={'lock': self.dev, 'cpus': list(cpus), 'queue': '', 'memory_gib': 8,
+                                   'inventory': self.inv}, **kw)
+
+    def test_a_pool_run_on_dev_slots_takes_no_ci_slot(self):
+        started, go = os.path.join(self.d, 'started'), os.path.join(self.d, 'go')
+        part = _python_holding(self.lock, 1, ['sleep', '30'])  # every CI slot is a part's
+        try:
+            _wait_holding(part)
+            r, _ = self.remote(self.dev_spec(f'grep Cpus_allowed_list /proc/self/status; touch {started}; '
+                                             f'while [ ! -e {go} ]; do sleep 0.1; done'))
+            for _ in range(300):
+                if os.path.exists(started) or r.poll() is not None:
+                    break
+                time.sleep(0.05)
+            self.assertTrue(os.path.exists(started))
+            during_ci = pool.probe(self.lock, 1, '')
+            during_dev = pool.probe(self.lock, 1, '', dev_lock=self.dev, dev_count=1)
+            queue = os.listdir(os.path.join(self.d, 'slot.queue')) if os.path.isdir(os.path.join(self.d, 'slot.queue')) else []
+            open(go, 'w').close()
+            out, err = self.finish(r)
+        finally:
+            part.kill()
+            part.wait()
+            part.stderr.close()
+        self.assertEqual(r.returncode, 0, err)
+        self.assertIn('holding dev slot 1 of 1 (CPUs 0)', err)
+        self.assertNotIn('CI slot', err)
+        self.assertRegex(out, r'Cpus_allowed_list:\s*0\n')  # pinned to its dev slot's cpuset
+        self.assertEqual(during_ci['slots_free'], 0)  # the part's alone: the run took none and waited for none
+        self.assertEqual(during_dev['dev_free'], 0)  # its own
+        self.assertEqual([n for n in queue if n.endswith('.ticket')], [])
+
+    def test_dev_slots_full_wait_and_never_fall_back_to_a_ci_slot(self):
+        marker = os.path.join(self.d, 'ran')
+        holder = _python_holding(self.dev, 1, ['sleep', '30'])
+        try:
+            _wait_holding(holder)
+            r, _ = self.remote(self.dev_spec(f'touch {marker}', rounds=2))
+            out, err = self.finish(r)
+        finally:
+            holder.kill()
+            holder.wait()
+            holder.stderr.close()
+        self.assertEqual(r.returncode, pool.NOT_STARTED, err)
+        self.assertIn('no dev slot free on this host now', err)
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(pool.probe(self.lock, 1, '')['slots_free'], 1)
+
+    def test_a_dev_slot_that_meets_a_ci_slot_is_refused_where_the_inventory_reads(self):
+        marker = os.path.join(self.d, 'ran')
+        with open(self.inv, 'w') as f:
+            f.write(INV_DEV.format(t=self.d, compile='8-9'))
+        r, _ = self.remote(self.dev_spec(f'touch {marker}', cpus=('2-3',)))
+        out, err = self.finish(r)
+        self.assertEqual(r.returncode, pool.NOT_STARTED, err)
+        self.assertIn("refused: dev slot 1 (CPUs 2-3) meets the inventory's cpus", err)
+        self.assertFalse(os.path.exists(marker))
+        self.assertFalse(os.path.exists(self.dev))  # nothing taken
+        with open(self.inv, 'w') as f:
+            f.write('not an inventory')
+        r, _ = self.remote(self.dev_spec(f'touch {marker}', cpus=('0',)))
+        out, err = self.finish(r)
+        self.assertEqual(r.returncode, 0, err)  # unreadable: no check (16.8: where it is readable)
+        self.assertTrue(os.path.exists(marker))
+
+    def test_a_run_above_the_dev_slots_memory_is_refused(self):
+        marker = os.path.join(self.d, 'ran')
+        r, _ = self.remote(self.dev_spec(f'touch {marker}', memory_gib=9))
+        out, err = self.finish(r)
+        self.assertEqual(r.returncode, pool.NOT_STARTED, err)
+        self.assertIn('9 GiB asked, a dev slot holds 8', err)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_a_host_without_dev_slots_keeps_the_ci_slot_claim(self):
+        r, _ = self.remote(self.spec('echo ran'))
+        out, err = self.finish(r)
+        self.assertEqual(r.returncode, 0, err)
+        self.assertIn('holding CI slot 1 of 1', err)

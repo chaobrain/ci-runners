@@ -342,6 +342,8 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 
 **运行**：`ci-run pool run [--cpu N] [--mem G] [--gpu 型号[:数量]] [--on 机器] -- 命令`。它把调用者的工作树（已跟踪的文件，加上未被忽略的未跟踪文件）送到一台现在就能启动的机器上运行。这台机器先从空闲主机里选，再选按价格从低到高的集群目标；都不行就在队列最短的主机上排队。命令的输出实时回传，退出码就是命令的退出码。主机上的占用就是 CI slot，和 CI part 的是同一套，所以两边不会同时拿到同一个 slot。集群上的占用就是作业本身，走同一个 gate。运行前先比对环境，不一致就拒绝运行（退出码 3）；加 `--env-mismatch warn` 可以照常运行，但会给出警告。调用者退出时，远端命令随之结束，slot 也随之释放。brainspike 用 `scripts/pool.sh` 包了一层。
 
+**开发槽位 `dev_slots`**（design 决定 16.8，R7 起）：主机项可以写 `dev_slots = { lock = "<绝对路径>/dev.lock", cpus = ["0-15", "16-31"], memory_gib = 64 }`（可选 `queue`、`inventory`），给 `pool run` 自己的槽位，在所有 CI slot 之外：每个开发槽位一个 cpuset（互不重叠，都小于这一项的 `cpus`）；`memory_gib` 是一次运行最多能要的内存（不超过这一项的 `memory_gib`）；锁文件是 `lock`、第二个起 `<stem>.<i>.lock`（占用时自动创建），队列默认 `<stem>.queue`，都不能是 CI slot 的文件。集群项和只给 `pool status` 用的项（`probe = "forced"`）不能写。写了它的主机上，CPU 的 `pool run` 只占开发槽位（排队方式和 CI slot 一样，`--no-wait` 时退出 75），命令用 `taskset` 绑到那个槽位的 cpuset，不碰、不等、不排 CI slot 的队；GPU 的运行照旧按卡的租约。占用之前，主机端读这台主机的 inventory（`inventory`，不写就是运行账户的 `$CI_RUNNERS_ETC/inventory.toml`），读得到时，开发槽位和 CI 给部件绑定的 cpuset（池的 `slot.cpus`、主机的 `cpus` 和 `compile_cpus`）有重叠就拒绝运行并说明。`pool status` 的行多出 `dev_slots`、`dev_free`、`dev_queue`，表格的 slots 一栏写成 `0/2 dev 1/2`；CI 的数字不变，所以路由和 presence 不受影响。没写 `dev_slots` 的主机和以前一样占 CI slot。**顺序**：旧版本的加载器不认识这个键（`unknown keys`），会让那个账户的 `pool status`、路由和 presence 写容量文件失败，所以要等读这份注册表的每台主机都装了这个 release、`v1` 也移过去之后才能加（和 `tier` 一样）。
+
 ## 12. nightly 的兜底定时器（design 决定 15.3）
 
 brainspike 的 nightly 靠 GitHub 的 `schedule` 触发，merge gate 的事件唤醒也会做同样的检查。为了在没有事件的晚上 GitHub 定时也停了的情况下仍然有 nightly，3090b 上维护者本人的账户跑一个 user 定时器（不是 CI 账户：CI 账户里没有任何 GitHub 凭据，决定 12.2）。

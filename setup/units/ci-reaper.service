@@ -2,7 +2,6 @@
 Description=ci-runners: reap what stopped jobs left behind
 
 [Service]
-@CPU_AFFINITY@
 Type=oneshot
 ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run reap
 Environment=CI_RUNNERS_ETC=@CI_ETC@

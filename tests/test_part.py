@@ -397,7 +397,7 @@ class Classes(ClassHost):
         with self.assertRaises(part.Refused):
             self.go('part', id='bad', lock='X')
 
-    def test_a_compile_part_is_pinned_at_nice_0_and_takes_no_slot(self):
+    def test_a_compile_part_is_pinned_at_nice_0_and_takes_a_slot(self):
         probe = ('nice > "$CI_PART_DIR/nice"; grep Cpus_allowed_list /proc/self/status > "$CI_PART_DIR/cpus"; '
                  'echo "$CI_CPUS $CI_SLOT_HELD" > "$CI_PART_DIR/env"')
         _, out = self.go('compile', command=probe)
@@ -405,34 +405,13 @@ class Classes(ClassHost):
         self.assertEqual((out['outcome'], rec['lock']), ('pass', 'x'))  # lock defaults to x on compile
         self.assertEqual(self.work(out, 'nice'), str(os.nice(0)))
         self.assertEqual(self.work(out, 'cpus').split()[-1], '0')  # compile_cpus
-        self.assertEqual(self.work(out, 'env'), '0')  # no CI slot: its CPUs are its own (decision 15.10)
+        self.assertEqual(self.work(out, 'env'), f'0 {self.slot}')
         _, out = self.go('part', command=probe, id='p')
         self.assertEqual(self.work(out, 'nice'), str(min(19, os.nice(0) + 10)))
         self.assertEqual(self.work(out, 'cpus').split()[-1], '1')  # cpus
         self.inv = inventory.load(self.inv_text.replace('compile_cpus = "0"\n', ''))
         _, out = self.go('compile', id='nocpus')
         self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'this host has no compile_cpus for compile parts'))
-
-    def test_a_compile_part_needs_the_other_parts_off_its_cpus(self):
-        """Decision 15.10: the compile CPUs are the part's alone, so the inventory's ``cpus``,
-        where every other part runs, must be given and disjoint from ``compile_cpus``."""
-        why = "compile parts need the inventory's cpus, disjoint from compile_cpus (decision 15.10)"
-        for n, cpus in enumerate(('0', '0-1', '1,0', '', '3-1')):
-            text = self.inv_text.replace('cpus = "1"\ncompile', f'cpus = "{cpus}"\ncompile' if cpus else 'compile')
-            self.inv = inventory.load(text)
-            _, out = self.go('compile', id=f'o{n}')
-            self.assertEqual((out['outcome'], out['reason']), ('unavailable', why), cpus)
-            self.assertFalse(self.ran(out))
-        self.inv = inventory.load(self.inv_text.replace('cpus = "1"\ncompile_cpus = "0"', 'cpus = "2-3,5"\ncompile_cpus = "0-1,4"'))
-        self.assertEqual(self.go('compile', id='disjoint')[1]['outcome'], 'pass')
-
-    def test_cpu_set_and_the_cpu_lock_path(self):
-        self.assertEqual(part.cpu_set('0-3,16, 18-19'), frozenset({0, 1, 2, 3, 16, 18, 19}))
-        for bad in ('3-1', 'x', '', '1,,2', '-1'):
-            with self.assertRaises(ValueError, msg=bad):
-                part.cpu_set(bad)
-        self.assertEqual(part.cpu_lock_path('/d', '4-15'), '/d/ci-runners/state/cpus/4-15.lock')
-        self.assertEqual(part.cpu_lock_path('/d', '0-3,16-27'), '/d/ci-runners/state/cpus/0-3_16-27.lock')
 
     def test_ci_cpus_without_a_pin_lists_the_cpus(self):
         """Where the inventory gives no ``cpus``, CI_CPUS lists the CPUs the part may use, as
@@ -449,36 +428,24 @@ class Classes(ClassHost):
         sep = '-' if have[1] == have[0] + 1 else ','
         self.assertEqual((out['outcome'], self.work(out, 'env')), ('pass', f'{have[0]}{sep}{have[1]},{have[-1]}'))
 
-    def test_a_compile_part_holds_its_cpus_x_the_host_s_and_covers_its_commands_requests(self):
-        """Decision 15.10 (was 12.7's whole-command x): a compile part holds its CPU set's lock
-        exclusively and the host lock shared; its command gets the CPU lock as its host lock,
-        held x, so its own ``host_lock.sh -x`` (a timing command) and ``-s`` are covered, not
-        deadlocked; both locks are free again after the part."""
+    def test_a_compile_part_holds_x_and_covers_its_commands_requests(self):
+        """Decision 12.7 and 12.9: a compile part holds the host lock exclusively for its whole
+        command; the command's own ``host_lock.sh -s`` is covered, not deadlocked, and the
+        lock is free again after the part."""
         sh = ROOT / 'tests/fixtures/brainspike/host_lock.sh'
         probe = (
             'flock -n -s "$CI_HOST_LOCK" true && echo free > "$CI_PART_DIR/probe" || echo held > "$CI_PART_DIR/probe"; '
-            'echo "$BRAINSPIKE_HOST_LOCK $CI_HOST_LOCK" > "$CI_PART_DIR/cover"; '
-            f'flock -n -s {self.hl} true && echo s-free > "$CI_PART_DIR/host" || echo s-held > "$CI_PART_DIR/host"; '
-            f'flock -n -x {self.hl} true && echo x-free >> "$CI_PART_DIR/host" || echo x-held >> "$CI_PART_DIR/host"; '
+            'echo "$BRAINSPIKE_HOST_LOCK" > "$CI_PART_DIR/cover"; '
             # brainspike's script finds the file by LOCAL_CI_HOST_LOCK: never let it reach the host's real one
-            f'if [ "$LOCAL_CI_HOST_LOCK" = "$CI_HOST_LOCK" ]; then timeout 10 {sh} -x true 2> "$CI_PART_DIR/sh" && '
-            f'timeout 10 {sh} -s true 2>> "$CI_PART_DIR/sh"; '
+            f'if [ "$LOCAL_CI_HOST_LOCK" = "$CI_HOST_LOCK" ]; then timeout 10 {sh} -s true 2> "$CI_PART_DIR/sh"; '
             'echo $? > "$CI_PART_DIR/rc"; else echo nolocal > "$CI_PART_DIR/rc"; fi')
         _, out = self.go('compile', command=probe)
         self.assertEqual(out['outcome'], 'pass', out['reason'])
-        cpu_lock = part.cpu_lock_path(str(self.data), '0')
-        self.assertEqual((self.work(out, 'probe'), self.work(out, 'cover'), self.work(out, 'rc')),
-                         ('held', f'x {cpu_lock}', '0'))
-        self.assertEqual(self.work(out, 'host').split(), ['s-free', 'x-held'])  # the host lock: shared
-        self.assertEqual(self.work(out, 'sh').count("covered by the caller's x hold"), 2)
-        rec = json.loads(pathlib.Path(self.path(out), 'record.json').read_text())
-        self.assertEqual((rec['lock'], rec['host_lock']), ('x', 's'))
-        self.assertGreaterEqual(rec['lock_wait_seconds'], rec['cpu_lock_wait_seconds'])
-        for p in (self.hl, cpu_lock):
-            self.assertEqual(subprocess.run(['flock', '-n', '-x', str(p), 'true'], timeout=10).returncode, 0, p)
-        _, out = self.go('part', command=probe, id='s', lock='s')  # a shared hold of the host: its -x fails (3)
-        self.assertEqual((self.work(out, 'probe'), self.work(out, 'cover'), self.work(out, 'rc')),
-                         ('free', f's {self.hl}', '3'))
+        self.assertEqual((self.work(out, 'probe'), self.work(out, 'cover'), self.work(out, 'rc')), ('held', 'x', '0'))
+        self.assertIn("covered by the caller's x hold", self.work(out, 'sh'))
+        self.assertEqual(subprocess.run(['flock', '-n', '-x', str(self.hl), 'true'], timeout=10).returncode, 0)
+        _, out = self.go('part', command=probe, id='s', lock='s')  # a shared hold: -s covered too
+        self.assertEqual((self.work(out, 'probe'), self.work(out, 'cover'), self.work(out, 'rc')), ('free', 's', '0'))
         _, out = self.go('part', command='echo "${BRAINSPIKE_HOST_LOCK-unset} $CI_HOST_LOCK" > "$CI_PART_DIR/cover"',
                          id='none', env_cover='x')
         self.assertEqual(self.work(out, 'cover'), f'unset {self.hl}')  # lock none: no cover, a job's is dropped
@@ -494,10 +461,9 @@ class Classes(ClassHost):
         finally:
             os.killpg(hold.pid, signal.SIGKILL)
             hold.wait()
-        self.assertEqual((code, out['outcome'], out['reason']), (0, 'unavailable', 'queue timeout: no host lock (s)'))
+        self.assertEqual((code, out['outcome'], out['reason']), (0, 'unavailable', 'queue timeout: no host lock (x)'))
         self.assertFalse(self.ran(out))
-        cpu_lock = part.cpu_lock_path(str(self.data), '0')
-        for p in (self.slot, self.slot.parent / 's.2.lock', cpu_lock):  # its CPUs (and the slots) are free again
+        for p in (self.slot, self.slot.parent / 's.2.lock'):  # its slot is free again
             self.assertEqual(subprocess.run(['flock', '-n', '-x', str(p), 'true'], timeout=10).returncode, 0)
 
     def _sh_shared_holder(self, seconds):
@@ -521,34 +487,25 @@ class Classes(ClassHost):
         except ProcessLookupError:
             pass
 
-    def test_a_compile_part_starts_beside_a_host_lock_sh_shared_holder(self):
-        """Decision 15.10: a ``compile`` part no longer waits for the ``host_lock.sh -s`` holders
-        (the other parts' tests, on the other CPUs); its shared hold enters beside them at once
-        (issue 80's wait, up to 1060 s in brainspike's batches, is gone). A ``-x`` holder (a
-        person's timing) still keeps it out: the test above."""
+    def test_a_compile_part_sees_a_host_lock_sh_shared_holder(self):
+        """Issue 80 (brainspike's #444 flake): a ``compile`` part's ``x`` waits for a
+        ``host_lock.sh -s`` holder, and runs once it has gone. The wait is the part's queue time;
+        ``local_ci.sh`` inside the part prints ``x 0m0s`` in its table whatever the part waited,
+        since its own request is covered by the part's hold."""
         hold = self._sh_shared_holder(30)
-        t0 = time.monotonic()
         code, out = self.go('compile')  # queue timeout 1.2 s: the holder is still in
-        self.assertEqual((code, out['outcome']), (0, 'pass'), out['reason'])
-        self.assertTrue(self.ran(out))
-        self.assertLess(time.monotonic() - t0, 1.0)
-        self.assertIsNone(hold.poll())  # beside it, not after it
-
-    def test_one_compile_part_at_a_time_on_its_cpus(self):
-        """Decision 15.10: the CPU lock is exclusive, so a second compile part (or anything
-        else holding those CPUs) waits for it, and times out naming the CPUs."""
-        cpu_lock = pathlib.Path(part.cpu_lock_path(str(self.data), '0'))
-        cpu_lock.parent.mkdir(parents=True, exist_ok=True)
-        hold = subprocess.Popen(['flock', '-x', str(cpu_lock), 'sleep', '20'], start_new_session=True)
-        self.addCleanup(lambda: (self._kill_group(hold), hold.wait()))
-        for _ in range(500):
-            if cpu_lock.exists() and part.slots._flocked(str(cpu_lock)):
-                break
-            time.sleep(0.01)
-        code, out = self.go('compile')
-        self.assertEqual((code, out['outcome'], out['reason']), (0, 'unavailable', 'queue timeout: no compile CPUs'))
+        self.assertEqual((code, out['outcome'], out['reason']), (0, 'unavailable', 'queue timeout: no host lock (x)'))
         self.assertFalse(self.ran(out))
-        self.assertEqual(subprocess.run(['flock', '-n', '-x', str(self.hl), 'true'], timeout=10).returncode, 0)
+        self._kill_group(hold)
+        hold.wait()
+        short = self._sh_shared_holder(2)
+        t0 = time.monotonic()
+        code, out = self.go('compile', id='after', queue_timeout_minutes=0.5)
+        self.assertEqual((code, out['outcome']), (0, 'pass'))
+        self.assertTrue(self.ran(out))
+        self.assertGreaterEqual(time.monotonic() - t0, 1.0)  # it waited for the 2 s holder
+        self.assertGreaterEqual(out['queue-seconds'], 1)
+        short.wait(10)
 
     def test_the_supervisor_keeps_the_host_lock_after_the_executor_is_gone(self):
         """The hold lasts as long as the command (§5.5 item 3: released when the scope ends),
@@ -569,22 +526,18 @@ class Classes(ClassHost):
             time.sleep(0.05)
         os.killpg(child.pid, signal.SIGKILL)  # the runner and its executor are gone
         child.wait(timeout=20)
-        cpu_lock = part.cpu_lock_path(str(self.data), '0')
-        held = [subprocess.run(['flock', '-n', m, p, 'true'], timeout=10).returncode
-                for m, p in (('-x', str(self.hl)), ('-s', cpu_lock))]
-        self.assertEqual(held, [1, 1], 'the command still runs, so its s hold of the host and x of its CPUs stand')
+        held = subprocess.run(['flock', '-n', '-s', str(self.hl), 'true'], timeout=10).returncode
+        self.assertEqual(held, 1, 'the command still runs, so its x hold stands')
         for _ in range(200):
             if (rec / 'exit.json').exists():
                 break
             time.sleep(0.05)
         self.assertEqual(subprocess.run(['flock', '-w', '10', '-x', str(self.hl), 'true'], timeout=20).returncode, 0)
-        self.assertEqual(subprocess.run(['flock', '-w', '10', '-x', cpu_lock, 'true'], timeout=20).returncode, 0)
 
     def test_a_part_waiting_for_a_slot_holds_no_host_lock(self):
-        """The order (§5.5 item 3): slots, then leases, then the host lock. A part with
-        ``lock: x`` that waits behind a nightly part holding every slot holds no lock
-        meanwhile, so the two cannot wait for each other. A compile part takes no slot
-        (decision 15.10): it runs while every slot is held."""
+        """The order (§5.5 item 3): slots, then leases, then the host lock. A compile part
+        that waits behind a nightly part holding every slot holds no lock meanwhile, so
+        the two cannot wait for each other."""
         fds = []
         for p in (self.slot, self.slot.parent / 's.2.lock'):  # every slot taken, as by a nightly part
             fd = os.open(p, os.O_WRONLY)
@@ -599,16 +552,12 @@ class Classes(ClassHost):
         t = threading.Thread(target=watch)
         t.start()
         try:
-            _, out = self.go('part', lock='x', queue_timeout_minutes=0.01)
-            stop.set()
-            t.join()
-            _, compiled = self.go('compile', id='beside', queue_timeout_minutes=0.01)
+            _, out = self.go('compile', queue_timeout_minutes=0.01)
         finally:
             stop.set()
             t.join()
             for fd in fds:
                 os.close(fd)
-        self.assertEqual(compiled['outcome'], 'pass', compiled['reason'])
         self.assertEqual(out['reason'], 'queue timeout: no CI slot')
         self.assertTrue(seen)
         self.assertFalse(any(seen), 'the host lock was held while the part waited for a slot')

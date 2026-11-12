@@ -23,8 +23,8 @@ memory_max = "120G"                             # ci.slice
 disk_min_gib = 50
 gpus = [0, 1]
 max_temp_c = 80
-cpus = "0-3,16-27"                              # every other part, the runners and the timers
-compile_cpus = "4-15"                           # the compile parts' CPUs, disjoint from cpus (12.7, 15.10)
+cpus = "0-27"
+compile_cpus = "4-15"                           # the compile parts' CPUs (decision 12.7)
 default_project = "brainspike"                  # the project of a ci_slot.sh ticket (decision 12.9)
 python = "/<path to a Python 3.11 or later>"    # export it as CI_RUNNERS_PYTHON (and CI_RUNNERS_ETC)
                                                 # to run setup/*.sh by hand

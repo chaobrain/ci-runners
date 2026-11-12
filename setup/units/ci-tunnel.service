@@ -8,7 +8,6 @@
 Description=ci-runners: egress tunnel
 
 [Service]
-@CPU_AFFINITY@
 ExecStart=/usr/bin/ssh -F @CI_ETC@/tunnel/ssh_config -N -L 127.0.0.1:@TUNNEL_HTTP@:127.0.0.1:@TUNNEL_EGRESS@ -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile=@CI_ETC@/tunnel/id_ed25519 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=@CI_ETC@/tunnel/known_hosts -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none -o VerifyHostKeyDNS=no -o CheckHostIP=no -o UpdateHostKeys=no -o GatewayPorts=no -o PermitLocalCommand=no -o IdentityAgent=none -o ControlMaster=no -o ControlPath=none -o ForwardAgent=no -o ForwardX11=no -o ConnectTimeout=20 egress
 NoNewPrivileges=yes
 Restart=always

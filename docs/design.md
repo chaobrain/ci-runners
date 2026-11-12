@@ -2419,7 +2419,7 @@ The order is therefore made where the runners are, by presence, and no plan name
          holder: its key, its `until`, who set it and when. A job's key is its
          repository, run id and attempt; the maintainer's key is `maintainer`. So one
          run's release never ends another's hold. The host is held while any entry is
-         unexpired. An expired entry counts for nothing, and the next write or tick
+         unexpired. An expired entry counts for nothing, and the next write
          removes it; there are at most 32 entries.
        - *Who may set it.* The maintainer, as the CI account, from a shell. Or a job
          running on that host's `home` runner (a light runner without a `ci-` label,

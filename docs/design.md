@@ -69,7 +69,7 @@ are listed with what replaced them.
       the `.env` files are root's), not accepted.*
    3. *The hook's path in job logs.* Moot while no public repository used the runners.
       *Amended by 16.7: on the public pool the logs are public; the hooks' path names no
-      disk or account, and the machine name is the lead's choice.*
+      disk or account, and the lead checks the machine name before P2.*
 
 ## Lead decisions (2026-11-06): a standard test CI on h100 (RUN-5)
 
@@ -1575,7 +1575,7 @@ Each item names what it supersedes or amends.
          since a job queued on a label without a runner waits 24 h (§2); a runner that
          presence holds back for a passing cause (a card in use, a taken slot, a timing
          run) still serves its label. A queued part's own bound stays with the
-         consumer's sweeper for now (§10, RUN-10's open points).
+         consumer's sweeper for now (§10, RUN-10's open point).
        - *Retries are the five rows of `outcome.hint`* and nothing else:
 
          | row (`where`) | outcomes | the retry's labels |
@@ -1630,7 +1630,10 @@ Each item names what it supersedes or amends.
        instead:
        - *A second account on one host* (the new host of 16.9), never a shared account
          and never a host whose CI account holds a cluster key. It holds no cluster key,
-         no tunnel key and no organisation token. Its hooks, `policy.toml`, snapshot and
+         no tunnel key and no organisation token. Where the host has no direct route to
+         GitHub, its runners' `.env` points at the loopback forward that the host's
+         private CI account already holds (11.10): the public account gets the egress
+         host's allowlist and no key. Its hooks, `policy.toml`, snapshot and
          every runner's `.env` are root's and not writable by the account, so an
          accepted job cannot change the checks of later jobs (amends 10.2: the tamper
          gap is closed for this pool, not accepted).
@@ -1656,7 +1659,8 @@ Each item names what it supersedes or amends.
        - *Public logs* (amends 10.3, moot while no public repository used the runners).
          Every job log shows the runner's machine name and the hook's path (`v1.4.0`
          notes item 5): the hooks sit at a root-owned path that names no disk or
-         account, and the machine name is the lead's choice.
+         account. The machine name is shown as the host has it, which the lead checks
+         before P2: it may name no person, site or address.
        - *First consumers:* a public copy of the canary, then one public library. Never
          this repository (`policy.SELF`; its own CI stays on hosted runners).
        - *Residuals.* A member's same-repository branch may carry fork commits nobody
@@ -1694,7 +1698,8 @@ Each item names what it supersedes or amends.
         time; the reusable workflow is proven on the canary before any consumer calls
         it; host-label routing goes last (`v2`). Each step's rollback is one revert,
         moving `v1` back, or the previous inventory. The host and org steps are the
-        lead's, each approved when it comes (AGENTS.md): the capability labels on the
+        lead's, approved for RUN-10 on 2026-11-12 (issue #175) and logged where each is
+        done: the capability labels on the
         existing runners; the new host's CI account, env, cache warm-up, numerics check
         and registration; h100's slots, 3090b leaving the CPU pool, and presence per
         host; each release and each move of `v1`; the public account, its root-owned
@@ -3467,7 +3472,9 @@ nightly on capability labels) are its PRs, not this repository's.
   stamp's rewrite of their refs. *Acceptance,* on the canary at `@v1.N.0`: a run takes 3
   pickups on its critical path; a runner killed during a part leads to its salvage and a
   retry, and the run ends green; a head whose contract is too old is red in under 30 s
-  with no part started; every fact §2 lists for R6 is confirmed or the contract amended.
+  with no part started; a part that no runner takes within its bound ends the run with
+  an infrastructure error, not a day's wait (the bound's design is R6's); every fact §2
+  lists for R6 is confirmed or the contract amended.
 - **R7, statistics and dev slots** (16.8): `ci-run stats`; `pool run` on `dev_slots`.
   *Acceptance:* on a recorded batch of 8 runs, the report's queue, run and verdict delays
   per label and per repository equal an independent count from the jobs API; a pool run
@@ -3494,12 +3501,11 @@ nightly on capability labels) are its PRs, not this repository's.
   `pull_request_target` and a non-member's re-run; a same-repository pull request is
   green.
 
-*Open points:* a queued part's bound inside the reusable workflow (a part whose job no
-runner takes for its bound; today the consumer's own sweeper); the public account's
-egress where its host has no direct route (a key of its own, the lead's); the machine
-name the public pool's runners show; whether the public pool should also take a member's
-`workflow_dispatch` or a `schedule` on a protected ref (16.7 takes neither); the `nightly`
-class once its consumer runs its nightly on capability labels.
+*Open point:* the design of a queued part's bound inside the reusable workflow (a part
+whose job no runner takes; today the consumer's own sweeper), closed by R6. Decided with
+the contract: the public pool takes neither a member's `workflow_dispatch` nor a
+`schedule` (16.7; a consumer that needs one asks by an issue); the `nightly` class
+follows its consumer (16.10).
 
 ## 11. brainspike on top of this (decision 12)
 

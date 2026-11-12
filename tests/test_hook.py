@@ -58,7 +58,7 @@ class Started(unittest.TestCase):
         (self.etc / 'policy.toml').write_text(POLICY + '[repositories."chaobrain/brainevent"]\nid = 2002\n'
                                               'visibility = "public"\npublic_runners = true\n')
         ev = json.loads((EVENTS / 'pr_same_repo.json').read_text())
-        pub = {'id': 2002, 'full_name': 'chaobrain/brainevent'}
+        pub = {'id': 2002, 'full_name': 'chaobrain/brainevent', 'private': False}
         ev['repository'] = ev['pull_request']['head']['repo'] = ev['pull_request']['base']['repo'] = pub
         path = self.base / 'public.json'
         path.write_text(json.dumps(ev))

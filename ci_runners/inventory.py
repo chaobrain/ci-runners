@@ -312,7 +312,7 @@ def load(text: str) -> Inventory:
             if pub:
                 _check_public(f'hosts.{role}.pools.{pool}', role, cls, v)
             else:
-                _check_private_labels(f'hosts.{role}.pools.{pool}', v)
+                _check_private_labels(f'hosts.{role}.pools.{pool}', role, pool, v)
             if (cls, pub) in seen:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: class {cls} is also the class of {seen[cls, pub]}')
             if isinstance(v, dict) and 'slot' in v:  # one cpuset per runner (16.2)
@@ -358,9 +358,10 @@ def _check_public(where: str, role: str, cls: str, v: Mapping[str, object]) -> N
         raise InventoryError(f'{where}: a public pool\'s labels are {PUBLIC_LABEL} and {role}-pub-gpu only')
 
 
-def _check_private_labels(where: str, v: object) -> None:
-    """No private pool carries a label of the public pool's (decision 18.7). Pure."""
-    labels = v.get('labels', []) if isinstance(v, dict) else []
+def _check_private_labels(where: str, role: str, pool: str, v: object) -> None:
+    """No private pool carries a label of the public pool's (decision 18.7), its own or the
+    ``<pool>, <role>`` its runners carry without them (setup's rule, §5.1). Pure."""
+    labels = (v.get('labels') if isinstance(v, dict) else None) or [pool, role]
     if any(x.startswith(PUBLIC_PREFIX) or x.endswith(PUBLIC_HOST_SUFFIX) for x in labels):
         raise InventoryError(f'{where}: a label of the public pool on a private pool')
 

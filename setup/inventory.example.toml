@@ -72,6 +72,7 @@ compile = { count = 1, labels = ["3090b-compile"] }
 # no count or slot (its runners come from the issuer, 18.6) and the labels ci-pub-gpu and
 # <role>-pub-gpu only; it needs the host's `isolation`. Accepted, checked and ignored by setup,
 # presence, the route and the executor until a later phase; no private pool carries a ci-pub- label.
+# No host's inventory gains these keys before every host runs a release that accepts them.
 # pub-gpu = { per_card = true, class = "gpu", audience = "public", labels = ["ci-pub-gpu", "3090b-pub-gpu"] }
 
 [hosts.3090b.files]                             # brainspike's lock and slot files (decision 12.9)

@@ -385,6 +385,9 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
             return no('event')
         if event_name == 'push' and env.get('GITHUB_REF_PROTECTED') != 'true':
             return no('unprotected')
+        r = event.get('repository')
+        if not isinstance(r, dict) or r.get('private') is not False:  # its payload says it is public
+            return no('repository')
     # not a fork: a pull request's head and base, and a workflow_run's head, are this repository
     if 'pull_request' in event or event_name.startswith('pull_request'):
         pr = event.get('pull_request')

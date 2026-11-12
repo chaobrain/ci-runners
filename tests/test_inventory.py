@@ -231,6 +231,13 @@ class Load(unittest.TestCase):
             inv.load(new.replace('cards = { per_card = true, class = "gpu", labels = ["3090b-gpu"] }  # runners 3090b-gpu<N>\n', ''))
         with self.assertRaises(inv.InventoryError):  # and the host's isolation
             inv.load(new.replace('isolation = "ns-subuid"', ''))
+        for pool in ('ci-pub-gpu', 'x-pub-gpu'):  # nor as a pool's default label, <pool>, <role> (§5.1)
+            with self.assertRaises(inv.InventoryError, msg=pool):
+                inv.load(EXAMPLE.replace('multi = { count = 1, labels = ["3090b-multi"] }', f'{pool} = {{ count = 1, class = "multi" }}'))
+        with self.assertRaises(inv.InventoryError):
+            inv.load(EXAMPLE.replace('"3090b"', '"h-pub-gpu"').replace('3090b.', 'h-pub-gpu.').replace(
+                'multi = { count = 1, labels = ["3090b-multi"] }', 'multi = 1'))
+        inv.load(EXAMPLE.replace('multi = { count = 1, labels = ["3090b-multi"] }', 'multi = 1'))
         for label in ('ci-pub-gpu', 'ci-pub-cpu', '3090b-pub-gpu', '3090a-pub-gpu'):  # never on a private pool
             with self.assertRaises(inv.InventoryError, msg=label):
                 inv.load(EXAMPLE.replace('labels = ["3090b-gpu"]', f'labels = ["3090b-gpu", "{label}"]'))

@@ -4,12 +4,13 @@
 Experimental: wired into nothing. Standard library only (the G items load the host's
 ``libcuda.so.1`` through ctypes and import ``jax`` from the Python environment).
 
-    check.py suite --variant control|subuid-gpu|subuid-none|single --scratch DIR
+    check.py suite --variant control|subuid-gpu|subuid-kept|subuid-none|single --scratch DIR
                    --env DIR [--card N] [--proxy-port P] [--out FILE]
     check.py cost  --scratch DIR --env DIR --card N [--proxy-port P] [--repeat 3] [--out FILE]
 
 ``suite`` creates its own markers under ``--scratch`` -- a marker file outside the job's
-tree, a marker process (which allows any same-uid tracer, so a trace attach can succeed
+tree, a second one readable only by its owner and one of the account's groups other
+than the GPU group, a marker process (which allows any same-uid tracer, so a trace attach can succeed
 when nothing confines it) and a marker TCP listener on the host's loopback -- then runs
 the item checks inside the variant's sandbox (``control``: with no sandbox at all) and
 removes the markers. Every item states what a confined job must observe; the control
@@ -22,8 +23,10 @@ import argparse
 import ctypes
 import errno
 import glob
+import grp
 import json
 import os
+import pwd
 import secrets
 import shutil
 import socket
@@ -37,8 +40,8 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SANDBOX = os.path.join(HERE, 'sandbox.py')
-VARIANTS = {'control': None, 'subuid-gpu': ('subuid', 'gpu'), 'subuid-none': ('subuid', 'none'),
-            'single': ('single', 'gpu')}
+VARIANTS = {'control': None, 'subuid-gpu': ('subuid', 'gpu'), 'subuid-kept': ('subuid', 'kept'),
+            'subuid-none': ('subuid', 'none'), 'single': ('single', 'kept')}
 INSIDE_RELAY = 'http://127.0.0.1:3128'
 ALLOWED_URL = 'https://api.github.com/zen'
 DENIED_URL = 'https://example.com/'
@@ -46,11 +49,14 @@ PATTERN = 0x5A17C0DE
 FILL_MIB, SCAN_MIB = 384, 512
 
 EXPECTED = {
-    'I1': "record uid, gid, groups inside and the kernel ids outside; the job's kernel uid is not the account's",
+    'I1': ("the job's kernel uid and gid, read outside, are a subordinate pair and its kernel groups are "
+           "the GPU group alone (none without a card); recorded inside and outside"),
     'F1': 'a marker file outside the tree is not visible',
     'F2': 'creating a file in the read-only hook/policy stand-in fails',
     'F3': "the account's home path does not exist",
     'F4': 'writing outside the per-job tree (and the per-job /tmp) fails',
+    'F5': ("a file outside the tree readable by one of the account's other groups (mode 0640) is not visible, "
+           "and the job's kernel credentials, read outside, could not open it"),
     'P1': "/proc lists only the sandbox's processes; the marker is not among them",
     'P2': "signal 0 to the marker's pid fails",
     'P3': 'a trace attach to the marker fails',
@@ -177,7 +183,14 @@ def i1(spec) -> dict:
             k, _, v = line.partition(':')
             if k in ('CapEff', 'CapPrm', 'CapBnd', 'CapAmb', 'NoNewPrivs', 'Seccomp', 'NSpid'):
                 status[k] = v.strip()
-    obs = {'resuid': os.getresuid(), 'resgid': os.getresgid(), 'groups': os.getgroups(), **status}
+    names = []
+    for g in os.getgroups():
+        try:
+            names.append(grp.getgrgid(g).gr_name)
+        except KeyError:
+            names.append(str(g))
+    obs = {'resuid': os.getresuid(), 'resgid': os.getresgid(), 'groups': os.getgroups(), 'group_names': names,
+           **status}
     # let the suite read the kernel ids from outside while this process lives
     with open(spec['ids_ready'], 'w') as f:
         f.write(str(os.getpid()))
@@ -190,6 +203,18 @@ def i1(spec) -> dict:
 def f1(spec):
     seen = os.path.exists(spec['marker_file'])
     return _item('F1', 'visible' if seen else 'not visible', not seen)
+
+
+def f5(spec):
+    p = spec['group_file']
+    if not os.path.exists(p):
+        return _item('F5', 'not visible', True)  # the credentials half is added outside
+    try:
+        with open(p) as f:
+            f.read(1)
+        return _item('F5', 'visible, opened', False)
+    except OSError as e:
+        return _item('F5', f'visible, open failed ({_errname(e)})', False)
 
 
 def f2(spec):
@@ -434,7 +459,7 @@ def g4(spec):
     return _item('G4', obs, None)
 
 
-ITEMS = [i1, f1, f2, f3, f4, p1, p2, p3, n1, n2, n3, k1, k2, k3]
+ITEMS = [i1, f1, f2, f3, f4, f5, p1, p2, p3, n1, n2, n3, k1, k2, k3]
 GPU_ITEMS = [g1, g2, g3, g4]
 
 
@@ -494,9 +519,50 @@ def _kernel_ids(root_pid: int, inner_pid: int):
         except OSError:
             continue
         if st.get('NSpid') and int(st['NSpid'][-1]) == inner_pid:
-            return {'pid_outside': p, 'uid': [int(x) for x in st['Uid']], 'gid': [int(x) for x in st['Gid']],
-                    'groups': [int(x) for x in st.get('Groups', [])], 'NSpid': st['NSpid']}
+            ids = {'pid_outside': p, 'uid': [int(x) for x in st['Uid']], 'gid': [int(x) for x in st['Gid']],
+                   'groups': [int(x) for x in st.get('Groups', [])], 'NSpid': st['NSpid']}
+            for name in ('uid_map', 'gid_map', 'setgroups'):
+                try:
+                    with open(f'/proc/{p}/{name}') as f:
+                        ids[name] = [' '.join(ln.split()) for ln in f.read().splitlines()]
+                except OSError:
+                    pass
+            return ids
     return None
+
+
+def _sandbox_module():
+    """sandbox.py (beside this file), for its ``/etc/subuid`` parsing."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('sandbox', SANDBOX)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def identity_held(ids, account_uid: int, subuid: list, subgid: list, expected_groups: list) -> bool:
+    """Check 8: the job's kernel uid and gid (every one of real, effective, saved, fs) lie in the
+    account's subordinate lines, none is the account's, and its kernel groups are exactly
+    ``expected_groups`` (the GPU group alone; none without a card)."""
+    if not ids:
+        return False
+    def sub(x, lines):
+        return any(first <= x < first + count for first, count in lines)
+    return (all(u != account_uid and sub(u, subuid) for u in ids['uid'])
+            and all(sub(g, subgid) for g in ids['gid'])
+            and sorted(set(ids['groups'])) == sorted(set(expected_groups)))
+
+
+def could_open(ids, st) -> bool:
+    """Whether credentials ``ids`` (from /proc/PID/status, outside) may read a file of stat ``st``
+    by its mode bits (the fs uid and gid, then the groups; no capability inside the namespace
+    reaches a file of an unmapped owner)."""
+    fsuid, fsgid = ids['uid'][3], ids['gid'][3]
+    if fsuid == st.st_uid:
+        return bool(st.st_mode & 0o400)
+    if st.st_gid == fsgid or st.st_gid in ids['groups']:
+        return bool(st.st_mode & 0o040)
+    return bool(st.st_mode & 0o004)
 
 
 def _card_uuid(card: int) -> str:
@@ -540,6 +606,15 @@ def suite(a) -> int:
     marker_file = os.path.join(run, token)
     with open(marker_file, 'w') as f:
         f.write(token)
+    gpu_gid = os.stat(f'/dev/nvidia{a.card}').st_gid if a.card is not None else None
+    # F5's file: readable by its owner and one of the account's groups other than the GPU group
+    # (the primary group when the account has no other), by no one else
+    others = sorted(set(os.getgroups()) - {gpu_gid, os.getgid()})
+    group_file = os.path.join(run, token + '-group')
+    with open(group_file, 'w') as f:
+        f.write(token)
+    os.chown(group_file, -1, others[0] if others else os.getgid())
+    os.chmod(group_file, 0o640)
     lst, hits = _marker_listener()
     marker = subprocess.Popen([sys.executable, '-c', MARKER_CODE, token])
     gpu_marker = None
@@ -549,7 +624,7 @@ def suite(a) -> int:
         if gpu_marker.stdout.readline().strip() != 'ready':
             raise SystemExit('check: the GPU marker did not start')
     home = os.path.expanduser('~')
-    spec = {'token': token, 'marker_file': marker_file, 'marker_pid': marker.pid,
+    spec = {'token': token, 'marker_file': marker_file, 'group_file': group_file, 'marker_pid': marker.pid,
             'marker_port': lst.getsockname()[1], 'proxy_port': a.proxy_port, 'home': home, 'scratch': run,
             'card': a.card, 'env_prefix': os.path.realpath(a.env)}
     if variant is None:
@@ -612,11 +687,30 @@ def suite(a) -> int:
         msg = (err.strip().splitlines() or [f'exit {proc.returncode}'])[-1]
         results = [{'id': 'ALL', 'expected': 'the sandbox starts', 'observed': f'did not start: {msg}', 'held': False}]
     ids = outer.get('ids')
+    sb = _sandbox_module()
+    pw = pwd.getpwuid(os.getuid())
+    sublines = []
+    for path in ('/etc/subuid', '/etc/subgid'):
+        try:
+            with open(path) as f:
+                sublines.append(sb.subid_lines(f.read(), pw.pw_name, pw.pw_uid))
+        except OSError:
+            sublines.append([])
+    expected_groups = [gpu_gid] if gpu_gid is not None else []
+    gst = os.stat(group_file)
     for r in results:
         if r['id'] == 'I1':
             inside_ids = r['observed']
-            r['observed'] = {'inside': inside_ids, 'kernel': ids}
-            r['held'] = bool(ids) and ids['uid'][1] != os.getuid()
+            r['observed'] = {'inside': inside_ids, 'kernel': ids, 'gpu_group': gpu_gid}
+            r['held'] = identity_held(ids, os.getuid(), *sublines, expected_groups)
+        if r['id'] == 'F5':
+            hidden = r['held']
+            opens = could_open(ids, gst) if ids else None
+            r['observed'] = (f'mount namespace: {r["observed"]}; credentials: the job\'s kernel groups '
+                             f'{"hold" if ids and gst.st_gid in ids["groups"] else "lack"} the file\'s group, '
+                             f'so they {"could" if opens else "could not" if opens is False else "(not read)"} '
+                             f'open it')
+            r['held'] = bool(hidden) and opens is False
     if 'reverse' in outer:
         results.append({'id': 'R1', 'expected': EXPECTED['R1'], 'held': None,
                         'observed': 'attached' if outer['reverse'].get('r') == 'ok'
@@ -625,7 +719,8 @@ def suite(a) -> int:
         for r in results:
             if r['id'] == 'N1':
                 r['observed'] += f' (listener saw {len(hits)} connection(s))'
-    report = {'variant': a.variant, 'host': a.host_label, 'exit': proc.returncode, 'wall_s': round(wall, 1),
+    report = {'variant': a.variant, 'host': a.host_label, 'group_file_gid': gst.st_gid,
+              'exit': proc.returncode, 'wall_s': round(wall, 1),
               'account_uid': os.getuid(), 'account_groups': os.getgroups(), 'results': results,
               'stderr_tail': err.strip().splitlines()[-5:]}
     shutil.rmtree(run, ignore_errors=True)
@@ -672,6 +767,7 @@ def cost(a) -> int:
         tree = tempfile.mkdtemp(prefix='tree-', dir=run)
         t = time.time()
         subprocess.run([sys.executable, SANDBOX, 'run', '--tree', tree, '--env', a.env, '--card', str(a.card),
+                        '--groups', 'gpu',
                         '--setenv', 'XLA_PYTHON_CLIENT_PREALLOCATE=false', '--setenv', 'TF_CPP_MIN_LOG_LEVEL=3',
                         '--', '/opt/env/bin/python', '-c', G1_CODE], check=True, capture_output=True)
         inside_t.append(time.time() - t)

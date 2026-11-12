@@ -114,6 +114,9 @@ CPT = 'setup/units/ci-capacity.timer'
 TCA = 'tests.test_capacity'
 ROU = 'ci_runners/route.py'
 TRO = 'tests.test_route'
+SBX = 'experiments/sandbox/sandbox.py'
+SBC = 'experiments/sandbox/check.py'
+TSB = 'tests.test_sandbox'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
@@ -3466,6 +3469,26 @@ MUTANTS = [
      "for p in parts if p.get('needs') not in NEEDS]", [f'{TRO}.PlanTime.test_an_unknown_need_is_the_plans_fault']),
     (ROU, "        rows, unread = None, 'every host row is stale'", "        pass", [f'{TRO}.Overflow.test_stale_rows']),
     (CLI, "    if cmd == 'route':", "    if cmd == 'r0ute':", [f'{TRO}.Cli.test_ci_run_route']),
+    # the sandbox prototype's group modes (design 18, items 4 and 5, check 8)
+    (SBX, "        if len(parts) == 3 and parts[0] in (name, str(uid)):", "        if len(parts) == 3 and parts[0] == name:",
+     [f'{TSB}.Lines.test_every_line_of_the_account_by_name_or_uid']),
+    (SBX, "        if count > JOB_UID:", "        if count > 0:",
+     [f'{TSB}.Lines.test_the_range_is_the_first_line_large_enough_for_the_job']),
+    (SBX, "    inside = n + 1", "    inside = n",
+     [f'{TSB}.Plan.test_gpu_maps_the_gpu_group_beyond_every_other_inside_id_and_holds_it_alone']),
+    (SBX, "    gm += [str(inside), str(gpu_gid), '1']", "    pass",
+     [f'{TSB}.Plan.test_gpu_maps_the_gpu_group_beyond_every_other_inside_id_and_holds_it_alone']),
+    (SBX, "    if not any(first <= gpu_gid < first + count for first, count in glines):", "    if False:",
+     [f'{TSB}.Plan.test_gpu_without_the_line_names_the_line_to_add']),
+    (SBX, "    if sg <= gpu_gid < sg + n:", "    if False:", [f'{TSB}.Plan.test_gpu_without_the_line_names_the_line_to_add']),
+    (SBX, "    return ['--groups=' + ','.join(str(g) for g in job_groups)]", "    return ['--keep-groups']",
+     [f'{TSB}.Plan.test_gpu_maps_the_gpu_group_beyond_every_other_inside_id_and_holds_it_alone']),
+    (SBX, "    if ctl.st_gid != node.st_gid and ctl.st_mode & 0o006 != 0o006:", "    if False:",
+     [f'{TSB}.Plan.test_the_gpu_group_is_the_card_nodes_group']),
+    (SBC, "            and sorted(set(ids['groups'])) == sorted(set(expected_groups)))", "            and True)",
+     [f'{TSB}.Identity.test_check_8_holds_only_for_a_subordinate_pair_with_the_gpu_group_alone']),
+    (SBC, "    if st.st_gid == fsgid or st.st_gid in ids['groups']:", "    if st.st_gid == fsgid:",
+     [f'{TSB}.Identity.test_could_open_by_the_files_bits']),
 ]
 
 

@@ -4354,6 +4354,21 @@ Rules:
      salvage, verdict; no retry); the red head was red on compile, cpu, gpu, multi-a and multi-b. After the move, a
      canary calling `ci.yml@v1` (`canary-r6-v1`) was green: its plan, the three parts (the oom part on its retry) and
      the verdict.
+- **`v1.19.0`** (minor, stamped 2026-11-13; decisions 16.8, 18.7, §5.1, RUN-10 R7, C2a-C2c, #221-#223, #226, #233-#237;
+  brainspike's coordinator under the lead's delegation of 2026-11-13): `ci-run stats` (R7a); `pool run` on dev slots
+  (R7b); the public pool's policy, hook and inventory keys, a public caller's hosted legs and presence's public runners
+  (C2a, C2b); a host's home pool (§5.1, #232); the reusable workflow `sweep.yml` and the action `sweep` (#213); hidden
+  plan files and a failed upload as the plan's end (#227); a part's plan key `history` (#228); the job-started hook
+  takes the runner's class and audience from the inventory, runs under `env -i`, and reads the etc setup writes into it
+  (C2c). The stamp covers `sweep.yml`, `public.yml` and `public-part.yml` too. No existing action's input, output or
+  outcome kind changes; every key it adds is optional. Its notes:
+  1. **Order.** Before the release reaches a host, its `actions-runner/*` is checked to be a subset of what `ci-run
+     runners` lists (a directory the inventory does not know is refused, `runner`, and counts toward the self-drain).
+     The install moves `releases/hook`; the old job-started wrapper with the new release still decides as before. The
+     host's plan then rewrites the installed hook with its etc line, and a canary per pool class follows at once.
+  2. **Keys behind `v1`.** A home pool, a registry's `dev_slots` and a plan's `history` are refused by older
+     releases, so none is written on a host, nor printed by a consumer pinned to `ci.yml@v1`, before `v1` points here
+     and every host has installed it.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

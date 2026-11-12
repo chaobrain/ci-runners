@@ -1,0 +1,10 @@
+[Unit]
+Description=ci-runners: a presence tick every @PRESENCE_TICK@ s (decision 16.4)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=@PRESENCE_TICK@s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

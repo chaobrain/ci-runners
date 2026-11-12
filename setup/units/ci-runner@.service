@@ -11,6 +11,10 @@ StartLimitIntervalSec=0
 
 [Service]
 WorkingDirectory=@CI_DATA@/actions-runner/%i
+# Presence (decision 16.4): while the runner's resource cannot start a job, the check ends
+# 77 and the start is skipped (Result=exec-condition; the presence tick starts it later).
+# Any other end, an error or an older release without the check, lets the runner start.
+ExecCondition=/bin/sh -c 'CI_RUNNERS_ETC=@CI_ETC@ CI_RUNNERS_PYTHON=@CI_PYTHON@ @CI_DATA@/ci-runners/releases/hook/bin/ci-run presence check "$$1"; test $$? -ne 77' presence %i
 @HOOKS_CHECK@
 ExecStart=@CI_DATA@/actions-runner/%i/run.sh
 NoNewPrivileges=yes

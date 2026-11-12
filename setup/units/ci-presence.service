@@ -1,0 +1,11 @@
+[Unit]
+Description=ci-runners: presence, one tick (decision 16.4)
+
+[Service]
+Type=oneshot
+ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run presence
+Environment=CI_RUNNERS_ETC=@CI_ETC@
+Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
+NoNewPrivileges=yes
+# two nvidia-smi calls of at most 20 s each, a load sample of 1 s, and the rest
+TimeoutStartSec=90s

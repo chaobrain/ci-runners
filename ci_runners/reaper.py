@@ -17,7 +17,7 @@ from ci_runners import hostload
 
 KEEP_DAYS = 14
 RUN_DEPTH = 3  # state/parts/<owner>/<repo>/<run>
-LOGS = ('hook-', 'shared-')  # the dated logs under logs/: the hook's, the shared state's (15.2)
+LOGS = ('hook-', 'shared-', 'presence-')  # the dated logs under logs/: the hook's, the shared state's (15.2), presence's (16.4)
 
 
 def newest(path: str) -> float:

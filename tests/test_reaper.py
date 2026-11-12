@@ -56,10 +56,12 @@ class Reap(unittest.TestCase):
         self.put('logs/hook-2026-11-04.log', 1)
         self.put('logs/shared-2026-10-01.log', 20)  # the shared state's (decision 15.2)
         self.put('logs/shared-2026-11-04.log', 1)
+        self.put('logs/presence-2026-10-01.log', 20)  # presence's (decision 16.4)
+        self.put('logs/presence-2026-11-04.log', 1)
         self.put('logs/keep-me', 40)
         reaper.reap(str(self.data), now=self.now)
         self.assertEqual(sorted(p.name for p in (self.base / 'logs').iterdir()),
-                         ['hook-2026-11-04.log', 'keep-me', 'shared-2026-11-04.log'])
+                         ['hook-2026-11-04.log', 'keep-me', 'presence-2026-11-04.log', 'shared-2026-11-04.log'])
 
     def test_the_load_record_after_2_days_its_markers_after_14(self):
         """Decision 13.2: the record's day files go after 2 days, the refused markers after

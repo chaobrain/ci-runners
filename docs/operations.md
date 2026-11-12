@@ -366,7 +366,27 @@ cards = { per_card = true, class = "gpu", labels = ["<host>-gpu"], slot = { cpus
 
 上线和回退：先确认 `v1` 已经指向接受 `slot` 的版本（R1，16.3）和会读它的版本（R2），再在 inventory 加表、跑 setup 的 plan 和 apply，让各 runner 的 `.env` 带上 `CI_RUNNER_SLOT`。只有表、`.env` 里还没有 `CI_RUNNER_SLOT` 的 runner 照旧运行；`.env` 里的序号超出表的范围、表被删掉、或 per-card 池的序号和 `CI_RUNNER_CARD` 对不上，部件都以 `unavailable`（`slot: ...`）结束，不会悄悄退回旧的绑核方式。回退就是删掉表再 apply 一次。部件记录（`record.json`）的 `runner_slot` 记下序号、cpuset、`workers`、`memory`、`speed`、`isa` 和放大后的超时分钟数。
 
-## 15. 看懂一次路由（design 决定 16.5，RUN-10 R5）
+## 15. presence：按资源停启空闲的 runner（design 决定 16.4，RUN-10 R3 起）
+
+presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 runner 的资源暂时用不了时，它把这个空闲的 runner 停掉（`systemctl --user stop`），资源恢复后再启动。它以 CI 账户的 `ci-presence.timer` 运行，默认每 20 秒一次（`ci-run presence`，一次一个 tick），只读本机状态，不用令牌也不联网。
+
+- **原因**（每个 runner 单独判断）：它的卡被别人占用（卡上有不属于我们的计算进程，或不属于我们的显存达到 `busy.gpu_mib`），或卡的健康门不通过（每卡一个 runner 的主机上：温度达到 `max_temp_c` 或读不到）；没有空闲的 CI slot 给它（slot 总数减去不属于我们的进程持有的，再减去我们忙着的部件 runner 占的；剩下的 slot 先给每个池一个 runner，在线的优先、再按顺序；所以 2 个空闲 slot、某池 2 个在线 runner、另一池 1 个停着时，前者的第二个 runner 会被停一次，让后者启动，之后就稳定了）；它的 slot 的 CPU 被不属于我们的进程占着（1 秒的采样，达到这些 CPU 的一半算，降到四分之一以下才解除；cgroup v2 上不会超过整机忙时减去我们所有单元的 CPU 时间，所以我们自己的短进程不算）；主机或它的池被 drain，或主机的健康门不通过（数据盘剩余低于 `disk_min_gib`，或 CI 账户对共享文件的访问缺失，决定 15.2）；一个独占的计时部件在跑或在等：CPU 和 `compile_cpus` 重叠的 runner（有 slot 的看 slot 的 cpuset，没有 slot 的 `part` runner 看主机的 `cpus`）停。
+- **"我们的"进程**按 systemd 单元和 cgroup 判断，不按 Unix 账户：在本账户 user manager（`user@<uid>.service`）下某个 `ci-` 服务或 scope 里的进程（runner、部件的 scope、定时器的服务）。cgroup v1 的主机读 `/proc/<pid>/cgroup` 里 `name=systemd` 那一行。共享账户的主机（h100）上同一个 uid 的登录会话、别人的 `systemd-run` 都不算我们的。看不到的进程不算我们的。
+- **空闲**：runner 目录下没有 `Runner.Worker` 进程，也没有这个 runner 的部件 scope。连续 2 个 tick 空闲且有原因才停；停之前再看一次，这时出现了 `Runner.Worker` 就不停（日志里记一条 `kept`）。presence 停掉的、或被单元的 `ExecCondition=` 拦下的（`Result=exec-condition`），连续 2 个 tick 没有原因就启动。忙着的 runner 永远不停；没有 `ci-` 标签的 light runner（§5.1 的 `home` 池，给本机的 salvage）永远不停；主机的 light 池还没有 `ci-light`（16.1）之前，那里的每个 light runner 都算这种 runner，drain 时也不停，所以先加能力标签、再打开 presence。别人手动停掉的 runner presence 不管。
+- **单元的 `ExecCondition=`**：runner 每次启动（包括 15.5 的自动恢复、开机）先跑 `ci-run presence check <runner>`，有原因时退出 77，systemd 跳过这次启动，等 presence 的 tick 再启动它。其他任何结果（出错、旧 release 没有这个命令）都让 runner 照常启动。systemd 243 以前不认识这个键，会忽略它。
+- **只在 inventory 打开的主机上生效**：主机的 inventory 写 `presence = { enabled = true }`（可选 `tick_seconds`）。每台主机都装这个定时器，但没有打开时它什么都不做。一次只打开一台主机（16.11，lead 的步骤），且 `v1` 已经指向包含 R3 的 release。
+
+**打开之前先观察**：以 CI 账户运行 `ci-run presence --dry-run`。它按"已经打开"的情况读本机，逐个 runner 打印状态、是否空闲、原因和这个 tick 会做什么（`stop`、`start`、`keep`、`never stopped`），它不写状态、不动任何单元。
+
+**看日志**：每次停、启和 `kept` 都是 `<data>/ci-runners/logs/presence-<UTC 日期>.log` 里的一行 JSON（`runner`、`action`、`cause`），同时打到 `journalctl --user -u ci-presence.service`。reaper 14 天后删除这些文件。`state/presence.json` 里有每个 runner 的停、启次数（给 16.8 的统计）和两个 tick 的计数。
+
+**容量文件**（16.5）：有注册表（`etc/pool.toml`）的账户，每个打开的 tick 在停、启之后用 `pool.record_local` 重写容量文件里本机那一部分（§11），所以路由看到的空闲 runner 不会比 presence 晚一个 tick 以上（`--no-block` 的停止还没完成时，这一行仍把它算作在线，下一个 tick 更正）。写不进去时日志里记一条 `"capacity": "not written"`，tick 照常进行；`ci-capacity.timer` 仍在 30 秒内重写这个文件。
+
+**回滚**：把 inventory 改成 `presence = { enabled = false }`（或删掉这个表）。下一个 tick 就启动它停掉的和被 `ExecCondition=` 拦下的所有 runner，然后什么都不做；`check` 也总是放行。状态文件读不出来时，回滚把所有停着的 runner 都当成 presence 停的，一并启动。
+
+**仍然存在的竞争**：presence 只能缩小、不能消除取作业和资源变化之间的竞争。停之前的最后一次查看到 systemd 把 SIGTERM 送到 runner 之间（毫秒级），GitHub 仍可能把作业派给它：作业会被重新排队，或者以 `stopped`/`lost` 结束，由 16.5 的重试行重试，不会跑两次。tick 之后到作业开始之间资源也可能变化：执行器的拒绝（drain、busy、健康门、租约）仍然生效。
+
+## 16. 看懂一次路由（design 决定 16.5，RUN-10 R5）
 
 可复用工作流的 plan 作业在 `ci-light` 上跑 `ci-run route`：标准输入是计划（schema 1），标准输出是路由后的计划。容量用 `capacity.load()` 读（`pool status --fast` 的行）；`--rows FILE` 读一份事先存下的 `pool status --fast --json`，用来复现某次决定。
 

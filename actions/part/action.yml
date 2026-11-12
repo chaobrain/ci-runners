@@ -40,6 +40,9 @@ inputs:
   target:
     description: a slurm part's target in the site config, or a list in the order to try (slurm runners only)
     default: ''
+  upload:
+    description: "false: no outcome artifact (ci.yml's plan command, whose outcome is this step's output and which no verdict reads)"
+    default: 'true'
 outputs:
   outcome:
     description: "pass, red, oom, thermal, reboot, unavailable, lost or stopped"
@@ -107,7 +110,7 @@ runs:
         --timeout-minutes "$IN_TIMEOUT" --gpus "$IN_GPUS" --gpu-mem-mib "$IN_GPU_MEM" --memory "$IN_MEMORY"
         --queue-timeout-minutes "$IN_QUEUE" --results "$IN_RESULTS"
         --resume "$IN_RESUME" --attempt-of "$IN_ATTEMPT_OF" --lock "$IN_LOCK" --target "$IN_TARGET"
-    - if: always() && steps.part.outputs.outcome != ''
+    - if: always() && steps.part.outputs.outcome != '' && inputs.upload != 'false'
       uses: actions/upload-artifact@v4
       with:
         name: ci-part-${{ inputs.id }}-${{ steps.part.outputs.attempt || '1' }}

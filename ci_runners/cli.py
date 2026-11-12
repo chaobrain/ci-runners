@@ -21,6 +21,8 @@
     ci-run slurm check|plan|apply|env|canary|status|cost|uninstall ...   a Slurm site's accounts (decision 14.9)
     ci-run pool status|run|add|check|ready ...   the machine registry's live capacity, a command on a free
                            machine, and adding a host (decision 15.1)
+    ci-run stats [--repo R] [--since T] [--records DIR] [--json]   queue, run and verdict delays per
+                           label and repository from the jobs API, retries, refusals, presence (16.8)
     ci-run route [--rows FILE]   a plan's parts to capability labels, from the capacity (decision 16.5)
     ci-run hosted ...      a public caller's CPU part on a GitHub-hosted runner (actions/hosted; 18.7)
     ci-run flow contract|plan|retry|locate|status ...   the reusable workflow's own steps (actions/flow;
@@ -79,6 +81,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'flow':  # the reusable workflow's steps: the capacity and the registry, read only (16.6)
         from ci_runners import flow
         return flow.main(args, etc_dir())
+    if cmd == 'stats':  # the caller's own login; the inventory is not needed (decision 16.8)
+        from ci_runners import stats
+        return stats.main(args, etc_dir())
     if cmd == 'runner-watch':  # the maintainer's account: no inventory there (decision 15.6)
         from ci_runners import runnerwatch
         return runnerwatch.main(args)

@@ -755,7 +755,7 @@ def pool_table(inv, p: Mapping) -> list[dict]:
     for name, v in inv.host['pools'].items():
         cls = inventory.pool_class(inv.host, name)
         mine = [r for r in rs if r[2] == cls]
-        common = [x for x in mine[0][1] if all(x in r[1] for r in mine[1:])] if mine else []
+        common = [x for x in dict.fromkeys(mine[0][1]) if all(x in r[1] for r in mine[1:])] if mine else []
         e = {'pool': name, 'class': cls, 'labels': common, 'registered': len(mine),
              'online': sum(r[0] in alive for r in mine) if known else None,
              'free': sum(r[0] in alive and r[0] not in busy for r in mine) if known else None}

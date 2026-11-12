@@ -1746,6 +1746,52 @@ Each item names what it supersedes or amends.
        presence's capacity file of an older release would fail on a registry that has it;
        the key goes into a registry only after every host that reads that registry has the
        release and `v1` points at it (as `tier`, 19.9).
+
+       *Built in R7 (#219): the report.* `ci-run stats [--repo R ...] [--since T | --run ID
+       ...] [--records DIR ...] [--no-artifacts] [--json]` (`ci_runners/stats.py`), on any
+       account with a login that reads the repositories (`GH_TOKEN=$(gh auth token) ci-run
+       stats ...`; the tool reads, stores and refreshes no token itself, as 15.6). The
+       repositories default to the project registry's. Each number and its timestamps (the
+       jobs API with `filter=all`, so every run attempt's jobs):
+       - *queue delay* of a job a runner took: `started_at` − `created_at`; *run time*:
+         `completed_at` − `started_at`; per label (the job's `labels` but `self-hosted`,
+         joined by `+`) and per repository, and for the part attempts (`first`, `retry`,
+         `fallback`) apart. A job with no `started_at` or no runner (cancelled in the queue,
+         still queued) is *unstarted* and in no delay; a skipped job is in nothing;
+       - *wall time* of a completed run: the latest `completed_at` of its jobs that were not
+         skipped − the run's `created_at`;
+       - *verdict delay*: the `completed_at` of the run's `verdict` job (it posts the final
+         status as its last step), of the latest run attempt that has one, − the head's push:
+         the repository's activity entry (`GET /repos/{r}/activity`) whose `after` is the head
+         sha on the run's branch, at most 10 min before the run's `created_at` (or a minute
+         after), on a `push`, `pull_request` or `merge_group` run; else the run's `created_at`
+         (a dispatch, a schedule, a push not found, an activity the login may not read). The
+         report counts which;
+       - a *re-run* is measured within its latest attempt: the wall from the run's
+         `run_started_at`, and the verdict delay too where the re-run repeated the `verdict`
+         job (one that it did not repeat keeps its own attempt's origin), since the wait for a
+         person to re-run it is not CI's.
+
+       Counts, p50, p90 and max: the value at index round(p × (n − 1)) of the sorted values. A
+       job's kind is the last ` / ` segment of its name: the reusable workflow's `part <id> /
+       first|locate|salvage|retry|red`, `plan`, `pending`, `verdict`; a composing workflow's
+       `part <id> / first|where|salvage|retry|fallback`, or a flat `<part>` with
+       `<part>-retry`. *Retries per row*: each retry or fallback attempt a runner took, by the
+       hint's row (`route.row_of`; the route may still move a retry, 16.5) of its first
+       attempt's outcome, read from the host's part record
+       (`--records`), else from the run's artifact `ci-part-<id>-1`; without either, a first
+       attempt whose host had to be found (a `locate`, `where` or `salvage` job ran) or that
+       was cancelled is `any`, a `fallback` job is `fallback`, the rest `unknown`. *Refusals
+       after a start*: the outcomes read that are `unavailable`, by the reason's head (from the
+       API the retried parts' first attempts; from `--records` every attempt on that host).
+       *Presence* (16.4, 19): from `--records DIR`, a host's data directory: its
+       `presence-<date>.log` lines in the window, stops by cause, starts by the cause of the
+       runner's previous stop, `kept`, holds, infrastructure ends and self-drains; a host's
+       logs and records are read where the caller can read them (its own account), never
+       fetched. *API use*, each call 30 s and 3 tries, on GitHub's API host only, at most
+       `--max-requests` (2,000) calls or the report is refused, never shortened: for one repository with R runs, P pushes and
+       N retried parts in K runs, about ceil(R/100) + R + ceil(P/100) + K + 2N requests (a day of the
+       canary's 44 runs on 2026-11-12: 77). GitHub's run search gives at most 1,000 runs: a window with more is refused.
     9. **Shares** (amends 15.8 item 2 and §5.1). Shared hosts give most of their
        capacity to CI: h100 8 CPU slots of 20 threads (160 of its 176) and its 5 cards;
        3090a 2 CPU slots, its cards and its nightly. 3090b becomes the development and
@@ -4181,8 +4227,8 @@ Rules:
      salvage, verdict; no retry) on a second head, after a first whose parts all passed but whose two artifact uploads
      from one host were reset on the way to the egress proxy (a network fault the release does not touch); the red
      head was red on compile, cpu, gpu, multi-a and multi-b.
-- **`v1.18.0`** (minor, stamped 2026-11-12; decision 16.6, RUN-10 R6, #211, #212, #214; brainspike's coordinator under the
-  lead's delegation of 2026-11-12): the reusable workflows `ci.yml` and `part.yml` (`workflow_call` only), the composite
+- **`v1.18.0`** (minor, stamped 2026-11-12; decision 16.6, RUN-10 R6, #211, #212, #214, #216; brainspike's coordinator under
+  the lead's delegation of 2026-11-12; `v1` moved to it after the 3090 canary at `@v1.18.0`, green and red, 2026-11-12): the reusable workflows `ci.yml` and `part.yml` (`workflow_call` only), the composite
   action `flow` and `ci-run flow`, the plan JSON's optional keys (`files`, `max_parallel`; a part's `queue_minutes`,
   `artifacts`; `needs: light`), the registry's optional `max_parallel`, and `ci_runners/stamp.py`, which stamps the two
   workflows' references with the release (operations §5). The verdict reads only this run attempt's records when an
@@ -4190,6 +4236,16 @@ Rules:
   changes. Its notes:
   1. **Order.** No setup file changes, so no host's plan changes and the egress proxy keeps running (the egress host's
      hook link moves first). No registry sets `max_parallel`: the default (16) holds.
+  2. **The stamp's own checks.** Two tests read main's state as written (`actions/RELEASE` at `hook`, the snippets of
+     the workflows' `@v1`), so a stamp PR's tree failed them: `tests/test_reusable.py` and `tests/mutants.py` now stamp a
+     copy back to `hook` first (#214, #216).
+  3. **The rollout.** Every host's plan was all `keep` (the new host's but for its four GPU runners, left disabled on
+     purpose): an install moved only `releases/hook`, nothing was applied and no runner restarted; the egress proxy kept
+     running.
+  4. **The canary** (`canary-3090-v1180`): green on every part (claim, cpu, gpu, multi-a, multi-b, compile, slow, oom,
+     salvage, verdict; no retry); the red head was red on compile, cpu, gpu, multi-a and multi-b. After the move, a
+     canary calling `ci.yml@v1` (`canary-r6-v1`) was green: its plan, the three parts (the oom part on its retry) and
+     the verdict.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

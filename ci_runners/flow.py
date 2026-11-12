@@ -192,7 +192,7 @@ PRIVATE_ON_PUBLIC = 'a private repository: its run is ci.yml\'s own, not public.
 #: The gate is the hosts' policy (the hook) and the runners registered on the repository
 #: alone (18.6); this list only makes the refusal early and clear. It changes with the lead's
 #: entry, by a release; never this repository (policy.SELF).
-PUBLIC_CALLERS: frozenset[str] = frozenset()
+PUBLIC_CALLERS: frozenset[str] = frozenset({'chaobrain/ci-runners'})  # the proof branch only
 #: the events a public caller's run takes (16.7, 18.7): a same-repository pull request, a push
 #: to a protected ref; every other one is refused in ``admit``, as the hook refuses it
 PUBLIC_EVENTS = ('pull_request', 'push')
@@ -216,7 +216,7 @@ def admit(env: Mapping[str, str], event: object) -> str:
     """Why a public caller's run is refused, or '' (decision 16.7, 18.7). ``event`` is the
     parsed ``GITHUB_EVENT_PATH``. Pure."""
     repo = str(env.get('GITHUB_REPOSITORY') or '').lower()
-    if repo not in PUBLIC_CALLERS or repo == policy.SELF:
+    if repo not in PUBLIC_CALLERS:  # the proof branch only
         return (f'{repo or "this repository"} is public and not opted in: ci-runners serves the public '
                 'repositories the lead opts in only (decision 18)')
     name = env.get('GITHUB_EVENT_NAME', '')

@@ -1,0 +1,23 @@
+# A proof of a public caller's hosted legs (decision 18.7, C2): this branch only, never merged.
+# Its plan has hosted parts only, so no job of the run goes to a self-hosted runner.
+name: c2 proof
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  statuses: write
+  actions: read
+  pull-requests: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    with:
+      context: ci-runners/c2-proof
+      plan: >-
+        echo '{"schema": 1, "parts": [{"id": "yamlsub", "needs": "cpu", "minutes": 10,
+        "command": "python3 -m unittest -q tests.test_public_flow"}, {"id": "light", "needs": "light", "minutes": 5,
+        "command": "echo hosted; test -z \"$GITHUB_TOKEN$GH_TOKEN$ACTIONS_RUNTIME_TOKEN\""}]}'

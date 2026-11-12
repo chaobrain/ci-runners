@@ -426,3 +426,29 @@ presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 ru
 - **"提供"的含义**：主机行在线（没有问题项）并且它的 inventory 给这个标签注册了 runner，就算提供，哪怕 presence 因为卡被占用、slot 被占用或 timing 部件在跑而暂时停掉了全部 runner。所以"没有主机提供"只说明这些主机本身不能用（掉线、drained、过期、连不上），不是忙。
 - **优先主机**（design 决定 19，R5b）：路由从不写主机标签，每个计划的部件都只带能力标签；顺序由 presence 定（§15 的 `tier` 原因）：前面层级有空闲 runner 时，后面层级的空闲 runner 停着，GitHub 只能把作业交给前面层级。主机行 `pools` 里的 `yielded`（只因 `tier` 停着的 runner）算作空位：`N free` 里包含它们，所以一个突发里超过 h100 空位的部件留在共享标签上，等后面层级的 runner 在一个反应时间内上线，而不是去集群。
 - **重试**（`route.retry`）：按 `outcome.hint` 的五行：`cool-card` 去首次尝试那台主机上凉的那张卡（`<host>-gpu<M>`，只限单卡部件，双卡部件按 fallback）；`same-host` 去首次尝试所在主机这一类的主机标签，集群部件回同一个目标；`more-memory` 原标签加 `mem-big`（并 `resume`），容量证明不了有主机同时提供这两个标签时，就用不带 `mem-big` 的标签加 `resume` 重试，免得排队 24 小时；`any` 原标签；fallback 用现在的容量重新路由。首次尝试所在主机有 `tier`、而一台在线的前面层级主机也提供这个部件的能力标签时（它可能正在让），`cool-card` 按 fallback、`same-host` 按 `any`，不在让着的主机上等。每个部件最多重试一次；主机标签取自首次尝试的记录（`host`、`pool_labels`、`cool_card`），不读 `retry-on`；part action 的输出 `pool-labels` 和 `cool-card`（design 19.5）就是这两个值。
+
+## 17. 统计：`ci-run stats`（design 决定 16.8，RUN-10 R7）
+
+在任何有 GitHub 登录、能读这些仓库的账户上运行（工作站、维护者账户）：
+
+```
+GH_TOKEN=$(gh auth token) ci-run stats [--repo OWNER/NAME ...] [--since 24h|90m|7d|<ISO 时间> | --run ID ...] [--records DIR ...] [--no-artifacts] [--json]
+```
+
+登录只从环境变量 `GH_TOKEN` 读，和 runner watch 一样（决定 15.6）；工具本身不读、不存、不刷新 token。不写 `--repo` 时取项目注册表（`<etc>/projects/*.toml`）里的仓库。`--run` 只统计一个仓库里列出的那几个 run。默认输出文本表，`--json` 给机器读。
+
+**每个数取自哪些时间戳**（作业 API 用 `filter=all`，所以每个 run attempt 的作业都算）：
+
+- **排队时间**：作业的 `started_at` − `created_at`；**运行时间**：`completed_at` − `started_at`。按标签（作业的 `labels` 去掉 `self-hosted`，用 `+` 连起来，如 `ci-cpu+mem-big`）、按仓库，部件尝试（`first`、`retry`、`fallback` 作业）另有一行。没有 `started_at` 或没有 runner 的作业（排队时被取消、还在排队）算"未被接"，不进任何时间；被跳过的作业什么都不算。差值小于 0（时钟偏差）不算，计入 `negative`。
+- **墙钟时间**（已完成的 run）：它没被跳过的作业里最晚的 `completed_at` − run 的 `created_at`。
+- **结论时间**：run 的 `verdict` 作业（最后一步发最终状态）的 `completed_at`，取有它的最新 run attempt，减去 head 被推送的时间：仓库活动（`GET /repos/{r}/activity`）里 `after` 是 head sha、在 run 的 `created_at` 之前 10 分钟以内（或之后 1 分钟以内）的那一条，只对 `push`、`pull_request`、`merge_group` 的 run；否则用 run 的 `created_at`（手动派发、定时、找不到推送、登录读不到活动）。报告里写明各有几个。
+- 每项给个数、p50、p90 和最大值：排序后下标 round(p × (n − 1)) 的那个值。
+
+**两种运行形态**：作业名按 ` / ` 切开，最后一段是类别：可复用工作流的 `part <id> / first|locate|salvage|retry|red` 和 `plan`、`pending`、`verdict`；自己组合 action 的 `part <id> / first|where|salvage|retry|fallback`、`verdict`，或平铺的 `<部件>` 加 `<部件>-retry`。
+
+**按行统计的重试**（决定 16.5 的五行）：每个被 runner 接走的 retry 或 fallback 尝试，按它首次尝试的结果归到哪一行。结果先从 `--records` 的部件记录读，否则从这个 run 的 artifact `ci-part-<id>-1`（它的 `outcome.json`）读；都没有时，首次尝试要找主机（跑了 `locate`、`where` 或 `salvage`）或被取消的算 `any`，`fallback` 作业算 `fallback`，其余是 `unknown`。`--no-artifacts` 不下载 artifact。**启动后的拒绝**：读到的结果里 `unavailable` 的那些，按原因开头的词归类（API 只读到被重试部件的首次尝试；`--records` 读那台主机上每一次尝试）。
+
+**presence**（决定 16.4、19）：`--records DIR` 给一台主机的数据目录（`<DIR>/ci-runners`），读它窗口内的 `logs/presence-<日期>.log`：按原因的停止次数（每个原因开头的词，去掉卡号，用 `+` 连起来），按这个 runner 上一次停止的原因统计的启动次数（窗口里没看到停止时按日志里写的，如 `no cause`），作业刚开始而没停的 `kept`，保持（19.8）次数，基础设施结束和自我 drain 次数；部件记录读 `state/parts/` 下窗口内写的 `outcome.json`。工具只读调用者自己能读的目录，不会去别的主机取；在 CI 账户上就是 `--records ~/data`（数据目录）。
+
+**API 开销**：每次调用 30 秒、3 次尝试；一个仓库有 R 个 run、P 次推送、K 个 run 里共 N 个被重试的部件时，共 ceil(R/100) + R + ceil(P/100) + K + 2N 次请求（作业每页 100 个；下载是两次请求：GitHub 的重定向，再是不带登录的签名 URL）。2026-11-12 金丝雀一天 44 个 run 用了 77 次。超过 `--max-requests`（默认 2000）就拒绝出报告，不会出一份不全的；GitHub 的 run 搜索最多给 1000 个 run，超过也拒绝。退出码：0 报告；1 GitHub 读不到或到了上限；2 参数错误或没有登录。
+

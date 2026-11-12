@@ -1576,7 +1576,9 @@ Each item names what it supersedes or amends.
          since a job queued on a label without a runner waits 24 h (§2); a runner that
          presence holds back for a passing cause (a card in use, a taken slot, a timing
          run) still serves its label. A queued part's own bound stays with the
-         consumer's sweeper for now (§10, RUN-10's open point).
+         consumer's sweeper for now (§10, RUN-10's open point). *Amended by
+         19:* with `--prefer`, a part goes first to a preferred host's own label where that
+         host has room, and moves to its shared labels after 60 s still queued.
        - *Retries are the five rows of `outcome.hint`* and nothing else:
 
          | row (`where`) | outcomes | the retry's labels |
@@ -1774,6 +1776,164 @@ host's eight runners were stopped.
   503. (c) Close a half-closed connection at once: TLS gives no reason to keep it, but a
   client that half-closes and still awaits an answer would lose it; 60 s quiet keeps that.
 
+## Lead decision (proposed, 2026-11-12): a preferred host first in the route (decision 19, issue #200)
+
+Proposed with RUN-10's R5b (issue #200); this text is approved with its PR. The lead ruled on
+2026-11-12 that all tests of every repository that uses the pool run on h100 first: the
+pool's large host (176 threads, 5 cards) sat nearly idle while parts waited elsewhere, and
+the other free hosts, then the cluster, are overflow. The route of 16.5 cannot say so: it
+names capability labels only, and GitHub gives a job to any idle runner that has all of its
+labels (16.1, §2). Building R5 also found what the route cannot yet read (its PR's "Needs
+the lead"), and on 2026-11-12 two hosts that had joined the pool lacked a repository entry
+that the older hosts' policies carried: the merge bot's jobs were refused there in "Set up
+runner" (reason `bot`), whole runs were lost, and nothing reported the difference.
+
+19. **A preferred host first, and what the route reads.**
+    1. **The order** (amends 16.5's "It never names a host label" and R5's acceptance "no
+       part is routed to a host label"). A host's entry in a pool registry (`pool.toml`,
+       `[machine.<key>]`, access `local` or `ssh`) may set `prefer`, an integer from 1 to
+       99: lower first, equal values in the registry's order, and a host without it is in
+       no order (it serves the shared labels as before). A cluster entry refuses the key.
+       The maintainer sets it, the same values in every CI account's registry and in their
+       own (a host step, operations §11); a host row carries its machine's `prefer` from the
+       registry that read it. No consumer sets or overrides it: a plan names needs, never
+       hosts (16.1, §4.10's keys), and a composed workflow's host labels stay for canaries
+       and diagnosis. The values for the lead's ruling: h100 `1`, the new host of 16.9 `2`
+       (18.1's ruling 2 gives the public pool the same order), 3090a `3`; 3090b none (the
+       development and timing host, 16.9). Ranking every free host, not h100 alone, gives
+       a plan's parts beyond h100's room a host with a known free runner instead of the
+       shared label, where they would race the plan's own h100 parts for h100's runners.
+    2. **What the route does with it.** `ci-run route --prefer` (the reusable workflow
+       passes it, 19.3; without it the output is 16.5's, unchanged). A host *offers* a
+       part's labels (`ci-<need>`, with `mem-big` where 16.5 adds it) when its row is up
+       (no problem: so not stale, drained, unreachable, without a runner online or failing
+       its health gate, 19.4), was read within 60 s (two readings of `ci-capacity.timer`),
+       carries no policy warning (19.6), and reports a pool (19.4) whose runners carry every
+       one of those labels and a host label, with its free runners known. A pool's *host
+       label* is its label equal to the host's role or starting with `<role>-` (§5.1's
+       naming, which the `cool-card` row already relies on). Its *room* is its free runners
+       less the parts this plan already placed in it. In plan order, a part goes to the
+       first host in the order that offers its labels with room: its labels are
+       `[self-hosted, ci-<need>, (mem-big,) <host label>]`, so the capability labels keep
+       it in its equal-verdict class and a host label that several of the host's pools
+       carry (a bare role) cannot reach another class; it books one runner of that pool and
+       one of its capability label. Where no host in the order has room, the part goes to
+       its shared labels and 16.5's overflow rule follows, counting the host bookings. With
+       the capacity unread or every host row stale (16.5), no part is preferred. The needs:
+       `cpu`, `gpu` (a card's runner of a per-card pool: presence stops one whose card is
+       held, 16.4, a public job's lease of 18.4 included) and `gpu2` where the host has a
+       pool carrying `ci-gpu2`; never `timing`, which one host serves by contract (16.9:
+       h100 never times the compile gates); a cluster part stays on `ci-slurm`, since the
+       host of its driver runner does not change where it runs. Each part's output gains
+       `host` (the preferred host's key, else empty), `spill_labels` (its shared labels,
+       equal to `labels` where no host is named) and `spill_after_s` (60 where a host label
+       is named, else 0); its `timeout_minutes` stays the shared labels' (the largest
+       speed), so one bound holds for both legs.
+    3. **No part waits on a host label while another host idles: the spill.** A row is up
+       to 60 s old at plan time and a part is picked up seconds to minutes later, so the
+       free runner the route counted may be taken by another run's job, stopped by presence
+       (its slot or card taken), or its host may go down; the part would then wait on the
+       host label for that host's next free runner, up to 24 h (§2). Labels cannot express
+       a soft preference, and no API cancels one job of a run, but a job-level
+       `concurrency` group with `cancel-in-progress: true` cancels the group's earlier job
+       when a new one is queued (§2, confirmed in R6). `part.yml` (16.6, R6) therefore runs
+       a part with `spill_after_s` > 0 as three jobs:
+       - *first*, on `labels`, in the concurrency group `ci-part-<run id>-<run attempt>-<part
+         id>`;
+       - *watch*, on `ci-light`, started with it, which reads the run's jobs with the job
+         token (`actions: read`, §4.10) every 10 s and ends with `spill=false` as soon as
+         *first* has left `queued`, or `spill=true` once `spill_after_s` has passed with it
+         still queued (at most 7 calls; the job token allows 1,000 an hour per
+         repository);
+       - *spill*, only on `spill=true`, on `spill_labels`, in the same group with
+         `cancel-in-progress: true`: its queueing cancels the waiting *first*. Its first
+         step waits until *first* is completed (cancelled), so the part never runs twice
+         at once, and it runs as the part's first attempt, on the shared labels, which
+         any idle runner takes, the preferred host's too if one has come free. Its outputs
+         are the first attempt's for the retry rows.
+
+       So a part waits on a preferred host's label at most `spill_after_s` plus one poll
+       (70 s), then as on its shared labels. The critical path keeps its three pickups (the
+       watch runs beside the attempt). The cost is one light job per preferred part, most
+       ending within seconds, at the attempt's pickup. *Retries never prefer:* `any` and
+       `more-memory` take the part's `spill_labels` (with `mem-big` as 16.5 says), the
+       fallback is routed again without the order, and `cool-card` and `same-host` keep
+       their host labels (16.5). If the canary disproves the concurrency fact, R6 does not
+       pass `--prefer` and the order waits for an amendment of this item; the watch may
+       also serve R6's bound of a queued part (§10's open point).
+    4. **What the rows gain** (each additive; the capacity file stays schema 1).
+       - A host row: `role` (the inventory's `this`); `pools`, one per runner pool of the
+         host's inventory: `pool`, `class`, `labels` (those every runner of the pool
+         carries, so not a card's `<role>-gpu<N>`), `registered`, `online` and `free` (as
+         `label_runners`, per pool), and where the pool has a `slot` table its
+         `memory_gib`, `speed` and `workers`. They replace R5's `slot_pools`, which nothing
+         wrote: `mem-big`, the memory error and the timeout's speed (16.2) are now decided
+         from every host that reports its pools. Also `prefer` (19.1); `policy` (19.6);
+         and the host's health gate (the data directory's free space below
+         `disk_min_gib`, the CI account's access to the shared files, 15.2) as the problem
+         `health: …`, which takes the host out as any problem does (15.1). The CI
+         account's own probe reads them (the local machine's and a forced probe's); a
+         probe that a maintainer's login sends reads no inventory or policy of the CI
+         account, and its row has none of them.
+       - A cluster target row: `memory_gib` and `max_minutes` (the registry's), and
+         `partition` as an opaque key, the first 12 hex digits of the SHA-256 of the
+         machine's key and the partition's name, equal for targets that share a partition
+         (so they share its jobs, 16.5); the name stays in the registry (§3.3).
+       - *Schema.* An older reader keeps a row's unknown fields and ignores them
+         (`capacity.read` keeps every key; `host_row` reads the probe's keys by name), and
+         a newer caller that reads an older host's probe finds none: that host offers no
+         preference, reports no pools and is not compared (19.6). So no schema 2, and a
+         mixed fleet during a release routes as 16.5 on the older hosts. The one
+         non-additive change is the registry key: an older loader refuses an unknown key,
+         so `pool status` and the route of an older release fail on a registry that has
+         `prefer` (the route then sends every part to its shared labels, never to a wrong
+         host). The key goes in only after every host has the release and `v1` points at
+         it (operations §5's second lesson).
+    5. **The part action's outputs** (amends §4.3, additive): `pool-labels`, the JSON
+       array of the labels of the pool the part ran on (its record's `pool_labels`), and
+       `cool-card`, a card of this host that passes the health gate for a thermal retry,
+       or empty. `gpus` stays the cards the part held, which the `cool-card` row avoids.
+       The reusable workflow passes them to `route.retry` (16.5); until then the
+       `cool-card` row falls back and `same-host` becomes `any`.
+    6. **A drifted hook policy shows.** The CI account's probe reads its `etc/policy.toml`
+       and reports `policy`: `file`, the first 12 hex digits of the file's SHA-256 (the
+       hook's `policy=`, §6.3), and `repositories`, those of its `[repositories]` entries
+       as loaded (each name with its keys, in a canonical JSON), or `error` where the
+       policy does not load, which is also the problem `policy: does not load` (the hook
+       then refuses every job, a black hole). Among the host rows that report
+       `repositories`, the value most of them hold is the norm (on a tie there is none);
+       each other host gets the warning `policy: repository entries differ from <n>
+       other host(s)` in `warnings` and `policy_drift: true`. `pool status` prints the
+       warnings with the problems, marked `warn:`. A warning is not a problem: the host
+       stays up and its runners still take shared-label jobs, which no route can keep from
+       it, but the route names no part to it (19.2). The file digest is shown and not
+       compared (the actors and comments may differ). Operations §2's new-host steps copy
+       the `[repositories]` entries from a host in service and check that `pool status`
+       shows no warning before the runners are registered.
+    7. **Smaller.**
+       - The inventory loader refuses a slot's `speed` that is not a finite positive number
+         (TOML has `inf` and `nan`; `inf` made every scaled timeout infinite).
+       - *Noted, not solved:* a workflow's or job's `env:` reaches the executor's own
+         environment, so a job can set `CI_RUNNER_SLOT` and take another slot's cpuset and
+         memory. On the private pools a job's code can do as much anyway as the account
+         (T13); on the public pool decision 18 covers it (the confined runner, 18.3).
+    8. **Rollout.** One minor release (R5b); the route's output changes only with
+       `--prefer`, the part action gains two outputs, every row field is optional. After it
+       is installed everywhere and `v1` points at it, the host steps (the lead's): `prefer`
+       in each CI account's registry and the maintainer's; each host's `[repositories]`
+       entries made equal where `pool status` warns. R6 passes `--prefer` once its canary
+       has confirmed §2's row for 19.3.
+- *Options weighed.* (a) Shared labels only, with presence holding back the other hosts'
+  idle runners while the preferred host has free ones: no host label, but every burst
+  stops and starts runner sessions through the egress proxy (17's storm) and couples one
+  host's presence to another's row. (b) A host label without a spill: the measured 48 %
+  waiting of 16 returns whenever a row is wrong. (c) Routing each part just before its
+  attempt, from a light job: one more pickup per part, and other runs still race for the
+  same runner. (d) A soft hint: GitHub's labels have none (§2). (e) Single-job runners
+  issued on demand, as 18.6 does for the public pool: the org's runners would need a
+  token that administers them on the issuer (15.6 keeps such a token off every host), for
+  a placement the labels and the spill already give.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -1864,6 +2024,8 @@ back to this contract.
 | A caller pinned to `ci.yml@v1.N.0` runs `part.yml` and the actions at `@v1.N.0` once the stamp rewrote their refs (as measured for `h100-test.yml`, §9). | 16.6, §9 | R6 |
 | The job token with `actions: read` lists only its own repository's runs and jobs; the org's runner list needs `admin:org` (15.6). So the route reads capacity from the hosts, never from GitHub's queue. | 16.5 | R5 |
 | A job queued on labels that no online runner has waits (up to 24 h) instead of failing at once. | 16.5 (the plan-time error) | R5 |
+| A job-level `concurrency` group with `cancel-in-progress: true` cancels the group's job that is still queued for a runner when a new job of the group is queued, and that job only: the run's other jobs go on, and a job that needs the cancelled one with `if: always()` runs. | 19.3 | R6 |
+| The jobs API (`actions: read`) lists a called workflow's job as `queued` until a runner takes it, then `in_progress`, within seconds. | 19.3 | R6 |
 | A runner stopped while idle goes offline and takes no job; a job assigned to it just before the stop is queued again or ends without outputs (`lost` or `stopped`), and never runs twice. | 16.4 | R3 (the 50 flips) |
 | The pre-job hook sees `GITHUB_REF_PROTECTED` with the other default variables, for every event, on a repository-level runner of a public repository too. | 16.7 | P1, P2 |
 | A fork's pull request to a public repository that names `ci-pub-*` labels is assigned to a repository runner and fails in "Set up runner" on the hook's refusal, before any step. | 16.7 | P2 (the live negative test) |
@@ -2123,6 +2285,7 @@ the GPU leases for the part's life; the command does not inherit them.
 | `retry-on` | label array for the retry: a cool card's `<host>-gpu<M>`, the other host's pool of the class for a drained or busy part (decision 13.3), else the pool's own labels or the registry's `fallback`. The reusable workflow does not read it: it retries by the five rows of 16.5; the other host's pool goes with `v2` |
 | `resume` | whether the retry should resume |
 | `host`, `gpus`, `queue-seconds`, `run-seconds` | for the summary |
+| `pool-labels`, `cool-card` | the labels of the pool the part ran on (a JSON array), and a card of this host that passes the health gate for a thermal retry, or empty (19.5): what `route.retry` reads for the `same-host` and `cool-card` rows |
 | `record` | `<host role>:<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>`, the part record below the host's `state/parts/` |
 | `summary` | path to a Markdown block: host, cards, peak temperature per card, waits, events |
 
@@ -3551,13 +3714,23 @@ nightly on capability labels) are its PRs, not this repository's.
   the recorded plans of the first consumer's last 14 days, no part is routed to a host
   label, a part goes to the cluster only when no host had a free slot of its label, and
   a label with no host serving it fails the plan.
+- **R5b, a preferred host** (19, issue #200): the registry's `prefer`; `route --prefer`,
+  its host labels, the plan's room and `spill_labels`; the rows' `role`, `pools`, `prefer`,
+  `policy`, health gate and the targets' bounds; the part action's `pool-labels` and
+  `cool-card`; `pool status`'s policy warnings; the slot `speed` check. *Acceptance:*
+  unit tests for every rule, each failing on a mutant; replayed on the first consumer's
+  recorded plans with rows where the preferred host is free, full, stale and down, the
+  parts go to it first and the excess elsewhere at once, no part goes to the cluster
+  while a host has room, and no host label appears where the capacity is unread or
+  `--prefer` is not given.
 - **R6, the reusable workflow** (16.6): `ci.yml` and `part.yml`; the contract check; the
   stamp's rewrite of their refs. *Acceptance,* on the canary at `@v1.N.0`: a run takes 3
   pickups on its critical path; a runner killed during a part leads to its salvage and a
   retry, and the run ends green; a head whose contract is too old is red in under 30 s
   with no part started; a part that no runner takes within its bound ends the run with
-  an infrastructure error, not a day's wait (the bound's design is R6's); every fact §2
-  lists for R6 is confirmed or the contract amended.
+  an infrastructure error, not a day's wait (the bound's design is R6's); with
+  `--prefer`, a part whose host label has no free runner runs on its shared labels within
+  70 s (19.3); every fact §2 lists for R6 is confirmed or the contract amended.
 - **R7, statistics and dev slots** (16.8): `ci-run stats`; `pool run` on `dev_slots`.
   *Acceptance:* on a recorded batch of 8 runs, the report's queue, run and verdict delays
   per label and per repository equal an independent count from the jobs API; a pool run

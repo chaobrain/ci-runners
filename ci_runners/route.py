@@ -103,7 +103,7 @@ LIGHT_MAX_MINUTES = 15
 NO_OVERFLOW = ('timing', 'light')
 MAX_PARTS = 256
 PART_KEYS = {'id': True, 'command': True, 'needs': True, 'minutes': True, 'memory_gib': False, 'results': False,
-             'queue_minutes': False, 'artifacts': False}
+             'queue_minutes': False, 'artifacts': False, 'history': False}
 #: a plan's keys; ``schema`` and ``parts`` required (the rest the reusable workflow's, ``flow.load``)
 PLAN_KEYS = {'schema': True, 'parts': True, 'files': False, 'max_parallel': False}
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]*\Z')
@@ -163,6 +163,8 @@ def load_plan(doc: object) -> list[dict]:
             errors.append(f'{name}: minutes is a number in (0, {most}]' + (' for needs light' if most != MAX_MINUTES else ''))
         if 'memory_gib' in p and (not _num(p['memory_gib']) or p['memory_gib'] <= 0):
             errors.append(f'{name}: memory_gib is a positive number')
+        if 'history' in p and not isinstance(p['history'], bool):  # #228: part.yml's checkout depth
+            errors.append(f'{name}: history is true or false')
     if errors:
         raise PlanError('; '.join(errors))
     return [dict(p) for p in parts]

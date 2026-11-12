@@ -49,9 +49,8 @@ PERMISSIONS = {
 #: part.yml's step after each checkout (#228): no credential stays in the checkout's config
 CREDENTIAL_CHECK = (
     "git sparse-checkout disable 2> /dev/null || true\n"
-    "if git config --local --name-only --get-regexp "
-    "'^(http\\..*\\.extraheader|credential\\..*|include\\.path|includeif\\..*)$'; then\n"
-    '  echo "::error::the checkout kept a credential in its git config"\n'
+    "if git config --local --name-only --get-regexp '^http\\..*\\.extraheader$'; then\n"
+    '  echo "::error::the checkout kept its authorization header in its git config"\n'
     "  exit 1\n"
     "fi\n")
 
@@ -162,16 +161,17 @@ class Structure(unittest.TestCase):
             def check():
                 return subprocess.run(['bash', '-c', CREDENTIAL_CHECK], cwd=d, env=env, capture_output=True, text=True)
             self.assertEqual(check().returncode, 0)
-            for key, value in (('http.https://github.com/.extraheader', 'AUTHORIZATION: basic x'),
-                               ('credential.helper', 'store'), ('credential.https://github.com.username', 'x'),
-                               ('include.path', '/tmp/creds'), ('includeIf.gitdir:/x/.path', '/tmp/creds')):
-                subprocess.run(['git', 'config', '--local', key, value], cwd=d, check=True)
+            for key in ('http.https://github.com/.extraheader', 'http.https://ghe.example/.extraheader'):
+                subprocess.run(['git', 'config', '--local', key, 'AUTHORIZATION: basic x'], cwd=d, check=True)
                 r = check()
                 self.assertEqual(r.returncode, 1, key)
-                self.assertIn('::error::the checkout kept a credential in its git config', r.stdout, key)
+                self.assertIn("::error::the checkout kept its authorization header in its git config", r.stdout, key)
                 subprocess.run(['git', 'config', '--local', '--unset', key], cwd=d, check=True)
-            subprocess.run(['git', 'config', '--local', 'http.postBuffer', '1'], cwd=d, check=True)
-            self.assertEqual(check().returncode, 0)  # other settings are not credentials
+            # what a reused workspace may hold from an earlier command is not the checkout's token:
+            # failing on it would let one head fail every later attempt on that runner
+            for key, value in (('http.postBuffer', '1'), ('credential.helper', 'store'), ('include.path', '../x')):
+                subprocess.run(['git', 'config', '--local', key, value], cwd=d, check=True)
+            self.assertEqual(check().returncode, 0)
 
     def test_no_expression_in_a_shell_script(self):
         """A consumer's string (its plan command, a part's id or command) reaches a shell only

@@ -226,7 +226,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 | `parts[].results` | 字符串（`CI_RESULTS_DIR` 下 JUnit XML 的 glob） | 否 | 无 | `<id>: results is a string (a glob)` |
 | `parts[].queue_minutes` | 数，(0, 240]：一次尝试在主机上等 slot 或租约的上限（`part` 的 `queue-timeout-minutes`）；到了就是 `unavailable`，按重试的五行处理（同丢失的尝试一样换一台）；作业的 `timeout-minutes` 加上它 | 否 | 15 | `<id>: queue_minutes is a number in (0, 240]` |
 | `parts[].artifacts` | 对象，最多 4 项：名字（`[A-Za-z0-9][A-Za-z0-9_.]*`，最多 32 个字符，不含 `-`，不能是 `ci`）→ `RUNNER_TEMP` 下的相对路径；每次尝试结束后（红了也传）上传为 artifact `<名字>-<id>-<尝试>`，保留 7 天，路径不存在只警告；verdict 不读它们 | 否 | 无 | `<id>: artifacts maps at most 4 names ([A-Za-z0-9][A-Za-z0-9_.]*, no "-") to relative paths below RUNNER_TEMP`；`<id>: the artifact name ci is reserved (ci-part-*, ci-plan-files)` |
-| `parts[].history` | `true` 或 `false`：`true` 时部件的 checkout 取 head 的全部历史和所有分支的远程 ref（默认分支的 `origin/<分支>` 也在），供读历史的测试用（`git rev-list`、和默认分支的 diff、旧提交的树）；用作业自己的只读 token 拉取，checkout 之后 git 配置里不留凭据（留了就让这次尝试失败），命令拿不到任何 token | 否 | `false`：只有一个提交，和以前一样 | `<id>: history is true or false` |
+| `parts[].history` | `true` 或 `false`：`true` 时部件的 checkout 取 head 的全部历史和所有分支的远程 ref（默认分支的 `origin/<分支>` 也在），供读历史的测试用（`git rev-list`、和默认分支的 diff、旧提交的树）；用作业自己的只读 token 拉取，checkout 不保存它（`persist-credentials: false`），之后它的认证头（`http.<url>.extraheader`）若还在 checkout 的 git 配置里，这次尝试就失败，命令拿不到任何 token | 否 | `false`：只有一个提交，和以前一样 | `<id>: history is true or false` |
 | （部件的其他键 / 缺键） | — | — | — | `<id>: unknown key(s) ['gpus']`、`<id>: missing ['minutes']` |
 
 - 以上 `files`、`max_parallel`、`light`、`queue_minutes`、`artifacts`、`history` 和空的 `parts` 都是 schema 1 的可选扩展：不用它们的计划照旧。

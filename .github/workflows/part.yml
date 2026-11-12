@@ -55,8 +55,8 @@ jobs:
       - shell: bash
         run: |
           git sparse-checkout disable 2> /dev/null || true
-          if git config --local --name-only --get-regexp '^(http\..*\.extraheader|credential\..*|include\.path|includeif\..*)$'; then
-            echo "::error::the checkout kept a credential in its git config"
+          if git config --local --name-only --get-regexp '^http\..*\.extraheader$'; then
+            echo "::error::the checkout kept its authorization header in its git config"
             exit 1
           fi
       # the plan's files (its key files), for the command as CIRUNNERS_FILES
@@ -211,8 +211,8 @@ jobs:
       - shell: bash
         run: |
           git sparse-checkout disable 2> /dev/null || true
-          if git config --local --name-only --get-regexp '^(http\..*\.extraheader|credential\..*|include\.path|includeif\..*)$'; then
-            echo "::error::the checkout kept a credential in its git config"
+          if git config --local --name-only --get-regexp '^http\..*\.extraheader$'; then
+            echo "::error::the checkout kept its authorization header in its git config"
             exit 1
           fi
       # the plan's files (its key files), for the command as CIRUNNERS_FILES

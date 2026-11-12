@@ -2279,9 +2279,10 @@ The order is therefore made where the runners are, by presence, and no plan name
        failing its health gate or its policy, 19.4, 19.6), was read within 45 s, has the
        same repository entries as this host's policy (19.6), and reports a pool (19.4)
        whose labels include all of the runner's capability labels with at least one
-       *listening* runner: online, idle (no worker), and its listener holding an
-       established TCP connection (its socket inodes against its network namespace's
-       established ones in `/proc`). Light, timing, cluster-driver and the `home` runners
+       *listening* runner: online, idle (no worker), no lease held on its cards (our own
+       parts' too), and its listener holding an established TCP connection (its socket
+       inodes against its network namespace's established ones in `/proc`, IPv4 and
+       IPv6). The row's age is judged by this host's clock after the probes. Light, timing, cluster-driver and the `home` runners
        never yield (16.9: one host times the compile gates). A card is a slot: a card's
        runner yields to a host with a listening runner of `ci-gpu`, a two-card runner to
        one of `ci-gpu2`; a card held by someone else is not listening there, since its
@@ -2291,7 +2292,8 @@ The order is therefore made where the runners are, by presence, and no plan name
          starts at the first tick without a cause, not after two: up at once. A runner
          that presence started is not yielded for 300 s (the dwell), so a burst's
          overflow runners stay for its next parts and a flickering count above makes no
-         flapping; at most 12 stops an hour per runner.
+         flapping: a runner that presence starts stops at most 12 times an hour (a start
+         by hand or by 15.5's recovery is not under the dwell).
        - *What does not yield* (an unproven fact counts as false): no registry or no
          tier here; every earlier tier's probe failed, late, older than 45 s, of an older
          release (no `listening`), with a problem or with other repository entries; or a

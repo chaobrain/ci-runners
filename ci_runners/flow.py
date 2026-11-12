@@ -17,6 +17,15 @@ host's files (the capacity, the registry) but change nothing there.
 ``ci-run flow locate``    the host of a part's first attempt, from its job's ``runner_name``
                           (§2): the salvage leg's labels, ``[self-hosted, <role>-light]``.
 ``ci-run flow status``    post a state on the context (a red part's fail-fast status).
+``ci-run flow admit``     a public caller (decision 18.7, ``public.yml``): a repository of this
+                          organisation and its events; prints the refusal and exits 1.
+``ci-run flow verdict``   a public caller's verdict on a hosted runner: ``verdict`` without
+                          the salvage (a public part's tree goes with its job).
+
+A public caller's commands run with ``CIRUNNERS_PUBLIC=true`` (``public.yml`` sets it on its
+steps): they read nothing of a host (no capacity, registry or policy), its plan is routed by
+``route_public`` (hosted CPU; its own pool's ``gpu``, for a repository opted in to the public
+GPU pool only) and its retry by ``retry_public``.
 
 Every command reads ``GITHUB_*`` from its environment and writes ``GITHUB_OUTPUT`` and
 ``GITHUB_STEP_SUMMARY`` where they are set. Stdlib only.
@@ -105,8 +114,10 @@ def _text(description: str) -> str:
     return one if len(one) <= 140 else one[:137] + '...'
 
 
-def _bot(etc: str) -> str:
+def _bot(etc: str, env: Mapping[str, str]) -> str:
     """The runners' identity (the policy's ``bot``, decision 15.9): only its statuses count."""
+    if is_public(env):  # a hosted runner has no policy: the job token's identity (18.7)
+        return policy.Policy(frozenset(), {}).bot
     with open(os.path.join(etc, 'policy.toml'), 'rb') as f:
         return policy.load(f.read(1 << 20)).bot
 
@@ -123,7 +134,7 @@ def _statuses(env: Mapping[str, str], call: Callable, context: str, sha: str, bo
 def run_claim(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc: str) -> int:
     """The claim's decision (§4.1) with a read-only token: ``run``, ``reason``, and ``seen``,
     the time of the newest status of the runners it read (0: none), for ``pending``."""
-    bot = _bot(etc)
+    bot = _bot(etc, env)
     mine = _statuses(env, call, a.context, a.sha, bot)
     c = claim.decide(mine, bot=bot)
     seen = max((st.time for st in mine), default=0.0)
@@ -140,14 +151,14 @@ def run_pending(a: argparse.Namespace, env: Mapping[str, str], call: Callable, e
         seen = float(a.seen)
     except ValueError:
         raise FlowError('--seen is not a time') from None
-    newer = [st for st in _statuses(env, call, a.context, a.sha, _bot(etc)) if st.time > seen]
+    newer = [st for st in _statuses(env, call, a.context, a.sha, _bot(etc, env)) if st.time > seen]
     if newer:
         print(f'ci-run flow pending: not posted: {newer[0].state} posted since the claim', file=sys.stderr)
         _out(env, posted='false')
         return 0
     post(env, call, context=a.context, sha=a.sha, state='pending', description=a.description)
     # a red attempt posted between the read and the post: put it back on top
-    final = [st for st in _statuses(env, call, a.context, a.sha, _bot(etc)) if st.time > seen and st.state != 'pending']
+    final = [st for st in _statuses(env, call, a.context, a.sha, _bot(etc, env)) if st.time > seen and st.state != 'pending']
     if final:
         top = max(final, key=lambda st: st.time)
         print(f'ci-run flow pending: {top.state} posted meanwhile: posted again over the pending', file=sys.stderr)
@@ -172,8 +183,125 @@ def contents(env: Mapping[str, str], call: Callable, path: str, ref: str) -> str
     return base64.b64decode(got['content']).decode('utf-8', 'replace')
 
 
-#: a public caller's legs (hosted CPU, the confined GPU pool) come with decision 18's C2
-PUBLIC = 'a public repository: ci-runners runs private ones only until decision 18 C2'
+#: the contract's end for a public repository on the private legs (ci.yml sends a public
+#: caller to public.yml; an event without its repository in the payload still lands here)
+PUBLIC = 'a public repository: its run is public.yml\'s, on hosted runners (decision 18.7)'
+PRIVATE_ON_PUBLIC = 'a private repository: its run is ci.yml\'s own, not public.yml\'s'
+
+# ------------------------------------------------------------------ a public caller (18.7)
+
+#: the organisation whose public repositories the hosted legs serve (decided 2026-11-13: they
+#: touch nothing of ours, so they need no opt-in; ``admit`` refuses every other owner)
+ORG = policy.SELF.split('/')[0]
+#: the public repositories the lead opted in to the public GPU pool (decision 16.7, 18.7), as
+#: their policy entries' ``public_runners = true`` name them on the hosts: a plan with a
+#: ``gpu`` part from any other is red at plan time; a CPU-only plan needs no entry. The gate
+#: for the cards is the hosts' policy (the hook) and the issuer (C3); this list only makes
+#: the refusal early and clear. It changes with the lead's entry, by a release; never this
+#: repository (policy.SELF).
+PUBLIC_CALLERS: frozenset[str] = frozenset()
+#: the events a public caller's run takes (16.7, 18.7): a same-repository pull request, a push
+#: to a protected ref; every other one is refused in ``admit``, as the hook refuses it
+PUBLIC_EVENTS = ('pull_request', 'push')
+HOSTED = 'ubuntu-latest'
+#: a public plan's needs and their labels (18.7): CPU work on GitHub's hosted runners, its
+#: ``gpu`` parts on its own confined single-job runners; ``gpu2``, ``timing`` and the cluster
+#: (an overflow) never
+PUBLIC_LABELS = {'cpu': [HOSTED], 'light': [HOSTED], 'gpu': [rt.BASE, 'ci-pub-gpu']}
+
+
+def is_public(env: Mapping[str, str]) -> bool:
+    """Whether this step is a public caller's (``public.yml`` sets ``CIRUNNERS_PUBLIC``)."""
+    return env.get('CIRUNNERS_PUBLIC') == 'true'
+
+
+def _login_of(obj: object, key: str = 'login') -> object:
+    return obj.get(key) if isinstance(obj, dict) else None
+
+
+def admit(env: Mapping[str, str], event: object) -> str:
+    """Why a public caller's run is refused, or '' (decision 16.7, 18.7). ``event`` is the
+    parsed ``GITHUB_EVENT_PATH``. Pure."""
+    repo = str(env.get('GITHUB_REPOSITORY') or '').lower()
+    if repo.split('/')[0] != ORG or str(env.get('GITHUB_REPOSITORY_OWNER') or '').lower() != ORG:
+        return (f'{repo or "this repository"}: ci-runners serves the public repositories of the {ORG} '
+                'organisation only (decision 18.7)')
+    name = env.get('GITHUB_EVENT_NAME', '')
+    if name not in PUBLIC_EVENTS:
+        return f'{name or "an event"}: a public repository runs on a same-repository pull_request or a protected push only'
+    if not isinstance(event, dict):
+        return 'the event payload does not load'
+    actors = [env.get('GITHUB_ACTOR'), env.get('GITHUB_TRIGGERING_ACTOR'), _login_of(event.get('sender'))]
+    users = [event.get('sender')]  # GitHub's account type: a bot whose login has no [bot] too
+    if name == 'pull_request':
+        pr = event.get('pull_request') if isinstance(event.get('pull_request'), dict) else {}
+        names = [_login_of(_login_of(pr.get(side), 'repo'), 'full_name') for side in ('head', 'base')]
+        if not all(isinstance(n, str) and n.lower() == repo for n in names):
+            return "a fork's pull request: a public repository runs its own branches' only"
+        actors.append(_login_of(pr.get('user')))
+        users.append(pr.get('user'))
+    elif env.get('GITHUB_REF_PROTECTED') != 'true':
+        return 'a push to a ref that is not protected: a public repository runs on a protected push only'
+    else:
+        actors.append(_login_of(event.get('pusher'), 'name'))
+    if not all(isinstance(x, str) and x and not x.lower().endswith('[bot]') for x in actors) \
+            or any(_login_of(u, 'type') == 'Bot' for u in users):
+        return "a bot, or an actor not named: a public repository runs its members' pushes and pull requests only"
+    return ''
+
+
+def run_admit(env: Mapping[str, str]) -> int:
+    try:
+        with open(env.get('GITHUB_EVENT_PATH', ''), 'rb') as f:
+            event = json.loads(f.read(64 << 20).decode('utf-8'))
+    except (OSError, ValueError, RecursionError):
+        event = None
+    why = admit(env, event)
+    if why:
+        print(f'::error::ci-runners: {why}')
+        _summary(env, f'## ci-runners: refused\n\n{why}\n')
+        return EXIT_RED
+    print(f'ci-run flow admit: {env.get("GITHUB_REPOSITORY", "")} on {env.get("GITHUB_EVENT_NAME", "")}', file=sys.stderr)
+    return 0
+
+
+def route_public(parts: Sequence[Mapping], repo: str) -> list[dict]:
+    """A public caller's route (decision 18.7): ``cpu`` and ``light`` parts on GitHub's hosted
+    runners, ``gpu`` parts on its own pool's runners where ``repo`` is opted in to the public
+    GPU pool, nothing else and never an overflow to the cluster. Raises ``route.PlanError``
+    naming each part it cannot run. Pure."""
+    bad = [f'{p.get("id")}: needs {p.get("needs")!r}: a public repository runs cpu and light parts on '
+           'hosted runners and gpu parts on its own pool only (decision 18.7)'
+           for p in parts if p.get('needs') not in PUBLIC_LABELS]
+    repo = repo.lower()
+    if repo not in PUBLIC_CALLERS or repo == policy.SELF:
+        bad += [f'{p.get("id")}: needs \'gpu\': {repo or "this repository"} is not opted in to the public GPU pool '
+                '(decision 18.7)' for p in parts if p.get('needs') == 'gpu']
+    if bad:
+        raise rt.PlanError('; '.join(bad))
+    return [{**p, 'labels': list(PUBLIC_LABELS[p['needs']]), 'where': 'host', 'target': '',
+             'timeout_minutes': rt._timeout(p['minutes'], 1.0),
+             'why': 'hosted' if PUBLIC_LABELS[p['needs']] == [HOSTED] else 'its own pool'} for p in parts]
+
+
+def retry_public(part: Mapping, first: Mapping) -> dict:
+    """``route.retry`` for a public part (decision 18.7): there is no salvage leg, and every
+    row (``cool-card`` and ``same-host``, which name a host, ``more-memory``, with its resume,
+    ``any`` and ``fallback``) is the part's own labels again. Pure."""
+    row = rt.row_of(str(first.get('outcome', '')), str(first.get('next', '')))
+    out = {'retry': True, 'row': row, 'labels': list(PUBLIC_LABELS[part['needs']]), 'where': 'host', 'target': '',
+           'timeout_minutes': part['timeout_minutes'], 'resume': row == 'more-memory'}
+    if int(first.get('attempt') or 1) > 1 or first.get('next') not in ('retry', 'fallback') or row not in rt.ROWS:
+        return {**out, 'retry': False, 'labels': [], 'resume': False, 'why': 'no retry: final, or retried once already'}
+    return {**out, 'why': 'a public part: its own labels again'}
+
+
+def run_verdict(a: argparse.Namespace) -> int:
+    """A public caller's verdict on a hosted runner (``verdict.main`` without the salvage)."""
+    from ci_runners import verdict
+    if not is_public(os.environ):
+        raise FlowError('verdict is a public caller\'s (ci.yml\'s own is actions/verdict)')
+    return verdict.main(['--context', a.context, '--sha', a.sha, '--parts', a.parts, '--artifacts', a.artifacts], None)
 
 
 def repository(env: Mapping[str, str], call: Callable) -> tuple[str, bool]:
@@ -227,8 +355,8 @@ def run_contract(a: argparse.Namespace, env: Mapping[str, str], call: Callable) 
         branch, private = repository(env, call)
         branch = a.default_branch or branch
         state, text = check_contract(contents(env, call, SPEC, branch), contents(env, call, SPEC, a.sha), branch)
-        if not private:  # nothing of a public head runs here (the workflow's own guard misses some events)
-            state, text = 'error', PUBLIC
+        if private == is_public(env):  # each caller its own legs (18.7): the workflow's guard misses some events
+            state, text = 'error', PRIVATE_ON_PUBLIC if private else PUBLIC
     except github.ApiError as e:
         state, text = 'error', f'contract: {SPEC} not read ({e})'
     print(f'ci-run flow contract: {state}: {text}', file=sys.stderr)
@@ -344,7 +472,7 @@ def entry(p: Mapping, files: bool = False) -> dict:
 
 
 def summary(parts: Sequence[Mapping], capacity_note: str, max_parallel: int) -> str:
-    rows = ''.join(f'| `{p["id"]}` | {p["needs"]} | {" ".join(p["labels"][1:])}{" " + p["target"] if p["target"] else ""}'
+    rows = ''.join(f'| `{p["id"]}` | {p["needs"]} | {" ".join(x for x in p["labels"] if x != rt.BASE)}{" " + p["target"] if p["target"] else ""}'
                    f' | {p["minutes"]:g} | {p["timeout_minutes"]} | {p.get("why", "")} |\n' for p in parts)
     return (f'## the plan: {len(parts)} part(s), at most {max_parallel} at once\n\ncapacity: {capacity_note}\n\n'
             '| part | needs | labels | minutes | job bound | why |\n|---|---|---|---|---|---|\n' + rows)
@@ -419,14 +547,17 @@ def run_plan(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc:
         return fail('error', f'plan: no plan output ({type(e).__name__})', EXIT_PLAN)
     except rt.PlanError as e:
         return fail('failure', f'plan: {e}', EXIT_PLAN)
-    rows, unread = _rows(a.rows, etc)
+    public = is_public(env)
+    rows, unread = (None, 'a public caller') if public else _rows(a.rows, etc)
     try:
-        routed = rt.route(parts, rows, unread)
+        routed = route_public(parts, env.get('GITHUB_REPOSITORY', '')) if public else rt.route(parts, rows, unread)
+    except rt.PlanError as e:
+        return fail('failure', f'plan: {e}', EXIT_PLAN)
     except rt.RouteError as e:
         for line in e.errors:
             print(f'ci-run flow plan: route: {line}', file=sys.stderr)
         return fail('error', f'route: {e.errors[0]}', EXIT_RED)
-    proj = _project(etc, a.project)
+    proj = None if public else _project(etc, a.project)
     most = proj.max_parallel if proj is not None else MAX_PARALLEL
     most = min(most, opts['max_parallel'] or most)  # a plan lowers the registry's cap, never raises it
     matrix = [entry(p, bool(opts['files'])) for p in routed]
@@ -434,6 +565,8 @@ def run_plan(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc:
     if len(text) > MAX_MATRIX:
         return fail('failure', f'plan: the routed parts take {len(text)} bytes, more than {MAX_MATRIX}', EXIT_PLAN)
     note = 'read' if rows else f'unreadable ({unread or "no rows"}): every part on its shared label, no overflow'
+    if public:
+        note = 'not read: a public caller, its CPU parts hosted and its gpu parts on its own pool (decision 18.7)'
     _summary(env, summary(matrix, note, most))
     print(f'ci-run flow plan: {len(matrix)} part(s), max_parallel {most}, capacity {note}', file=sys.stderr)
     if not matrix or a.plan_only == 'true':  # nothing to run, or a plan-only run: the plan job's state is the run's
@@ -484,7 +617,8 @@ def decide(part: Mapping, doc: Mapping | None, role: str, rows: Sequence | None,
     if retries < 1:
         return None
     q = math.ceil(float(part.get('queue') or 0))  # the route's bound without the queue, and the queue on top
-    r = rt.retry({**part, 'timeout_minutes': int(part['timeout_minutes']) - q}, first, rows, unread)
+    bare = {**part, 'timeout_minutes': int(part['timeout_minutes']) - q}
+    r = retry_public(bare, first) if is_public(env) else rt.retry(bare, first, rows, unread)
     if not r['retry']:
         return None
     return {'labels': r['labels'], 'timeout_minutes': int(r['timeout_minutes']) + q, 'target': r['target'],
@@ -508,6 +642,8 @@ def run_retry(a: argparse.Namespace, env: Mapping[str, str], etc: str) -> int:
         part = json.loads(a.part)
         if not isinstance(part, dict) or not isinstance(part.get('labels'), list):
             raise ValueError
+        if is_public(env) and part.get('needs') not in PUBLIC_LABELS:
+            raise ValueError
     except ValueError:
         raise FlowError('--part is not a routed part') from None
     doc = None
@@ -517,8 +653,8 @@ def run_retry(a: argparse.Namespace, env: Mapping[str, str], etc: str) -> int:
                 got.get('run-attempt') or env.get('GITHUB_RUN_ATTEMPT', '1')) == env.get('GITHUB_RUN_ATTEMPT', '1'):
             doc = got
             break
-    proj = _project(etc, a.project) if a.project else None
-    rows, unread = _rows(a.rows, etc)
+    proj = _project(etc, a.project) if a.project and not is_public(env) else None
+    rows, unread = (None, 'a public caller') if is_public(env) else _rows(a.rows, etc)
     r = decide(part, doc, a.role, rows, unread, proj.retries if proj is not None else 1, env)
     _out(env, retry=json.dumps(r, sort_keys=True, separators=(',', ':')) if r else 'none')
     print(json.dumps(r['labels']) if r else 'none')
@@ -648,6 +784,12 @@ def parser() -> argparse.ArgumentParser:
     pe.add_argument('--sha', required=True)
     pe.add_argument('--seen', required=True)
     pe.add_argument('--description', default='queued on the runners')
+    sub.add_parser('admit')
+    v = sub.add_parser('verdict')
+    v.add_argument('--context', required=True)
+    v.add_argument('--sha', required=True)
+    v.add_argument('--parts', default='')
+    v.add_argument('--artifacts', required=True)
     s = sub.add_parser('status')
     s.add_argument('--context', required=True)
     s.add_argument('--sha', required=True)
@@ -673,6 +815,10 @@ def main(argv: Sequence[str], etc: str, call: Callable | None = None, env: Mappi
             return run_claim(a, env, call, etc)
         if a.cmd == 'pending':
             return run_pending(a, env, call, etc)
+        if a.cmd == 'admit':
+            return run_admit(env)
+        if a.cmd == 'verdict':
+            return run_verdict(a)
         post(env, call, context=a.context, sha=a.sha, state=a.state, description=a.description)
         return 0
     except (ValueError, github.ApiError, OSError) as e:  # FlowError, a policy that does not load

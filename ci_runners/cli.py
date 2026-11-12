@@ -24,6 +24,7 @@
     ci-run stats [--repo R] [--since T] [--records DIR] [--json]   queue, run and verdict delays per
                            label and repository from the jobs API, retries, refusals, presence (16.8)
     ci-run route [--rows FILE]   a plan's parts to capability labels, from the capacity (decision 16.5)
+    ci-run hosted ...      a public caller's CPU part on a GitHub-hosted runner (actions/hosted; 18.7)
     ci-run flow contract|plan|retry|locate|status ...   the reusable workflow's own steps (actions/flow;
                            decision 16.6), run from the action's checkout
     ci-run sweep --workflow W --context C [--minutes N]   cancel a run whose job has queued at GitHub
@@ -76,6 +77,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'route':  # the plan job's, on a light runner: the capacity, no inventory (decision 16.5)
         from ci_runners import route
         return route.main(args, etc_dir())
+    if cmd == 'hosted':  # a public caller's CPU part on a GitHub-hosted runner (decision 18.7): no host layer
+        from ci_runners import hosted
+        return hosted.main(args)
     if cmd == 'flow':  # the reusable workflow's steps: the capacity and the registry, read only (16.6)
         from ci_runners import flow
         return flow.main(args, etc_dir())

@@ -312,7 +312,7 @@ def summary_md(v: Verdict, context: str, items: list[End]) -> str:
     return head + '\n'.join(parts)
 
 
-def main(argv: list[str], inv: inventory.Inventory, call: Callable | None = None,
+def main(argv: list[str], inv: inventory.Inventory | None, call: Callable | None = None,
          fetch: Callable | None = None) -> int:
     p = argparse.ArgumentParser(prog='ci-run verdict')
     p.add_argument('--context', required=True)
@@ -332,6 +332,8 @@ def main(argv: list[str], inv: inventory.Inventory, call: Callable | None = None
             raise ValueError('context or sha is malformed')
 
         def salvage(pid: str, attempt: int) -> dict | None:
+            if inv is None:  # a public caller's verdict on a hosted runner: no record there (18.7)
+                return None
             ref = f'{inv.this}:{repo}/{run}/{pid}-{attempt}'
             try:  # the record's own outputs only: nothing reaches this step's outputs
                 return part.salvage(inv, ref, {'GITHUB_REPOSITORY': repo}, wait_seconds=a.wait_seconds)[1]

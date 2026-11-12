@@ -1075,7 +1075,33 @@ def _with_inventory(p: dict, etc: str) -> dict:
     health = host_health(inv, etc)
     if health:
         p['health'] = health
+    pub = public_of(inv)
+    if pub is not None:
+        p['public'] = pub
     return p
+
+
+PUBLIC_MAX_AGE = 60  # s: an older public row of presence's offers nothing (three ticks)
+
+
+def public_of(inv, now: float | None = None) -> dict | None:
+    """The host's public part of its row (decision 18.7), where the inventory names a public
+    pool: presence's last ``state/public.json`` (the audience, the check's result and age, the
+    cards a public runner could take now). A row that is missing, unread or older than
+    ``PUBLIC_MAX_AGE`` offers no card; None where the host has no public pool."""
+    from ci_runners import inventory, presence
+    if inventory.public_pool(inv) is None:
+        return None
+    now = time.time() if now is None else now
+    doc = presence._json(os.path.join(str(inv.host['data']), 'ci-runners', 'state', presence.PUBLIC_FILE))
+    t = doc.get('time') if isinstance(doc, dict) else None
+    if type(t) not in (int, float) or not now - PUBLIC_MAX_AGE <= t <= now + 5:
+        return {'offered': False, 'cards': [], 'check': 'none', 'age_s': None,
+                'isolation': str(inv.host.get('isolation', '')), 'why': 'presence has not written its public row'}
+    cards = doc.get('cards')
+    ok = doc.get('offered') is True and isinstance(cards, list) and all(type(c) is int for c in cards)
+    return {**{k: doc.get(k) for k in ('check', 'age_s', 'isolation', 'why', 'groups', 'running')},
+            'offered': ok, 'cards': cards if ok else []}
 
 
 def holds_of(inv, now: float | None = None) -> tuple[float, int] | None:

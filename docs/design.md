@@ -2157,6 +2157,18 @@ amends.
          host label (`cool-card`, `same-host`, 16.5) become the fallback row. The UTS
          namespace names the machine `<host>-pub-gpu<N>`, so a public log shows no host's
          own name (amends 16.7's "the machine name as the host has it").
+       - *The opt-in* (decided 2026-11-13, amends this item and 16.7 for the hosted legs):
+         the hosted legs are open to the organisation's public repositories; the opt-in is
+         for the GPU pool. They touch nothing of ours, so `public.yml` admits a public caller
+         whose owner is this organisation under the event rules above (a same-repository
+         pull request, which needs write access to the repository, or a protected push) and
+         with no bot, with no entry anywhere; a CPU-only public plan runs so. Membership is
+         not checked there (a hosted runner reads no snapshot): it is the hook's, for the GPU
+         pool. A plan with a `gpu` part from a
+         repository not opted in (the release's list `flow.PUBLIC_CALLERS`, beside the
+         hosts' `public_runners = true`; never this repository) ends red at plan time, "not
+         opted in to the public GPU pool". The gate for the cards stays the hosts' policy
+         and the issuer (C3).
        - *Inventory.* A host's `isolation` names the backend it is set up for (`account`
          or `ns-subuid`); the probe and the check prove it. A pool's `audience` (16.3) is
          `public` on the public GPU pool: a per-card pool of 0 static instances (its runners
@@ -4699,8 +4711,16 @@ check, the relay and the issuer get an independent review (AGENTS.md, Review).
   holds. *Acceptance:* P1's event fixtures, each refused or accepted as P1 said; a public
   repository's job on a `light` or `part` runner of audience `public` refused; a public
   plan asking for `gpu2`, `timing` or the cluster red at plan time; a withdrawn audience
-  stops the public runners within one tick.
-- **C3, the issuer** (18.6). *Acceptance,* on the canary: a queued `ci-pub-gpu` job gets
+  stops the public runners within one tick; what stops the private runners for the whole
+  host (a drain of the host or of its gpu pool, presence's self-drain, the health gate)
+  stops the idle public runners within one tick and offers no card, while a busy one
+  finishes its job (from C2's review, 2026-11-13).
+- **C3, the issuer** (18.6). *Requirements* (from C2's review, 2026-11-13): the head's code
+  controls its own job on a hosted runner, so "red at plan time" and a public verdict hold
+  against an honest head only, and the gate for the cards is the host: the confined
+  executor takes the card count, the time bound and the memory from the pool, never from
+  the job's inputs; the launcher refuses to start when presence's public record
+  (`state/public.json`) is stale. *Acceptance,* on the canary: a queued `ci-pub-gpu` job gets
   one runner on the first host in the order that has a free card and a fresh check; it
   takes one job and is gone; an unused runner is removed after 5 min; a host whose check
   failed or is stale is skipped; after a run, a scan of the host account's files finds no

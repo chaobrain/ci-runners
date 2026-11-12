@@ -51,7 +51,20 @@ cluster's); a ``lost`` part on a host that stayed up; a hook refusal ``stale``, 
 Nothing undrains by itself.
 
 *Rollback*: ``presence = { enabled = false }`` (or no table): the tick starts every runner
-it stopped, at once, and does nothing else; ``check`` always lets a runner start.
+it stopped, at once, and does nothing else but stop the public runners; ``check`` always
+lets a runner start.
+
+*The public runners* (decision 18.4, 18.5; from C2). A public runner is a confined
+single-job runner the launcher starts as the user unit ``ci-pub-runner@<role>-pub-gpu<N>-<seq>``
+(C3), holding card N's lease for its life. The *public audience* holds only while presence is
+enabled, the inventory names the host's public pool and its ``isolation``, and the conformance
+check's record (``state/confine-check.json``) passed every item within ``CHECK_MAX_AGE``, in
+this boot and kernel, for that backend, with the GPU group alone (mode (a)). At each tick a
+withdrawn audience stops every public runner at once, busy or not; while one is up, its card
+is a cause of the card's private runners (``public: ...``), so they stop when idle and the
+unit's ``ExecCondition=`` keeps them down. Each enabled tick writes ``state/public.json``: the
+audience, the check's result and age, and the cards a public runner could take now (no
+cause, no private job, no public runner), which the capacity row carries for the issuer.
 
 Every stop, start, infrastructure end and drain is one JSON line in the host's
 ``logs/presence-<UTC date>.log`` (the reaper drops it after 14 days), and the stops and
@@ -114,6 +127,10 @@ TIER = 'tier: '  # the cause's prefix
 HOLD_MAX_MIN = 720  # min: the longest hold (19.8: one night)
 HOLD_ENTRIES = 32  # the most holders at once
 HOLD_CLASS = 'nightly'  # the policy class a job's repository needs on the host to hold it (19.8)
+PUBLIC_UNIT = 'ci-pub-runner@'  # the public runners' units (18.4; the launcher's, C3)
+CHECK_FILE, PUBLIC_FILE = 'confine-check.json', 'public.json'  # the check's record (18.5); the tick's public row
+CHECK_MAX_AGE = 26 * 3600  # s: an older check withdraws the public audience (18.5)
+PUBLIC_CAUSE = 'public: '
 
 
 # ------------------------------------------------------------------ the runners
@@ -261,6 +278,7 @@ class Facts:
     slots: tuple[int, int] | None = None  # (the host's CI slots, those held by processes not ours)
     busy: set[str] | None = None  # the runners that are not idle; None: not known (nothing stops)
     load: dict | None = None  # hostload.load_between, where a runner has a slot
+    public: set[int] | None = dataclasses.field(default_factory=set)  # cards a public runner holds; None: all (unread)
 
 
 class Probe:
@@ -351,6 +369,26 @@ class Probe:
             return None
         return {r.name for r in rs if r.name in w or any(s.startswith(scope_prefix(r.name)) for s in sc)}
 
+    def public_units(self) -> list[tuple[str, str]] | None:
+        """This account's public runner units ``(unit, active state)`` that are not down, or
+        None where they cannot be read (decision 18.4)."""
+        r = self.systemctl('list-units', '--all', '--plain', '--no-legend', f'{PUBLIC_UNIT}*')
+        if r is None or r.returncode != 0:
+            return None
+        out = []
+        for line in (r.stdout or '').splitlines():
+            f = line.split()
+            if len(f) >= 3 and f[0].startswith(PUBLIC_UNIT) and f[2] not in DOWN:
+                out.append((f[0], f[2]))
+        return out
+
+    def check_record(self) -> dict | None:
+        """The conformance check's last record (18.5), or None."""
+        return _json(os.path.join(str(self.h['data']), 'ci-runners', 'state', CHECK_FILE))
+
+    def kernel(self) -> str:
+        return os.uname().release
+
     def idle_now(self, r: Runner) -> bool:
         """The look just before a stop: no worker and no part scope of ``r`` now."""
         b = self.busy([r])
@@ -425,7 +463,8 @@ class Probe:
         where given (``check``: the one runner, so a light runner's start reads no card)."""
         mine = rs if focus is None else focus
         f = Facts(drain=drain_mod.read(str(self.h['data'])), health=self.health(), cards=self.cards(mine),
-                  slots=self.slot_holds() if any(r.cls in SLOT_CLASSES for r in rs) else None, busy=self.busy(rs))
+                  slots=self.slot_holds() if any(r.cls in SLOT_CLASSES for r in rs) else None, busy=self.busy(rs),
+                  public=public_cards(self.public_units(), self.inv.this) if any(r.cards for r in mine) else set())
         if any(r.slot is not None for r in mine):
             f.load = self.load()
         return f
@@ -454,6 +493,10 @@ def causes(inv: inventory.Inventory, rs: Sequence[Runner], f: Facts, units: Mapp
             why.append(f.health)
         for c in r.cards:
             why += f.cards.get(c, [])
+        held = [c for c in r.cards if f.public is None or c in f.public]
+        if held:  # one job per card: a public runner holds its lease (18.4)
+            why.append(f'{PUBLIC_CAUSE}card {held[0]} is held by a public runner' if f.public is not None
+                       else f'{PUBLIC_CAUSE}the public runners cannot be read')
         if timing and r.cls != TIMING and r.cpus & compile_cpus:
             why.append(f'timing: a timing part fences CPUs {h.get("compile_cpus")}')
         if r.slot is not None and f.load is not None and r.cpus:
@@ -897,6 +940,108 @@ def _utc(t: float) -> str:
     return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')
 
 
+# ------------------------------------------------------------------ the public runners (18.4, 18.5)
+
+_PUBLIC_NAME = re.compile(r'([a-z0-9][a-z0-9-]{0,30})-pub-gpu([0-9]{1,4})-([0-9]{1,12})\Z')
+
+
+def public_card(unit: str, role: str) -> int | None:
+    """The card of a public runner unit of this host (``ci-pub-runner@<role>-pub-gpu<N>-<seq>``),
+    or None where the name is not one. Pure."""
+    name = unit[len(PUBLIC_UNIT):] if unit.startswith(PUBLIC_UNIT) else ''
+    name = name[:-len('.service')] if name.endswith('.service') else name
+    m = _PUBLIC_NAME.fullmatch(name)
+    return int(m.group(2)) if m and m.group(1) == role else None
+
+
+def public_cards(units: Sequence[tuple[str, str]] | None, role: str) -> set[int] | None:
+    """The cards the public runners hold; None (every card) where they cannot be read or a
+    unit's name names no card of this host. Pure."""
+    if units is None:
+        return None
+    cards = [public_card(u, role) for u, _ in units]
+    return None if None in cards else set(cards)
+
+
+def check_result(doc: Mapping | None, *, isolation: object, boot: str, kernel: str, now: float) -> tuple[str, str]:
+    """The conformance check's result (18.5): ``('passed', '')``, or ``(state, why)`` with
+    ``state`` one of ``none``, ``failed`` and ``stale``. Pure."""
+    if not isinstance(doc, Mapping):
+        return 'none', 'no conformance check has run'
+    failed = doc.get('failed')
+    if doc.get('passed') is not True or failed != []:
+        items = ', '.join(str(x) for x in failed) if isinstance(failed, list) and failed else 'its record'
+        return 'failed', f'the conformance check failed ({items})'
+    t = doc.get('time')
+    if type(t) not in (int, float) or not now - CHECK_MAX_AGE <= t <= now + 300:
+        return 'stale', f'the conformance check is older than {CHECK_MAX_AGE // 3600} h'
+    if doc.get('boot_id') != boot or doc.get('kernel') != kernel:
+        return 'stale', 'the conformance check ran in another boot or kernel'
+    if doc.get('isolation') != isolation:
+        return 'failed', f'the conformance check proved {doc.get("isolation")!r}, not the inventory\'s {isolation!r}'
+    if doc.get('groups') != 'gpu':
+        return 'failed', 'the job keeps more than the GPU group (mode (a) is required, 18.4)'
+    return 'passed', ''
+
+
+def public_audience(inv: inventory.Inventory, enabled: bool, check: tuple[str, str]) -> str:
+    """Why this host offers no public audience now, or ''. Pure."""
+    if inventory.public_pool(inv) is None:
+        return 'the inventory names no public pool'
+    if not inv.host.get('isolation'):
+        return 'the inventory names no isolation'
+    if not enabled:
+        return 'presence is off'
+    return check[1] if check[0] != 'passed' else ''
+
+
+def public_row(inv: inventory.Inventory, rs: Sequence[Runner], f: Facts, why: Mapping[str, list[str]],
+               check: tuple[str, str], doc: Mapping | None, withdrawn: str, t: float) -> dict:
+    """``state/public.json``: the capacity row's public part (18.7). The cards a public
+    runner could take now: every card of the host's gpu pool whose runner is idle, without
+    a cause, and held by no public runner; none while the audience is withdrawn. Pure."""
+    free = []
+    if not withdrawn and f.busy is not None and f.public is not None \
+            and not any(x.cards and x.cls != 'gpu' and x.name in f.busy for x in rs):  # a multi-card job holds them all
+        for r in rs:
+            if r.cls == 'gpu' and len(r.cards) == 1 and r.name not in f.busy and not why.get(r.name):  # a public runner's card has its cause
+                free.append(r.cards[0])
+    age = round(t - doc['time']) if isinstance(doc, Mapping) and type(doc.get('time')) in (int, float) else None
+    return {'time': t, 'isolation': inv.host.get('isolation', ''), 'check': check[0], 'why': withdrawn,
+            'groups': doc.get('groups', '') if isinstance(doc, Mapping) else '',
+            'proven': doc.get('isolation', '') if check[0] == 'passed' and isinstance(doc, Mapping) else '',
+            'age_s': age, 'offered': not withdrawn, 'cards': sorted(free),
+            'running': sorted(f.public) if f.public is not None else None}
+
+
+def stop_public(probe: Probe, data: str, units: Sequence[tuple[str, str]] | None, why: str, t: float) -> None:
+    """Stop every public runner at once (a withdrawn audience, 18.5)."""
+    for unit, _ in units or ():
+        p = probe.systemctl('--no-block', 'stop', unit)
+        ok = p is not None and p.returncode == 0
+        log(data, {'runner': unit, 'action': 'stop' if ok else 'stop failed', 'cause': f'public audience withdrawn: {why}'}, t)
+
+
+def public_tick(inv: inventory.Inventory, probe: Probe, data: str, enabled: bool, t: float) -> tuple[str, str, dict | None]:
+    """The public runners' part of a tick: their audience now, and its stop where it is
+    withdrawn. ``(withdrawn, check state and why, the check's record)``."""
+    units = probe.public_units()
+    doc = probe.check_record()
+    check = check_result(doc, isolation=inv.host.get('isolation'), boot=boot_id(probe.read), kernel=probe.kernel(), now=t)
+    withdrawn = public_audience(inv, enabled, check)
+    if withdrawn and units:
+        stop_public(probe, data, units, withdrawn, t)
+    return withdrawn, check, doc
+
+
+def write_public(data: str, row: Mapping) -> None:
+    path = os.path.join(data, 'ci-runners', 'state', PUBLIC_FILE)
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), 'w', encoding='utf-8') as f:
+        json.dump(row, f, sort_keys=True)
+    os.replace(tmp, path)
+
+
 # ------------------------------------------------------------------ the tick
 
 
@@ -956,6 +1101,7 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
         return a in DOWN and (bool(rst.get('stopped')) or res == 'exec-condition' or not read_ok)
 
     if not enabled and not dry_run:  # the rollback: start what presence stopped, and nothing else
+        public_tick(inv, probe, data, False, now())  # but stop the public runners: nothing guards their cards
         for r in rs:
             if ours_down(r):
                 p = probe.systemctl('--no-block', 'start', r.unit)
@@ -969,6 +1115,7 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
         return 0
 
     t = now()
+    withdrawn, check, check_doc = ('', ('none', ''), None) if dry_run else public_tick(inv, probe, data, enabled, t)
     f = probe.facts(rs)
     held = {n for n, v in st['runners'].items() if v.get('load')}
     why = causes(inv, rs, f, units, held)
@@ -1046,6 +1193,11 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
     names = {r.name for r in rs}
     st['runners'] = {n: v for n, v in st['runners'].items() if n in names}
     write_state(data, st)
+    if inventory.public_pool(inv) is not None:  # 18.7: the capacity row's public part, for the issuer
+        try:
+            write_public(data, public_row(inv, rs, f, why, check, check_doc, withdrawn, t))
+        except OSError as e:
+            log(data, {'public': 'not written', 'error': f'{type(e).__name__}: {e}'[:200]}, t)
     # 16.5: the host's own part of the capacity file, at every tick, after the state is saved: a
     # hung nvidia-smi in its probe that gets the tick killed then loses nothing of the tick
     publish_capacity(data, probe, t)

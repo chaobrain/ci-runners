@@ -19,6 +19,8 @@ WF = ROOT / '.github' / 'workflows'
 REUSABLE = ('ci.yml', 'part.yml', 'public.yml', 'public-part.yml')
 #: a public caller's (decision 18.7): its jobs' labels, a hosted runner or its own pool only
 PUBLIC_WF = ('public.yml', 'public-part.yml')
+#: the reusable workflows the stamp rewrites
+WORKFLOWS4 = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/public.yml', '.github/workflows/public-part.yml')
 POOL_OR_HOSTED = ("${{ fromJSON(inputs.part).gpus > 0 && fromJSON('[\"self-hosted\",\"ci-pub-gpu\"]') "
                   "|| 'ubuntu-latest' }}")
 #: the capability labels a job may name literally (16.1)
@@ -463,7 +465,7 @@ class Stamp(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             after = self.files(t)
             changed = {k for k in before if before[k] != after[k]}
-            self.assertEqual(changed, {'actions/RELEASE', *stamp.WORKFLOWS})
+            self.assertEqual(changed, {'actions/RELEASE', *WORKFLOWS4})
             self.assertEqual(after['actions/RELEASE'], 'v1.17.0\n')
             for rel in stamp.WORKFLOWS:
                 old, new = before[rel].splitlines(), after[rel].splitlines()
@@ -485,7 +487,7 @@ class Stamp(unittest.TestCase):
     def test_a_proof_branch_names_itself_and_keeps_the_release(self):
         with tempfile.TemporaryDirectory() as d:
             t = self.tree(d)
-            self.assertEqual(sorted(stamp.stamp(t, 'hook', 'r6-proof')), sorted(stamp.WORKFLOWS))
+            self.assertEqual(sorted(stamp.stamp(t, 'hook', 'r6-proof')), sorted(WORKFLOWS4))
             self.assertEqual((t / 'actions' / 'RELEASE').read_text().strip(), 'hook')
             self.assertEqual({r for _, r in stamp.refs((t / '.github/workflows/part.yml').read_text())}, {'r6-proof'})
 

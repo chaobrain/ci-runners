@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
+import signal
 import stat
 import subprocess
 import sys
@@ -56,7 +58,7 @@ class Admit(unittest.TestCase):
     def test_every_other_event(self):
         for name in ('workflow_dispatch', 'schedule', 'pull_request_target', 'workflow_run', 'issue_comment',
                      'merge_group', 'repository_dispatch', 'Push', ''):
-            self.assertIn('only', flow.admit(env(name), payload(name)), name)
+            self.assertIn('a same-repository pull_request or a protected push only', flow.admit(env(name), payload(name)), name)
 
     def test_a_fork_or_a_bot(self):
         self.assertIn('fork', flow.admit(env(), payload(head='mallory/myproj')))
@@ -86,6 +88,7 @@ class Admit(unittest.TestCase):
             self.assertTrue(out.startswith('::error::ci-runners: a fork'))
             code, out, _ = run(['admit'], {**e.env, **env(), 'GITHUB_EVENT_PATH': os.path.join(d, 'none')}, Api())
             self.assertEqual((code, out), (1, '::error::ci-runners: the event payload does not load\n'))
+            self.assertEqual(flow.admit(env(), ['not', 'an', 'object']), 'the event payload does not load')
             with open(path, 'w') as f:
                 json.dump(payload(), f)
             api = Api()
@@ -191,6 +194,8 @@ class Legs(unittest.TestCase):
                 self.assertEqual(code, want, (private, public))
                 if want:
                     self.assertEqual(e.outputs()['description'], flow.PUBLIC if not private else flow.PRIVATE_ON_PUBLIC)
+        for v, want in (('true', True), ('false', False), ('1', False), ('', False), (None, False)):
+            self.assertIs(flow.is_public({} if v is None else {'CIRUNNERS_PUBLIC': v}), want, v)
 
     def test_the_claim_counts_the_job_token_s_statuses_without_a_policy(self):
         class Statuses(Api):
@@ -227,6 +232,7 @@ class Legs(unittest.TestCase):
                 code, _, err = run(['verdict', '--context', 'p/ci', '--sha', SHA, '--parts', 'a', '--artifacts', arts],
                                    e.env, Api())
             self.assertEqual(code, 2)  # not a public caller's: actions/verdict is ci.yml's
+            self.assertIn("verdict is a public caller's", err)
 
 
 class Hosted(unittest.TestCase):
@@ -250,7 +256,7 @@ class Hosted(unittest.TestCase):
                 with open(out) as f:
                     outputs = dict(x.split('=', 1) for x in f.read().splitlines())
             res = os.path.join(d, 'ci-runners', 'p', 'results')
-            files = {n: open(os.path.join(res, n)).read() for n in os.listdir(res)} if os.path.isdir(res) else {}
+            files = {n: pathlib.Path(res, n).read_text() for n in os.listdir(res)} if os.path.isdir(res) else {}
             return code, doc, outputs, {**files, 'ran': os.path.exists(os.path.join(ws, 'ran')), 'ws': ws}
 
     def test_pass_red_and_the_outcome_the_verdict_reads(self):
@@ -274,7 +280,7 @@ class Hosted(unittest.TestCase):
     def test_the_bound_ends_the_command_red(self):
         with mock.patch.object(hosted, 'KILL_GRACE', 1):
             p = mock.MagicMock()
-            p.wait.side_effect = [subprocess.TimeoutExpired('bash', 60), None]
+            p.wait.side_effect = [subprocess.TimeoutExpired('bash', 60), subprocess.TimeoutExpired('bash', 1), None]
             p.returncode = -15
             with mock.patch('os.killpg') as kill:
                 with tempfile.TemporaryDirectory() as d:
@@ -284,10 +290,10 @@ class Hosted(unittest.TestCase):
                         doc = json.load(f)
             self.assertEqual((code, doc['outcome']), (1, 'red'))
             self.assertIn('timeout', doc['reason'])
-            kill.assert_called()
+            self.assertEqual([c.args[1] for c in kill.call_args_list], [signal.SIGTERM, signal.SIGKILL])
 
     def test_it_refuses_to_run_on_one_of_our_runners(self):
-        for e in ({'RUNNER_ENVIRONMENT': 'self-hosted'}, {}, {'CI_RUNNERS_ETC': '/x/etc'}):
+        for e in ({'RUNNER_ENVIRONMENT': 'self-hosted'}, {}, {'RUNNER_ENVIRONMENT': 'github-hosted', 'CI_RUNNERS_ETC': '/x/etc'}):
             code, doc, _, got = self.run_part('touch "$GITHUB_WORKSPACE/ran"', env={'RUNNER_ENVIRONMENT': '', **e})
             self.assertEqual((code, doc, got['ran']), (2, None, False), e)
         for bad in (['--id', '../x'], ['--timeout-minutes', '0'], ['--timeout-minutes', '241']):

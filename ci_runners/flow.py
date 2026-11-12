@@ -182,7 +182,6 @@ def contents(env: Mapping[str, str], call: Callable, path: str, ref: str) -> str
 #: caller to public.yml; an event without its repository in the payload still lands here)
 PUBLIC = 'a public repository: its run is public.yml\'s, on hosted runners (decision 18.7)'
 PRIVATE_ON_PUBLIC = 'a private repository: its run is ci.yml\'s own, not public.yml\'s'
-PRIVATE_ON_PUBLIC = 'a private repository: its run is ci.yml\'s own, not public.yml\'s'
 
 # ------------------------------------------------------------------ a public caller (18.7)
 

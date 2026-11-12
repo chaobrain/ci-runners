@@ -1646,7 +1646,9 @@ Each item names what it supersedes or amends.
        plan command, a route error, nothing to run, plan only) its state is an output.
        The claim's `pending` comes from a job of its own on `ci-light`, beside the parts,
        only where the plan routed parts, and only where the runners posted nothing on the
-       context since the claim read it (a red attempt is never covered, nor a green). The
+       context since the claim read it (a red attempt is never covered, nor a green). A
+       red attempt's `failure` comes from a light job of its part, after its attempts: no
+       job that holds a write permission runs head code. The
        verdict job, which needs the plan, the pending job and the parts, posts every final
        state, the plan's included: on those paths it is the run's second pickup, and the
        critical path stays three. A caller may hand the plan command the plan job's
@@ -3107,11 +3109,19 @@ empty where the claim skipped a green head.
 `pull-requests`: `read`) posts nothing; its end, where it ends the run, is an output.
 The `pending` job (`statuses: write`, on `ci-light`) posts the claim's pending once,
 beside the parts, only where the plan routed parts on a head the claim did not skip, and
-only where the runners posted nothing on the context since the claim read it. A part's
-attempt posts `failure` from its own job where it ends red. The verdict job, after the
+only where the runners posted nothing on the context since the claim read it (it reads
+again after its post and puts a red posted meanwhile back on top). A part's `red` job
+(`statuses: write`, on `ci-light`, after its attempts) posts `failure` where an attempt
+ends red; the attempts' own jobs hold no write permission. The verdict job, after the
 plan, the pending job and the parts, posts the run's one final status: the plan's end, or
-every part's. A cancelled run posts no final status (a newer head's run does), and a head
-the claim skipped keeps its green. Its own steps that are not an action of §4 (the
+every part's, or `error` where the plan job ended without either (its runner lost, a step
+failed). No job that holds a write permission runs head code. A cancelled run posts no
+final status (a newer head's run does; after a cancel by hand, a pending it posted stays
+until the next run), and a head the claim skipped keeps its green. *Residuals.* A part
+command runs as the runner's account (T13): it can rewrite the files of its own job's
+later steps and so the outputs of its job, and the plan command those of the plan job; a
+head that forges its plan job's end posts only on its own head, as an empty plan could.
+The verdict job runs the host's installed release, which the CI account owns (T13). Its own steps that are not an action of §4 (the
 contract check, the plan's checks and route, the retry's row, the salvage leg's host, a
 red attempt's status) are `ci-run flow` commands (`ci_runners/flow.py`), run through
 `actions/flow` from the action's own checkout, the release the workflow names (§9):
@@ -3137,14 +3147,14 @@ attempt's artifact of this run attempt where it arrived after all, else `lost`. 
 workflow calls `ci.yml` once (the `locate` job finds the attempt by its job's name, `part
 <id> / first`).
 
-*A red attempt* posts `failure` from its own job (`statuses: write` there; the token
-reaches no part command), and the verdict posts the run's state after every part:
+*A red attempt* posts `failure` through its part's `red` job (no token reaches a part
+command), and the verdict posts the run's state after every part:
 `failure` where a part's last attempt is `red` ("red: <id> red, ..."), `error` where none
 is red and one is not `pass` ("infrastructure: <id> <outcome>, ..."), else `success`; the
-consumers' guide lists every description. That step and the retry's decision run after
-the part command in its job, as the same account, so the command can rewrite their files
-(T13): what decides the head's state is the verdict, which reads the artifacts and the
-host's records from a job of its own.
+consumers' guide lists every description. The retry's decision runs after the part
+command in its job, as the same account, so the command can rewrite its files (T13):
+what decides the head's state is the verdict, which reads the artifacts and the host's
+records from a job of its own.
 
 **The plan** is one JSON document on the command's standard output; anything that does
 not load is a red plan job with the reason:

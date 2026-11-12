@@ -2,8 +2,8 @@
 # per part: its first attempt, the retry by the five rows of 16.5 (ci-run flow retry reads
 # the first attempt's outcome, pool-labels and cool-card), and, only on the lost path (an
 # attempt that ended without its outputs uploaded), a salvage leg on the first attempt's
-# host before the retry (§4.5). An attempt that ends red posts failure on the context at
-# once; nothing is cancelled and the run goes on. A part is retried at most once (§4.4);
+# host before the retry (§4.5). An attempt that ends red has the red job post failure on
+# the context at once; nothing is cancelled and the run goes on. A part is retried at most once (§4.4);
 # its attempts are 1 and 2 wherever they run (the retry names the first's record). The
 # plan's files come down before the command; the part's own artifacts go up per attempt.
 # workflow_call only; every runs-on is the plan's route, the retry's row or the salvage
@@ -37,7 +37,6 @@ jobs:
     timeout-minutes: ${{ fromJSON(inputs.part).timeout_minutes }}
     permissions:
       contents: read
-      statuses: write
     outputs:
       outcome: ${{ steps.part.outputs.outcome }}
       # its outcome reached an artifact: the part step's own upload, or the second try below
@@ -107,14 +106,6 @@ jobs:
           path: ${{ runner.temp }}/${{ fromJSON(inputs.part).artifacts[3].path }}
           retention-days: 7
           if-no-files-found: warn
-      - if: always() && steps.part.outputs.outcome == 'red'
-        uses: chaobrain/ci-runners/actions/flow@v1
-        with:
-          command: status
-          context: ${{ inputs.context }}
-          sha: ${{ inputs.sha }}
-          state: failure
-          description: red at part ${{ fromJSON(inputs.part).id }}; the other parts run on
       - id: retry
         if: always() && steps.part.outputs.outcome != ''
         uses: chaobrain/ci-runners/actions/flow@v1
@@ -194,7 +185,8 @@ jobs:
     timeout-minutes: ${{ fromJSON(needs.first.outputs.retry || needs.salvage.outputs.retry || needs.locate.outputs.retry).timeout_minutes }}
     permissions:
       contents: read
-      statuses: write
+    outputs:
+      outcome: ${{ steps.part.outputs.outcome }}
     env:
       RETRY: ${{ needs.first.outputs.retry || needs.salvage.outputs.retry || needs.locate.outputs.retry }}
     steps:
@@ -261,11 +253,24 @@ jobs:
           path: ${{ runner.temp }}/${{ fromJSON(inputs.part).artifacts[3].path }}
           retention-days: 7
           if-no-files-found: warn
-      - if: always() && steps.part.outputs.outcome == 'red'
-        uses: chaobrain/ci-runners/actions/flow@v1
+
+  # a red attempt's failure, at once, from a light job that runs no head code: the
+  # attempts' jobs hold no write permission (a part command runs as the runner's account
+  # and could rewrite the files of its job's later steps, T13)
+  red:
+    name: red
+    needs: [first, retry]
+    if: >-
+      always() && !cancelled() && (needs.first.outputs.outcome == 'red' || needs.retry.outputs.outcome == 'red')
+    runs-on: [self-hosted, ci-light]
+    timeout-minutes: 10
+    permissions:
+      statuses: write
+    steps:
+      - uses: chaobrain/ci-runners/actions/flow@v1
         with:
           command: status
           context: ${{ inputs.context }}
           sha: ${{ inputs.sha }}
           state: failure
-          description: red at part ${{ fromJSON(inputs.part).id }} (its retry); the other parts run on
+          description: red at part ${{ fromJSON(inputs.part).id }}${{ needs.retry.outputs.outcome == 'red' && ' (its retry)' || '' }}; the other parts run on

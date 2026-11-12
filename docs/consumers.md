@@ -272,7 +272,7 @@ jobs:
 **一次运行三次取 runner**（关键路径上）：
 
 1. **plan**（`ci-light`，token 只读，不发任何状态）：claim 的判断（已经绿的 head 跳过）→ `contract` 检查（§8）→ checkout head、跑 `plan` 命令 → 检查计划、按能力标签路由 → summary 里列出每个部件。
-2. **parts**：每个部件调用一次 `part.yml`，同时最多 registry 的 `max_parallel` 个。部件第一次尝试跑在路由给的标签上；按 `outcome.hint` 的五行（§2 的结果表）最多重试一次；第一次尝试没留下结果（runner 被停、上传失败）时，先在那台主机上 salvage（它的记录只在那台主机上），再决定重试。一次尝试红了，立刻在 `context` 上发 `failure`（"red at part <id>"），其他部件照常跑完，summary 完整。 同时一个 **pending** 小作业（`ci-light`，只有 `statuses: write`）发 claim 的 `pending`：只在计划路由出部件、claim 没跳过的时候，并且 claim 读状态之后 runners 没发过别的状态（红色不会被盖掉，绿色也不会）。
+2. **parts**：每个部件调用一次 `part.yml`，同时最多 registry 的 `max_parallel` 个。部件第一次尝试跑在路由给的标签上；按 `outcome.hint` 的五行（§2 的结果表）最多重试一次；第一次尝试没留下结果（runner 被停、上传失败）时，先在那台主机上 salvage（它的记录只在那台主机上），再决定重试。一次尝试红了，部件的 `red` 小作业（`ci-light`，只有 `statuses: write`，不跑 head 的代码）立刻在 `context` 上发 `failure`（"red at part <id>"），其他部件照常跑完，summary 完整；跑部件命令的作业都没有写权限。 同时一个 **pending** 小作业（`ci-light`，只有 `statuses: write`）发 claim 的 `pending`：只在计划路由出部件、claim 没跳过的时候，并且 claim 读状态之后 runners 没发过别的状态（红色不会被盖掉，绿色也不会）。
 3. **verdict**（`ci-light`）：发本次运行唯一的最终状态。plan 作业结束了运行时（`contract` 落后、计划读不进来、plan 命令红了、路由错误、空计划、`plan-only`）发 plan 作业给出的状态和描述；否则读每个部件的 artifact，每个部件以最后一次尝试为准，合并 summary，发状态。plan 作业结束运行的路径上，verdict 是第二次取 runner。
 
 **状态的描述**（精确字符串，测试红和基础设施红分开）：
@@ -289,7 +289,7 @@ jobs:
 
 描述超过 140 个字符时截断，以 `...` 结尾。
 
-`pull_request_target`、fork 的 PR 在 plan 作业的 guard 里就跳过；**公开仓库**现在不能调用 `ci.yml`：它的 `public` 作业在 GitHub 托管的 runner 上直接失败（公开仓库的 CPU 部件走托管 runner、GPU 走隔离的池，等决定 18 的 C2 实现）；事件的 payload 里没有仓库信息时（如 `schedule`），plan 作业的 `contract` 步骤用 API 查仓库是否私有，公开的就结束运行（verdict 作业发 `error`），head 的任何东西都不运行。部件在 GitHub 的队列里一直没有 runner 接的情况，现在没有上限（GitHub 不能取消单个作业；计划中的定时 sweeper 见 issue #213），在那之前请用自己的 sweeper。一个工作流里只调用一次 `ci.yml`（定位丢失尝试的主机时按作业名找 `part <id> / first`）。运行被取消（同一个 PR 推了新 head）时不重试、不发结论，新 head 的运行会发。不要把 secret 传进来：`ci.yml` 不接收也不转发任何 secret；plan 作业的 token 只读（`contents`、`statuses`、`actions`、`pull-requests` 都是 `read`），所以调用方要给 `pull-requests: read`（GitHub 拒绝被调用的作业要的权限超过调用方给的）；部件的作业只有 `contents: read` 和发红色状态用的 `statuses: write`，token 不进部件命令的环境，只在 `plan-token` 打开时以只读的形式进 plan 命令；checkout 不保存凭据。注意：部件命令以 CI 账户运行（design T13），它能改写同一个作业里之后的步骤用到的文件，所以同一作业里发红色状态、重试决定这些后续步骤并不防部件命令本身；结论以 verdict 读到的 artifact 和主机记录为准。
+`pull_request_target`、fork 的 PR 在 plan 作业的 guard 里就跳过；**公开仓库**现在不能调用 `ci.yml`：它的 `public` 作业在 GitHub 托管的 runner 上直接失败（公开仓库的 CPU 部件走托管 runner、GPU 走隔离的池，等决定 18 的 C2 实现）；事件的 payload 里没有仓库信息时（如 `schedule`），plan 作业的 `contract` 步骤用 API 查仓库是否私有，公开的就结束运行（verdict 作业发 `error`），head 的任何东西都不运行。部件在 GitHub 的队列里一直没有 runner 接的情况，现在没有上限（GitHub 不能取消单个作业；计划中的定时 sweeper 见 issue #213），在那之前请用自己的 sweeper。一个工作流里只调用一次 `ci.yml`（定位丢失尝试的主机时按作业名找 `part <id> / first`）。运行被取消（同一个 PR 推了新 head）时不重试、不发结论，新 head 的运行会发。不要把 secret 传进来：`ci.yml` 不接收也不转发任何 secret；plan 作业的 token 只读（`contents`、`statuses`、`actions`、`pull-requests` 都是 `read`），所以调用方要给 `pull-requests: read`（GitHub 拒绝被调用的作业要的权限超过调用方给的）；跑部件的作业只有 `contents: read`，token 不进部件命令的环境，只在 `plan-token` 打开时以只读的形式进 plan 命令；checkout 不保存凭据。注意：部件命令以 CI 账户运行（design T13），它能改写同一个作业里之后的步骤用到的文件，所以同一作业里的重试决定、作业的输出并不防部件命令本身（plan 命令对 plan 作业的输出也一样）；结论以 verdict 读到的 artifact 和主机记录为准。手动取消的运行不发最终状态，它发过的 pending 留到下一次运行。
 
 **自己组合的部分**（`ci.yml` 不做，design §4.8）：`ci.yml` 只管测试部件和它们的结论。
 

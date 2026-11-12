@@ -516,7 +516,7 @@ class Claim(unittest.TestCase):
         def call(method, url, token, body=None):
             if '/commits/' in url and method == 'GET':
                 api.calls.append((method, url, body))
-                return statuses
+                return statuses() if callable(statuses) else statuses
             return inner(method, url, token, body)
         api.__call__ = call
         return api, call
@@ -555,6 +555,16 @@ class Claim(unittest.TestCase):
         self.assertEqual(self.pending(seen, [self.st('failure', 8, who='someone')])[1]['posted'], 'true')
         self.assertEqual(self.pending('0.0', [])[1]['posted'], 'true')
         self.assertEqual(self.pending('soon', [])[0], 2)
+
+    def test_a_red_posted_between_the_read_and_the_pending_is_put_back(self):
+        seen = repr(flow.claim._epoch('2026-11-12T10:00:07+00:00'))
+        red = dict(self.st('failure', 8), description='red at part a; the other parts run on')
+        reads = iter([[self.st('failure', 7)], [self.st('pending', 9), red, self.st('failure', 7)]])
+        code, out, posted = self.pending(seen, lambda: next(reads))
+        self.assertEqual([(p['state'], p['description']) for p in posted],
+                         [('pending', 'queued on the runners'), ('failure', 'red at part a; the other parts run on')])
+        code, out, posted = self.pending(seen, [self.st('failure', 7)])  # nothing meanwhile: the pending stays
+        self.assertEqual([p['state'] for p in posted], ['pending'])
 
     def test_no_policy_no_decision(self):
         with tempfile.TemporaryDirectory() as d:

@@ -154,7 +154,7 @@ jobs:
           workspace: ${{ github.workspace }}
       # the plan's files, once, for every part (CIRUNNERS_FILES there)
       - id: files
-        if: steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != ''
+        if: ${{ !cancelled() && steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: ci-plan-files
@@ -224,7 +224,7 @@ jobs:
       statuses: write
       actions: read
     outputs:
-      state: ${{ needs.plan.outputs.state || steps.verdict.outputs.state }}
+      state: ${{ needs.plan.outputs.state || (needs.plan.outputs.routed == 'true' && steps.verdict.outputs.state) || 'error' }}
     steps:
       - if: needs.plan.outputs.state != ''
         uses: chaobrain/ci-runners/actions/flow@v1
@@ -234,8 +234,17 @@ jobs:
           sha: ${{ needs.plan.outputs.sha }}
           state: ${{ needs.plan.outputs.state }}
           description: ${{ needs.plan.outputs.description }}
+      # a plan job that ended without its end or a plan (its runner lost, a step failed)
+      - if: needs.plan.outputs.state == '' && needs.plan.outputs.routed != 'true'
+        uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: status
+          context: ${{ inputs.context }}
+          sha: ${{ needs.plan.outputs.sha }}
+          state: error
+          description: 'plan: the plan job ended without a plan (${{ needs.plan.result }}); no part ran'
       - id: verdict
-        if: needs.plan.outputs.state == ''
+        if: needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'
         uses: chaobrain/ci-runners/actions/verdict@v1
         with:
           context: ${{ inputs.context }}

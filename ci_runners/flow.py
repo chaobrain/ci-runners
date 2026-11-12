@@ -144,6 +144,12 @@ def run_pending(a: argparse.Namespace, env: Mapping[str, str], call: Callable, e
         _out(env, posted='false')
         return 0
     post(env, call, context=a.context, sha=a.sha, state='pending', description=a.description)
+    # a red attempt posted between the read and the post: put it back on top
+    final = [st for st in _statuses(env, call, a.context, a.sha, _bot(etc)) if st.time > seen and st.state != 'pending']
+    if final:
+        top = max(final, key=lambda st: st.time)
+        print(f'ci-run flow pending: {top.state} posted meanwhile: posted again over the pending', file=sys.stderr)
+        post(env, call, context=a.context, sha=a.sha, state=top.state, description=top.description)
     _out(env, posted='true')
     return 0
 

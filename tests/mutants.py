@@ -3830,11 +3830,11 @@ MUTANTS = [
      [f'{TRU}.Structure.test_the_salvage_leg_only_on_the_lost_path_and_before_the_retry']),
     (PTW, "          attempt-of: ${{ fromJSON(env.RETRY).attempt_of }}", "          attempt-of: ''",
      [f'{TRU}.Structure.test_the_retry_names_the_first_attempt']),
-    (PTW, "          description: red at part ${{ fromJSON(inputs.part).id }}; the other parts run on",
-     "          description: red at part ${{ fromJSON(inputs.part).id }}; the other parts run on\n          token: ${{ secrets.X }}",
+    (PTW, "          state: failure\n",
+     "          state: failure\n          token: ${{ secrets.X }}\n",
      [f'{TRU}.Structure.test_no_secret_reaches_a_part']),
-    (PTW, "  first:\n    name: first\n    runs-on: ${{ fromJSON(inputs.part).labels }}\n    timeout-minutes: ${{ fromJSON(inputs.part).timeout_minutes }}\n    permissions:\n      contents: read\n      statuses: write\n    outputs:\n      outcome: ${{ steps.part.outputs.outcome }}\n      # its outcome reached an artifact: the part step's own upload, or the second try below\n      uploaded: ${{ steps.part.outcome == 'success' || steps.again.outcome == 'success' }}\n      retry: ${{ steps.retry.outputs.retry }}\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          persist-credentials: false",
-     "  first:\n    name: first\n    runs-on: ${{ fromJSON(inputs.part).labels }}\n    timeout-minutes: ${{ fromJSON(inputs.part).timeout_minutes }}\n    permissions:\n      contents: read\n      statuses: write\n    outputs:\n      outcome: ${{ steps.part.outputs.outcome }}\n      # its outcome reached an artifact: the part step's own upload, or the second try below\n      uploaded: ${{ steps.part.outcome == 'success' || steps.again.outcome == 'success' }}\n      retry: ${{ steps.retry.outputs.retry }}\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          persist-credentials: true",
+    (PTW, "  first:\n    name: first\n    runs-on: ${{ fromJSON(inputs.part).labels }}\n    timeout-minutes: ${{ fromJSON(inputs.part).timeout_minutes }}\n    permissions:\n      contents: read\n    outputs:\n      outcome: ${{ steps.part.outputs.outcome }}\n      # its outcome reached an artifact: the part step's own upload, or the second try below\n      uploaded: ${{ steps.part.outcome == 'success' || steps.again.outcome == 'success' }}\n      retry: ${{ steps.retry.outputs.retry }}\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          persist-credentials: false",
+     "  first:\n    name: first\n    runs-on: ${{ fromJSON(inputs.part).labels }}\n    timeout-minutes: ${{ fromJSON(inputs.part).timeout_minutes }}\n    permissions:\n      contents: read\n    outputs:\n      outcome: ${{ steps.part.outputs.outcome }}\n      # its outcome reached an artifact: the part step's own upload, or the second try below\n      uploaded: ${{ steps.part.outcome == 'success' || steps.again.outcome == 'success' }}\n      retry: ${{ steps.retry.outputs.retry }}\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          persist-credentials: true",
      [f'{TRU}.Structure.test_no_secret_reaches_a_part']),
     # R6, after the rulings and the review: the first attempt's decision first, the salvage
     # leg's fallback file, the files and the artifacts, the queue bound, the public refusal
@@ -3909,8 +3909,8 @@ MUTANTS = [
     (CIW, "        uses: chaobrain/ci-runners/actions/flow@v1\n        with:\n          command: claim",
      "        uses: chaobrain/ci-runners/actions/claim@v1\n        with:\n          pending-description: x",
      [f'{TRU}.Structure.test_the_plan_job_posts_nothing_and_hands_a_token_only_to_the_plan_command']),
-    (CIW, "        if: steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != ''",
-     "        if: steps.plan.outputs.files != ''", [f'{TRU}.Structure.test_the_plan_job_hands_on_its_outcome_and_files']),
+    (CIW, "        if: ${{ !cancelled() && steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != '' }}",
+     "        if: steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != ''", [f'{TRU}.Structure.test_the_plan_job_hands_on_its_outcome_and_files']),
     (CIW, "    if: >-\n      !cancelled() && needs.plan.outputs.routed == 'true' && needs.plan.outputs.files != 'failure' &&\n      needs.plan.outputs.run == 'true'\n    permissions:\n      contents: read",
      "    if: >-\n      needs.plan.outputs.routed == 'true' && needs.plan.outputs.files != 'failure' &&\n      needs.plan.outputs.run == 'true'\n    permissions:\n      contents: read",
      [f'{TRU}.Structure.test_the_parts_run_once_the_plan_is_routed_whatever_failed_after']),
@@ -3924,6 +3924,20 @@ MUTANTS = [
     (CIW, "      state: ${{ steps.contract.outputs.state || steps.plan.outputs.state }}",
      "      state: ${{ steps.plan.outputs.state }}", [f'{TRU}.Structure.test_one_final_status_and_its_pending_beside_the_parts']),
     (AFL, '        [ -z "$IN_SEEN" ] || args+=("--seen=$IN_SEEN")\n', "", [f'{TRU}.Flow.test_each_input_reaches_its_flag']),
+    # the third review: the red post from a job without head code, the plan's files after a
+    # failed step, a plan job lost, a red put back over a late pending
+    (PTW, "    permissions:\n      contents: read\n    outputs:\n      outcome: ${{ steps.part.outputs.outcome }}\n    env:",
+     "    permissions:\n      contents: read\n      statuses: write\n    outputs:\n      outcome: ${{ steps.part.outputs.outcome }}\n    env:",
+     [f'{TRU}.Structure.test_permissions_explicit_and_least']),
+    (PTW, "(needs.first.outputs.outcome == 'red' || needs.retry.outputs.outcome == 'red')",
+     "(needs.first.outputs.outcome == 'red')",
+     [f'{TRU}.Structure.test_every_attempt_posts_its_red_at_once_from_a_job_without_head_code']),
+    (PTW, "    needs: [first, retry]\n", "    needs: [first]\n",
+     [f'{TRU}.Structure.test_every_attempt_posts_its_red_at_once_from_a_job_without_head_code']),
+    (CIW, "      - if: needs.plan.outputs.state == '' && needs.plan.outputs.routed != 'true'\n",
+     "      - if: false\n", [f'{TRU}.Structure.test_one_final_status_and_its_pending_beside_the_parts']),
+    (FLW, "    if final:\n", "    if False:\n",
+     [f'{TFL}.Claim.test_a_red_posted_between_the_read_and_the_pending_is_put_back']),
 ]
 
 

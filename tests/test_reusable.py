@@ -37,10 +37,12 @@ PERMISSIONS = {
                'pending': {'statuses': 'write'},
                'parts': {'contents': 'read', 'statuses': 'write', 'actions': 'read'},
                'verdict': {'contents': 'read', 'statuses': 'write', 'actions': 'read'}},
-    'part.yml': {'first': {'contents': 'read', 'statuses': 'write'},
+    # no job that runs head code holds a write permission: the red job posts
+    'part.yml': {'first': {'contents': 'read'},
                  'locate': {'contents': 'read', 'actions': 'read'},
                  'salvage': {'contents': 'read'},
-                 'retry': {'contents': 'read', 'statuses': 'write'}},
+                 'retry': {'contents': 'read'},
+                 'red': {'statuses': 'write'}},
 }
 
 
@@ -176,13 +178,24 @@ class Structure(unittest.TestCase):
         for j in ('locate', 'salvage', 'retry'):
             self.assertIn('!cancelled()', jobs[j]['if'], j)  # a cancelled run retries nothing (§4.8 rule 4)
 
-    def test_every_attempt_posts_its_red_at_once(self):
+    def test_every_attempt_posts_its_red_at_once_from_a_job_without_head_code(self):
+        jobs = load('part.yml')['jobs']
         for jid in ('first', 'retry'):
-            red = [st for st in load('part.yml')['jobs'][jid]['steps']
-                   if (st.get('with') or {}).get('command') == 'status']
-            self.assertEqual(len(red), 1, jid)
-            self.assertEqual(red[0]['if'], "always() && steps.part.outputs.outcome == 'red'")
-            self.assertEqual(red[0]['with']['state'], 'failure')
+            self.assertFalse([st for st in jobs[jid]['steps'] if (st.get('with') or {}).get('command') == 'status'], jid)
+            self.assertEqual(jobs[jid]['outputs']['outcome'], '${{ steps.part.outputs.outcome }}')
+        red = jobs['red']
+        self.assertEqual(red['needs'], ['first', 'retry'])
+        self.assertIn("needs.first.outputs.outcome == 'red' || needs.retry.outputs.outcome == 'red'", red['if'])
+        self.assertIn('!cancelled()', red['if'])
+        self.assertEqual(red['runs-on'], ['self-hosted', 'ci-light'])
+        self.assertEqual([(st.get('uses', '').split('@')[0], st['with']['command'], st['with']['state']) for st in red['steps']],
+                         [('chaobrain/ci-runners/actions/flow', 'status', 'failure')])
+        # who may post, in both workflows: only jobs that run no head code
+        for name in REUSABLE:
+            for jid, job in load(name)['jobs'].items():
+                if 'write' in (job.get('permissions') or {}).values() and 'uses' not in job:
+                    self.assertFalse([st for st in job['steps'] if st.get('uses', '').startswith(
+                        ('actions/checkout@', 'chaobrain/ci-runners/actions/part@'))], f'{name}: {jid}')
 
     def test_the_first_attempts_decision_comes_first(self):
         """A known outcome is never read as lost: where the first attempt decided, its
@@ -231,6 +244,7 @@ class Structure(unittest.TestCase):
         up = [st for st in sts if st.get('uses', '').startswith('actions/upload-artifact@')]
         self.assertEqual([u['with']['name'] for u in up], ['ci-plan-files'])
         self.assertIn("steps.plan.outputs.routed == 'true'", up[0]['if'])
+        self.assertTrue(up[0]['if'].startswith('${{ !cancelled() && '))  # a failed plan part's upload skips it not
         env = [st for st in sts if st.get('id') == 'command'][0]['env']
         self.assertLessEqual({'CIRUNNERS_PLAN', 'CIRUNNERS_EVENT', 'CIRUNNERS_PR_LABELS', 'CIRUNNERS_BASE_SHA',
                               'CIRUNNERS_HEAD_SHA'}, set(env))
@@ -292,8 +306,11 @@ class Structure(unittest.TestCase):
         self.assertEqual(pend['steps'][0]['with']['seen'], "${{ needs.plan.outputs.seen || '0.0' }}")
         v = jobs['verdict']
         self.assertEqual(v['needs'], ['plan', 'pending', 'parts'])  # no pending after the final status
-        post, verd = v['steps']
-        self.assertEqual((post['if'], verd['if']), ("needs.plan.outputs.state != ''", "needs.plan.outputs.state == ''"))
+        post, lost, verd = v['steps']
+        self.assertEqual((post['if'], lost['if'], verd['if']),
+                         ("needs.plan.outputs.state != ''", "needs.plan.outputs.state == '' && needs.plan.outputs.routed != 'true'",
+                          "needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'"))
+        self.assertEqual(lost['with']['state'], 'error')
         self.assertEqual((post['with']['command'], post['with']['state']), ('status', '${{ needs.plan.outputs.state }}'))
         self.assertEqual(jobs['plan']['outputs']['state'], '${{ steps.contract.outputs.state || steps.plan.outputs.state }}')
         # who posts: pending, a red attempt (part.yml) and the verdict job; nothing else

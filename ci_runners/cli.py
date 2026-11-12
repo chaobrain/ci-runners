@@ -26,6 +26,8 @@
     ci-run route [--rows FILE]   a plan's parts to capability labels, from the capacity (decision 16.5)
     ci-run flow contract|plan|retry|locate|status ...   the reusable workflow's own steps (actions/flow;
                            decision 16.6), run from the action's checkout
+    ci-run sweep --workflow W --context C [--minutes N]   cancel a run whose job has queued at GitHub
+                           past N minutes and post error (sweep.yml, on a hosted runner; §4.10)
 
 The inventory is ``$CI_RUNNERS_ETC/inventory.toml``, else ``~/data/ci-runners/etc``.
 """
@@ -77,6 +79,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'flow':  # the reusable workflow's steps: the capacity and the registry, read only (16.6)
         from ci_runners import flow
         return flow.main(args, etc_dir())
+    if cmd == 'sweep':  # sweep.yml's step, on a hosted runner: the job's token, no inventory (§4.10)
+        from ci_runners import sweep
+        return sweep.main(args)
     if cmd == 'stats':  # the caller's own login; the inventory is not needed (decision 16.8)
         from ci_runners import stats
         return stats.main(args, etc_dir())

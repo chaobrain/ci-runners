@@ -1586,7 +1586,8 @@ Each item names what it supersedes or amends.
          since a job queued on a label without a runner waits 24 h (§2); a runner that
          presence holds back for a passing cause (a card in use, a taken slot, a timing
          run) still serves its label. A queued part's own bound stays with the
-         consumer's sweeper for now (§10, RUN-10's open point). *Amended by
+         consumer's sweeper for now (§10, RUN-10's open point; from issue #213 the
+         scheduled `sweep.yml`, §4.10). *Amended by
          19:* presence holds a later tier's idle runners offline while an earlier tier has
          idle ones (19.2), and the route counts them as room (19.3); it names no host.
        - *Retries are the five rows of `outcome.hint`* and nothing else:
@@ -2563,8 +2564,9 @@ The order is therefore made where the runners are, by presence, and no plan name
            a hook that refuses drains its host after three refusals (16.4's black hole).
            One that GitHub never serves is not caught until a maintainer drains it. This
            is an open point. R6 bounds a part's wait on its host only (`queue_minutes`):
-           GitHub cancels no single queued job. The backstop is a scheduled sweeper of
-           the consumer's runs (issue #213); until it exists, the consumer's own.
+           GitHub cancels no single queued job. The backstop is the scheduled sweeper
+           `sweep.yml` (§4.10, issue #213): a consumer that schedules it gets its run
+           cancelled and `error` posted once a job has queued at GitHub past its bound.
          - *Host labels.* A job on a later tier's own host label waits while that host
            yields, unless the host is held (19.8).
        - *The rollout* (the host steps are the lead's).
@@ -2766,10 +2768,12 @@ setup/workstation/    the maintainer's own user units: orgsync-push.sh and
                       on 3090b (decision 15.3); runner-watch.sh and
                       ci-runner-watch.{service,timer}, the alert when a host has no
                       runner online (decision 15.6)
-actions/              claim/, part/, salvage/, verdict/ (composite, action.yml);
+actions/              claim/, part/, salvage/, verdict/ (composite, action.yml); flow/ and
+                      sweep/, the reusable workflows' steps;
                       lib/ci-run.sh, the launcher; RELEASE, the release stamp
 .github/workflows/    test.yml (this repository's tests, hosted only); ci.yml and part.yml,
-                      the reusable workflow for consumers, `workflow_call` only (16.6; from R6)
+                      the reusable workflow for consumers, `workflow_call` only (16.6; from R6);
+                      sweep.yml, the scheduled sweeper (§4.10, issue #213)
 tests/                unit tests; fixtures/ (sanitised): event payloads,
                       nvidia-smi CSV, /proc/stat, /proc/locks, boot ids, JUnit; mutants.py
 tests/test_no_inventory.py     no tracked file holds a denied token (hashed deny list)
@@ -3267,9 +3271,29 @@ caller hands its plan command (`plan-token`); a public caller's run is refused i
 
 *Bounds of a queued part.* `queue_minutes` bounds the wait on the host. A job that GitHub
 never hands to a runner (a later tier's black hole, 19.9) waits in GitHub's queue up to
-its 24 hours: GitHub cancels no single job. The backstop is a small reusable workflow a
-consumer schedules, which lists its runs, cancels one whose job has queued past its bound
-and posts `error` (issue #213, not built); until then, the consumer's own sweeper.
+its 24 hours: GitHub cancels no single job. The backstop is `sweep.yml` (19.9;
+issue #213), a reusable workflow a consumer schedules: inputs `workflow` (its file that
+calls `ci.yml`), `context` and `minutes` (5 to 1440, default 60; not the plan's
+`queue_minutes`, which bounds the other wait and would cost an artifact list and a
+download per run per sweep). One job, `ci-run sweep` (`ci_runners/sweep.py`) from the
+action's own checkout on a hosted `ubuntu-latest` for every caller, with exactly `actions:
+write` and `statuses: write`: nothing of any head ever ran on that VM (ci-light runs plan
+commands under the runner's account), and it works when the pools are what is wrong. It
+runs on a `schedule` or a `workflow_dispatch` on the default branch only (any other event
+skips the job), checks out and downloads nothing, and passes its inputs through `env:`.
+It lists the workflow's `queued` and `in_progress` runs (one page of 100 each), reads the
+latest jobs of those older than the bound, and takes a run with a job whose status is
+`queued` (not `waiting`, `pending` or `requested`: gates and holds) past the bound. Its
+head is the run's `head_sha` for a `push` or `pull_request` run, or where a status of this
+run is on that sha; any other run is left alone and reported. The newest status of the
+context decides: none or the run's own `pending`, cancel and post `error`; the run's own
+`failure` or other final state, cancel only; the run's own earlier sweep `error`,
+`force-cancel`; another run's, leave it. After a cancel it reads the status again and posts
+only over none or the run's own `pending`: `error`, linked to the swept run, `queued past
+N min: part <id> on <labels>` (`plan on <labels>`, `<n> jobs, first part ...`), from a
+validated id and labels only. At most 200 requests and 10 cancels a sweep (exit 1 when
+reached, after what was done). Cost: one hosted minute a sweep (every 15 minutes, about
+2,900 a month). Built in the release after `v1.18.0`; the consumers' guide §10.
 
 **The contract.** The default branch's `.github/ci-runners.toml` may set `contract = N`
 (an integer; §4.9's spec, accepted from R1). The plan job reads that file with the job
@@ -3812,7 +3836,7 @@ Rules:
 - **Rollout of `v1.N`:**
   1. A PR with tests (hosted unit tests, fixtures, a live check on one host).
   2. The stamp PR: `actions/RELEASE` set to `v1.N.0`, and, from R6, the action refs in
-     `ci.yml` and `part.yml` and `ci.yml`'s ref to `part.yml` (16.6).
+     `ci.yml`, `part.yml` and (issue #213) `sweep.yml`, and `ci.yml`'s ref to `part.yml` (16.6).
   3. The lead tags `v1.N.0` on the stamp's merge commit.
   4. `install.sh` on every host, the egress host first (17); nothing switches yet.
   5. A canary consumer branch composes the actions at `@v1.N.0` on both 3090 hosts and

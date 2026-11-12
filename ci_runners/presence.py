@@ -32,10 +32,17 @@ that is not idle is never stopped; nor is the host's light runner without a ``ci
 ``ExecCondition=`` runs ``ci-run presence check <runner>``, the same causes now, so that a
 restart (15.5) does not bring back a runner whose resource is still taken.
 
+*Black holes.* ``presence.infra_failures`` (3) infrastructure ends within 15 min drain the
+host as 15.2's miss does (``drained: infra`` in the host's log): a part's ``unavailable``
+other than busy, drained or a full queue (and other than a cluster part's, which is the
+cluster's); a ``lost`` part on a host that stayed up; a hook refusal ``stale``, ``policy``,
+``timeout`` or ``error``. Ends before the last self-drain or the last undrain do not count.
+Nothing undrains by itself.
+
 *Rollback*: ``presence = { enabled = false }`` (or no table): the tick starts every runner
 it stopped, at once, and does nothing else; ``check`` always lets a runner start.
 
-Every stop and start is one JSON line in the host's
+Every stop, start, infrastructure end and drain is one JSON line in the host's
 ``logs/presence-<UTC date>.log`` (the reaper drops it after 14 days), and the stops and
 starts are counted per runner in ``state/presence.json``.
 
@@ -65,16 +72,26 @@ from ci_runners import drain as drain_mod
 from ci_runners import hostload, inventory, outcome, slots
 
 TICK_SECONDS = 20  # the default tick (presence.tick_seconds)
+INFRA_FAILURES = 3  # the default count of infrastructure ends that drain the host
+INFRA_WINDOW = 15 * 60  # s: the window of those ends
 TICKS = 2  # consecutive ticks with (to stop) or without (to start) a cause
 LOAD_SECONDS = 1.0  # s: the load sample of a slot's CPUs
 LOAD_ON, LOAD_OFF = 0.5, 0.25  # a slot's CPUs busy with others: holds at half of them, clears below a quarter
 HOLD = 77  # check's exit while a cause holds: ExecCondition= skips the start (1-254), and no other error maps to it
+LOST_HORIZON = 12 * 3600  # s: the part records read for a lost part (the longest part, 600 min, and its queue)
 SLOT_CLASSES = ('part', 'compile')  # the classes whose parts take one host CI slot (part.SLOT_CLASSES)
 EVERY_SLOT = 'nightly'  # the class whose part takes every slot (part.EVERY_SLOT)
 CARD_CLASSES = {'gpu', 'multi'}  # the classes whose runners lease cards: its own (gpu), every card (multi)
 TIMING = 'compile'  # the exclusive timing class (16.1 ci-timing)
 RUNNING = ('active', 'activating', 'reloading')
 DOWN = ('inactive', 'failed')
+#: a part's ``unavailable`` that is no infrastructure end (16.4): busy, drained, a full queue;
+#: also a wait that ran out (the host was busy: no slot, no card, no host lock) and a request
+#: the class's row refuses (the caller's ``gpus``, ``lock`` or class, not the host)
+NOT_INFRA = ('busy', 'drained', 'project queue full', drain_mod.UNREADABLE, 'queue timeout', 'gpus ', 'lock ',
+             'this host has no compile_cpus')
+HOOK_INFRA = ('stale', 'policy', 'timeout', 'error')  # the hook's refusals that are infrastructure ends
+CLUSTER = 'slurm'  # a cluster part's unavailable is the cluster's, not the host's
 
 
 # ------------------------------------------------------------------ the runners
@@ -422,7 +439,7 @@ def state_path(data: str) -> str:
 
 
 def fresh_state() -> dict:
-    return {'runners': {}, 'counts': {}}
+    return {'runners': {}, 'counts': {}, 'infra': {'since': 0.0, 'drained': False, 'seen': {}}}
 
 
 def read_state(data: str) -> tuple[dict, bool]:
@@ -438,6 +455,8 @@ def read_state(data: str) -> tuple[dict, bool]:
         return fresh_state(), False
     if not (isinstance(st, dict) and isinstance(st.get('runners'), dict) and isinstance(st.get('counts'), dict)):
         return fresh_state(), False
+    if not (isinstance(st.get('infra'), dict) and isinstance(st['infra'].get('seen'), dict)):
+        st['infra'] = fresh_state()['infra']  # a state from before the self-drain, or a bad count: count afresh
     return st, True
 
 
@@ -477,6 +496,164 @@ def _count(st: dict, name: str, action: str) -> None:
     c[action] = int(c.get(action, 0)) + 1
 
 
+# ------------------------------------------------------------------ black holes
+
+
+def _json(path: str) -> dict | None:
+    try:
+        with open(path, encoding='utf-8') as f:
+            v = json.load(f)
+        return v if isinstance(v, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def boot_id(read: Callable[[str], str] = hostload._read) -> str:
+    return read('/proc/sys/kernel/random/boot_id').strip()
+
+
+def part_end(doc: Mapping | None, rec: Mapping, boot: str) -> str:
+    """Why a part's end is an infrastructure end (16.4), or empty: ``unavailable`` other
+    than busy, drained or a full queue, and other than a cluster part's (the cluster's, not
+    this host's); ``lost`` on a host that stayed up (its boot id unchanged). ``doc`` is its
+    ``outcome.json``, None for a record that never finished (lost). Pure."""
+    kind = 'lost' if doc is None else str(doc.get('outcome', ''))
+    reason = '' if doc is None else str(doc.get('reason', ''))
+    if kind == 'unavailable':
+        if reason.startswith(NOT_INFRA) or rec.get('class') == CLUSTER:
+            return ''
+        return f'unavailable: {reason}'
+    if kind == 'lost' and boot and rec.get('boot_start') == boot:
+        return 'lost'
+    return ''
+
+
+def hook_end(line: Mapping) -> str:
+    """Why a hook log line is an infrastructure end: a refusal ``stale``, ``policy``,
+    ``timeout`` or ``error`` (the hook could not decide). Pure."""
+    if line.get('accepted') is False and line.get('reason') in HOOK_INFRA and 'hook' not in line:
+        return f'hook: {line["reason"]}'
+    return ''
+
+
+def _iso(s: object) -> float | None:
+    try:
+        return datetime.datetime.fromisoformat(str(s)).timestamp()
+    except ValueError:
+        return None
+
+
+def _record_end(record: str, since: float, *, alive: Callable[[int, float], bool], active: Callable[[str], bool],
+                boot: str) -> dict | None:
+    """One part record's infrastructure end in the window after ``since``, or None (see
+    ``infra_ends``)."""
+    try:
+        t = os.stat(os.path.join(record, 'outcome.json')).st_mtime
+    except OSError:
+        t = None
+    if t is not None and t <= since:  # ended before the window: not read
+        return None
+    rec = _json(os.path.join(record, 'record.json'))
+    if rec is None:
+        return None
+    if t is not None:
+        doc = _json(os.path.join(record, 'outcome.json'))
+        if doc is None:
+            return None
+    else:  # never finished: lost once nothing of it runs
+        if os.path.exists(os.path.join(record, 'exit.json')):
+            return None
+        pid, start = int(rec.get('executor', 0)), float(rec.get('start_epoch', 0))
+        if pid > 0 and alive(pid, start) or rec.get('unit') and active(str(rec['unit'])):
+            return None
+        with os.scandir(record) as it:
+            t = max([os.stat(record).st_mtime, *(e.stat(follow_symlinks=False).st_mtime for e in it)])
+        if t <= since:
+            return None
+        doc = None
+    why = part_end(doc, rec, boot)
+    ref = '/'.join(record.split(os.sep)[-4:])
+    return {'key': f'part:{ref}', 'time': t, 'why': why, 'record': ref} if why else None
+
+
+def infra_ends(data: str, now: float, *, alive: Callable[[int, float], bool] = slots.alive,
+               active: Callable[[str], bool] = lambda unit: False, boot: str = '') -> list[dict]:
+    """The infrastructure ends of this host in the window before ``now``: ``{'key',
+    'time', 'why'}`` each, from the part records (an ``outcome.json``'s time; a record
+    that never finished, whose executor is gone, whose scope is not ``active`` and with no
+    ``exit.json``, at its newest file's time) and the hook's log lines. A record or line
+    that cannot be read is skipped, whatever the error."""
+    out = []
+    since = now - INFRA_WINDOW
+    root = os.path.join(data, 'ci-runners', 'state', 'parts')
+
+    def dirs(d: str, horizon: float) -> list[str]:
+        try:
+            with os.scandir(d) as it:
+                return [e.path for e in it if e.is_dir(follow_symlinks=False) and e.stat().st_mtime >= horizon]
+        except OSError:
+            return []
+    horizon = now - LOST_HORIZON
+    for owner in dirs(root, 0):
+        for repo in dirs(owner, 0):
+            for run in dirs(repo, horizon):
+                for record in dirs(run, horizon):
+                    try:
+                        end = _record_end(record, since, alive=alive, active=active, boot=boot)
+                    except Exception:  # noqa: BLE001 - one bad record never stops a tick
+                        end = None
+                    if end:
+                        out.append(end)
+    logs = os.path.join(data, 'ci-runners', 'logs')
+    days = sorted({datetime.datetime.fromtimestamp(x, datetime.timezone.utc).strftime('%Y-%m-%d') for x in (since, now)})
+    for day in days:
+        try:
+            with open(os.path.join(logs, f'hook-{day}.log'), encoding='utf-8', errors='replace') as f:
+                text = f.read(16 << 20)
+        except OSError:
+            continue
+        for n, raw in enumerate(text.splitlines()):
+            try:
+                line = json.loads(raw)
+                t = _iso(line.get('time')) if isinstance(line, dict) else None
+                why = hook_end(line) if t is not None else ''
+            except Exception:  # noqa: BLE001 - one bad line never stops a tick (a deep nesting, say)
+                continue
+            if why and since < t <= now:
+                out.append({'key': f'hook:{day}:{n}', 'time': t, 'why': why, 'runner': str(line.get('runner', ''))})
+    return sorted(out, key=lambda e: e['time'])
+
+
+def black_hole(inv: inventory.Inventory, st: dict, f: Facts, now: float, limit: int, *,
+               ends: Sequence[dict], dry_run: bool = False) -> list[dict]:
+    """Count the infrastructure ends after the last self-drain or undrain, log each new one,
+    and drain the host (``drained: infra``) once ``limit`` fall in the window. Returns the
+    ends counted."""
+    data = str(inv.host['data'])
+    infra = st['infra']
+    drained = f.drain is None or f.drain['host'] is not None
+    if infra.get('drained') and not drained:  # undrained since the last tick: count afresh
+        infra['since'] = now
+    counted = [e for e in ends if e['time'] > float(infra.get('since') or 0)]
+    if dry_run:
+        return counted
+    for e in counted:
+        if e['key'] not in infra['seen']:
+            infra['seen'][e['key']] = e['time']
+            log(data, {'infra': e['why'], **{k: e[k] for k in ('record', 'runner') if k in e}}, now)
+    infra['seen'] = {k: t for k, t in infra['seen'].items() if t > now - INFRA_WINDOW - 3600}
+    if len(counted) >= limit and not drained:
+        try:
+            drain_mod.change(data, True)
+            log(data, {'drain': 'drained: infra', 'ends': [e['why'] for e in counted]}, now)
+            drained = True
+        except (OSError, ValueError) as e:  # ValueError: an unreadable state, drained already
+            log(data, {'drain': 'drained: infra', 'error': str(e)}, now)
+        infra['since'] = now
+    infra['drained'] = drained
+    return counted
+
+
 # ------------------------------------------------------------------ the tick
 
 
@@ -491,10 +668,10 @@ def publish_capacity(data: str, probe: Probe, t: float) -> None:
         log(data, {'capacity': 'not written', 'error': f'{type(e).__name__}: {e}'[:200]}, t)
 
 
-def config(h: Mapping[str, object]) -> bool:
-    """Whether the host's ``presence`` table enables presence. Pure."""
+def config(h: Mapping[str, object]) -> tuple[bool, int]:
+    """``(enabled, infra_failures)`` from the host's ``presence`` table. Pure."""
     p = h.get('presence') if isinstance(h.get('presence'), dict) else {}
-    return bool(p.get('enabled', False))
+    return bool(p.get('enabled', False)), int(p.get('infra_failures', INFRA_FAILURES))
 
 
 def tick(inv: inventory.Inventory, probe: Probe, *, dry_run: bool = False, now: Callable[[], float] = time.time,
@@ -522,7 +699,7 @@ def tick(inv: inventory.Inventory, probe: Probe, *, dry_run: bool = False, now: 
 def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, now: Callable[[], float],
           out: Callable[[str], None]) -> int:
     h = inv.host
-    enabled = config(h)
+    enabled, limit = config(h)
     rs = runners(inv)
     st, read_ok = read_state(data)
     units = probe.units(rs)
@@ -571,7 +748,11 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
         else:  # down by someone else's hand, or between states: not presence's
             rst['stop_ticks'] = rst['start_ticks'] = 0
     if dry_run:
-        out(report(inv, rs, units, f, why, plan, enabled))
+        try:
+            ends: list[dict] | None = black_hole(inv, st, f, t, limit, ends=_ends(probe, data, t), dry_run=True)
+        except Exception:  # noqa: BLE001 - the report without the count
+            ends = None
+        out(report(inv, rs, units, f, why, plan, enabled, ends=ends, limit=limit))
         return 0
     for action, r in plan:
         rst = st['runners'][r.name]
@@ -596,6 +777,10 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
                 rst['stopped'], rst['start_ticks'] = None, 0
                 log(data, {'runner': r.name, 'action': 'start', 'cause': 'no cause'}, t)
                 _count(st, r.name, 'start')
+    try:  # after the stops and starts, and never in their way
+        black_hole(inv, st, f, t, limit, ends=_ends(probe, data, t))
+    except Exception as e:  # noqa: BLE001 - the controller goes on; the error is logged
+        log(data, {'infra': 'not counted', 'error': f'{type(e).__name__}: {e}'}, t)
     names = {r.name for r in rs}
     st['runners'] = {n: v for n, v in st['runners'].items() if n in names}
     write_state(data, st)
@@ -605,8 +790,18 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
     return 0
 
 
+def _ends(probe: Probe, data: str, now: float) -> list[dict]:
+    return infra_ends(data, now, active=lambda unit: _active(probe, unit), boot=boot_id(probe.read))
+
+
+def _active(probe: Probe, unit: str) -> bool:
+    r = probe.systemctl('is-active', unit)
+    return r is not None and (r.stdout or '').strip() in ('active', 'activating', 'deactivating', 'reloading')
+
+
 def report(inv: inventory.Inventory, rs: Sequence[Runner], units: Mapping[str, tuple[str, str]], f: Facts,
-           why: Mapping[str, list[str]], plan: Sequence[tuple[str, Runner]], enabled: bool) -> str:
+           why: Mapping[str, list[str]], plan: Sequence[tuple[str, Runner]], enabled: bool, *,
+           ends: Sequence[dict] | None, limit: int) -> str:
     """The dry run's text: each runner's state, causes and what a tick would do (a stop
     needs ``TICKS`` such ticks in a row). Pure."""
     acts = {r.name: a for a, r in plan}
@@ -620,6 +815,11 @@ def report(inv: inventory.Inventory, rs: Sequence[Runner], units: Mapping[str, t
         state = f'{a}{" (" + res + ")" if a in DOWN and res not in ("", "success") else ""}'
         what = acts.get(r.name, 'never stopped' if never_stopped(r) else 'keep')
         lines.append(f'  {r.name}: {state}, {idle}; {what}' + (f'; {"; ".join(why[r.name])}' if why[r.name] else ''))
+    if ends is None:
+        lines.append('infrastructure ends: not counted (an error; see the tick\'s log)')
+    else:
+        lines.append(f'infrastructure ends in the last {INFRA_WINDOW // 60} min: {len(ends)} (the host drains at {limit})')
+        lines += [f'  {e["why"]}' for e in ends]
     return '\n'.join(lines)
 
 
@@ -628,7 +828,7 @@ def check(inv: inventory.Inventory, probe: Probe, name: str, out: Callable[[str]
     (presence enabled), else 0. Any error lets the runner start: the executor's refusals
     are the backstop (16.4)."""
     try:
-        enabled = config(inv.host)
+        enabled, _ = config(inv.host)
         if not enabled:
             return 0
         rs = runners(inv)

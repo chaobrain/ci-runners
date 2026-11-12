@@ -1,9 +1,10 @@
 """Presence (design decision 16.4): ours by unit and cgroup, the causes, idle, the two-tick
-rule, the never-stop rules, enable and disable, and the runner unit's
-ExecCondition. ``systemctl`` and ``nvidia-smi`` are stubbed: no unit is touched."""
+rule, the never-stop rules, enable and disable, the runner unit's ExecCondition and the
+black-hole self-drain. ``systemctl`` and ``nvidia-smi`` are stubbed: no unit is touched."""
 from __future__ import annotations
 
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -710,6 +711,136 @@ class Check(Fixture):
             fake.chmod(0o755)
             r = subprocess.run(['/bin/sh', '-c', m.group(1), 'presence', 'hz-gpu0'], capture_output=True, timeout=30)
             self.assertEqual(r.returncode, want, rc)
+
+
+def _iso(t):
+    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).isoformat(timespec='seconds')
+
+
+class BlackHole(Fixture):
+    def record(self, rid, outcome=None, reason='', cls='part', boot='B1', age=60, executor=None, start=0.0):
+        d = self.data / 'ci-runners' / 'state' / 'parts' / 'org' / 'repo' / '77-1' / f'{rid}-1'
+        d.mkdir(parents=True)
+        (d / 'record.json').write_text(json.dumps({'class': cls, 'boot_start': boot, 'executor': executor or os.getpid(),
+                                                   'start_epoch': start}))
+        if outcome:
+            (d / 'outcome.json').write_text(json.dumps({'outcome': outcome, 'reason': reason}))
+        t = self.now - age
+        for p in [*d.iterdir(), d]:
+            os.utime(p, (t, t))
+
+    def hook_line(self, reason, age=60, accepted=False, **kw):
+        t = self.now - age
+        logs = self.data / 'ci-runners' / 'logs'
+        logs.mkdir(parents=True, exist_ok=True)
+        with open(logs / f'hook-{datetime.datetime.fromtimestamp(t, datetime.timezone.utc):%Y-%m-%d}.log', 'a') as f:
+            f.write(json.dumps({'accepted': accepted, 'reason': reason, 'runner': 'hz-part-1', 'time': _iso(t), **kw}) + '\n')
+
+    def ends(self):
+        return presence.infra_ends(str(self.data), self.now, boot='B1')
+
+    def test_what_counts(self):
+        self.record('a', 'unavailable', 'low disk: 1 GiB free under the data directory')
+        self.record('o', 'unavailable', 'queue timeout: no CI slot')  # the host was busy
+        self.record('p', 'unavailable', 'gpus 2: the gpu runners take 1 card (design §4.8)')  # the caller's request
+        self.record('q', executor=os.getpid(), start=0.0)
+        (self.data / 'ci-runners/state/parts/org/repo/77-1/q-1/record.json').write_text('{"executor": 1e999}')  # garbage
+        self.record('b', 'unavailable', 'busy: cpu 17 >= 14 cores for 10 min')
+        self.record('c', 'unavailable', 'drained: host')
+        self.record('d', 'unavailable', 'project queue full')
+        self.record('e', 'unavailable', 'pending: AssocGrpCpuLimit', cls='slurm')  # the cluster's
+        self.record('f', 'lost', 'the part ended without an exit status')
+        self.record('g', 'lost', '', boot='B0')  # the host rebooted: not a black hole
+        self.record('h', 'red', 'exit 1')
+        self.record('i', 'unavailable', 'low disk: 1 GiB free', age=16 * 60)  # outside the window
+        self.record('j', executor=os.getpid(), start=0.0)  # never finished, its executor gone: lost
+        self.record('k', executor=os.getpid(), start=self.now)  # never finished, its executor runs
+        self.record('m', 'unavailable', drain_mod.UNREADABLE)
+        self.record('n', executor=os.getpid(), start=0.0)
+        (self.data / 'ci-runners/state/parts/org/repo/77-1/n-1/exit.json').write_text('{}')  # its supervisor ended
+        self.hook_line('stale')
+        self.hook_line('policy')
+        self.hook_line('actor')  # a refusal by the policy: not the host's fault
+        self.hook_line('error', accepted=True)
+        self.hook_line('timeout', hook='job-completed')
+        with open(next((self.data / 'ci-runners' / 'logs').glob('hook-*.log')), 'a') as f:
+            f.write('[' * 100000 + '\n')  # a line too deep to parse: skipped
+        got = sorted((e['why'], e.get('record', e.get('runner'))) for e in self.ends())
+        self.assertEqual(got, [('hook: policy', 'hz-part-1'), ('hook: stale', 'hz-part-1'),
+                               ('lost', 'org/repo/77-1/f-1'), ('lost', 'org/repo/77-1/j-1'),
+                               ('unavailable: low disk: 1 GiB free under the data directory', 'org/repo/77-1/a-1')])
+
+    def test_three_ends_in_15_min_drain_the_host_and_it_stays_drained(self):
+        self.record('a', 'unavailable', 'low disk: 1 GiB free')
+        self.record('b', 'lost')
+        self.tick()
+        self.assertIsNone(drain_mod.read(str(self.data))['host'])  # two: not yet
+        self.hook_line('timeout')
+        self.tick()
+        self.assertIsNotNone(drain_mod.read(str(self.data))['host'])
+        log = self.log()
+        self.assertEqual(sorted(x['infra'] for x in log if 'infra' in x),
+                         ['hook: timeout', 'lost', 'unavailable: low disk: 1 GiB free'])  # each end once
+        self.assertEqual([x['drain'] for x in log if 'drain' in x], ['drained: infra'])
+        self.now += 20 * 60  # the ends age out: nothing undrains by itself
+        self.tick()
+        self.assertIsNotNone(drain_mod.read(str(self.data))['host'])
+
+    def test_an_undrain_counts_afresh(self):
+        for rid in 'abc':
+            self.record(rid, 'lost')
+        self.tick()
+        self.assertIsNotNone(drain_mod.read(str(self.data))['host'])
+        for _ in range(3):  # the hook kept refusing while the host was drained (it reads no drain)
+            self.hook_line('stale', age=5)
+        self.tick()
+        drain_mod.change(str(self.data), False)  # the operator, once fixed
+        self.tick()
+        self.tick()
+        self.assertIsNone(drain_mod.read(str(self.data))['host'])  # the old ends do not drain it again
+        self.assertEqual(len([x for x in self.log() if 'drain' in x]), 1)
+
+    def test_an_error_in_the_count_never_stops_the_controller(self):
+        drain_mod.change(str(self.data), True, 'compile')
+        orig = presence.infra_ends
+        presence.infra_ends = lambda *a, **kw: 1 / 0
+        try:
+            self.tick()
+            self.tick()
+        finally:
+            presence.infra_ends = orig
+        self.assertEqual(self.actions('stop'), ['ci-runner@hz-compile-1.service'])
+        self.assertIn('ZeroDivisionError', [x for x in self.log() if 'error' in x][0]['error'])
+
+    def test_a_state_from_before_the_count_is_read(self):
+        """The first PR's state has no count: it is kept (an unread one would start the
+        runners stopped by hand), and the count starts afresh."""
+        p = pathlib.Path(presence.state_path(str(self.data)))
+        p.parent.mkdir(parents=True)
+        p.write_text(json.dumps({'runners': {'hz-gpu0': {'stopped': 1.0}}, 'counts': {}}))
+        st, ok = presence.read_state(str(self.data))
+        self.assertTrue(ok)
+        self.assertEqual((st['runners'], st['infra']['seen']), ({'hz-gpu0': {'stopped': 1.0}}, {}))
+
+    def test_the_limit_is_the_inventorys(self):
+        self.load_inv(extra='presence = { enabled = true, infra_failures = 1 }')
+        self.record('a', 'lost')
+        self.tick()
+        self.assertIsNotNone(drain_mod.read(str(self.data))['host'])
+
+    def test_disabled_counts_nothing(self):
+        self.load_inv(extra='presence = { enabled = false }')
+        for rid in 'abc':
+            self.record(rid, 'lost')
+        self.tick()
+        self.assertIsNone(drain_mod.read(str(self.data))['host'])
+
+    def test_the_dry_run_does_not_drain(self):
+        for rid in 'abc':
+            self.record(rid, 'lost')
+        _, lines, _ = self.tick(dry_run=True)
+        self.assertIsNone(drain_mod.read(str(self.data))['host'])
+        self.assertIn('infrastructure ends in the last 15 min: 3 (the host drains at 3)', '\n'.join(lines))
 
 
 class Cli(unittest.TestCase):

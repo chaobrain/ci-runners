@@ -374,11 +374,12 @@ presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 ru
 - **"我们的"进程**按 systemd 单元和 cgroup 判断，不按 Unix 账户：在本账户 user manager（`user@<uid>.service`）下某个 `ci-` 服务或 scope 里的进程（runner、部件的 scope、定时器的服务）。cgroup v1 的主机读 `/proc/<pid>/cgroup` 里 `name=systemd` 那一行。共享账户的主机（h100）上同一个 uid 的登录会话、别人的 `systemd-run` 都不算我们的。看不到的进程不算我们的。
 - **空闲**：runner 目录下没有 `Runner.Worker` 进程，也没有这个 runner 的部件 scope。连续 2 个 tick 空闲且有原因才停；停之前再看一次，这时出现了 `Runner.Worker` 就不停（日志里记一条 `kept`）。presence 停掉的、或被单元的 `ExecCondition=` 拦下的（`Result=exec-condition`），连续 2 个 tick 没有原因就启动。忙着的 runner 永远不停；没有 `ci-` 标签的 light runner（§5.1 的 `home` 池，给本机的 salvage）永远不停；主机的 light 池还没有 `ci-light`（16.1）之前，那里的每个 light runner 都算这种 runner，drain 时也不停，所以先加能力标签、再打开 presence。别人手动停掉的 runner presence 不管。
 - **单元的 `ExecCondition=`**：runner 每次启动（包括 15.5 的自动恢复、开机）先跑 `ci-run presence check <runner>`，有原因时退出 77，systemd 跳过这次启动，等 presence 的 tick 再启动它。其他任何结果（出错、旧 release 没有这个命令）都让 runner 照常启动。systemd 243 以前不认识这个键，会忽略它。
-- **只在 inventory 打开的主机上生效**：主机的 inventory 写 `presence = { enabled = true }`（可选 `tick_seconds`）。每台主机都装这个定时器，但没有打开时它什么都不做。一次只打开一台主机（16.11，lead 的步骤），且 `v1` 已经指向包含 R3 的 release。
+- **黑洞自动 drain**：15 分钟内 `presence.infra_failures`（默认 3）次基础设施失败就 drain 整台主机（和 15.2 的缺失一样，日志里是 `drained: infra`）。算数的是：部件的 `unavailable`，但不包括 busy、drained、队列满、等待超时（没有 slot、卡或主机锁：主机忙）、类别不接受的请求（调用方的 `gpus`、`lock`）和集群部件的（那是集群的问题）；主机没有重启过的 `lost` 部件；hook 的 `stale`、`policy`、`timeout`、`error` 拒绝。上次自动 drain 或上次 `drain off` 之前的失败不算。计数在停启之后进行，计数出错只记日志，不影响停启。不会自己解除 drain：修好以后运维执行 `ci-run drain off`。
+- **只在 inventory 打开的主机上生效**：主机的 inventory 写 `presence = { enabled = true }`（可选 `tick_seconds`、`infra_failures`）。每台主机都装这个定时器，但没有打开时它什么都不做。一次只打开一台主机（16.11，lead 的步骤），且 `v1` 已经指向包含 R3 的 release。
 
-**打开之前先观察**：以 CI 账户运行 `ci-run presence --dry-run`。它按"已经打开"的情况读本机，逐个 runner 打印状态、是否空闲、原因和这个 tick 会做什么（`stop`、`start`、`keep`、`never stopped`），它不写状态、不动任何单元。
+**打开之前先观察**：以 CI 账户运行 `ci-run presence --dry-run`。它按"已经打开"的情况读本机，逐个 runner 打印状态、是否空闲、原因和这个 tick 会做什么（`stop`、`start`、`keep`、`never stopped`），以及 15 分钟内的基础设施失败数。它不写状态、不动任何单元、不 drain。
 
-**看日志**：每次停、启和 `kept` 都是 `<data>/ci-runners/logs/presence-<UTC 日期>.log` 里的一行 JSON（`runner`、`action`、`cause`），同时打到 `journalctl --user -u ci-presence.service`。reaper 14 天后删除这些文件。`state/presence.json` 里有每个 runner 的停、启次数（给 16.8 的统计）和两个 tick 的计数。
+**看日志**：每次停、启、`kept`、每个基础设施失败和每次自动 drain 都是 `<data>/ci-runners/logs/presence-<UTC 日期>.log` 里的一行 JSON（`runner`、`action`、`cause`，或 `infra`、`drain`），同时打到 `journalctl --user -u ci-presence.service`。reaper 14 天后删除这些文件。`state/presence.json` 里有每个 runner 的停、启次数（给 16.8 的统计）和两个 tick 的计数。
 
 **容量文件**（16.5）：有注册表（`etc/pool.toml`）的账户，每个打开的 tick 在停、启之后用 `pool.record_local` 重写容量文件里本机那一部分（§11），所以路由看到的空闲 runner 不会比 presence 晚一个 tick 以上（`--no-block` 的停止还没完成时，这一行仍把它算作在线，下一个 tick 更正）。写不进去时日志里记一条 `"capacity": "not written"`，tick 照常进行；`ci-capacity.timer` 仍在 30 秒内重写这个文件。
 

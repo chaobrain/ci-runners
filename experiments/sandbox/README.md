@@ -65,8 +65,11 @@ every other card's node do not exist inside.
   - `--groups none`: no supplementary group; the card cannot be opened.
 
   `--map single` maps only the account's own ids, with `setgroups` denied, so it keeps the
-  groups (`kept` only). `probe` builds an empty sandbox in each mode the card allows and
-  says which ones this account can use here.
+  groups (`kept` only). `probe` builds an empty sandbox under `none`, and one under `gpu`
+  (the card is not opened); `kept` it infers from the account being in the GPU group. It
+  says which modes this account can use here. Mode `gpu` refuses a card node that belongs
+  to the root group (the job would get gid 0), and a control or UVM node that opens
+  neither to the card's group nor to everyone.
 - **Privileges.** The job's capability bounding, inheritable and ambient sets are empty,
   no-new-privileges is set, every mount is nosuid, and `user.max_*_namespaces` of the
   sandbox's user namespace are 0, so the job cannot create a nested namespace (and so
@@ -111,8 +114,9 @@ everything and prints a table.
 F5 shows the two barriers separately. "Not visible" is the mount namespace: the file's
 directory does not exist inside, whatever the job's credentials. "Could not open" is the
 credentials alone, judged outside from the job's kernel ids in `/proc/PID/status` against
-the file's owner, group and mode bits: the job is neither its owner nor in its group,
-and it is not world-readable. That second barrier is what mode (a) adds: under `kept` the
+the file's owner, group and mode bits (the suite strips any ACL the scratch directory
+would give the file): the job is neither its owner nor in its group, and it is not
+world-readable. That second barrier is what mode (a) adds: under `kept` the
 job's kernel groups hold the file's group, so a file of the account that the mount
 namespace exposed by mistake would be open to it; under `gpu` it would not.
 
@@ -163,12 +167,13 @@ The job's kernel ids, read outside:
 | single | the account's | every group of the account (3) | uid and gid 0 |
 
 Expected in it: I1 fails under `subuid-kept` and `single` (the account's other groups;
-under `single` also the account's uid), and so does F5, whose file of another of the
-account's groups the mount namespace hides in every variant but whose group the job
-holds there; G1 fails under `subuid-none` (CUDA finds no device and JAX falls back to the
-CPU). Under `subuid-gpu` every item holds and the card works. A fresh process that
-imports JAX and runs one 1024 × 1024 product takes 3.96 s inside under `gpu` against
-3.81 s outside (medians of 5); an empty sandbox takes 0.11 s.
+under `single` also the account's uid). F5 fails there too, though the mount namespace
+hides its file in every sandboxed variant: under `subuid-kept` the job's credentials
+could open the file as its group, under `single` as its owner. G1 fails under
+`subuid-none` (CUDA finds no device and JAX falls back to the CPU). Under `subuid-gpu`
+every item holds and the card works. A fresh process that imports JAX and runs one
+1024 × 1024 product takes 3.87 s inside under `gpu` against 3.91 s outside (medians of
+5, within the runs' spread); an empty sandbox takes 0.11 s.
 
 ## What it does not do
 

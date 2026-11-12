@@ -540,29 +540,46 @@ def _sandbox_module():
     return mod
 
 
-def identity_held(ids, account_uid: int, subuid: list, subgid: list, expected_groups: list) -> bool:
-    """Check 8: the job's kernel uid and gid (every one of real, effective, saved, fs) lie in the
-    account's subordinate lines, none is the account's, and its kernel groups are exactly
-    ``expected_groups`` (the GPU group alone; none under ``--groups none`` or without a card)."""
-    if not ids:
+def expected_groups(gpu_gid, groups_mode) -> list:
+    """Check 8's groups: the GPU group alone; none under ``--groups none`` or without a card.
+    ``kept`` expects the GPU group alone too, so the account's other groups fail it."""
+    return [gpu_gid] if gpu_gid is not None and groups_mode != 'none' else []
+
+
+def identity_held(ids, account_uid: int, urange, grange, expected: list) -> bool:
+    """Check 8: the job's kernel uid and gid (every one of real, effective, saved, fs) are a
+    subordinate pair -- in the account's subordinate ranges (``(first, count)``, the lines
+    the launcher maps; None when the account has none), at the same offset, not the
+    account's -- and its kernel groups are exactly ``expected``."""
+    if not ids or not urange or not grange:
         return False
-    def sub(x, lines):
-        return any(first <= x < first + count for first, count in lines)
-    return (all(u != account_uid and sub(u, subuid) for u in ids['uid'])
-            and all(sub(g, subgid) for g in ids['gid'])
-            and sorted(set(ids['groups'])) == sorted(set(expected_groups)))
+    (uf, un), (gf, gn) = urange, grange
+    offs = {u - uf for u in ids['uid']} | {g - gf for g in ids['gid']}
+    return (len(offs) == 1 and 0 <= min(offs) < min(un, gn) and account_uid not in ids['uid']
+            and sorted(set(ids['groups'])) == sorted(set(expected)))
 
 
-def could_open(ids, st) -> bool:
-    """Whether credentials ``ids`` (from /proc/PID/status, outside) may read a file of stat ``st``
-    by its mode bits (the fs uid and gid, then the groups; no capability inside the namespace
-    reaches a file of an unmapped owner)."""
+def opened_by(ids, st) -> str:
+    """Which of a file's permission classes lets credentials ``ids`` (from /proc/PID/status,
+    outside) read it, by its mode bits: ``owner``, ``group``, ``others``, or '' (none; the
+    fs uid, then the fs gid and groups; no capability inside the namespace reaches a file of
+    an unmapped owner)."""
     fsuid, fsgid = ids['uid'][3], ids['gid'][3]
     if fsuid == st.st_uid:
-        return bool(st.st_mode & 0o400)
+        return 'owner' if st.st_mode & 0o400 else ''
     if st.st_gid == fsgid or st.st_gid in ids['groups']:
-        return bool(st.st_mode & 0o040)
-    return bool(st.st_mode & 0o004)
+        return 'group' if st.st_mode & 0o040 else ''
+    return 'others' if st.st_mode & 0o004 else ''
+
+
+def f5_verdict(inside: str, hidden, ids, st) -> tuple[str, bool]:
+    """F5 from the inside observation and the kernel ids read outside: held only when the
+    mount namespace hid the file and the credentials could not open it."""
+    if not ids:
+        return f'mount namespace: {inside}; credentials: not read', False
+    by = opened_by(ids, st)
+    cred = f'the job could open it as its {by}' if by else 'the job is not its owner, not in its group, and it is not world-readable: it could not open it'
+    return f'mount namespace: {inside}; credentials: {cred}', bool(hidden) and not by
 
 
 def _card_uuid(card: int) -> str:
@@ -615,6 +632,10 @@ def suite(a) -> int:
         f.write(token)
     os.chown(group_file, -1, others[0] if others else os.getgid())
     os.chmod(group_file, 0o640)
+    try:  # a default ACL of the scratch directory would add entries the mode bits do not show
+        os.removexattr(group_file, 'system.posix_acl_access')
+    except OSError:
+        pass
     lst, hits = _marker_listener()
     marker = subprocess.Popen([sys.executable, '-c', MARKER_CODE, token])
     gpu_marker = None
@@ -689,29 +710,22 @@ def suite(a) -> int:
     ids = outer.get('ids')
     sb = _sandbox_module()
     pw = pwd.getpwuid(os.getuid())
-    sublines = []
+    ranges = []
     for path in ('/etc/subuid', '/etc/subgid'):
         try:
             with open(path) as f:
-                sublines.append(sb.subid_lines(f.read(), pw.pw_name, pw.pw_uid))
-        except OSError:
-            sublines.append([])
-    # check 8: the GPU group alone; kept fails it by design (the account's other groups), none holds none
-    expected_groups = [gpu_gid] if gpu_gid is not None and (variant or ('', ''))[1] != 'none' else []
+                ranges.append(sb.subordinate_range(sb.subid_lines(f.read(), pw.pw_name, pw.pw_uid), path))
+        except (OSError, sb.Cannot):
+            ranges.append(None)
+    expected = expected_groups(gpu_gid, variant[1] if variant else None)
     gst = os.stat(group_file)
     for r in results:
         if r['id'] == 'I1':
             inside_ids = r['observed']
             r['observed'] = {'inside': inside_ids, 'kernel': ids, 'gpu_group': gpu_gid}
-            r['held'] = identity_held(ids, os.getuid(), *sublines, expected_groups)
+            r['held'] = identity_held(ids, os.getuid(), *ranges, expected)
         if r['id'] == 'F5':
-            hidden = r['held']
-            opens = could_open(ids, gst) if ids else None
-            r['observed'] = (f'mount namespace: {r["observed"]}; credentials: the job\'s kernel groups '
-                             f'{"hold" if ids and gst.st_gid in ids["groups"] else "lack"} the file\'s group, '
-                             f'so they {"could" if opens else "could not" if opens is False else "(not read)"} '
-                             f'open it')
-            r['held'] = bool(hidden) and opens is False
+            r['observed'], r['held'] = f5_verdict(r['observed'], r['held'], ids, gst)
     if 'reverse' in outer:
         results.append({'id': 'R1', 'expected': EXPECTED['R1'], 'held': None,
                         'observed': 'attached' if outer['reverse'].get('r') == 'ok'

@@ -283,17 +283,31 @@ def subordinate_range(lines: list[tuple[int, int]], what: str) -> tuple[int, int
     raise Cannot(f'no subordinate range of more than {JOB_UID} ids for the account in {what}')
 
 
-def gpu_group(card: int, node=None, ctl=None) -> int:
+def _opens(st, gid: int) -> bool:
+    """Whether a node of stat ``st`` is read-write for everyone or for group ``gid``."""
+    return st.st_mode & 0o006 == 0o006 or (st.st_gid == gid and st.st_mode & 0o060 == 0o060)
+
+
+def gpu_group(card: int, node=None, ctl=None, uvm=None) -> int:
     """The GPU group: the group the leased card's node opens to (``os.stat`` results of the
-    card's node and the control node; read from ``/dev`` when not given)."""
-    node = node if node is not None else os.stat(f'/dev/nvidia{card}')
-    ctl = ctl if ctl is not None else os.stat('/dev/nvidiactl')
+    card's node, the control node and the UVM nodes; read from ``/dev`` when not given).
+    The control and UVM nodes must open to it too, or to everyone."""
+    try:
+        node = node if node is not None else os.stat(f'/dev/nvidia{card}')
+        ctl = ctl if ctl is not None else os.stat('/dev/nvidiactl')
+        if uvm is None:
+            uvm = [os.stat(p) for p in ('/dev/nvidia-uvm', '/dev/nvidia-uvm-tools') if os.path.exists(p)]
+    except OSError as e:
+        raise Cannot(f'the card\'s nodes: {e}')
     if node.st_mode & 0o006 == 0o006:
         raise Cannot(f'/dev/nvidia{card} is open to everyone: the job needs no group (use --groups none)')
     if node.st_mode & 0o060 != 0o060:
         raise Cannot(f'/dev/nvidia{card} is not open to its group: no group gives the job the card')
-    if ctl.st_gid != node.st_gid and ctl.st_mode & 0o006 != 0o006:
-        raise Cannot(f'/dev/nvidiactl opens to another group than /dev/nvidia{card}: one group cannot give the card')
+    if node.st_gid == 0:
+        raise Cannot(f'/dev/nvidia{card} belongs to the root group: mode gpu would give the job gid 0')
+    if not all(_opens(st, node.st_gid) for st in [ctl] + list(uvm)):
+        raise Cannot(f'the control or UVM node does not open to the group of /dev/nvidia{card} or to '
+                     'everyone: one group cannot give the card')
     return node.st_gid
 
 
@@ -335,7 +349,7 @@ def id_plan(mapping: str, groups: str, name: str, uid: int, gid: int, subuid: st
     if not any(first <= gpu_gid < first + count for first, count in glines):
         raise Cannot(f'mode gpu needs the GPU group (gid {gpu_gid}, the group of the card node) among the '
                      f'account\'s lines in /etc/subgid; its administrator adds the line "{name}:{gpu_gid}:1"')
-    inside = n + 1
+    inside = n + 1 if n + 1 not in (65534, 65535) else 65536  # never 65534 or 65535: the overflow gid and (gid_t) -1
     gm += [str(inside), str(gpu_gid), '1']
     plan.update(job_groups=[inside], gpu_inside=inside, gpu_gid=gpu_gid)
     return plan
@@ -715,7 +729,7 @@ def probe(card=None) -> int:
         print('sandbox: not usable here')
         return EXIT_CANNOT
     print('sandbox: usable')
-    print('sandbox: --groups none: usable (the job holds no group)')
+    print('sandbox: --groups none: usable (the job holds no group)')  # the sandbox just built
     cards = _cards()
     if card is None and cards:
         card = cards[0]
@@ -729,8 +743,8 @@ def probe(card=None) -> int:
         return 0
     others = sorted(set(os.getgroups()) - {gg, os.getgid()})
     if gg in os.getgroups() or gg == os.getgid():
-        print(f'sandbox: --groups kept: usable (the job keeps every group of the account: the GPU group '
-              f'and {len(others)} other(s))')
+        print(f'sandbox: --groups kept: usable, not built (the account is in the GPU group; the job keeps '
+              f'every group of the account: the GPU group and {len(others)} other(s))')
     else:
         print('sandbox: --groups kept: no card (the account is not in the GPU group)')
     if attempt(card=card, groups='gpu') == 0:
@@ -740,7 +754,8 @@ def probe(card=None) -> int:
     return 0
 
 
-def main(argv=None) -> int:
+def parse(argv=None):
+    """The arguments, with the group mode's default filled in."""
     p = argparse.ArgumentParser(prog='sandbox.py', description=__doc__.split('\n\n')[0])
     sub = p.add_subparsers(dest='verb', required=True)
     r = sub.add_parser('run', help='run CMD in a sandbox')
@@ -763,7 +778,7 @@ def main(argv=None) -> int:
     pr.add_argument('--card', type=int, help='the card node whose group is the GPU group (not opened)')
     a = p.parse_args(argv)
     if a.verb == 'probe':
-        return probe(a.card)
+        return a
     if a.cmd and a.cmd[0] == '--':
         a.cmd = a.cmd[1:]
     if a.groups is None:
@@ -773,7 +788,12 @@ def main(argv=None) -> int:
                 'only --groups kept')
     if a.groups == 'gpu' and a.card is None:
         p.error('--groups gpu needs --card (the GPU group is the group of the card node)')
-    return run(a)
+    return a
+
+
+def main(argv=None) -> int:
+    a = parse(argv)
+    return probe(a.card) if a.verb == 'probe' else run(a)
 
 
 if __name__ == '__main__':

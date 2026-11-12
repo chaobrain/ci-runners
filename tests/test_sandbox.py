@@ -1,7 +1,9 @@
 """The sandbox prototype's id maps and group modes (experiments/sandbox; design 18, items 4 and 5)."""
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import pathlib
 import stat
 import types
@@ -90,38 +92,100 @@ class Plan(unittest.TestCase):
                 plan(groups, mapping='single')
 
     def test_the_gpu_group_is_the_card_nodes_group(self):
-        self.assertEqual(sandbox.gpu_group(4, node(3000, 0o660), node(3000, 0o660)), 3000)
-        self.assertEqual(sandbox.gpu_group(4, node(3000, 0o660), node(0, 0o666)), 3000)
-        for n, ctl in ((node(0, 0o666), node(0, 0o666)), (node(3000, 0o600), node(3000, 0o660)),
-                       (node(3000, 0o660), node(3001, 0o660))):
+        uvm = [node(0, 0o666)]
+        self.assertEqual(sandbox.gpu_group(4, node(3000, 0o660), node(3000, 0o660), uvm), 3000)
+        self.assertEqual(sandbox.gpu_group(4, node(3000, 0o660), node(0, 0o666), uvm), 3000)
+        self.assertEqual(sandbox.gpu_group(4, node(3000, 0o660), node(3000, 0o660), [node(3000, 0o660)]), 3000)
+        for n, ctl, u in ((node(0, 0o666), node(0, 0o666), uvm), (node(3000, 0o600), node(3000, 0o660), uvm),
+                          (node(3000, 0o660), node(3001, 0o660), uvm), (node(0, 0o660), node(0, 0o660), uvm),
+                          (node(3000, 0o660), node(3000, 0o600), uvm), (node(3000, 0o660), node(3000, 0o660),
+                                                                        [node(3001, 0o660)])):
             with self.assertRaises(sandbox.Cannot):
-                sandbox.gpu_group(4, n, ctl)
+                sandbox.gpu_group(4, n, ctl, u)
+
+    def test_a_missing_node_is_a_refusal(self):
+        with self.assertRaises(sandbox.Cannot):
+            sandbox.gpu_group(10 ** 6)
+
+    def test_the_inside_id_is_never_the_overflow_gid(self):
+        for count, inside in ((65533, 65536), (65532, 65533), (65536, 65537)):
+            p = plan('gpu', subgid=f'acct:300000:{count}\nacct:3000:1\n')
+            self.assertEqual(p['job_groups'], [inside])
 
 
 class Identity(unittest.TestCase):
-    SUB = [(300000, 65536)]
+    U = G = (300000, 65536)
 
     def ids(self, uid, gid, groups):
         return {'uid': [uid] * 4, 'gid': [gid] * 4, 'groups': groups}
 
     def test_check_8_holds_only_for_a_subordinate_pair_with_the_gpu_group_alone(self):
-        held = check.identity_held
-        self.assertTrue(held(self.ids(300999, 300999, [3000]), 5000, self.SUB, self.SUB, [3000]))
-        self.assertTrue(held(self.ids(300999, 300999, []), 5000, self.SUB, self.SUB, []))
-        self.assertFalse(held(self.ids(300999, 300999, [3000, 4000, 5000]), 5000, self.SUB, self.SUB, [3000]))
-        self.assertFalse(held(self.ids(300999, 300999, []), 5000, self.SUB, self.SUB, [3000]))
-        self.assertFalse(held(self.ids(5000, 5000, [3000]), 5000, self.SUB, self.SUB, [3000]))  # the account
-        self.assertFalse(held(self.ids(300999, 5000, [3000]), 5000, self.SUB, self.SUB, [3000]))  # its gid
-        self.assertFalse(held(None, 5000, self.SUB, self.SUB, []))
+        def held(uid, gid, groups, expected, account=5000):
+            return check.identity_held(self.ids(uid, gid, groups), account, self.U, self.G, expected)
+        self.assertTrue(held(300999, 300999, [3000], [3000]))
+        self.assertTrue(held(300999, 300999, [], []))
+        self.assertTrue(held(300000, 300000, [], []))  # inside id 1
+        self.assertFalse(held(300999, 300999, [3000, 4000, 5000], [3000]))  # kept
+        self.assertFalse(held(300999, 300999, [], [3000]))
+        self.assertFalse(held(5000, 5000, [3000], [3000]))  # the account
+        self.assertFalse(held(300999, 5000, [3000], [3000]))  # its gid
+        self.assertFalse(held(300999, 3000, [3000], [3000]))  # the GPU group as the job's gid
+        self.assertFalse(held(300999, 301000, [3000], [3000]))  # not a pair
+        self.assertFalse(held(365536, 365536, [], []))  # past the range
+        self.assertFalse(check.identity_held(None, 5000, self.U, self.G, []))
+        self.assertFalse(check.identity_held(self.ids(300999, 300999, []), 5000, None, self.G, []))
 
-    def test_could_open_by_the_files_bits(self):
+    def test_the_expected_groups_per_mode(self):
+        self.assertEqual(check.expected_groups(3000, 'gpu'), [3000])
+        self.assertEqual(check.expected_groups(3000, 'kept'), [3000])  # so the account's other groups fail it
+        self.assertEqual(check.expected_groups(3000, None), [3000])  # the control
+        self.assertEqual(check.expected_groups(3000, 'none'), [])
+        self.assertEqual(check.expected_groups(None, 'gpu'), [])
+
+    def test_opened_by_the_files_bits(self):
         f = types.SimpleNamespace(st_uid=5000, st_gid=4000, st_mode=stat.S_IFREG | 0o640)
-        self.assertFalse(check.could_open(self.ids(300999, 300999, [3000]), f))
-        self.assertTrue(check.could_open(self.ids(300999, 300999, [3000, 4000]), f))
-        self.assertTrue(check.could_open(self.ids(300999, 4000, []), f))
-        self.assertTrue(check.could_open(self.ids(5000, 5000, []), f))
-        self.assertTrue(check.could_open(self.ids(300999, 300999, []), types.SimpleNamespace(
-            st_uid=5000, st_gid=4000, st_mode=stat.S_IFREG | 0o644)))
+        self.assertEqual(check.opened_by(self.ids(300999, 300999, [3000]), f), '')
+        self.assertEqual(check.opened_by(self.ids(300999, 300999, [3000, 4000]), f), 'group')
+        self.assertEqual(check.opened_by(self.ids(300999, 4000, []), f), 'group')
+        self.assertEqual(check.opened_by(self.ids(5000, 5000, []), f), 'owner')
+        self.assertEqual(check.opened_by(self.ids(300999, 300999, []), types.SimpleNamespace(
+            st_uid=5000, st_gid=4000, st_mode=stat.S_IFREG | 0o644)), 'others')
+
+    def test_f5_needs_both_barriers(self):
+        f = types.SimpleNamespace(st_uid=5000, st_gid=4000, st_mode=stat.S_IFREG | 0o640)
+        gpu, kept = self.ids(300999, 300999, [3000]), self.ids(300999, 300999, [3000, 4000])
+        self.assertTrue(check.f5_verdict('not visible', True, gpu, f)[1])
+        obs, held = check.f5_verdict('not visible', True, kept, f)
+        self.assertFalse(held)
+        self.assertIn('as its group', obs)
+        self.assertFalse(check.f5_verdict('visible, open failed (EACCES)', False, gpu, f)[1])
+        self.assertFalse(check.f5_verdict('not visible', True, None, f)[1])
+
+
+class Cli(unittest.TestCase):
+    def test_the_group_modes_defaults(self):
+        self.assertEqual(sandbox.parse(['run', '--tree', 't', '--card', '4', '--', 'x']).groups, 'gpu')
+        self.assertEqual(sandbox.parse(['run', '--tree', 't', '--', 'x']).groups, 'none')
+        self.assertEqual(sandbox.parse(['run', '--tree', 't', '--map', 'single', '--card', '4', '--', 'x']).groups,
+                         'kept')
+        self.assertEqual(sandbox.parse(['run', '--tree', 't', '--card', '4', '--groups', 'kept', '--', 'x']).groups,
+                         'kept')
+        with contextlib.redirect_stderr(io.StringIO()):
+            for argv in (['run', '--tree', 't', '--groups', 'gpu', '--', 'x'],
+                         ['run', '--tree', 't', '--map', 'single', '--groups', 'none', '--', 'x']):
+                with self.assertRaises(SystemExit):
+                    sandbox.parse(argv)
+
+    def test_setpriv_sets_the_plans_groups(self):
+        a = sandbox.parse(['run', '--tree', 't', '--card', '4', '--', 'x'])
+        a.plan = plan('gpu')
+        cmd = sandbox._setpriv(a)
+        self.assertIn('--groups=65537', cmd)
+        self.assertNotIn('--keep-groups', cmd)
+        self.assertIn('--reuid=1000', cmd)
+        a.plan = plan('kept', mapping='single')
+        a.map = 'single'
+        self.assertIn('--keep-groups', sandbox._setpriv(a))
 
 
 if __name__ == '__main__':

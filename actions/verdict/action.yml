@@ -14,7 +14,7 @@ inputs:
     description: how long salvage waits for a part that still runs
     default: '300'
   token:
-    description: a token with statuses write (the job's)
+    description: a token with statuses write (the job's), and actions read so that a part re-run in a later run attempt counts
     default: ${{ github.token }}
 outputs:
   state:

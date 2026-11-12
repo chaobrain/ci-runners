@@ -2191,10 +2191,15 @@ hosts, a coverage job). These rules are the consumer's:
    all `pass`, success; else error. A run's artifacts outlive its GitHub re-runs, so an
    attempt made in an earlier run attempt than the part's first attempt is not read
    (`v1.5.2`, issue #64): the run attempt is the outcome's `run-attempt`, else the one its
-   `record` names. It merges the parts' summaries into the job summary and fails unless
-   the state is success.
-6. **Permissions:** `contents: read`, plus `statuses: write` for claim and verdict. A job
-   that reads another run's artifacts adds `actions: read`.
+   `record` names. Of the artifacts that share a name, one per run attempt that made it,
+   the newest counts: `actions/download-artifact` keeps the one of the highest id, which
+   need not be the newest, so the verdict lists the run's artifacts and fetches the newest
+   of each part's name where another was downloaded, and a re-run of failed jobs can turn
+   a run green (R1, issue #169); without `actions: read` it reads what was downloaded. It
+   merges the parts' summaries into the job summary and fails unless the state is success.
+6. **Permissions:** `contents: read`, plus `statuses: write` for claim and verdict, and
+   `actions: read` for verdict (rule 5). A job that reads another run's artifacts adds
+   `actions: read`.
 
 The consumer's own jobs (`light` commands, a coverage job as a `part`) run in its env
 like any part. Its test selection, its summary format and its merge gate stay its own

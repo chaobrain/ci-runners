@@ -15,6 +15,10 @@ Decision 14 (2026-11-08, RUN-9) adds a time-billed Slurm cluster as a remote tar
 Decision 15.8 (2026-11-11) brings h100 back as a full runner host on its shared account and
 raises the light pool to about 20 runners on the three hosts, with one shared label.
 Decision 15.9 (2026-11-11) makes `claim` count only the runners' own statuses.
+Decision 16 (2026-11-12) makes this repository the self-hosted runner layer of every
+chaobrain repository: capability labels in place of host labels, one runner per slot,
+presence, an overflow-only route, a reusable workflow, and a public pool for public
+repositories that opt in, delivered in the phases of RUN-10.
 
 Guides, in Chinese: [consumers.md](consumers.md) for the repositories that use the CI,
 [operations.md](operations.md) for the maintainer of the hosts. This file is the contract;
@@ -36,7 +40,9 @@ are listed with what replaced them.
    reach the self-hosted runners and keep all their work on GitHub-hosted runners. The
    guard it introduced stays on every job: a workflow sends a job to the self-hosted
    runners only when `github.event.pull_request.head.repo.full_name ==
-   github.repository`, or on `push` or `workflow_dispatch`.
+   github.repository`, or on `push` or `workflow_dispatch`. *Amended by 16.7: a public
+   repository that opts in reaches a pool of its own (repository-level runners on a
+   separate account), never the org's runners.*
 3. *h100, option A (runners on 3090b, parts over ssh).* Superseded by 11.3 and retired by
    11.12. Its safeguard 4 stands: **the exit path is a dedicated account from the host's
    admin, then normal runners.**
@@ -59,7 +65,11 @@ are listed with what replaced them.
       (`bot`). §6.2.
    2. "Tamper gap (§5.3, T13): accepted for private consumers for now." It stays
       accepted, since only private repositories use the runners (11.1, 11.12).
-   3. *The hook's path in job logs.* Moot: no public repository uses the runners.
+      *Amended by 16.7: on the public pool the gap is closed (the hooks, the policy and
+      the `.env` files are root's), not accepted.*
+   3. *The hook's path in job logs.* Moot while no public repository used the runners.
+      *Amended by 16.7: on the public pool the logs are public; the hooks' path names no
+      disk or account, and the machine name is the lead's choice.*
 
 ## Lead decisions (2026-11-06): a standard test CI on h100 (RUN-5)
 
@@ -74,7 +84,8 @@ the first path.
        their GPU path stays decision 2, §12 item 2 and RUN-4, unchanged.
        `allows_public_repositories` stays off. `Default` goes from `selected` to every
        private repository (supersedes §12 item 9; the lead makes the change).
-       *Amended by 11.12: there is no public GPU path.*
+       *Amended by 11.12: there is no public GPU path.* *Amended by 16.7: the flag stays
+       off; a public repository that opts in reaches a pool of its own.*
     2. **Allowlists synced from the org.** The actor allowlist is the org's members, and
        the repository allowlist is the org's private repositories with their ids. A
        timer fetches both every 10 min into a local snapshot on h100 (§6.5; where the
@@ -175,7 +186,8 @@ the first path.
           verdict still salvages a part's record on its own host (§4.5);
         - RUN-2 (the ssh driver, the manifest, the keyed verify, `compare`,
           `disagreement`), RUN-3 (3090a) and RUN-4 (`gpu.yml`, public consumers) are not
-          built. Public repositories stay on GitHub-hosted runners;
+          built. Public repositories stay on GitHub-hosted runners (*amended by 16.7*:
+          an opted-in one reaches the public pool);
         - the hosted branch of `claim` goes: every job of `h100-test.yml` runs on h100;
         - policy schema 1 goes; the hook reads schema 2 only (§6.5).
 
@@ -232,7 +244,9 @@ no `place`, no CI proxy, no public-repository path, policy schema 2 only.
        `3090b-gpu<N>`, `3090b-multi`, `3090b-compile`; `3090a-light`, `3090a-cpu`,
        `3090a-gpu` and `3090a-gpu<N>`, `3090a-multi`, `3090a-nightly`. Four runner
        classes are added: `gpu` (one runner per card, what h100's `h100` class is),
-       `multi`, `compile` and `nightly`.
+       `multi`, `compile` and `nightly`. *Amended by 16.1: a consumer names capability
+       labels; host labels stay for canaries, diagnosis and the reusable workflow's own
+       legs, and route consumers' jobs only until `v2`.*
     6. **Two-card parts on the 3090 hosts, behind a P2P self-test** (D7 stays for h100).
        A `multi` runner leases both cards of its host (`gpus: 2`). Before the command,
        inside the part's scope and with the part's `CUDA_VISIBLE_DEVICES`, the executor
@@ -476,6 +490,8 @@ from the load record they add.
        2026-11-08 at 00:03: 25 cores and 31 GiB of the local account's, and its 2.6 GiB on
        card 0 at 89 % use. No GPU or host-lock history exists on either host (`sar` has
        no GPU, the lock writes no log); the load record keeps both from `v1.5.0` on.
+       *Amended by 16.4: presence stops the runners of a busy resource, "ours" read by
+       systemd unit and cgroup; the busy refusal stays as a backstop until `v2` (16.10).*
     3. **Where a refused part goes, and retries across hosts.** A new optional inventory
        key, `peer_labels`, maps a runner class to the labels of the other host's pool of
        that class (on 3090b: `light = ["3090a-light"]`, `part = ["3090a-cpu"]`,
@@ -491,6 +507,8 @@ from the load record they add.
          `v1.5.0` a record of another host is taken by its name alone: the attempt is the
          `n` of its `<id>-<n>` plus one, and its id must be the part's; nothing else is
          read. A record of this host is read as before.
+       *Amended by 16.5: the reusable workflow retries by the five rows of
+       `outcome.hint` on capability labels; `peer_labels` goes with `v2` (16.10).*
     4. **The h100 clean-up** (12.17's review). These go, with their tests, fixtures and
        mutants:
        - the `h100` runner class: in the policy's classes, the executor's class rows and
@@ -819,7 +837,8 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
 3. **The claim** on a host is a slot of the host's CI slot queue (§7), the same files and
    `SlotQueue` that a part's `ci-slot` and brainspike's `ci_slot.sh` take. So a pool run and a
    part never hold one slot, and a run waits in line in arrival order or, with `--no-wait`,
-   says so (exit 75). On a cluster the job itself is the claim, submitted through the
+   says so (exit 75). *Amended by 16.8: on a host whose registry names `dev_slots`, a pool
+   run takes one of those and never a CI slot.* On a cluster the job itself is the claim, submitted through the
    account's `ci-slurm-gate` (14.5). It is the parts' batch script, supervisor and env, and
    the job is cancelled if it has not started within the run's queue bound.
 4. **The env check**: before a run, the versions of the registry's `check` distributions
@@ -936,6 +955,9 @@ pool. Parts and people ask for capabilities, never a host. Built here (`ci_runne
    note. The release that brings this (`v1.9.0`) is read by `v1.8` callers' hosts only
    once their inventories gain `probe_key`, which `v1.8.0` refuses: that waits until `v1`
    has moved (§9).
+   *Amended by 16.5: the plan no longer places by the rows; one route function maps a
+   part's needs to capability labels from `state/capacity.json` (`pool status --fast`),
+   overflowing to the cluster only. The forced probes stay and return that file.*
 
 ## Lead decision (2026-11-11): the shared state at job time (decision 15.2, issue #125)
 
@@ -1315,7 +1337,8 @@ amend 12.2 and §5.1.
    - *Busy avoidance* (13.2) finds nothing there and fails open: cgroup v1 gives no
      `user@<uid>.service` CPU or memory reading, and without `hidepid` every process is
      visible, so another account's card memory is never counted. A part waits for its
-     slot or card, as before 13.2.
+     slot or card, as before 13.2. *Amended by 16.4: presence tells our processes by
+     systemd unit and cgroup, which works on this account.*
    - *Units and files.* Setup writes only our subtree, the `ci-*` units it records
      (`plan.sh` refuses one that no apply wrote) and the probe keys' lines of item 4; it
      never changes another unit, the shell files or the crontab of the account.
@@ -1325,7 +1348,8 @@ amend 12.2 and §5.1.
    on cards 0 to 4 (`h100-gpu`, `h100-gpu<N>`). No `multi` (D7 restated): cards 0 to 3
    share a PCIe switch whose peer copies read zeros, so a two-card pool needs a P2P
    self-test that passed on the cards it would lease first. No `compile`, `nightly` or
-   `slurm` pool. `peer_labels` names 3090b's pools.
+   `slurm` pool. `peer_labels` names 3090b's pools. *Amended by 16.2 and 16.9: 8 CPU
+   slots of 20 threads, one runner each (instances = slots).*
 3. **The light pool to about 20, with one shared label.** 3090b 6, 3090a 6, h100 8; every
    light runner also carries `ci-light`, so a light job that reads no host's state asks for
    it and takes whichever light runner is free. The 3090 hosts' `3090-light` stays until
@@ -1416,6 +1440,276 @@ verdict) until the branch's next push. These amend §4.1, §6.4's T11 and §6.5:
    passes either input gets the same claim. brainspike, the only caller (the org's
    repositories searched, §9), passes both, and drops them in a PR of its own.
 
+## Lead decisions (2026-11-12): capability queues and one CI for the organisation (decision 16, issue #175)
+
+Decided by the lead on 2026-11-12 (issue #175); this text is approved with its PR. Until
+now a consumer placed each part on one host's label at plan time, and the executor then
+refused what did not fit there (a busy host, a held card, a drained host); the consumer
+patched the difference with a retry matrix of its own. Measured on the first consumer over
+36 hours: 48 % of a run's wall time was spent waiting for a runner while other hosts sat
+idle, and most red verdicts were scheduling or version-skew errors, not test failures. A
+second consumer would have had to copy about 4,000 lines of planning and workflow code.
+Decision 16 moves scheduling into this repository and makes it the self-hosted runner
+layer of every chaobrain repository, public ones included. The code follows in the phases
+of RUN-10 (§10), each with its own issue and PR; until a phase ships, the hosts run what
+its predecessor describes, and the sections below mark what a phase brings ("from R2").
+Each item names what it supersedes or amends.
+
+16. **Capability queues and one CI for the organisation.**
+    1. **Capability labels** (amends D3, 12.5, §4.8 rule 2 and §5.1's "each host's labels
+       are its own"). A shared label names what a job needs, never a host: `ci-light`
+       (15.8), `ci-cpu` (a CPU part's slot), `ci-gpu` (one card; one runner per card),
+       `ci-gpu2` (two cards behind a passed P2P self-test, 12.6), `ci-timing` (an
+       exclusive timing part, the `compile` class of 12.7), `ci-slurm` (a cluster part,
+       14), and one attribute label, `mem-big` (a slot whose `memory` is at least
+       128 GiB). GitHub gives a job to a runner that has every label the job names:
+       labels combine by AND only, so an attribute label narrows a class, and no label
+       can say "this host or that one". A capability label is therefore an
+       *equal-verdict class*: every runner that carries it gives the same verdict on the
+       same head. A host's runners gain `ci-cpu`, `ci-gpu` or `ci-gpu2` only after the
+       `numerics` check (15.1 item 6) of every consumer registry that names one has
+       passed on that host (for the first consumer: its full CPU selection and its GPU
+       smoke set, f64 bit-identical to the reference host's, 15.8 item 9). Each
+       capability label is allowed only on the class it names (`inventory.CAPABILITY`).
+       Host labels (`<host>-light`, `<host>-cpu`, `<host>-gpu<N>`, …) stay on every
+       runner, for canaries, diagnosis and the reusable workflow's own legs that must
+       reach one host (a salvage, a cool-card retry, 16.5); **a consumer's workflow
+       never names a host.** Until `v2` (16.10) the host labels still route a job as
+       before, so each consumer moves when it is ready.
+    2. **Slots** (amends §4.3's `CI_CPUS`, §5.1's "slots plus one waiting seat per
+       project", §7 rule 2's `max_waiting` for parts, §12 item 3, and 15.8 item 2's 9
+       runners on 8 slots). One part runner is one slot: a fixed CPU set and a memory
+       limit, and a `part` or `gpu` pool has as many instances as slots. The pool's
+       inventory entry gains a `slot` table: `cpus`, a list of disjoint cpusets, one per
+       instance (a per-card pool: one per card); `workers`, how many worker processes a
+       part should start; `memory`, the part's cap (at most the registry's maximum);
+       `speed`, how many times longer a test takes per worker than on the reference host
+       (1.0 there); and an optional `isa`, the highest instruction-set level a part may
+       use (a host with AVX-512 capped at AVX2, so that its results equal the label's
+       other hosts'). Setup writes `CI_RUNNER_SLOT=<i>` into each runner's `.env`, as it
+       writes `CI_RUNNER_CARD`. A part on that runner is pinned to slot i's cpuset
+       (`CI_CPUS`), capped at its `memory`, and its command gets `CI_WORKERS`,
+       `CI_SPEED` and, where set, `CI_ISA`. A slow host uses more workers, and timeouts
+       scale by speed: a part's inner timeout is its plan `minutes` × its slot's
+       `speed`, and its job's `timeout-minutes` is its `minutes` × the largest `speed`
+       of its label, plus 15 (16.5), since a job's bound is fixed before a runner takes
+       it. Until `v2` a CPU part still takes a CI slot from the host's slot files (§7),
+       so local work on the 3090 hosts keeps its interoperation (12.9); presence keeps
+       no more part runners online than there are free slots (16.4). A pool without
+       `slot` behaves as before.
+    3. **The new inventory keys ship first, accepted and ignored** (§9). A released host
+       layer refuses an inventory key it does not know (`inventory._check_table`, and a
+       pool table's keys), so every `claim`, `part`, `salvage` and `verdict` of an older
+       release would fail on a host whose inventory gains one. The first release of
+       RUN-10 (R1) therefore accepts a pool's `slot` and `audience` and a host's
+       `presence`, and ignores them, as `v1.3` did for the retired keys (11.12). No
+       host's inventory gains one until `v1` points at that release or later. The env
+       spec's `contract` (16.6) goes the same way: a release accepts it before any
+       consumer writes it.
+    4. **Presence** (amends 13.2, 15.8 item 1's busy bullet and §7 rule 6). A per-host
+       controller, `ci-run presence` on a timer of the CI account
+       (`ci-presence.{service,timer}`, a tick every 20 s), stops an *idle* runner whose
+       resource cannot start a job now, and starts it again once it can, so that a
+       queued job is picked up by a runner that can run it. The causes, per runner:
+       - its card is held by someone else (memory or a process on the card that is not
+         ours, where the host shows it), or the card's health gate fails (§5.5);
+       - its slot is taken by something that is not ours (a local run's or a pool run's
+         hold of a CI slot), or its slot's CPUs are kept busy by processes that are not
+         ours (one load sample, with hysteresis; not 13.2's 10-min window);
+       - the host or its pool is drained (13.1, 15.2), or the host's health gate fails;
+       - an exclusive timing part runs or waits for its CPUs: the part runners whose
+         CPUs it fences stop.
+
+       *Idle* is read without a token: no `Runner.Worker` process below the runner's
+       root (the scan `pool.runners_alive` makes) and no part scope of the runner
+       (`hook._job_scopes`). A runner is stopped only after two consecutive idle ticks
+       with a cause, and started after two ticks without one; the runner unit's
+       `ExecCondition=` runs the same check, so a restart (15.5) does not bring back a
+       runner whose resource is still taken. *Ours* is decided by systemd unit and
+       cgroup, never by Unix account: a process of our user manager's
+       `ci-runner@*.service`, a `ci-part-*.scope` or another `ci-` unit (on cgroup v1,
+       read from the process's `name=systemd` line). One host runs everything under a
+       shared account (11.3, 15.8), where 13.2 reads nothing and fails open.
+
+       *Black holes.* A host whose jobs keep ending for infrastructure reasons drains
+       itself: `presence.infra_failures` (default 3) such ends within 15 min drain it as
+       15.2's miss does (`drained: infra`, each end logged on the host). They are a
+       part's `unavailable` other than busy, drained or a full queue; a `lost` part on a
+       host that stayed up; and a hook refusal `stale`, `policy`, `timeout` or `error`.
+       Light runners count, and presence stops them on a drain like the others, since a
+       broken light runner takes every claim and plan; each host keeps one more light
+       runner, in a pool of its own that carries its host label and not `ci-light`,
+       which presence never stops, for the host's salvage legs (§4.5). Nothing undrains
+       by itself (15.2 item 4).
+
+       *The backstop.* Presence narrows the race between a pickup and a change of the
+       resource; it cannot close it. A job can be assigned between a tick and the
+       runner's stop, and the resource can change between a tick and the job's start. So
+       the executor's refusals stay (§4.3's gate: the drain, busy, the health gate, the
+       leases), and a refused, `stopped` or `lost` part is retried by the five rows of
+       16.5. Stops, starts and refusals after a start are counted (16.8).
+
+       *Rollback* is the host's inventory `presence = { enabled = false }` (the table
+       also holds `tick_seconds` and `infra_failures`): the controller then starts every
+       runner it stopped and does nothing else. It is turned on one host at a time
+       (16.11).
+    5. **Capacity and route** (amends 15.1 item 8's "places by the rows", 13.3's
+       `peer_labels`, §4.4's `retry-on` and §4.8 rule 4).
+       - *The capacity file.* `pool status` writes `state/capacity.json`: its `--json`
+         rows, each host's labels with their online and free runners, each cluster
+         target's `jobs_free`, and the time each was read. Presence rewrites the host's
+         own part at every tick. `pool status --fast` reads only those files: a forced
+         probe (15.1 item 8) returns the receiving account's file without running
+         `nvidia-smi`; every ssh call has `ConnectTimeout=2`; the cluster's figures come
+         from a timer that caches them. It ends within 2 s at the 95th percentile with
+         one host down; a row older than 2 min counts as down.
+       - *The route.* One function, `route.route`, run once in the plan job, maps a
+         part's needs (`cpu`, `gpu`, `gpu2` or `timing`; its memory; its minutes) to its
+         labels: `[self-hosted, ci-<need>]`, plus `mem-big` where its memory exceeds the
+         largest slot of the label without it. It overflows only: a part goes to
+         `ci-slurm` (with the target that fits) only when no free host has a slot of its
+         label and the cluster can start it now (`jobs_free`, each part booked against
+         it), and stays on the shared label when the cluster cannot. `timing` never
+         overflows. A label that no host serves (every host that carries it down,
+         drained, unreachable or failing its health gate) is an error at plan time,
+         since a job queued on a label without a runner waits 24 h (§2); a runner that
+         presence holds back for a passing cause (a card in use, a taken slot, a timing
+         run) still serves its label. A queued part's own bound stays with the
+         consumer's sweeper for now (§10, RUN-10's open points).
+       - *Retries are the five rows of `outcome.hint`* and nothing else:
+
+         | row (`where`) | outcomes | the retry's labels |
+         |---|---|---|
+         | `cool-card` | thermal, on a host with a cool card | that card's host label, `<host>-gpu<M>` |
+         | `same-host` | reboot; a cluster node's failure (14.4) | the first attempt's host label of its class; a cluster part, `ci-slurm` and its target |
+         | `more-memory` | oom, with `resume` | the part's labels plus `mem-big` |
+         | `any` | lost (after its salvage), stopped | the part's labels again |
+         | fallback | unavailable; thermal without a cool card | the part's needs routed again (the cluster where the route now sends it) |
+
+         A part is retried at most once (§4.4). The reusable workflow (16.6) applies
+         the table itself and does not read `retry-on`, which keeps its `v1` meaning
+         for consumers that compose the actions until `v2`.
+    6. **A reusable workflow** (amends D2's and §1's "the reusable workflow went with
+       12.17", §4.7, and AGENTS.md's "none of its workflows targets a self-hosted
+       label"). This repository ships `.github/workflows/ci.yml`, which a consumer
+       calls, and `part.yml`, which `ci.yml` calls once per part (two levels of
+       nesting). Neither runs on this repository's own events (`workflow_call` only),
+       and the hook refuses this repository anyway (`policy.SELF`). The critical path is
+       three pickups:
+       1. *plan*, on `ci-light`: the claim (§4.1), folded in; the contract check; the
+          consumer's `plan` command; the route of each part (16.5); the plan's summary.
+       2. *parts*, a matrix of `part.yml` over the plan's parts, at most the registry's
+          `max_parallel` at once: the first attempt; a retry by the five rows, inside the
+          same called workflow; and a salvage leg on the first attempt's host only on
+          the lost path (an attempt that ended without outputs). A part that ends red
+          posts `failure` on the context at once (a fail-fast status); the run goes on,
+          so the summary is whole.
+       3. *verdict*, on `ci-light`: reads every part's artifacts (a matrix of called
+          workflows gives its outputs last-writer-wins, so outcomes travel as artifacts,
+          §4.8 rule 3), merges the summaries and posts the context.
+
+       The consumer gives one command, `plan`, that prints the plan as JSON with a
+       schema version (§4.10): `schema` and `parts`, each part with `id`, `command`,
+       `needs` and `minutes`. Without `plan`, the plan is one part, `pytest`.
+       *The contract check.* The default branch's `.github/ci-runners.toml` may set
+       `contract = N`. The plan job reads it with the job token before anything else
+       and compares the head's own file: a head whose `contract` is lower, or absent
+       where the default branch sets one, ends red in that one light job, within about
+       20 s, with "merge origin/main", and no part starts. *Releases:* the release stamp
+       (§9) rewrites the action references inside both workflows, and `ci.yml`'s
+       reference to `part.yml`, to the release's tag. *Onboarding* a repository is at
+       most 20 workflow lines (§4.10) and one registry entry. Composing the actions
+       (§4.8, 12.12) stays allowed, with capability labels.
+    7. **A public pool** (amends decisions 2, 10.2, 10.3, 11.1 and 11.12; brings back
+       §12 item 2; amends §6.1, §6.2, §6.5, T1, T12 and T13). The Default group's
+       `allows_public_repositories` is never turned on: on Free it is the org's only
+       group, so the flag would open every runner on every host to every public
+       repository, the runners of the shared account and of the hosts that hold a
+       cluster key included, with the hook (a file of the account the job code runs as,
+       T13) as the only barrier. A public repository opts in to a pool of its own
+       instead:
+       - *A second account on one host* (the new host of 16.9), never a shared account
+         and never a host whose CI account holds a cluster key. It holds no cluster key,
+         no tunnel key and no organisation token. Its hooks, `policy.toml`, snapshot and
+         every runner's `.env` are root's and not writable by the account, so an
+         accepted job cannot change the checks of later jobs (amends 10.2: the tamper
+         gap is closed for this pool, not accepted).
+       - *Runners registered at repository level* on each opted-in public repository,
+         in no runner group of the org, with labels of their own (`ci-pub-light`,
+         `ci-pub-cpu`, `ci-pub-gpu`) and the runner audience `public`
+         (`CI_RUNNER_AUDIENCE`, from the pool's inventory `audience`; every other
+         runner's is `private`).
+       - *The policy* (schema 2, additive). A repository entry gains `public_runners =
+         true`, written by the lead, beside `visibility = "public"` and its id. `decide`
+         accepts a job only where the runner's audience and the repository agree (a
+         public repository on a `public` runner only, a private one never there); its
+         actors are all org members (the snapshot's members now count for an opted-in
+         public repository too; bots are refused; `bot_dispatch`, `extra_events` and
+         `classes` stay refused for it); and its event is a same-repository
+         `pull_request`, or a `push` whose `GITHUB_REF_PROTECTED` is `true`. Fork pull
+         requests, non-members, bots, `pull_request_target`, `workflow_dispatch`,
+         `schedule` and every other event are refused in "Set up runner", before the
+         first step; they keep GitHub-hosted runners.
+       - *The snapshot* the account receives holds the members only (`org-sync --receive
+         --public` drops every private repository; an opted-in public repository is the
+         policy's own entry), so job code there reads no private repository's name.
+       - *Public logs* (amends 10.3, moot while no public repository used the runners).
+         Every job log shows the runner's machine name and the hook's path (`v1.4.0`
+         notes item 5): the hooks sit at a root-owned path that names no disk or
+         account, and the machine name is the lead's choice.
+       - *First consumers:* a public copy of the canary, then one public library. Never
+         this repository (`policy.SELF`; its own CI stays on hosted runners).
+       - *Residuals.* A member's same-repository branch may carry fork commits nobody
+         reviewed; the hook cannot see that, and the member vouches for them (consumers'
+         guide). A job reads the account's files as on every pool: there that is the
+         runners' registrations of the opted-in repositories, the env and the host's
+         network.
+    8. **Statistics and dev slots** (amends §7 rule 5, and 15.1 items 3, 5 and 7: a pool
+       run's claim). `ci-run stats [--repo R] [--since T]` reports, per label and per
+       repository, the queue delay (created to started), the run time and the verdict
+       delay (the head's push to its final status) of the runs' jobs, with the retries
+       per row of 16.5, presence's stops and starts, and the refusals after a start. It
+       reads the jobs API with the caller's own login, as the runner watch does (15.6),
+       and the part records. `pool run` takes *dev slots* of its own (the registry's
+       `dev_slots`: cpusets and a memory cap outside every CI slot), so development
+       never takes a CI slot; a host whose registry names none keeps 15.1's claim.
+    9. **Shares** (amends 15.8 item 2 and §5.1). Shared hosts give most of their
+       capacity to CI: h100 8 CPU slots of 20 threads (160 of its 176) and its 5 cards;
+       3090a 2 CPU slots, its cards and its nightly. 3090b becomes the development and
+       timing host: it leaves the CPU part pool and keeps its light, GPU, `multi`,
+       `compile` (`ci-timing`) and `slurm` pools. A new host (128 threads, 377 GiB,
+       four 96 GB cards) joins with a dedicated CI account, its slots sized from the
+       parts' measured memory peaks (about 96 threads and its 4 cards), and holds the
+       public pool (16.7). The cluster is overflow only (16.5).
+    10. **`v2`** (§9). Once every consumer names capability labels only (the org's
+        repositories searched), `v2` removes: host-label routing for consumers (the host
+        labels stay for 16.1's own uses; `3090-light` goes), `peer_labels` and
+        `retry-on`'s other host's pool (13.3), the busy refusal (13.2; presence and the
+        drain stay), and a part's `SlotQueue` (a part's runner is its slot; the queue
+        stays for local runs' interoperation and pool runs). The `nightly` class follows
+        its consumer: it goes once that consumer's nightly runs on capability labels.
+    11. **Migration.** Every consumer keeps a working CI at every step. Runners carry the
+        old and the new labels during the switch (new labels through the org's runner
+        API, as 15.8 item 3, and in the inventory); presence is turned on one host at a
+        time; the reusable workflow is proven on the canary before any consumer calls
+        it; host-label routing goes last (`v2`). Each step's rollback is one revert,
+        moving `v1` back, or the previous inventory. The host and org steps are the
+        lead's, each approved when it comes (AGENTS.md): the capability labels on the
+        existing runners; the new host's CI account, env, cache warm-up, numerics check
+        and registration; h100's slots, 3090b leaving the CPU pool, and presence per
+        host; each release and each move of `v1`; the public account, its root-owned
+        files, the repository-level registrations, and each public repository's setting
+        that requires approval for outside contributors' workflows.
+
+- *Options weighed.* (a) Turn on `allows_public_repositories`: every host, the shared
+  account and the cluster keys included, open to every public repository with the hook as
+  the only barrier (16.7). (b) Presence without the executor's refusals: the race between
+  a tick and a pickup stays (16.4). (c) Keep host labels and place at plan time from `pool
+  status` (until now): the plan and the runtime refusals disagree, which is the measured
+  waiting. (d) A label per set of hosts ("3090 or h100"): one label per combination;
+  equal-verdict classes need one per capability. (e) A pull queue of our own in front of
+  GitHub's: a service to run and secure, where presence keeps GitHub's queue.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -1424,14 +1718,18 @@ verdict) until the branch's next push. These amend §4.1, §6.4's T11 and §6.5:
     has write access to every repository. In a private ci-runners, any member could move
     `v1` and run code on every runner.
   - *Reason:* the repository's own tests then run free on hosted runners.
-- **D2. Two layers.**
+- **D2. Two layers.** *(Amended by 16.6: the workflow layer holds the reusable workflow
+  `ci.yml` again.)*
   - The *host layer* is installed on each host from a release by `setup/install.sh`, and
     no job ever fetches it. It holds the hook, the executor, slots, GPU leases and
     outcome classification.
-  - The *workflow layer* holds the actions (the reusable workflow went with 12.17). It
-    is thin and calls the host layer of its own release.
-- **D3. Labels name a class and a host.** Pools are shared by projects. Host slots bound
-  the load, and runner counts bound only the waiting (§7).
+  - The *workflow layer* holds the actions and, from R6, the reusable workflows `ci.yml`
+    and `part.yml` (16.6). It is thin and calls the host layer of its own release.
+- **D3. Labels name a capability** (amended by 16.1; they named a class and a host).
+  Pools are shared by projects. A consumer names capability labels (`ci-cpu`, `ci-gpu`,
+  …); host labels stay for canaries, diagnosis and the reusable workflow's own legs. A
+  part runner is one slot (16.2), and presence keeps online only the runners that can
+  start a job (16.4).
 - **D4. The pre-job hook is the boundary on every runner.** Every runner unit sets
   `NoNewPrivileges=yes`, which made `sudo` fail inside a user unit (measured 2026-11-05,
   and on h100 on 2026-11-06).
@@ -1452,8 +1750,10 @@ verdict) until the branch's next push. These amend §4.1, §6.4's T11 and §6.5:
 In scope: host setup, runner services, the pre-job hook, the executor of a part, shared
 slots and GPU leases, the host lock and the slot interop on the 3090 hosts, the P2P
 self-test, outcome classification and retry hints, the claim step, salvage, the
-verdict, the org snapshot, the hosts' egress and the env builds. The reusable workflow
-`h100-test.yml` was retired by 12.17.
+verdict, the org snapshot, the hosts' egress and the env builds; from decision 16, the
+scheduling (capability labels, slots, presence, the capacity file and the route), the
+reusable workflow `ci.yml` and the public pool. The reusable workflow `h100-test.yml` was
+retired by 12.17.
 
 Out of scope, and kept by each consumer: what to test, its test selection and markers,
 its merge gate and its status semantics beyond `claim` and the verdict.
@@ -1476,13 +1776,34 @@ Settings read back from the API:
 | fact | source | consequence |
 |---|---|---|
 | An org has one Default runner group. Only Team can create more. | docs: runner groups ("organizations using the GitHub Team plan"); API: one group, `Default` | Every org runner is open to every private org repository. The hook's repository allowlist (the org snapshot) is the per-repository boundary. |
-| By default, only private repositories can use a runner group. | docs; API default `allows_public_repositories: false` | Public repositories reach no org runner while the flag is off, and it stays off (11.1, 11.12). |
+| By default, only private repositories can use a runner group. | docs; API default `allows_public_repositories: false` | Public repositories reach no org runner while the flag is off, and it stays off (11.1, 11.12, 16.7). An opted-in public repository reaches only runners registered on that repository (16.7). |
 | Rulesets and branch protection exist only for public repositories on Free. | API: a private repository returns 403 "Upgrade to GitHub Pro or make this repository public" | D1 |
 | Self-hosted runners and standard hosted runners for public repositories are free. | docs: Actions billing | This repository's CI runs on hosted runners. A private caller's self-hosted jobs spend no hosted minutes (§4.8). |
 | The pre-job hook runs in "Set up runner" with the default variables and the event payload (`GITHUB_EVENT_PATH`). A nonzero exit fails the job. It has no timeout, and its output is visible to anyone who can read the repository. | docs: "Running scripts before or after a job" | The hook bounds itself, reads only local files and prints a reason code, never inventory. |
 | A job queued 24 h fails. A runner offline 14 days is removed. A runner registered with `--disableupdate` that misses an update for 30 days gets no jobs. Runners update themselves by default. | docs | §8 bounds. Auto-update stays on. |
-| Forks of a repository can run code on a self-hosted runner through a pull request. GitHub recommends self-hosted runners only for private repositories. | docs warnings | Private repositories only (11.1); the org forbids forks of private repositories; the guard and the hook refuse a fork's pull request anyway (§6). |
-| A reusable workflow job's runner is not in the API's job record: `runnerName` is empty for the jobs of a called workflow. | measured 2026-11-06 | Which runner ran a part is read from its record on the host (`record.json`), not from the API. |
+| Forks of a repository can run code on a self-hosted runner through a pull request. GitHub recommends self-hosted runners only for private repositories. | docs warnings | The org's runners serve private repositories only (11.1); the org forbids forks of private repositories; the guard and the hook refuse a fork's pull request anyway (§6). The public pool (16.7) is a separate account holding no credential of ours, with root-owned checks, and its hook refuses a fork's pull request before the first step. |
+| A job names labels that a runner must all have (AND); no expression says "one of". | docs: "Choosing runners" | A capability label is an equal-verdict class; an attribute label only narrows (16.1). |
+| The jobs API's `runner_name` names the runner of a called workflow's job too. | read 2026-11-12 on a run of the first consumer: every `part <id> / first` job of its called workflow had its runner (the 2026-11-06 row said `runnerName` was empty; that reading was wrong) | The reusable workflow's salvage leg finds the first attempt's host from its job's `runner_name` (runner names start with the host's role, §5.1). A part's record on the host (`record.json`) still names its runner. |
+
+**Relied on by decision 16, not yet measured.** Each is confirmed on the canary in the
+phase named, before a consumer depends on it; a fact that does not hold sends the phase
+back to this contract.
+
+| relied on | used by | confirmed in |
+|---|---|---|
+| A private repository may call a reusable workflow of a public repository of its org, and the called workflow's jobs run on the self-hosted runners the caller may use (the org's for a private caller, the repository's own for a public one). | 16.6, 16.7 | R6, P2 |
+| Two levels of nesting (caller → `ci.yml` → `part.yml`) are allowed, with `strategy.matrix` and `max-parallel` on the job that calls `part.yml`; a calling job takes no `timeout-minutes` or `env`, so the bounds sit inside `part.yml`. | 16.6 | R6 |
+| In a called workflow, `GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_ID`, the `github` context and the event payload the hook reads are the caller's, so the hook decides on the caller. | 16.6, §6.3 | R6 |
+| The outputs of a matrix of called workflows are last-writer-wins. | 16.6 (outcomes travel as artifacts in any case) | R6 |
+| `uses: ./…` inside a called workflow resolves in the caller's workspace, so the workflows name `chaobrain/ci-runners/actions/<a>@<tag>`. | 16.6, §9 | R6 |
+| A called workflow's token can only be narrowed from the caller's `permissions`, never widened. | 16.6 | R6 |
+| A caller pinned to `ci.yml@v1.N.0` runs `part.yml` and the actions at `@v1.N.0` once the stamp rewrote their refs (as measured for `h100-test.yml`, §9). | 16.6, §9 | R6 |
+| The job token with `actions: read` lists only its own repository's runs and jobs; the org's runner list needs `admin:org` (15.6). So the route reads capacity from the hosts, never from GitHub's queue. | 16.5 | R5 |
+| A job queued on labels that no online runner has waits (up to 24 h) instead of failing at once. | 16.5 (the plan-time error) | R5 |
+| A runner stopped while idle goes offline and takes no job; a job assigned to it just before the stop is queued again or ends without outputs (`lost` or `stopped`), and never runs twice. | 16.4 | R3 (the 50 flips) |
+| The pre-job hook sees `GITHUB_REF_PROTECTED` with the other default variables, for every event, on a repository-level runner of a public repository too. | 16.7 | P1, P2 |
+| A fork's pull request to a public repository that names `ci-pub-*` labels is assigned to a repository runner and fails in "Set up runner" on the hook's refusal, before any step. | 16.7 | P2 (the live negative test) |
+| Runners registered on a public repository are reachable from that repository only, and from no other repository of the org. | 16.7 | P2 |
 
 ## 3. Layout
 
@@ -1499,6 +1820,9 @@ ci_runners/           stdlib-only Python: pure functions, thin I/O
   part.py             the executor: gate, slot, lease, scope, supervisor, record
   drain.py            the drain switch (decision 13.1)
   hostload.py         the load record and the busy rule (decision 13.2)
+  presence.py         the presence controller and the self-drain (16.4; from R3)
+  route.py            a part's needs to labels, and the retry rows (16.5; from R5)
+  stats.py            `ci-run stats` (16.8; from R7)
   sampler.py          the GPU sampler and the early thermal stop (§5.5)
   outcome.py          outcome classification and the retry hint
   slots.py gpus.py    fair host slots with caps, GPU leases in ticket order per card
@@ -1540,7 +1864,8 @@ setup/workstation/    the maintainer's own user units: orgsync-push.sh and
                       runner online (decision 15.6)
 actions/              claim/, part/, salvage/, verdict/ (composite, action.yml);
                       lib/ci-run.sh, the launcher; RELEASE, the release stamp
-.github/workflows/    test.yml (this repository's tests, hosted only)
+.github/workflows/    test.yml (this repository's tests, hosted only); ci.yml and part.yml,
+                      the reusable workflow for consumers, `workflow_call` only (16.6; from R6)
 tests/                unit tests; fixtures/ (sanitised): event payloads,
                       nvidia-smi CSV, /proc/stat, /proc/locks, boot ids, JUnit; mutants.py
 tests/test_no_inventory.py     no tracked file holds a denied token (hashed deny list)
@@ -1635,9 +1960,12 @@ it the leases stay under `state/leases`. The first path's keys (`ssh`, `trusted`
 
 ## 4. The consumer interface
 
-A consumer calls the actions `chaobrain/ci-runners/actions/<name>@v1` in its own
-workflow (§4.8, decision 12.12; the reusable workflow `h100-test.yml` was retired by 12.17). Each action calls the host layer of its own
-release (§9). Inputs that the project registry already holds may be left out.
+A consumer calls the reusable workflow `chaobrain/ci-runners/.github/workflows/ci.yml@v1`
+(§4.10, decision 16.6; from R6), or composes the actions
+`chaobrain/ci-runners/actions/<name>@v1` in its own workflow (§4.8, decision 12.12).
+Either way it names capability labels, never a host (16.1). Each action calls the host
+layer of its own release (§9). Inputs that the project registry already holds may be left
+out.
 
 ### 4.1 `claim`: skip a head the runners already found green
 
@@ -1682,7 +2010,8 @@ h100 is the only host, and its labels choose the pool (§5.1); there is nothing 
 | `target` | none | `slurm` only, required there (decision 14.2): a target of the site config, or several in the order to try, separated by commas or spaces; `<site>:<target>` where the host has more than one site config |
 
 A CPU part (`gpus: 0`) takes one of the host's CI slots; a GPU part takes its card's
-lease, which is its slot (§7).
+lease, which is its slot (§7). On a runner with a slot (16.2, from R2) the part also runs
+on that slot's cpuset and memory cap; until `v2` it still takes a CI slot as well.
 
 Before it takes anything, the part passes its gate, in this order: low disk; its `gpus`
 and `lock` against its class's row (§4.8); the shared state (15.2, which drains the host
@@ -1695,9 +2024,13 @@ The command's environment holds:
 
 - `CI_RUNNERS_HOST` (the role name), `CI_PROJECT`, `CI_PART_DIR` and `CI_RESULTS_DIR`;
 - `CUDA_VISIBLE_DEVICES` (empty for a CPU part) and `CI_CPUS`, a cpuset list such as
-  `0-3,8-9`, never a count: the inventory's `cpus`, or `compile_cpus` on `compile`; where
-  the inventory gives none, and in a cluster part's job on its node, the CPUs the command
-  may run on (its affinity);
+  `0-3,8-9`, never a count: the runner's slot's `cpus` (16.2), else the inventory's
+  `cpus`, or `compile_cpus` on `compile`; where the inventory gives none, and in a cluster
+  part's job on its node, the CPUs the command may run on (its affinity);
+- from R2, on a runner with a slot: `CI_WORKERS` (the worker processes to start),
+  `CI_SPEED` (the slot's `speed`, 1.0 on the reference host; a command scales its own
+  per-test timeouts by it) and, where the slot sets `isa`, `CI_ISA` (the highest
+  instruction-set level the command may use);
 - the slot path, marked as held; on a host with the host lock, its path, and with `lock`
   set, the protocol's nesting variable at the mode held (decision 12.9);
 - `CI_RESUME`;
@@ -1721,7 +2054,7 @@ the GPU leases for the part's life; the command does not inherit them.
 |---|---|
 | `outcome`, `reason` | §4.4 |
 | `next` | `none`, `retry` or `fallback` |
-| `retry-on` | label array for the retry: a cool card's `<host>-gpu<M>`, the other host's pool of the class for a drained or busy part (decision 13.3), else the pool's own labels or the registry's `fallback` |
+| `retry-on` | label array for the retry: a cool card's `<host>-gpu<M>`, the other host's pool of the class for a drained or busy part (decision 13.3), else the pool's own labels or the registry's `fallback`. The reusable workflow does not read it: it retries by the five rows of 16.5; the other host's pool goes with `v2` |
 | `resume` | whether the retry should resume |
 | `host`, `gpus`, `queue-seconds`, `run-seconds` | for the summary |
 | `record` | `<host role>:<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>`, the part record below the host's `state/parts/` |
@@ -1752,7 +2085,10 @@ nonzero exit with an OOM kill is `oom`, not `red`.
 | stopped | cancelled: the job's signal, before or during the command (a newer run of the concurrency group, a person's cancel, or GitHub's own cancel of the job: a runner that lost its connection, the job's `timeout-minutes`) | retry once on the same pool; a cancelled run runs no retry (§4.8 rule 4), so only a cancel its run outlives is retried (decision 15.4) |
 
 A part is retried at most once (the registry may set 0). A second infrastructure end
-is an error in the verdict.
+is an error in the verdict. Where the retry runs is one of the five rows of 16.5
+(`outcome.hint`'s `where`: `cool-card`, `same-host`, `more-memory`, `any`, fallback); the
+reusable workflow maps each row to capability labels, and "the other host's pool" in the
+table above holds for `v1` callers that compose the actions until `v2` (16.10).
 
 ### 4.5 Salvage, inside the verdict and per host
 
@@ -1779,6 +2115,9 @@ older or newer, changes nothing (`v1.5.1`; until then "newest" was read across r
 a later run's part of the same id on the host left the lost part `lost`). A composite
 action cannot loop, so `salvage` uploads at most 16 parts per host and fails beyond that
 (read at the stamp, 2026-11-07). Salvage jobs run before the verdict, which then reads every artifact as usual.
+In the reusable workflow (16.6) a part's salvage leg runs inside its `part.yml`, only on
+the lost path, on the `home` runner of the host its first attempt ran on (the job's
+`runner_name`, §2), before its retry.
 
 ### 4.6 *Reusable workflow `gpu.yml`* (retired by 11.12)
 
@@ -1797,18 +2136,30 @@ hosts, a coverage job). These rules are the consumer's:
 
 1. **The guard on every job** (decision 2): `pull_request` only with
    `head.repo.full_name == github.repository`, `push`, `workflow_dispatch`, `schedule`.
-2. **Labels.** A job names `self-hosted` and one host's pool label, never a bare class
-   name. These are the labels a consumer may target:
+   On the public pool the hook accepts only a same-repository `pull_request` and a
+   `push` to a protected ref (16.7).
+2. **Labels** (decision 16.1). A job names `self-hosted` and one capability label (plus
+   `mem-big` where it needs a big slot), never a host and never a bare class name. These
+   are the labels a consumer may target:
 
-   | class | labels | `part` runs | `gpus` | `lock` | slot | `timeout-minutes` |
-   |---|---|---|---|---|---|---|
-   | `light` | `<host>-light` | short commands (a plan, a summary); `claim`, `salvage`, `verdict` | 0 | `none` | none | ≤ 30 |
-   | `part` | `<host>-cpu` | CPU parts | 0 | any | one | ≤ 240 |
-   | `gpu` | `<host>-gpu`, `<host>-gpu<N>` | one-card parts on the runner's card | 1 | any | the card's lease | ≤ 240 |
-   | `multi` | `<host>-multi` (3090 hosts) | two-card parts, after the P2P self-test | 2 | any | both cards' leases | ≤ 240 |
-   | `compile` | `<host>-compile` (3090b), opt-in (12.14) | exclusive timing parts on `compile_cpus` | 0 | `x` | one | ≤ 240 |
-   | `nightly` | `<host>-nightly` (3090a), opt-in (12.14) | the consumer's nightly | 0 to all cards | any | every slot and card lease | ≤ 600 |
-   | `slurm` | `<host>-slurm` and a shared label (from RUN-9), opt-in (14.2) | one batch job on a Slurm cluster's `target` (14.3) | up to the target's `max_cards` | `none` | none on its host | ≤ the target's `max_minutes` |
+   | plan `needs` | labels | class | `part` runs | `gpus` | `lock` | slot | `timeout-minutes` |
+   |---|---|---|---|---|---|---|---|
+   | — | `ci-light` | `light` | short commands (a plan, a summary); `claim`, `verdict` | 0 | `none` | none | ≤ 30 |
+   | `cpu` | `ci-cpu`, and `mem-big` for a slot of 128 GiB or more | `part` | CPU parts | 0 | any | its runner's slot | ≤ 240 |
+   | `gpu` | `ci-gpu` | `gpu` | one-card parts on the runner's card | 1 | any | the card's lease | ≤ 240 |
+   | `gpu2` | `ci-gpu2` | `multi` | two-card parts, after the P2P self-test | 2 | any | both cards' leases | ≤ 240 |
+   | `timing` | `ci-timing`, opt-in (12.14) | `compile` | exclusive timing parts on `compile_cpus` | 0 | `x` | one | ≤ 240 |
+   | (the route's overflow) | `ci-slurm`, opt-in (14.2) | `slurm` | one batch job on a Slurm cluster's `target` (14.3) | up to the target's `max_cards` | `none` | none on its host | ≤ the target's `max_minutes` |
+   | — | `<host>-nightly` (3090a), opt-in (12.14), until its consumer moves (16.10) | `nightly` | the consumer's nightly | 0 to all cards | any | every slot and card lease | ≤ 600 |
+   | — | `ci-pub-light`, `ci-pub-cpu`, `ci-pub-gpu`: an opted-in public repository's own runners (16.7) | `light`, `part`, `gpu` | as the rows above | | | | |
+
+   Host labels (`<host>-light`, `<host>-cpu`, `<host>-gpu`, `<host>-gpu<N>`,
+   `<host>-multi`, `<host>-compile`, `<host>-slurm`, and the shared `3090-light` and
+   `3090-slurm`) stay on the runners for canaries, diagnosis and the reusable workflow's
+   salvage and cool-card legs. Until `v2` they still route a consumer's job as before
+   (12.5), so a consumer moves at its own pace; a new consumer names capability labels
+   only. The `salvage` action runs on the light pool of the host it reads (§4.5), named by
+   the reusable workflow, never by a consumer's own label.
 
    `part` refuses a `gpus` or `lock` value outside its class's row (`unavailable`). A
    `nightly` part holds every lease, whatever `gpus` says; its `gpu-mem-mib` is checked
@@ -1816,12 +2167,15 @@ hosts, a coverage job). These rules are the consumer's:
 3. **One `part` per job**, with the job's `timeout-minutes` at least the part's plus 15.
    A matrix leg's outputs do not reach later jobs one by one, so later jobs read the
    `ci-part-<id>-<attempt>` artifacts. Part ids are unique within a run.
-4. **Retries.** A part whose `next` is `retry` or `fallback` runs again at most once, with
-   `attempt-of` its first record and `resume` as the hint says, on the labels `retry-on`
-   names or on a pool the consumer chooses (another host's, for a `fallback`). A retry on
-   another host names the first host's record in `attempt-of` (decision 13.3). The retry
-   job is skipped on a cancelled run (`!cancelled()`), so a `stopped` part is retried only
-   when GitHub cancelled its job alone and the run went on (decision 15.4).
+4. **Retries** (decision 16.5). A part whose `next` is `retry` or `fallback` runs again at
+   most once, with `attempt-of` its first record and `resume` as the hint says, on the
+   labels of its row of 16.5's table: a cool card's host label, the first host's label of
+   the class, the part's labels plus `mem-big`, or the part's labels again (`any`, and a
+   fallback routed again). A retry on another host names the first host's record in
+   `attempt-of` (decision 13.3). The retry job is skipped on a cancelled run
+   (`!cancelled()`), so a `stopped` part is retried only when GitHub cancelled its job
+   alone and the run went on (decision 15.4). Until `v2`, `retry-on` still names the other
+   host's pool for a drained or busy part.
 5. **The verdict** runs last, on the light pool of one host that ran parts, after a
    `salvage` job on every other host that did (§4.5), unless the run was cancelled (a
    newer head's run posts instead). It reads the parts' `ci-part-<id>-<attempt>`
@@ -1888,6 +2242,76 @@ refresh checks its own record. It is for a host whose account others share (h100
 token would be readable for the build's length; its upstreams are cloned without
 credentials.
 
+### 4.10 The reusable workflow `ci.yml` and the plan (decision 16.6; from R6)
+
+`chaobrain/ci-runners/.github/workflows/ci.yml@v1` runs a consumer's CI in three pickups:
+*plan* (claim, contract check, the consumer's plan command, the route), *parts* (a matrix
+of `part.yml`, one called workflow per part, with its retry and, on the lost path, its
+salvage leg) and *verdict* (§4.8 rule 5). It composes the actions of its own release, so
+every rule of §4.1 to §4.5 holds inside it.
+
+| input | default | meaning |
+|---|---|---|
+| `context` | required | the project's status context, e.g. `myproj/ci` |
+| `plan` | none | a command, run in the head's checkout and env on `ci-light`, that prints the plan; none: one `pytest` part |
+| `project` | the repository's name | registry key, as `part`'s |
+
+**The plan** is one JSON document on the command's standard output; anything that does
+not load is a red plan job with the reason:
+
+| key | required | meaning |
+|---|---|---|
+| `schema` | yes | `1`; a later schema is a new key set, read by the release that brings it |
+| `parts` | yes | a list of at most 256 parts (GitHub's matrix limit) |
+| `parts[].id` | yes | `[A-Za-z0-9][A-Za-z0-9_.-]*`, unique in the plan |
+| `parts[].command` | yes | as `part`'s `command` |
+| `parts[].needs` | yes | `cpu`, `gpu`, `gpu2` or `timing` (16.5) |
+| `parts[].minutes` | yes | the part's time on the reference host, at most 240; its bounds scale by speed (16.2) |
+| `parts[].memory_gib` | no | the part's memory cap; the registry's default otherwise; above the label's largest slot, the route adds `mem-big` |
+| `parts[].results` | no | as `part`'s `results` |
+
+An unknown key is refused. Without `plan`, the plan is `{"schema": 1, "parts": [{"id":
+"pytest", "command": "python -m pytest", "needs": "cpu", "minutes": 60}]}`.
+
+**The contract.** The default branch's `.github/ci-runners.toml` may set `contract = N`
+(an integer; §4.9's spec, accepted from R1). The plan job reads that file with the job
+token before it runs the plan, and a head whose own file sets a lower `contract`, or none
+where the default branch sets one, ends red in that job with "merge origin/main"; no part
+starts. A consumer raises `contract` in the PR that changes what its plan or its parts
+expect of the head.
+
+**Onboarding** is at most 20 workflow lines and one registry entry (`etc/projects/
+<project>.toml`, §4.9's env). A private repository of the org needs no policy entry (the
+snapshot holds it, §6.5); a public one needs the lead's entry and its own pool (16.7). The
+whole workflow:
+
+```yaml
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+jobs:
+  ci:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: chaobrain/ci-runners/.github/workflows/ci.yml@v1
+    permissions:
+      contents: read
+      statuses: write
+      actions: read
+    with:
+      context: myproj/ci
+      plan: python scripts/ci_plan.py
+```
+
+`actions: read` lets the parts' salvage leg read its run's jobs (§2's `runner_name`). A
+fork's pull request skips the job (the guard, §4.8 rule 1); a consumer that wants a check
+for it runs one on GitHub-hosted runners.
+
 ## 5. Hosts
 
 ### 5.1 Runner pools
@@ -1897,29 +2321,38 @@ class (`CI_RUNNER_CLASS`) decides what the hook and the executor allow (§6.3). 
 first pools went with it (12.17), and its `h100` class with 13.4; it returns with the
 classes of the 3090 hosts (15.8).
 
-| host | pool (class) | instances | labels | runs |
-|---|---|---|---|---|
-| 3090b | `light` | 6 | `3090b-light`, `3090-light`, `ci-light` | claim, salvage, verdict; short consumer commands (a plan) |
-| 3090b | `part` | 3 | `3090b-cpu` | CPU parts, pinned to the inventory's `cpus` |
-| 3090b | `gpu` | 2 | `3090b-gpu`, `3090b-gpu<N>` | one-card parts on card N |
-| 3090b | `multi` | 1 | `3090b-multi` | two-card parts, after the P2P self-test (12.6) |
-| 3090b | `compile` | 1 | `3090b-compile` | exclusive timing parts on `compile_cpus` (12.7) |
-| 3090b | `slurm` | 8 | `3090b-slurm`, `3090-slurm` | cluster parts: one batch job each, no CI slot or card of the host (14.3) |
-| 3090a | `light` | 6 | `3090a-light`, `3090-light`, `ci-light` | as on 3090b |
-| 3090a | `part` | 3 | `3090a-cpu` | CPU parts |
-| 3090a | `gpu` | 2 | `3090a-gpu`, `3090a-gpu<N>` | one-card parts on card N |
-| 3090a | `multi` | 1 | `3090a-multi` | two-card parts, after the P2P self-test |
-| 3090a | `nightly` | 1 | `3090a-nightly` | a consumer's nightly, up to 600 min, holding the host (12.8) |
-| 3090a | `slurm` | 8 | `3090a-slurm`, `3090-slurm` | as on 3090b |
-| h100 | `light` | 8 | `h100-light`, `ci-light` | as on 3090b (15.8) |
-| h100 | `part` | 9 | `h100-cpu` | CPU parts, on 8 CI slots |
-| h100 | `gpu` | 5 | `h100-gpu`, `h100-gpu<N>` | one-card parts on card N; no `multi` until a P2P self-test passes (15.8) |
+The pools after RUN-10 (decision 16; each host's change is the lead's, 16.11). Until a
+host's change is applied, its inventory holds what runs there: today's pools, with host
+labels only and the CPU pools sized as before. A host's runners gain a capability label
+only after the label's numerics check passed there (16.1).
 
-A pool's size is the host's slots (or cards) plus one waiting seat per project allowed on
-it (§7); the 3090 hosts have 2 CI slots each, the count of brainspike's `ci_slot.sh`, and
-h100 has 8. **The light pools** (15.8) take no CI slot: about 20 runners on three hosts,
-each with the shared `ci-light`; the 3090 hosts' `3090-light` goes once no workflow asks
-for it.
+| host | pool (class) | instances | capability labels | host labels | runs |
+|---|---|---|---|---|---|
+| 3090b | `light` | 6 | `ci-light` | `3090b-light`, `3090-light` | claim, plan, verdict; short consumer commands |
+| 3090b | `home` (`light`) | 1 | — | `3090b-light` | the host's salvage legs; never stopped by presence (16.4) |
+| 3090b | `gpu` | 2 | `ci-gpu` | `3090b-gpu`, `3090b-gpu<N>` | one-card parts on card N |
+| 3090b | `multi` | 1 | `ci-gpu2` | `3090b-multi` | two-card parts, after the P2P self-test (12.6) |
+| 3090b | `compile` | 1 | `ci-timing` | `3090b-compile` | exclusive timing parts on `compile_cpus` (12.7) |
+| 3090b | `slurm` | 8 | `ci-slurm` | `3090b-slurm`, `3090-slurm` | cluster parts: one batch job each, no CI slot or card of the host (14.3) |
+| 3090a | `light` | 6 | `ci-light` | `3090a-light`, `3090-light` | as on 3090b |
+| 3090a | `home` (`light`) | 1 | — | `3090a-light` | as on 3090b |
+| 3090a | `part` | 2 | `ci-cpu` | `3090a-cpu` | CPU parts, one slot each |
+| 3090a | `gpu` | 2 | `ci-gpu` | `3090a-gpu`, `3090a-gpu<N>` | one-card parts on card N |
+| 3090a | `multi` | 1 | `ci-gpu2` | `3090a-multi` | two-card parts, after the P2P self-test |
+| 3090a | `nightly` | 1 | — | `3090a-nightly` | a consumer's nightly, up to 600 min, holding the host (12.8), until 16.10 |
+| 3090a | `slurm` | 8 | `ci-slurm` | `3090a-slurm`, `3090-slurm` | as on 3090b |
+| h100 | `light` | 8 | `ci-light` | `h100-light` | as on 3090b (15.8) |
+| h100 | `home` (`light`) | 1 | — | `h100-light` | as on 3090b |
+| h100 | `part` | 8 | `ci-cpu`, `mem-big` | `h100-cpu` | CPU parts, 8 slots of 20 threads (16.9) |
+| h100 | `gpu` | 5 | `ci-gpu` | `h100-gpu`, `h100-gpu<N>` | one-card parts on card N; no `multi` until a P2P self-test passes (15.8) |
+| the new host (16.9) | `light`, `home`, `part`, `gpu` | sized at its plan from the parts' measured peaks: about 96 threads and its 4 cards | `ci-light`, `ci-cpu`, `ci-gpu`; `ci-gpu2` after a P2P self-test | its role's | as on h100; a dedicated CI account |
+| the new host, second account (16.7) | `light`, `part`, `gpu`, audience `public` | a few, per opted-in repository | `ci-pub-light`, `ci-pub-cpu`, `ci-pub-gpu` | — | an opted-in public repository's jobs only; registered at repository level |
+
+A pool's size is its slots (or cards): one runner is one slot (16.2), and presence keeps
+online only the runners that can start a job (16.4), so no runner waits for a slot. The
+3090 hosts' CPU slots are the slot count of brainspike's `ci_slot.sh` (12.9). **The light
+pools** (15.8) take no CI slot; every light runner but the `home` one carries `ci-light`;
+`3090-light` goes with `v2`.
 **The `slurm` pools** (lead, 2026-11-11): 8 runners per 3090 host, up from 2, and the
 site config's `max_parts` (cluster parts per driver host) 8, up from 4, so that a runner
 never waits for a driver slot. With 2 per host, at most 4 cluster parts ran at once: a
@@ -1929,24 +2362,25 @@ part on the cluster. The bound is the account's CPU headroom: 16 runners × 32 c
 summed over the partitions of the enabled targets (CPU 72, v100 200, a100 128, a40 128,
 l40 64, h100 192; read on 2026-11-11 by the gate's `capacity`). The CPU partition alone
 holds 2 CPU parts at once (72 cores); a CPU part past those pends, and ends `unavailable`
-(`pending: … AssocGrpCpuLimit`) once its bound passes, so placement reads the CPU
-target's `start_now` in `pool status` before it sends a CPU part there. The GPU targets
+(`pending: … AssocGrpCpuLimit`) once its bound passes, so the route (16.5) books CPU
+parts against the CPU target's `jobs_free` before it sends one there. The GPU targets
 have room for the rest.
 Runner names are `<host role>-<pool>-<i>`, except the per-card pools'. All are org-level
-in Default (decision 1).
+in Default (decision 1), but the public pool's, which are registered on their repository.
 
-**Each host's labels are its own.** GitHub gives a job to any runner that has all its
-labels. So the light and CPU runners carry `3090b-light` and `3090b-cpu`, not the bare
-class names: a job of any repository that asks for `[self-hosted, light]` matches no
-runner, and a job that asks for `3090b-cpu` never lands on 3090a (decision 12.5).
-`setup` takes the labels from the inventory's pool entry; a pool may not give itself
-GitHub's labels or a bare class name. The `gpu` pool is `per_card`: one runner per card,
-named `<host>-gpu<N>`, labelled `<host>-gpu` and `<host>-gpu<N>`, with
-`CI_RUNNER_CARD=<N>` in its `.env`; a pool entry names its class where it is not the
-pool's key (`class = "gpu"`). The inventory's `peer_labels` names the other host's pool
-of each class, for a drained or busy part's `retry-on` (decision 13.3). The `part`
-class runs CPU parts only: the executor refuses `gpus > 0` there (`unavailable`), so
-only the per-card, `multi` and `nightly` runners lease cards.
+**Labels** (decision 16.1, amending 12.5). GitHub gives a job to any runner that has all
+its labels. A consumer asks for a capability label, an equal-verdict class: any runner
+that carries it gives the same verdict. A pool may not give itself GitHub's labels or a
+bare class name, and a capability label only on the class it names; `setup` takes the
+labels from the inventory's pool entry. Host labels keep a host's runners addressable for
+canaries, diagnosis and the reusable workflow's own legs. The `gpu` pool is `per_card`:
+one runner per card, named `<host>-gpu<N>`, labelled `ci-gpu`, `<host>-gpu` and
+`<host>-gpu<N>`, with `CI_RUNNER_CARD=<N>` in its `.env`; a pool entry names its class
+where it is not the pool's key (`class = "gpu"`). A pool with a `slot` table writes each
+runner's `CI_RUNNER_SLOT` (16.2). The inventory's `peer_labels` names the other host's
+pool of each class, for a drained or busy part's `retry-on` (decision 13.3), until `v2`.
+The `part` class runs CPU parts only: the executor refuses `gpus > 0` there
+(`unavailable`), so only the per-card, `multi` and `nightly` runners lease cards.
 
 ### 5.2 Setup scripts
 
@@ -2134,6 +2568,7 @@ On 3090b and 3090a the executor of §4.3 adds:
 |---|---|---|---|---|
 | h100 | the shared account, runners on it (decision 11.3) | everything a co-user of the account can reach, and they can reach everything of ours: the runner credentials, the hook, the policy, each job's `GITHUB_TOKEN` while the job runs, the checkout of a private repository, the results and the statuses we post | private repositories only, of org members only (decision 11.1, 11.2); `GITHUB_TOKEN` with `contents: read`, plus `statuses: write` only in claim and verdict; per-job directories, deleted after the job; no other credential there but the tunnel key, which opens only allowlisted HTTPS (T15); `NoNewPrivileges` | a dedicated account (decision 11.7) |
 | 3090b, 3090a | a dedicated CI account per host, runners on it (decision 12.2) | the CI account's files: the runner credentials, the hook, the policy, the envs, each job's `GITHUB_TOKEN` while it runs, the checkout of a private repository, the shared lock and slot files (a job can hold them and stall local runs); nothing of the local accounts (T18), no sudo, no GitHub credential | private repositories only, of org members only; `NoNewPrivileges`; the account's own mount namespace (decision 12.16); `GITHUB_TOKEN` as on h100; per-job directories; the tunnel key opens only allowlisted HTTPS; the push key only `--receive` | a root-owned host layer with system units (§5.3, T13) |
+| the new host's second account (16.7, from P2) | a second Unix account, runners registered on each opted-in public repository | the account's files: the runners' registrations of the opted-in repositories, the env, each job's `GITHUB_TOKEN` while it runs, the host's network; not the hooks, the policy, the snapshot or the `.env` files, which are root's; no cluster key, no tunnel key, no organisation token, no private repository's name | opted-in public repositories only, same-repository pull requests and protected refs of org members only (16.7); `NoNewPrivileges`; per-job directories | — |
 | egress host | a dynamic user of `ci-egress.service` | nothing of a job's: it sees only the names a job connects to | hardened system unit; root-owned release and allowlist | — |
 | workstation | the maintainer | nothing: no job runs there | the push reads the login at each run and stores nothing | — |
 | 3090b, the maintainer's account (15.3, 15.6) | the maintainer | nothing: no job runs as the maintainer, and the CI account reaches nothing of the local accounts (T18) | the backstop and the runner watch read the login at each run and store it nowhere; the watch keeps its counts | — |
@@ -2143,18 +2578,23 @@ On 3090b and 3090a the executor of §4.3 adds:
 | class | events accepted | actors | runner classes |
 |---|---|---|---|
 | private, allowlisted (every private repository of the org snapshot, §6.5, with its id; `compile` and `nightly` only where its `policy.toml` entry lists the class, decision 12.14) | `pull_request` (same repository), `push`, `workflow_dispatch`, `schedule`, `workflow_run`, `status`, `repository_dispatch` | `GITHUB_ACTOR`, `GITHUB_TRIGGERING_ACTOR`, and for a pull request its author and for a push its pusher, all on the actor allowlist (the org's members, §6.5). The workflow bot is accepted only for `workflow_dispatch` and `repository_dispatch`, and only where the repository's `bot_dispatch` switch is on (off by default; decision 10.1). | all |
-| any other repository, public ones and ci-runners itself included | none | none | none |
+| public, opted in (decision 16.7, from P1: `visibility = "public"`, `public_runners = true` and its id in `policy.toml`, written by the lead) | `pull_request` (same repository); `push` only where `GITHUB_REF_PROTECTED` is `true` | as for a private repository (the snapshot's members); the workflow bot never | `light`, `part`, `gpu` of the runner audience `public` only |
+| any other repository, other public ones and ci-runners itself included | none | none | none |
 
 `pull_request_target`, `issue_comment` and other events are refused everywhere unless
-the policy lists them for a private repository.
+the policy lists them for a private repository; a public repository takes no
+`extra_events`, `bot_dispatch` or `classes`. The runner audience (`CI_RUNNER_AUDIENCE`,
+`private` where unset) and the repository's class must agree: a private repository's job
+is refused on a `public` runner, and a public one's on every other runner.
 
 ### 6.3 The hook (`job-started`)
 
 `python -I` reads the inventory, the policy, the org snapshot (`etc/org.json`, §6.5) and
 `GITHUB_EVENT_PATH` as JSON, and does no network I/O. It bounds itself at 60 s (an
 alarm; if that fails, its wrapper kills it at 65 s, which refuses). It applies §6.2 to
-the runner's class (`CI_RUNNER_CLASS`) and checks that the event's repository id matches
-`GITHUB_REPOSITORY_ID`. It also removes stale work directories of this runner.
+the runner's class (`CI_RUNNER_CLASS`) and audience (`CI_RUNNER_AUDIENCE`, 16.7) and
+checks that the event's repository id matches `GITHUB_REPOSITORY_ID`. On the public pool
+it also reads `GITHUB_REF_PROTECTED`. It also removes stale work directories of this runner.
 
 It prints one line, `ci-runners: accepted|refused <reason code>`, followed by the
 policy's hash, and logs details on the host only. The job-completed hook stops the
@@ -2165,7 +2605,7 @@ bound).
 
 | # | threat | mitigation |
 |---|---|---|
-| T1 | A fork pull request asks for a self-hosted label by editing the workflow in the fork. | `allows_public_repositories` stays off, so a public repository's job matches no runner; the org forbids forks of private repositories; the guard on every job of `h100-test.yml`; the hook (fork, actor, repository, class); no docker for the runner account; `NoNewPrivileges` |
+| T1 | A fork pull request asks for a self-hosted label by editing the workflow in the fork. | `allows_public_repositories` stays off, so a public repository's job matches no org runner; the org forbids forks of private repositories; the guard on every job (§4.8 rule 1); the hook (fork, actor, repository, class, audience); no docker for the runner account; `NoNewPrivileges`. On an opted-in public repository's own runners (16.7) the hook refuses a fork's pull request, `pull_request_target`, a non-member and a bot before the first step, proven by the live negative test (P2), and the account holds no credential of ours |
 | T2 | Someone outside the org's members pushes a workflow that asks for our labels (an outside collaborator, a bot). | the hook's actor checks against the snapshot's members |
 | T3 | A new or unlisted repository asks for our labels (Default is open to all private repositories). | the hook's repository allowlist (the snapshot); the repository id is checked against the name |
 | T4 | Someone moves `v1` in ci-runners to bad code. | D1 rulesets (only the lead can update or delete `v*` and `main`); the hook and executor come from installed releases (D2) |
@@ -2176,8 +2616,8 @@ bound).
 | T9 | The hook's output leaks inventory in logs. | a reason code only; the inventory lint |
 | T10 | A hostile event payload targets the hook. | JSON parsing in `python -I`; no shell interpolation; fixtures with hostile strings |
 | T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the statuses of the runners' identity, the policy's `bot` (15.9). A workflow of the repository can still post as the bot with its own job token, so someone with write can still forge one; consumers audit merges |
-| T12 | A burst of refused jobs blocks our runners. | refusal in under 10 s; the lead can pause a repository in the policy |
-| T13 | (also any co-user of h100's account, an accepted gap; on the 3090 hosts the CI account's own jobs only) An accepted job (or its dependency) edits the host layer it owns: the hook (or its copy in `/tmp`, 13.5), the policy, `.env`, the units, the drain file or the load record (13.1, 13.2), so later jobs pass unchecked. | private consumers only (§5.3); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs; `ci-run hooks copy` checks its `/tmp` directory through a descriptor (no link, the account's, mode 700) and then writes the copies by path, which only the account itself could race in its private `/tmp` (accepted, 13.5) |
+| T12 | A burst of refused jobs blocks our runners (on the public pool, anyone may open fork pull requests). | refusal in under 10 s; the lead can pause a repository in the policy; each opted-in public repository requires approval before an outside contributor's workflow runs (a repository setting, the lead's); the public pool's runners serve that repository only |
+| T13 | (also any co-user of h100's account, an accepted gap; on the 3090 hosts the CI account's own jobs only; not on the public pool, whose hooks, policy, snapshot and `.env` are root's, 16.7) An accepted job (or its dependency) edits the host layer it owns: the hook (or its copy in `/tmp`, 13.5), the policy, `.env`, the units, the drain file, the load record (13.1, 13.2), presence's state or the capacity file (16.4, 16.5), so later jobs pass unchecked or the route is misled. | private consumers only (§5.3); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs; `ci-run hooks copy` checks its `/tmp` directory through a descriptor (no link, the account's, mode 700) and then writes the copies by path, which only the account itself could race in its private `/tmp` (accepted, 13.5) |
 | T14 | A co-user of h100's shared account reads the org-sync token, or edits the snapshot. | no token on h100 (decision 11.9): the snapshot arrives over the maintainer's ssh access, checked by `--receive` (§6.5). A host that syncs itself holds a fine-grained read-only token (members, metadata): it shows the member list and the private repositories' names, nothing else. An edited snapshot is T13's case. |
 | T15 | A co-user of h100's shared account takes the tunnel key, or any local user of a host uses the tunnel's port on 127.0.0.1 (on the 3090 hosts, every local account can reach it). | the egress account has no shell and no listening forward, and its key opens only the egress proxy's port (decision 11.10). The proxy passes only its allowlist on port 443: HTTPS to GitHub, the Actions service's storage and the package indexes, which job code reaches through the tunnel anyway. The suffix `.blob.core.windows.net` lets them reach any Azure storage account over HTTPS, and `storage.googleapis.com` any Google Cloud Storage bucket: accepted gaps, since the Actions storage accounts have no stable names and package downloads use those buckets. They appear as the egress host's address. The allowlist is root-owned on the egress host. The lead revokes the key by deleting one line there. |
 | T16 | (3090 hosts) A job, or a local user, holds the shared host lock or a slot, and stalls the other side's work; or a local account empties the ticket queue. | the files are `flock` locks, so a hold ends with its process: a part's hold ends with its scope (inner timeout, the job-completed hook, the reaper); a waiting part ends `unavailable` at its queue timeout; the files hold no data, and a lost ticket only loses a place in the queue |
@@ -2187,6 +2627,7 @@ bound).
 | T20 | (14) Other users of the cluster reach our files or a forward, or read the site's names in our public logs. | the account's root and every part directory mode 700; `check` and `apply` refuse a root another user could swap (its mode, a link, the directories above it); what a part shows on GitHub is redacted (14.4); a part's temporary files on a node only inside a 700 directory of its own; the build's forward is a Unix socket in a 700 directory behind a relay that accepts only the build's random credential | a node's `/tmp` and process table are shared with other users' jobs, as for any user of the site |
 | T21 | (14) Runaway cost: a lost driver, a stuck job, a retry loop. | every job has `--time`; the reaper cancels a job whose GitHub job is gone; pending is bounded; one retry (§4.4); the daily and monthly caps (14.7) | job code (T19) can spend up to the site's association limits |
 | T22 | (14) A node silently corrupts multi-card results (peer copies that read zeros). | the P2P self-test before every two-card part (12.6); a target's `max_cards` from its canary | – |
+| T23 | (16.7) Code of an opted-in public repository, from a member's same-repository branch (fork commits nobody reviewed included) or a compromised dependency, runs on the public pool and reads what the account holds, or its public logs show the host. | a separate account and host: no cluster key, tunnel key or organisation token, a snapshot without private repositories, root-owned checks; repository-level runners; the hooks at a path naming no disk or account, the machine name the lead's | the member vouches for their branch (consumers' guide); the job reaches the runners' registrations of the opted-in repositories and the host's network |
 
 ### 6.5 The org snapshot
 
@@ -2204,6 +2645,9 @@ document loads as the hook loads it, every repository in it belongs to the polic
 snapshot in place (a replayed old snapshot cannot bring back a removed member). Anything
 else leaves the old snapshot, exits 1 and prints why. Receives take a lock, one at a
 time. The push timer is monotonic: a workstation suspended for an hour stales h100 too.
+The public pool's account (16.7, from P2) receives with `--receive --public`, which keeps
+the members only and drops every private repository before it writes (an opted-in public
+repository is the policy's own entry).
 A host that holds its own token runs `ci-orgsync.timer` instead (inventory `orgsync`,
 `etc/orgsync.token`).
 
@@ -2228,48 +2672,65 @@ fails meanwhile.
 
 ## 7. Scheduling and fairness
 
+**Queues are GitHub's, one per capability label** (decision 16). A part's labels are
+chosen once, in the plan job, by the route (16.5): its capability label, `mem-big` where
+it needs a big slot, and `ci-slurm` only as overflow when no free host has a slot and the
+cluster can start it now. GitHub gives the job to any online runner with those labels, and
+presence (16.4) keeps online only the runners that can start a job now, so a part waits
+in GitHub's queue rather than on a host, and a free slot on any host of the label takes
+it. A label that no host serves fails the plan at once (16.5). Until a consumer moves to
+capability labels, its host labels route as before (§4.8 rule 2).
+
 Shared resources, per host:
 
-- **CI slots**: CPU and `compile` parts take one of the host's slots (inventory `slots`,
-  2 on each host), in the files the inventory's `files` names: under `state/` on h100,
+- **Slots**: one part runner is one slot, a fixed cpuset and memory cap (16.2, from R2).
+  Until `v2`, CPU and `compile` parts also take one of the host's CI slots (inventory
+  `slots`) in the files the inventory's `files` names: under `state/` on h100,
   brainspike's slot files on the 3090 hosts (decision 12.9), which its local runs take
-  through `ci_slot.sh` too. Each card is its own slot: a GPU part takes its card's lease
-  instead. A `nightly` part takes every slot.
+  through `ci_slot.sh` too; presence stops a part runner whose CI slot a local run or a
+  pool run holds. Each card is its own slot: a GPU part takes its card's lease instead. A
+  `nightly` part takes every slot.
 - **GPU leases**: per card, at most `max_parts` parts (default 1), and the free-memory
   check (`gpu-mem-mib`) at lease time, which also sees local work on the card. Leases are
   given in ticket order per card, so a `multi` or `nightly` part that waits for several
-  cards holds back the later leases of those cards (decision 12.6).
+  cards holds back the later leases of those cards (decision 12.6). Presence stops a
+  card's runner while someone else holds the card.
 - **Host lock** (3090 hosts): brainspike's `host_lock.sh` protocol, in `ci-lock`
   (decision 12.9). An `-x` request waits for the shared holders already in, so every
   project keeps a shared hold to about 15 min and takes the lock per step for longer
   commands (as brainspike does), and a `compile` part's whole-command `x` waits at most
   that long. A request made under a hold is covered by it (the nesting variable).
-- **Memory**: each part's cap (§4.3); `ci.slice` and `ci-<project>.slice` where the user
-  manager has a memory controller (decision 11.11).
+- **Memory**: each part's cap (§4.3, its slot's `memory`); `ci.slice` and
+  `ci-<project>.slice` where the user manager has a memory controller (decision 11.11).
+- **Dev slots**: `pool run` takes the registry's `dev_slots`, never a CI slot (16.8).
 
 Rules:
 
-1. **Queue order.** First come, first served, but a ticket whose project already holds
-   its cap is skipped. When several projects wait, the next slot goes to the project
-   that holds the fewest slots, and ties go to the older ticket.
-2. **Per-project caps** come from the registry: `max_slots` per host (default 1),
-   `memory_max`, and `max_waiting` per pool (default 1). A first attempt beyond
-   `max_waiting` ends `unavailable` ("project queue full") and goes elsewhere; a retry
-   queues past it, counted by it (decision 13.6). So one project cannot fill a pool with
-   waiters, and GitHub's queue, which is not fair across repositories, stays short.
-3. **Light jobs never wait behind heavy ones**: claim and verdict run on their own
-   `light` pool and take no slot.
+1. **Order.** GitHub's queue per label decides who goes next. It is not fair across
+   repositories, so the reusable workflow runs at most the registry's `max_parallel`
+   parts of one run at once (`max-parallel` on the parts matrix), and `ci-run stats`
+   reports the queue delay per repository (16.8). Until `v2` the host's CI slot queue
+   stays first come, first served, but a ticket whose project already holds its cap is
+   skipped, and the next slot goes to the project that holds the fewest, ties to the
+   older ticket; with one runner per slot it seldom has a waiter.
+2. **Per-project caps** come from the registry: `max_parallel` per run (16.6),
+   `max_slots` per host (default 1, until `v2`) and `memory_max`. `max_waiting` per pool
+   (decision 13.6) lapses for a pool whose instances equal its slots, since no runner
+   there waits; it still bounds a pool that has more runners than slots, until `v2`.
+3. **Light jobs never wait behind heavy ones**: claim, plan and verdict run on the
+   `ci-light` runners and take no slot; each host's `home` runner serves its salvage legs.
 4. **Interop with `ci_slot.sh`** (3090 hosts; decision 12.9). `ci_slot.sh`'s tickets
    carry no project, so they count as the host's `default_project` (brainspike). Its
    waiters apply no caps, so that project's cap is the slot count on those hosts.
-5. **Accounting** is the part records under `state/parts/`: queue time, run time and
-   outcome per part. No report command is built yet.
-6. **Busy hosts and drains** (decision 13). A part does not queue on a host that another
-   account has kept busy for the whole window, nor on a drained one: it goes once to the
-   other host's pool of its class. A retry, or a re-run of a head already sent away, waits
-   for its slot where it lands, so load moves at most once per head and part. Nor does a
-   first attempt queue behind a `nightly` part that holds or waits for every slot and
-   card (decision 13.6).
+5. **Accounting**: the part records under `state/parts/` (queue time, run time and outcome
+   per part) and `ci-run stats` over the jobs API (16.8).
+6. **Busy hosts and drains.** Presence stops the runners of a drained host or pool, of a
+   card or slot that someone else holds, and of a host whose health gate fails (16.4), so
+   new parts go to the label's other hosts. The executor's refusals stay as the backstop
+   (decision 13): a refused part is retried once by 16.5's rows. Until `v2`, a first
+   attempt refused as busy or drained still names the other host's pool in `retry-on`
+   (13.3), and does not queue behind a `nightly` part that holds or waits for every slot
+   and card (13.6).
 
 ## 8. Failure modes and bounds
 
@@ -2278,7 +2739,10 @@ Rules:
 | runner offline mid-part | GitHub fails the job without outputs | `lost`: the verdict salvages the record |
 | host reboot | running parts end; with linger the units start again, the tunnel first | `reboot` (as thermal); the reaper cleans up |
 | the user manager stopped and started again (15.5) | running parts end; the units start again with the manager | a runner whose start fails (the hooks' copy not yet done) is retried every 30 s, and the copy too, with no start limit |
-| no runner of a host online (15.5) | jobs labelled for that host wait in GitHub's queue | `pool status` shows `no runner online`, and brainspike's plan places no part there; the plan prints the runners not running |
+| no runner of a host online (15.5) | jobs labelled for that host wait in GitHub's queue | `pool status` shows `no runner online`; the route counts the host down, and a label no other host serves fails the plan at once (16.5); the plan prints the runners not running |
+| presence stops a runner as a job is assigned to it (16.4) | the job starts on a resource that is no longer free, or ends without outputs | the executor's refusal (`unavailable`) or `lost`/`stopped`, one retry by 16.5's rows; counted by `ci-run stats` |
+| a host that ends every job for an infrastructure reason (a black hole, light runners included) | it would take and fail every job of its labels | `presence.infra_failures` such ends in 15 min drain it and presence stops its runners but the `home` one (16.4); the operator undrains |
+| a host's capacity row older than 2 min, or its probe unanswered in 2 s | | the route counts the host down (fail closed for placement, 16.5) |
 | thermal kill or early stop | the part's processes die, or we stop them | `thermal`: one retry on a cool card |
 | OOM | the scope's processes are killed | `oom`: one retry with `resume` |
 | h100's tunnel down | the runners go offline for its length (their own traffic goes through it, decision 11.10); a running part goes on, but its job cannot report and may end `lost`, then is salvaged | ssh's keep-alive ends a dead link in 90 s, and systemd restarts it after 10 s; the runner app retries its connection on its own. The egress proxy answers 502 when its own connection fails |
@@ -2288,8 +2752,8 @@ Rules:
 | the workstation down, or its push failing | the snapshot ages | every job of a host whose push fails refused `stale` after 60 min, until the push is back; the other hosts are not held up |
 | a 3090 host's tunnel down | as h100's | as h100's |
 | a local run holds the host lock or a slot | parts wait | their queue timeout, then `unavailable`; an exclusive hold of `busy.lock_minutes` or more sends a first attempt to the other host (13.2) |
-| another account keeps the host busy (CPU, memory, a card) | parts would compete with it | a first attempt goes to the other host's pool (13.2) |
-| a host or pool drained | no new part runs there | `unavailable`, one retry on the other host's pool; `none` where there is none (13.1, 13.3) |
+| another account keeps the host busy (CPU, memory, a card) | parts would compete with it | presence stops the runners of the busy slot or card (16.4); a first attempt that still lands there is refused busy and retried (13.2, until `v2`) |
+| a host or pool drained | no new part runs there | presence stops its runners (16.4); a part that still lands there ends `unavailable` and is retried once (13.1, 16.5) |
 | the drain file unreadable or malformed | | the host counts as drained (fail closed) |
 | the load timer stopped, or too few samples | busy is not known | not busy (fail open): parts wait for their slots as before |
 | a hook copy in `/tmp` missing or changed | a job would start without its hook | the runner fails "Set up runner" for a missing file; the reaper rewrites the copy within 10 min; a runner does not start without both copies (13.5) |
@@ -2308,7 +2772,10 @@ Rules:
 | slot or lease wait | 60 min (input) |
 | sampler; early stop | every 30 s; 85 °C for 3 min |
 | the supervisor's memory cap | checked every 2 s |
-| a part | the consumer's `timeout-minutes`, at most 240 (`nightly`: 600); its job's is 15 min more |
+| a part | the consumer's `timeout-minutes`, at most 240 (`nightly`: 600); its job's is 15 min more; in the reusable workflow, the plan's `minutes` × the slot's `speed`, and the job's the label's largest `speed` × `minutes` + 15 (16.2) |
+| presence | a tick every 20 s; a stop after two idle ticks with a cause, a start after two without |
+| capacity | `pool status --fast` within 2 s (p95) with one host down; a row older than 2 min is down |
+| the contract check | one light job, about 20 s (16.6) |
 | P2P self-test | 60 s |
 | env refresh | every 30 min; one refresh at a time per project |
 | tunnel | keep-alive 30 s × 3; restart after 10 s |
@@ -2334,8 +2801,8 @@ Rules:
   of the hook must accept every major still installed.
 - **Rollout of `v1.N`:**
   1. A PR with tests (hosted unit tests, fixtures, a live check on one host).
-  2. The stamp PR: `actions/RELEASE` set to `v1.N.0` (and a reusable workflow's action
-     refs, should one return; none since 12.17).
+  2. The stamp PR: `actions/RELEASE` set to `v1.N.0`, and, from R6, the action refs in
+     `ci.yml` and `part.yml` and `ci.yml`'s ref to `part.yml` (16.6).
   3. The lead tags `v1.N.0` on the stamp's merge commit.
   4. `install.sh` on every host, the egress host included; nothing switches yet.
   5. A canary consumer branch composes the actions at `@v1.N.0` on both 3090 hosts and
@@ -2349,7 +2816,9 @@ Rules:
   workflow file. So the release stamp also rewrites the reusable workflow's own action refs
   (`chaobrain/ci-runners/actions/<a>@v1`) to `@v1.N.0`, and the PR after the tag sets them
   back to `@v1` with `actions/RELEASE`. A test checks that the refs and the stamp agree,
-  and that the docs' examples read `@v1`; since 12.17 no workflow here calls an action.
+  and that the docs' examples read `@v1`. From 12.17 until R6 no workflow here called an
+  action; from R6 `ci.yml` and `part.yml` do (16.6), and the same test covers their refs,
+  `ci.yml`'s ref to `part.yml` included.
 - **A host change the old release cannot run.** `v1.2.0` changed h100's inventory (the
   tunnel table) in a way `v1.1.0`'s host layer refuses. Between h100's apply and the move
   of `v1`, every h100 job ran `v1.1.0` and failed at once. Such a release says so in its
@@ -2357,9 +2826,11 @@ Rules:
   host holds the release, or the host layer first learns to read both forms in a release
   of its own (as `v1.3` does for the retired inventory keys, 11.12).
 - **Breaking changes** get `v2`: a removed or renamed input that a consumer passes, a
-  changed output, a changed label. `v1` stays tagged and installed until its last
-  consumer has migrated. Before a removal counts as non-breaking, the org's repositories
-  are searched for callers.
+  changed output, a changed or removed label. `v1` stays tagged and installed until its
+  last consumer has migrated. Before a removal counts as non-breaking, the org's
+  repositories are searched for callers. A capability label added to runners that keep
+  their host labels is additive (16.11); removing host-label routing, `peer_labels`, the
+  busy refusal and a part's `SlotQueue` is `v2` (16.10).
 - **`v1.4.0` is additive** (decision 12): new labels and classes, the `lock` input, the
   `salvage` action, the env spec's `conda` table and the inventory's optional keys. No
   input a consumer passes is removed or renamed, and h100's inventory and `h100-test.yml`
@@ -2707,6 +3178,18 @@ Rules:
      `cpus` to every CPU and its units without `CPUAffinity`; `main` reverts #170, so decision 15.10 is gone.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
+- **RUN-10's order** (decision 16). The release that accepts and ignores the new
+  inventory keys (`slot`, `audience`, `presence`) and the env spec's `contract` goes
+  first (R1, 16.3), and `v1` moves to it before any host's inventory or consumer's spec
+  gains one. Then each phase is a minor release of `v1`: capability labels are added to
+  runners beside their host labels; a part reads its slot only where its runner has one;
+  presence acts only where its host's inventory enables it; the route, the reusable
+  workflow and the public policy add files and keys and change no input a `v1` caller
+  passes. A consumer moves to `ci.yml@v1` when its canary run is green. `v2` (R9) comes
+  last, once the org's repositories, searched, name no host label. Rollback at every step
+  is a revert, moving `v1` back, or the host's previous inventory (16.11).
+- **The plan schema** (§4.10) is versioned on its own: a release reads every plan schema
+  a `v1` consumer may still print, and a new schema adds keys, never changes one.
 
 ## 10. Phases
 
@@ -2947,11 +3430,85 @@ and evidence, none with a site fact:
 3. Live at the release: one CPU part and one one-card part of the canary repository pass
    on the cluster, and a cancelled one ends `stopped` with its job gone; then `v1` moves.
 
+**RUN-10: capability queues and one CI for the organisation** (decision 16, issue #175).
+Each phase is its own issue and PR (at most about 1,500 lines), with its tests, each
+failing on a mutant, and its evidence; host and org steps are the lead's (16.11). The
+first consumer's own changes (its plan in schema 1, its workflow calling `ci.yml`, its
+nightly on capability labels) are its PRs, not this repository's.
+
+- **R0**: this contract (decision 16) and AGENTS.md's label rule. *Acceptance:* the lead
+  approves the PR.
+- **R1, the inventory first** (16.3): the loader accepts and ignores a pool's `slot` and
+  `audience` and a host's `presence`, and the env spec's `contract`; `setup` writes
+  `CI_RUNNER_SLOT` (inert until R2); the verdict reads each part's latest attempt only,
+  so a re-run of failed jobs can turn a run green (#169); setup's install of the
+  env-refresh units (#49) becomes a check of each host's apply. *Acceptance:* the old and
+  the new inventory and spec fixtures both load; a minor release, and `v1` moves to it
+  before any host's inventory gains a key.
+- **R2, slots** (16.2): `part` pins to its runner's slot, caps its memory, and sets
+  `CI_WORKERS`, `CI_SPEED` and `CI_ISA`; the per-slot `isa` cap. *Acceptance:* on each
+  slot of a test inventory, the pin and the environment are the slot's; a runner without
+  a slot runs exactly as before.
+- **R3, presence** (16.4): `presence.py`, `ci-presence.{service,timer}` and the runner
+  unit's `ExecCondition=`; "ours" by systemd unit and cgroup in `hostload` (the shared
+  account included); the infrastructure-failure count and the self-drain. *Acceptance:*
+  unit tests for each cause, the two-tick rule and the black hole; on a real host
+  (3090a), 50 presence stops and starts under load with 0 parts lost without a retry;
+  `presence = { enabled = false }` restores every runner within one tick.
+- **R4, capacity** (16.5): `pool status` writes `state/capacity.json`; `--fast`; the
+  forced probe returns the file; the cluster's figures cached by a timer. *Acceptance:*
+  `pool status --fast` ends within 2 s at the 95th percentile over 100 calls with one
+  host down.
+- **R5, the route** (16.5): `route.py` and the five retry rows. *Acceptance:* replayed on
+  the recorded plans of the first consumer's last 14 days, no part is routed to a host
+  label, a part goes to the cluster only when no host had a free slot of its label, and
+  a label with no host serving it fails the plan.
+- **R6, the reusable workflow** (16.6): `ci.yml` and `part.yml`; the contract check; the
+  stamp's rewrite of their refs. *Acceptance,* on the canary at `@v1.N.0`: a run takes 3
+  pickups on its critical path; a runner killed during a part leads to its salvage and a
+  retry, and the run ends green; a head whose contract is too old is red in under 30 s
+  with no part started; every fact §2 lists for R6 is confirmed or the contract amended.
+- **R7, statistics and dev slots** (16.8): `ci-run stats`; `pool run` on `dev_slots`.
+  *Acceptance:* on a recorded batch of 8 runs, the report's queue, run and verdict delays
+  per label and per repository equal an independent count from the jobs API; a pool run
+  on a host with `dev_slots` takes no CI slot.
+- **R9, `v2`** (16.10): host-label routing for consumers, `peer_labels`, the busy refusal
+  and a part's `SlotQueue` go; `v2.0.0`. *Acceptance:* the org's repositories, searched,
+  name no host label; the canary is green and red as expected on `@v2.0.0`; `v1` stays
+  installed until its last caller has moved.
+- **P1, the public policy** (16.7): the entry's `public_runners`, the runner audience,
+  the protected-ref rule, the snapshot's `--public` receive. *Acceptance:* unit tests on
+  the event fixtures (a fork pull request, a member's fork, `pull_request_target`, a
+  bot's dispatch, a member's `workflow_dispatch`, a `schedule`, a fork's `workflow_run`,
+  `issue_comment`, an unprotected ref's `push`,
+  a private repository's job on a `public` runner and a public one's on a `private`
+  runner) are each refused with its reason; a same-repository pull request and a
+  protected `push` of an opted-in public repository are accepted on a `public` runner
+  only.
+- **P2, the public pool live** (16.7): the second account, its root-owned files, the
+  repository-level runners, on a public copy of the canary, then one public library.
+  *Acceptance:* a fork's pull request whose workflow names `[self-hosted, ci-pub-cpu]`
+  and whose first step writes a marker ends in "Set up runner" with `ci-runners: refused
+  fork`; the jobs API shows the step not run; the host's hook log has `fork`; no marker
+  file and no `ci-part-*` scope exist; the same for a member's fork,
+  `pull_request_target` and a non-member's re-run; a same-repository pull request is
+  green.
+
+*Open points:* a queued part's bound inside the reusable workflow (a part whose job no
+runner takes for its bound; today the consumer's own sweeper); the public account's
+egress where its host has no direct route (a key of its own, the lead's); the machine
+name the public pool's runners show; whether the public pool should also take a member's
+`workflow_dispatch` or a `schedule` on a protected ref (16.7 takes neither); the `nightly`
+class once its consumer runs its nightly on capability labels.
+
 ## 11. brainspike on top of this (decision 12)
 
-brainspike composes the actions in its own `ci.yml` (§4.8), on both 3090 hosts. Its
-contract is the CI contract of its spec repository; this section lists only what it
-takes from here:
+brainspike composes the actions in its own `ci.yml` (§4.8), on the three hosts and the
+cluster. Its contract is the CI contract of its spec repository; this section lists only
+what it takes from here. With decision 16 it moves to the reusable workflow (§4.10): its
+plan prints schema 1, its parts name capability labels, and its nightly and cache
+warm-up follow before host-label routing goes (`v2`); the rows below name the pieces it
+uses until then.
 
 | brainspike needs | ci-runners piece |
 |---|---|
@@ -2971,9 +3528,12 @@ takes from here:
 
 1. **Visibility of ci-runners.** The repository is public, with rulesets on `main` and
    `v*` that only the lead may bypass. It never holds inventory (D1).
-2. *Repository-level GPU runners for public consumers.* Retired by 11.12.
-3. **Runner pools.** Pools are shared per host and class, with one waiting seat per
-   project and `max_waiting`.
+2. **Repository-level runners for public consumers.** Retired by 11.12; back with 16.7:
+   light, CPU and GPU runners of a separate account on one host, registered on each
+   public repository that opts in, with root-owned checks.
+3. **Runner pools.** Pools are shared per host and class. *Amended by 16.2 and 16.4:* one
+   runner per slot, and presence keeps online only the runners that can start a job, so
+   the waiting seat and `max_waiting` lapse where a pool's instances equal its slots.
 4. *The CI proxy.* Retired by 11.12.
 5. *First public consumer (RUN-4).* Retired by 11.12.
 6. *Verify timing.* Retired by 11.12.
@@ -2981,7 +3541,7 @@ takes from here:
    and retried on a cool card, before the watchdog throttles or kills it.
 8. *Manifest cost.* Retired by 11.12.
 9. **Default group's repository access.** Every private repository (decision 11.1);
-   `allows_public_repositories` stays off.
+   `allows_public_repositories` stays off, also with the public pool (16.7).
 10. **Org base permission.** It stays `write` for now: the hook and the rulesets cover
     the runners.
     - *Follow-up for the lead:* tighten it later to `read`, with write granted by team.

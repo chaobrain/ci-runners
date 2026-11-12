@@ -209,7 +209,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 | ci-runners 里出现 `No runner of <host> online` | 那台主机的 runner 在 GitHub 看来全部离线，已经连续两次检查（约 15 分钟）。到那台主机的 CI 账户看 `systemctl --user status 'ci-runner@*' ci-hooks ci-tunnel` 和日志，再看 `ci-run pool status`。runner 恢复后，下一次检查会自动评论并关闭 issue。监视器自身的记录在 3090b 维护者账户的 `journalctl --user -u ci-runner-watch`。 |
 | 部件一秒内就 `lost` | 多半是 `systemd-run` 拒绝了某个参数（例如在旧 systemd 上用了 `OOMPolicy`）。到部件记录 `state/parts/<repo>/<run>-<attempt>/<id>-<n>/` 里看 `log` 和 `record.json`。 |
 | 报错 `unknown keys [...]` 或 inventory 无法加载 | 主机文件和正在跑的 release 版本不一致（§5 第二个教训）。确认 `releases/hook` 和 `v1` 指向的版本，再决定 apply 还是移动 `v1`。 |
-| 想知道某个部件是哪个 runner 跑的 | 被调用的工作流里，API 返回的作业 `runnerName` 是空的。看主机上部件记录 `record.json` 里的 `runner`。 |
+| 想知道某个部件是哪个 runner 跑的 | 作业 API 的 `runner_name`（被调用的工作流里的作业也有，design §2），或者主机上部件记录 `record.json` 里的 `runner`。 |
 | 同一个 head 重新触发没有跑 | claim 跳过了已经绿的 head，推一个新 commit 再跑。 |
 | env build 时出现 403 | 缺少 `no_proxy`，包镜像被送到了 egress 代理。按 §4 从 runner 的 `.env` 导入代理变量。 |
 | 卡一直 `unavailable: health gate` | 卡温 ≥ 80 °C 或读不到。用 `nvidia-smi` 看温度。 |

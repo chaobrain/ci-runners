@@ -5,9 +5,12 @@ isolated (``-I``). ``job-started`` reads only local files (the policy, with a sc
 policy the org snapshot ``org.json``, the inventory and ``GITHUB_EVENT_PATH``), does no network I/O, bounds itself at 60 s and prints one line,
 ``ci-runners: accepted|refused <reason> policy=<hash>``, by the runner's class and audience
 (design §6.3). Both are the inventory's for the runner's name (``RUNNER_NAME``, which no
-workflow can set; decision 18.7, C2c): the environment's ``CI_RUNNER_CLASS`` and
-``CI_RUNNER_AUDIENCE`` must agree with them, a runner the inventory does not name is refused
-(``runner``), and an inventory that does not load refuses (``inventory``). Details go to the host's
+workflow can set; decision 18.7, C2c), never the environment's: ``job-started.sh`` starts the
+decision under ``env -i`` with the ``GITHUB_*`` and ``RUNNER_*`` it reads (``ENV``), so no
+``CI_RUNNER_*``, ``LD_*`` or ``PYTHON*`` of a job's arrives, and ``started`` ignores
+``CI_RUNNER_CLASS`` and ``CI_RUNNER_AUDIENCE`` where a caller passes them. A runner the
+inventory does not name is refused (``runner``, the host's fault: a stale runner directory)
+and an inventory that does not load refuses (``inventory``). Details go to the host's
 ``logs/hook-<date>.log`` only. Any error refuses the job. ``job-completed`` stops the job's
 part scopes and always exits 0, within 120 s.
 """
@@ -30,6 +33,9 @@ MAX_SNAPSHOT = 4 << 20
 MAX_EVENT = 64 << 20
 MAX_INVENTORY = 1 << 20
 START_BOUND, COMPLETE_BOUND = 60, 120
+#: the environment ``job-started`` reads, and all that ``job-started.sh`` passes it (C2c)
+ENV = ('GITHUB_ACTOR', 'GITHUB_EVENT_NAME', 'GITHUB_EVENT_PATH', 'GITHUB_REF_PROTECTED', 'GITHUB_REPOSITORY',
+       'GITHUB_REPOSITORY_ID', 'GITHUB_RUN_ID', 'GITHUB_TRIGGERING_ACTOR', 'RUNNER_NAME')
 
 
 class _Timeout(Exception):
@@ -88,8 +94,7 @@ def started(env: dict[str, str]) -> tuple[int, str]:
     detail: dict = {'runner': env.get('RUNNER_NAME', ''), 'repository': env.get('GITHUB_REPOSITORY', ''),
                     'event': env.get('GITHUB_EVENT_NAME', ''), 'actor': env.get('GITHUB_ACTOR', ''),
                     'triggering_actor': env.get('GITHUB_TRIGGERING_ACTOR', ''), 'run': env.get('GITHUB_RUN_ID', ''),
-                    'class': env.get('CI_RUNNER_CLASS', ''), 'audience': env.get('CI_RUNNER_AUDIENCE', ''),
-                    'ref_protected': env.get('GITHUB_REF_PROTECTED', '')}
+                    'class': '', 'audience': '', 'ref_protected': env.get('GITHUB_REF_PROTECTED', '')}
     try:
         if not etc:
             raise policy.PolicyError('CI_RUNNERS_ETC is not set')
@@ -113,17 +118,18 @@ def started(env: dict[str, str]) -> tuple[int, str]:
                 detail['error'] = f'inventory: {e}'[:300]
                 d = policy.Decision(False, 'inventory')
             else:
-                said = (env.get('CI_RUNNER_CLASS', ''), env.get('CI_RUNNER_AUDIENCE', 'private'))
-                if facts is None or said != facts:  # never the environment's word alone
-                    detail['error'] = f'runner: the inventory names it {facts}, its environment {said}'
+                if facts is None:  # a runner directory this host's inventory does not know
+                    detail['error'] = 'runner: the inventory names no such runner'
                     d = policy.Decision(False, 'runner')
                 else:
+                    detail['class'], detail['audience'] = facts
+                    env = {**env, 'CI_RUNNER_CLASS': facts[0], 'CI_RUNNER_AUDIENCE': facts[1]}  # never the caller's
                     try:
                         event = json.loads(_read(env.get('GITHUB_EVENT_PATH', ''), MAX_EVENT))
                     except (OSError, ValueError, RecursionError) as e:
                         detail['error'] = f'event: {type(e).__name__}'
                         event = None
-                    d = policy.decide(pol, env, event)  # its class and audience are the inventory's now
+                    d = policy.decide(pol, env, event)
     except _Timeout:
         d = policy.Decision(False, 'timeout')
     except Exception as e:  # noqa: BLE001 - any failure refuses

@@ -52,8 +52,8 @@ PUBLIC_EVENTS = frozenset({'pull_request', 'push'})
 
 #: the reason codes ``decide`` returns; the hook prints one of them and nothing else
 REASONS = ('ok', 'runner-class', 'self', 'repository', 'repository-id', 'payload', 'paused', 'audience', 'event',
-           'unprotected', 'fork', 'actor', 'bot', 'runner',
-           'stale', 'policy', 'inventory', 'timeout', 'error')  # from 'stale' on: the hook could not decide
+           'unprotected', 'fork', 'actor', 'bot',
+           'stale', 'runner', 'policy', 'inventory', 'timeout', 'error')  # from 'stale' on: the host's fault
 
 #: the org snapshot's schema, its age bound's range (minutes) and how far ahead of the
 #: host's clock its time may be (seconds)

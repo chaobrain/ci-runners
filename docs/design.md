@@ -1546,7 +1546,9 @@ Each item names what it supersedes or amends.
        itself: `presence.infra_failures` (default 3) such ends within 15 min drain it as
        15.2's miss does (`drained: infra`, each end logged on the host). They are a
        part's `unavailable` other than busy, drained or a full queue; a `lost` part on a
-       host that stayed up; and a hook refusal `stale`, `policy`, `timeout` or `error`.
+       host that stayed up; and a hook refusal `stale`, `runner` (a runner directory the
+       inventory does not know: a stale one would take a label's jobs and refuse each),
+       `policy`, `inventory`, `timeout` or `error`.
        Light runners count, and presence stops them on a drain like the others, since a
        broken light runner takes every claim and plan; each host keeps one more light
        runner, in a pool of its own that carries its host label and not `ci-light`,
@@ -3630,15 +3632,38 @@ the runner's class and audience (16.7) and checks that the event's repository id
 `GITHUB_REPOSITORY_ID`. *From C2c (2026-11-13):* the class and the audience are the
 inventory's for the runner's name (`RUNNER_NAME`, which no workflow can set): a private
 pool's runner as setup names it, a public runner as `<role>-pub-gpu<N>-<seq>` on a card of
-a host whose inventory has a public pool. The environment's `CI_RUNNER_CLASS` and
-`CI_RUNNER_AUDIENCE` (unset: `private`) must agree; a runner the inventory does not name,
-or one whose environment disagrees, is refused (`runner`, a decision), and an inventory
-that does not load refuses (`inventory`, an infrastructure end, 16.4). The hook reads the policy, the
-snapshot and the inventory from the etc setup writes into the installed job-started hook,
-as it writes its interpreter and its release, never from the environment's
-`CI_RUNNERS_ETC` (an unstamped copy, before setup runs again, falls back to it). A private
-pool's key never starts with `pub-gpu`, so no private runner's name reads as a public one. On the public pool
-it also reads `GITHUB_REF_PROTECTED`. It also removes stale work directories of this runner.
+a host whose inventory has a public pool; the environment's `CI_RUNNER_CLASS` and
+`CI_RUNNER_AUDIENCE` are never read. A runner the inventory does not name is refused
+(`runner`), and an inventory that does not load refuses (`inventory`); both are the host's
+fault and infrastructure ends (16.4), so a stale runner directory drains its host rather
+than black-hole a label (before the release reaches a host, its `actions-runner/*` is
+checked to be a subset of what `ci-run runners` lists). The hook reads the policy, the snapshot and the inventory from
+the etc setup writes into the installed job-started hook, as it writes its interpreter and
+its release, never from the environment's `CI_RUNNERS_ETC`: an unstamped copy refuses
+every job until setup runs again. A private pool's key never starts with `pub-gpu`, so no
+private runner's name reads as a public one. On the public pool it also reads
+`GITHUB_REF_PROTECTED`. It also removes stale work directories of this runner.
+
+*The decision's environment (from C2's review, 2026-11-13).* `job-started.sh` starts the
+decision under `env -i` with an allowlist: the `GITHUB_*` and `RUNNER_*` variables the hook
+reads (`hook.ENV`: `GITHUB_ACTOR`, `GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`,
+`GITHUB_REF_PROTECTED`, `GITHUB_REPOSITORY`, `GITHUB_REPOSITORY_ID`, `GITHUB_RUN_ID`,
+`GITHUB_TRIGGERING_ACTOR`, `RUNNER_NAME`), each only where it is set and as it is, `HOME`,
+and `PATH=/usr/bin:/bin`. No `LD_*`, `PYTHON*`, `CI_RUNNER*` or other variable of a job's or
+of the runner's `.env` reaches the interpreter. A test holds the list to what `hook.py` and
+`policy.py` read and runs the installed hook for a runner of every pool kind. The shell, `env`
+and `timeout` themselves start in the runner's environment, before the allowlist; C4's live
+negative test proves what a job's `env:` reaches (below).
+
+*The public runner's etc (from C2's review, 2026-11-13; built by C3).* On the public pool
+the hook's inputs are mounted readable inside the confinement, so the public runner's etc is
+never the host's: it is a directory the launcher (C3) writes for that runner, holding
+`inventory.public_view(inv, cards)` (this host's public pool and the gpu pool validation
+needs, on the runner's cards alone, placeholders for the account, the paths and the slot
+files; no account, home, data path, egress, push or probe key, or other host's row) and a
+policy with the opted-in public repositories' entries alone (and the org snapshot the public
+decision needs). The hook decides from it as from the host's (a test runs it on such an etc);
+a private runner's name the view still holds meets a policy without a private repository.
 
 It prints one line, `ci-runners: accepted|refused <reason code>`, followed by the
 policy's hash, and logs details on the host only. The job-completed hook stops the
@@ -4647,12 +4672,20 @@ check, the relay and the issuer get an independent review (AGENTS.md, Review).
   one runner on the first host in the order that has a free card and a fresh check; it
   takes one job and is gone; an unused runner is removed after 5 min; a host whose check
   failed or is stale is skipped; after a run, a scan of the host account's files finds no
-  credential of a public runner; §2's rows for 18.6 confirmed.
+  credential of a public runner; §2's rows for 18.6 confirmed. *Requirement* (from C2's
+  review, 2026-11-13, §6.3): the launcher writes each public runner's own etc (the stripped
+  inventory `inventory.public_view`, a policy with the public entries alone) and the runner's
+  hook names it; the conformance check (18.5) gains an item proving, from inside the
+  confinement, that the host's real etc, its inventory and its policy are unreadable.
 - **C4, the public canary** (18.10): a public copy of the canary on `6000pro`, then on h100
   once its check passes. *Acceptance:* P2's negative tests with `[self-hosted,
   ci-pub-gpu]` (a fork's pull request, a member's fork, `pull_request_target`, a
   non-member's re-run: each ends in "Set up runner" with its reason, no step run, no
-  marker); a same-repository pull request green; the check, run as a job of the canary,
+  marker); a job whose `env:` forges `RUNNER_NAME`, `CI_RUNNER_CLASS`, `CI_RUNNER_AUDIENCE`,
+  `CI_RUNNERS_ETC` and `LD_PRELOAD` decided as without them, with the hook's log showing the
+  runner's real name (if a job's `env:` reaches `RUNNER_NAME`, the name comes from the
+  worker's own path instead, and the `runner` refusal stops counting as an infrastructure end,
+  before the audience); a same-repository pull request green; the check, run as a job of the canary,
   passes; the lead reads the public logs (the machine name, the paths) and finds no site
   detail.
 - **C5, the first public library**: the lead's policy entry and the repository's approval

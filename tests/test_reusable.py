@@ -1,5 +1,5 @@
-"""The reusable workflows ``ci.yml`` and ``part.yml`` (decision 16.6, design §4.10) and the
-release stamp of their references (§9): their structure, read with the stdlib subset
+"""The reusable workflows ``ci.yml`` and ``part.yml`` (decision 16.6, design §4.10), ``sweep.yml``
+(§4.10, decision 19 item 9) and the release stamp of their references (§9): their structure, read with the stdlib subset
 reader (``tests/yamlsub.py``)."""
 from __future__ import annotations
 
@@ -16,11 +16,12 @@ from tests import yamlsub
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WF = ROOT / '.github' / 'workflows'
-REUSABLE = ('ci.yml', 'part.yml', 'public.yml', 'public-part.yml')
+REUSABLE = ('ci.yml', 'part.yml', 'sweep.yml', 'public.yml', 'public-part.yml')
 #: a public caller's (decision 18.7): its jobs' labels, a hosted runner or its own pool only
 PUBLIC_WF = ('public.yml', 'public-part.yml')
-#: the reusable workflows the stamp rewrites
-WORKFLOWS4 = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/public.yml', '.github/workflows/public-part.yml')
+#: the reusable workflows the stamp rewrites, written out (never read from the stamp)
+STAMPED = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml',
+           '.github/workflows/public.yml', '.github/workflows/public-part.yml')
 POOL_OR_HOSTED = ("${{ fromJSON(inputs.part).gpus > 0 && fromJSON('[\"self-hosted\",\"ci-pub-gpu\"]') "
                   "|| 'ubuntu-latest' }}")
 #: the capability labels a job may name literally (16.1)
@@ -36,6 +37,8 @@ COMPUTED = {
         'retry': '${{ fromJSON(needs.first.outputs.retry || needs.salvage.outputs.retry || '
                  'needs.locate.outputs.retry).labels }}',
     },
+    # hosted, for every caller: its token cancels runs and posts, and nothing of a head ever ran there
+    'sweep.yml': {'sweep': 'ubuntu-latest'},
 }
 #: each job's permissions, the least it needs (§4.8 rule 6)
 PERMISSIONS = {
@@ -59,7 +62,17 @@ PERMISSIONS = {
                    'verdict': {'contents': 'read', 'statuses': 'write', 'actions': 'read'}},
     'public-part.yml': {'first': {'contents': 'read'}, 'lost': {'contents': 'read'}, 'retry': {'contents': 'read'},
                         'red': {'statuses': 'write'}},
+    'sweep.yml': {'sweep': {'actions': 'write', 'statuses': 'write'}},
 }
+
+
+#: part.yml's step after each checkout (#228): no credential stays in the checkout's config
+CREDENTIAL_CHECK = (
+    "git sparse-checkout disable 2> /dev/null || true\n"
+    "if git config --local --name-only --get-regexp '^http\\..*\\.extraheader$'; then\n"
+    '  echo "::error::the checkout kept its authorization header in its git config"\n'
+    "  exit 1\n"
+    "fi\n")
 
 
 def load(name: str) -> dict:
@@ -140,6 +153,46 @@ class Structure(unittest.TestCase):
                 if st.get('uses', '').startswith('actions/checkout@'):
                     self.assertIs(st['with']['persist-credentials'], False, f'{name}: {jid}')
 
+    def test_a_parts_checkout_is_one_commit_or_its_history_and_keeps_no_credential(self):
+        """#228: the plan's ``history`` sets the depth of both attempts' checkouts (``'0'``, a
+        string: a bare 0 is false in an expression and would read as ``'1'``); the job's own
+        read-only token fetches it, no token reaches the command, and a step after the
+        checkout fails the attempt where a credential stayed in the checkout's git config."""
+        jobs = load('part.yml')['jobs']
+        for jid in ('first', 'retry'):
+            sts = jobs[jid]['steps']
+            co = sts[0]
+            self.assertTrue(co['uses'].startswith('actions/checkout@'), jid)
+            self.assertEqual(co['with'], {'ref': '${{ inputs.sha }}', 'persist-credentials': False,
+                                          'fetch-depth': "${{ fromJSON(inputs.part).history && '0' || '1' }}"}, jid)
+            self.assertEqual(jobs[jid]['permissions'], {'contents': 'read'})
+            self.assertEqual(sts[1]['run'], CREDENTIAL_CHECK, jid)  # before the files and the command
+            self.assertNotIn('token', str(sts[1:]).lower(), jid)
+        self.assertEqual([jid for jid, st in steps(load('part.yml')) if st.get('uses', '').startswith('actions/checkout@')],
+                         ['first', 'retry'])
+
+    def test_the_credential_check_fails_on_what_a_checkout_could_keep(self):
+        if not shutil.which('git'):
+            self.skipTest('no git')
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(['git', 'init', '-q', d], check=True)
+            env = {'PATH': '/usr/bin:/bin', 'HOME': d, 'GIT_CONFIG_NOSYSTEM': '1'}
+
+            def check():
+                return subprocess.run(['bash', '-c', CREDENTIAL_CHECK], cwd=d, env=env, capture_output=True, text=True)
+            self.assertEqual(check().returncode, 0)
+            for key in ('http.https://github.com/.extraheader', 'http.https://ghe.example/.extraheader'):
+                subprocess.run(['git', 'config', '--local', key, 'AUTHORIZATION: basic x'], cwd=d, check=True)
+                r = check()
+                self.assertEqual(r.returncode, 1, key)
+                self.assertIn("::error::the checkout kept its authorization header in its git config", r.stdout, key)
+                subprocess.run(['git', 'config', '--local', '--unset', key], cwd=d, check=True)
+            # what a reused workspace may hold from an earlier command is not the checkout's token:
+            # failing on it would let one head fail every later attempt on that runner
+            for key, value in (('http.postBuffer', '1'), ('credential.helper', 'store'), ('include.path', '../x')):
+                subprocess.run(['git', 'config', '--local', key, value], cwd=d, check=True)
+            self.assertEqual(check().returncode, 0)
+
     def test_no_expression_in_a_shell_script(self):
         """A consumer's string (its plan command, a part's id or command) reaches a shell only
         as an input or environment value, never pasted into a script."""
@@ -157,8 +210,9 @@ class Structure(unittest.TestCase):
             for k, v in {**call.get('inputs', {}), **call.get('outputs', {})}.items():
                 self.assertTrue(v.get('description'), f'{name}: {k}')
             for k, v in call.get('inputs', {}).items():
-                self.assertEqual(v.get('type'), 'boolean' if k in ('plan-only', 'plan-token') else 'string',
-                                 f'{name}: {k}')
+                want = {'plan-only': 'boolean', 'plan-token': 'boolean'}.get(k, 'number' if (name, k) == (
+                    'sweep.yml', 'minutes') else 'string')
+                self.assertEqual(v.get('type'), want, f'{name}: {k}')
         self.assertEqual(set(load('public.yml')['on']['workflow_call']['inputs']),
                          {'context', 'plan', 'project', 'sha', 'plan-only'})  # no token for a public plan command
         self.assertEqual(load('public-part.yml')['on']['workflow_call']['inputs'].keys(),
@@ -270,6 +324,9 @@ class Structure(unittest.TestCase):
         self.assertEqual(plan['if'], "always() && steps.contract.outcome == 'success'")
         up = [st for st in sts if st.get('uses', '').startswith('actions/upload-artifact@')]
         self.assertEqual([u['with']['name'] for u in up], ['ci-plan-files'])
+        # #227: hidden entries too (a `.ci-plan` directory, a `.name` inside); flow plan refused
+        # what the upload cannot carry, and an upload that finds nothing fails the plan's files
+        self.assertEqual((up[0]['with']['include-hidden-files'], up[0]['with']['if-no-files-found']), (True, 'error'))
         self.assertIn("steps.plan.outputs.routed == 'true'", up[0]['if'])
         self.assertTrue(up[0]['if'].startswith('${{ !cancelled() && '))  # a failed plan part's upload skips it not
         env = [st for st in sts if st.get('id') == 'command'][0]['env']
@@ -284,9 +341,10 @@ class Structure(unittest.TestCase):
         self.assertTrue(cond.startswith('!cancelled() && '))  # a status function: no implicit success()
         self.assertIn("needs.plan.outputs.routed == 'true'", cond)
         self.assertIn("needs.plan.outputs.run == 'true'", cond)
-        self.assertIn("needs.plan.outputs.files != 'failure'", cond)
+        # #227: only files uploaded (or none named) hand on; failed, timed out or skipped do not
+        self.assertIn("(needs.plan.outputs.files == 'none' || needs.plan.outputs.files == 'success')", cond)
         plan = load('ci.yml')['jobs']['plan']
-        self.assertEqual(plan['outputs']['files'], '${{ steps.files.outcome }}')
+        self.assertEqual(plan['outputs']['files'], "${{ steps.plan.outputs.files == '' && 'none' || steps.files.outcome }}")
         self.assertEqual(plan['steps'][0]['id'], 'project')  # before anything reads it
         text = (WF / 'ci.yml').read_text()
         self.assertNotIn('github.event.repository.name', text)  # absent on a schedule
@@ -333,11 +391,24 @@ class Structure(unittest.TestCase):
         self.assertEqual(pend['steps'][0]['with']['seen'], "${{ needs.plan.outputs.seen || '0.0' }}")
         v = jobs['verdict']
         self.assertEqual(v['needs'], ['plan', 'pending', 'parts'])  # no pending after the final status
-        post, lost, verd = v['steps']
-        self.assertEqual((post['if'], lost['if'], verd['if']),
+        post, lost, files, verd = v['steps']
+        self.assertEqual((post['if'], lost['if'], files['if'], verd['if']),
                          ("needs.plan.outputs.state != ''", "needs.plan.outputs.state == '' && needs.plan.outputs.routed != 'true'",
-                          "needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'"))
+                          "needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' && "
+                          "needs.plan.outputs.files != 'none' && needs.plan.outputs.files != 'success'",
+                          "needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' && "
+                          "(needs.plan.outputs.files == 'none' || needs.plan.outputs.files == 'success')"))
+        # a plan job whose runner was lost has no outputs: its sha too, so each post names the run's own head
+        for st in (post, lost, files):
+            self.assertEqual(st['with']['sha'], '${{ needs.plan.outputs.sha || inputs.sha || github.event.pull_request.head.sha || github.sha }}', st['if'])
         self.assertEqual(lost['with']['state'], 'error')
+        # #227: a plan job that ended after the route (its files not uploaded) is the plan's end,
+        # never every part read as lost: the verdict action does not run, no part started
+        self.assertEqual((files['with']['command'], files['with']['state']), ('status', 'error'))
+        self.assertEqual(files['with']['description'],
+                         "plan: the plan's files did not upload after the route (${{ needs.plan.outputs.files || 'lost' }}); no part ran")
+        self.assertEqual(v['outputs']['state'], "${{ needs.plan.outputs.state || (needs.plan.outputs.routed == 'true' && "
+                                                "steps.verdict.outputs.state) || 'error' }}")
         self.assertEqual((post['with']['command'], post['with']['state']), ('status', '${{ needs.plan.outputs.state }}'))
         self.assertEqual(jobs['plan']['outputs']['state'], '${{ steps.contract.outputs.state || steps.plan.outputs.state }}')
         # who posts: pending, a red attempt (part.yml) and the verdict job; nothing else
@@ -431,6 +502,53 @@ class Flow(unittest.TestCase):
         self.assertIn('exec sh "$GITHUB_ACTION_PATH/../../bin/ci-run" flow "$IN_COMMAND"', text)
 
 
+class Sweep(unittest.TestCase):
+    """``sweep.yml`` (§4.10, decision 19 item 9): one job on a hosted runner, started by a
+    schedule or a dispatch on the default branch only, that runs no head code."""
+
+    def test_one_hosted_job_with_exactly_its_two_writes(self):
+        doc = load('sweep.yml')
+        self.assertEqual(list(doc['on']), ['workflow_call'])
+        self.assertEqual(list(doc['jobs']), ['sweep'])
+        job = doc['jobs']['sweep']
+        self.assertEqual(job['runs-on'], 'ubuntu-latest')
+        self.assertEqual(job['permissions'], {'actions': 'write', 'statuses': 'write'})
+        self.assertNotIn('permissions', doc)
+        self.assertLessEqual(job['timeout-minutes'], 10)
+        self.assertEqual(set(doc['on']['workflow_call']['inputs']), {'workflow', 'context', 'minutes'})
+        self.assertEqual(doc['on']['workflow_call']['inputs']['minutes']['default'], 60)
+
+    def test_only_a_schedule_or_a_dispatch_on_the_default_branch_runs_it(self):
+        cond = ' '.join(load('sweep.yml')['jobs']['sweep']['if'].split())
+        self.assertEqual(cond, "github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && "
+                               "github.ref == format('refs/heads/{0}', github.event.repository.default_branch))")
+
+    def test_no_head_code_no_artifact_and_no_expression_in_a_script(self):
+        steps_ = load('sweep.yml')['jobs']['sweep']['steps']
+        self.assertEqual([st.get('uses') for st in steps_], ['chaobrain/ci-runners/actions/sweep@' + (
+            'v1' if (ROOT / 'actions' / 'RELEASE').read_text().strip() == 'hook'
+            else (ROOT / 'actions' / 'RELEASE').read_text().strip())])
+        text = (WF / 'sweep.yml').read_text() + (ROOT / 'actions' / 'sweep' / 'action.yml').read_text()
+        for bad in ('actions/checkout', 'download-artifact', 'upload-artifact', 'secrets'):
+            self.assertNotIn(bad, text)
+        action = yamlsub.load((ROOT / 'actions' / 'sweep' / 'action.yml').read_text())
+        self.assertEqual(len(action['runs']['steps']), 1)
+        self.assertNotIn('${{', action['runs']['steps'][0]['run'])
+        self.assertTrue(set(action['runs']['steps'][0]['env']) >= {'GITHUB_TOKEN', 'IN_WORKFLOW', 'IN_CONTEXT', 'IN_MINUTES'})
+
+    def test_each_input_reaches_its_flag_from_the_actions_checkout(self):
+        text = (ROOT / 'actions' / 'sweep' / 'action.yml').read_text()
+        ins = action_inputs('sweep') - {'token'}
+        self.assertEqual(set(load('sweep.yml')['jobs']['sweep']['steps'][0]['with']), ins)
+        pairs = set(re.findall(r'"(--[a-z-]+)=\$IN_([A-Z_]+)"', text))
+        self.assertEqual(pairs, {(f'--{i}', i.upper()) for i in ins})
+        self.assertLessEqual({f for f, _ in pairs},
+                             set(re.findall(r"add_argument\('(--[a-z-]+)'", (ROOT / 'ci_runners' / 'sweep.py').read_text())))
+        self.assertIn('exec sh "$GITHUB_ACTION_PATH/../../bin/ci-run" sweep "--workflow=$IN_WORKFLOW"', text)
+        self.assertIn('GITHUB_TOKEN: ${{ inputs.token }}', text)
+        self.assertEqual(yamlsub.load(text)['inputs']['token']['default'], '${{ github.token }}')
+
+
 class Stamp(unittest.TestCase):
     def tree(self, d: str) -> pathlib.Path:
         t = pathlib.Path(d) / 'tree'
@@ -465,7 +583,8 @@ class Stamp(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             after = self.files(t)
             changed = {k for k in before if before[k] != after[k]}
-            self.assertEqual(changed, {'actions/RELEASE', *WORKFLOWS4})
+            self.assertEqual(changed, {'actions/RELEASE', *STAMPED})
+            self.assertEqual(set(STAMPED), {f'.github/workflows/{n}' for n in REUSABLE})
             self.assertEqual(after['actions/RELEASE'], 'v1.17.0\n')
             for rel in stamp.WORKFLOWS:
                 old, new = before[rel].splitlines(), after[rel].splitlines()
@@ -487,7 +606,7 @@ class Stamp(unittest.TestCase):
     def test_a_proof_branch_names_itself_and_keeps_the_release(self):
         with tempfile.TemporaryDirectory() as d:
             t = self.tree(d)
-            self.assertEqual(sorted(stamp.stamp(t, 'hook', 'r6-proof')), sorted(WORKFLOWS4))
+            self.assertEqual(sorted(stamp.stamp(t, 'hook', 'r6-proof')), sorted(STAMPED))
             self.assertEqual((t / 'actions' / 'RELEASE').read_text().strip(), 'hook')
             self.assertEqual({r for _, r in stamp.refs((t / '.github/workflows/part.yml').read_text())}, {'r6-proof'})
 

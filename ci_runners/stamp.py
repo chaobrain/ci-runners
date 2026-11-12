@@ -1,10 +1,10 @@
 """The release stamp (design §9, decision 16.6): ``python -m ci_runners.stamp RELEASE``.
 
 ``RELEASE`` is ``vX.Y.Z`` (the stamp PR) or ``hook`` (the restore PR). It writes
-``actions/RELEASE`` and rewrites, in the reusable workflows (``ci.yml``, ``part.yml``, and a
-public caller's ``public.yml`` and ``public-part.yml``, decision 18.7) alone, every reference
-to this repository's actions and their references to each other to ``@<RELEASE>``, or to
-``@v1`` for ``hook``. Nothing else changes, so a
+``actions/RELEASE`` and rewrites, in the reusable workflows (``ci.yml``, ``part.yml``,
+``sweep.yml``, and a public caller's ``public.yml`` and ``public-part.yml``, decision 18.7)
+alone, every reference to this repository's actions and their references to each other to
+``@<RELEASE>``, or to ``@v1`` for ``hook``. Nothing else changes, so a
 caller pinned to ``ci.yml@vX.Y.Z`` runs that release's ``part.yml`` and actions, and they
 that release's host layer.
 
@@ -19,8 +19,8 @@ import pathlib
 import re
 import sys
 
-WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/public.yml',
-             '.github/workflows/public-part.yml')
+WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml',
+             '.github/workflows/public.yml', '.github/workflows/public-part.yml')
 #: a reference this repository's reusable workflows make to itself
 REF = re.compile(r'(chaobrain/ci-runners/(?:actions/[a-z][a-z0-9-]*|\.github/workflows/(?:part|public|public-part)\.yml))'
                  r'@([A-Za-z0-9._/-]+)')

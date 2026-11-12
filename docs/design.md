@@ -1589,7 +1589,8 @@ Each item names what it supersedes or amends.
          since a job queued on a label without a runner waits 24 h (§2); a runner that
          presence holds back for a passing cause (a card in use, a taken slot, a timing
          run) still serves its label. A queued part's own bound stays with the
-         consumer's sweeper for now (§10, RUN-10's open point). *Amended by
+         consumer's sweeper for now (§10, RUN-10's open point; from issue #213 the
+         scheduled `sweep.yml`, §4.10). *Amended by
          19:* presence holds a later tier's idle runners offline while an earlier tier has
          idle ones (19.2), and the route counts them as room (19.3); it names no host.
        - *Retries are the five rows of `outcome.hint`* and nothing else:
@@ -2580,8 +2581,9 @@ The order is therefore made where the runners are, by presence, and no plan name
            a hook that refuses drains its host after three refusals (16.4's black hole).
            One that GitHub never serves is not caught until a maintainer drains it. This
            is an open point. R6 bounds a part's wait on its host only (`queue_minutes`):
-           GitHub cancels no single queued job. The backstop is a scheduled sweeper of
-           the consumer's runs (issue #213); until it exists, the consumer's own.
+           GitHub cancels no single queued job. The backstop is the scheduled sweeper
+           `sweep.yml` (§4.10, issue #213): a consumer that schedules it gets its run
+           cancelled and `error` posted once a job has queued at GitHub past its bound.
          - *Host labels.* A job on a later tier's own host label waits while that host
            yields, unless the host is held (19.8).
        - *The rollout* (the host steps are the lead's).
@@ -2786,10 +2788,12 @@ setup/workstation/    the maintainer's own user units: orgsync-push.sh and
                       on 3090b (decision 15.3); runner-watch.sh and
                       ci-runner-watch.{service,timer}, the alert when a host has no
                       runner online (decision 15.6)
-actions/              claim/, part/, salvage/, verdict/ (composite, action.yml);
+actions/              claim/, part/, salvage/, verdict/ (composite, action.yml); flow/ and
+                      sweep/, the reusable workflows' steps;
                       lib/ci-run.sh, the launcher; RELEASE, the release stamp
 .github/workflows/    test.yml (this repository's tests, hosted only); ci.yml and part.yml,
-                      the reusable workflow for consumers, `workflow_call` only (16.6; from R6)
+                      the reusable workflow for consumers, `workflow_call` only (16.6; from R6);
+                      sweep.yml, the scheduled sweeper (§4.10, issue #213)
 tests/                unit tests; fixtures/ (sanitised): event payloads,
                       nvidia-smi CSV, /proc/stat, /proc/locks, boot ids, JUnit; mutants.py
 tests/test_no_inventory.py     no tracked file holds a denied token (hashed deny list)
@@ -3257,7 +3261,7 @@ not load is a red plan job with the reason:
 |---|---|---|
 | `schema` | yes | `1`; a later schema is a new key set, read by the release that brings it |
 | `parts` | yes | a list of at most 256 parts (GitHub's matrix limit); an empty list is a plan: no part job, the verdict job posts `success` "nothing to run" |
-| `files` | no | a directory below the checkout (relative, no `..`, no links, at most 1000 entries and 64 MiB) the plan command wrote: uploaded once (`ci-plan-files`), downloaded into every attempt before its command, at `CIRUNNERS_FILES` |
+| `files` | no | a directory below the checkout (relative, no `..`, no links, at most 1000 entries and 64 MiB) the plan command wrote: uploaded once (`ci-plan-files`), hidden entries included (#227: the plan named the directory, `.ci-plan` too), downloaded into every attempt before its command, at `CIRUNNERS_FILES`. `flow plan` refuses what the upload cannot carry (a link, an empty directory, an entry that is not a file, a name not in UTF-8 or with `" : < > \| * ?` or a line break) and a `.git` (a clone's config may hold the plan command's token); files that did not upload after the route (failed, timed out, skipped) are the plan's end (`error`, "plan: the plan's files did not upload after the route (<outcome>); no part ran"), not every part lost; a plan job lost after the route has no outputs and posts on the run's own head |
 | `max_parallel` | no | an integer in [1, 256]: lowers the registry's `max_parallel` for this run, never raises it |
 | `parts[].id` | yes | `[A-Za-z0-9][A-Za-z0-9_.-]*`, at most 64 characters (its artifact's name), unique in the plan; not `plan`, the plan command's own part |
 | `parts[].command` | yes | as `part`'s `command`, at most 32 KiB |
@@ -3266,6 +3270,7 @@ not load is a red plan job with the reason:
 | `parts[].memory_gib` | no | the part's memory cap; the registry's default otherwise; above the label's largest slot, the route adds `mem-big` |
 | `parts[].results` | no | as `part`'s `results` |
 | `parts[].queue_minutes` | no | (0, 240], default 15: an attempt's wait on its host for a slot or a lease (`part`'s `queue-timeout-minutes`), added to the job's bound; past it the attempt is `unavailable` and the retry's rows apply as for a lost one |
+| `parts[].history` | no | `true` or `false` (#228): with `true` both attempts check the head out with its whole history and every branch's remote ref (the default branch's too), fetched with the job's read-only token, which the checkout keeps nowhere (`persist-credentials: false`; a step after it fails the attempt where its authorization header, `http.<url>.extraheader`, stayed in the checkout's git config; other local settings a reused workspace kept from an earlier command are not the checkout's and do not fail it) and the command never gets; default one commit. A release before it refuses the key (unknown keys), it does not ignore it |
 | `parts[].artifacts` | no | at most 4 names (`[A-Za-z0-9][A-Za-z0-9_.]*`, no `-`, not `ci`) to paths below `RUNNER_TEMP`, uploaded after each attempt as `<name>-<id>-<attempt>`; the verdict does not read them |
 
 An unknown key is refused. Without `plan`, the plan is `{"schema": 1, "parts": [{"id":
@@ -3289,9 +3294,36 @@ caller hands its plan command (`plan-token`); a public caller's run is refused i
 
 *Bounds of a queued part.* `queue_minutes` bounds the wait on the host. A job that GitHub
 never hands to a runner (a later tier's black hole, 19.9) waits in GitHub's queue up to
-its 24 hours: GitHub cancels no single job. The backstop is a small reusable workflow a
-consumer schedules, which lists its runs, cancels one whose job has queued past its bound
-and posts `error` (issue #213, not built); until then, the consumer's own sweeper.
+its 24 hours: GitHub cancels no single job. The backstop is `sweep.yml` (19.9;
+issue #213), a reusable workflow a consumer schedules: inputs `workflow` (its file that
+calls `ci.yml`), `context` and `minutes` (5 to 1440, default 60; not the plan's
+`queue_minutes`, which bounds the other wait and would cost an artifact list and a
+download per run per sweep). One job, `ci-run sweep` (`ci_runners/sweep.py`) from the
+action's own checkout on a hosted `ubuntu-latest` for every caller, with exactly `actions:
+write` and `statuses: write`: nothing of any head ever ran on that VM (ci-light runs plan
+commands under the runner's account), and it works when the pools are what is wrong. It
+runs on a `schedule` or a `workflow_dispatch` on the default branch only (any other event
+skips the job), checks out and downloads nothing, and passes its inputs through `env:`.
+It lists the workflow's `queued` and `in_progress` runs, those created before the bound
+(`created=<T`) apart from the younger (one page of 100 each), reads the latest jobs of the
+old ones, and takes a run with a job whose status is `queued` (not `waiting`, `pending` or
+`requested`: gates and holds; whether a matrix job that `max-parallel` holds reads `pending`
+or `queued` is checked at the release, before any consumer schedules it) past the bound.
+Its head is the run's `head_sha` for a `push` or `pull_request` run (where the caller
+passes no `sha` for those events), or where a status of this run is on that sha; any other
+run is left alone and reported. Only the job token's own statuses count
+(`github-actions[bot]`, the first page of the head's), and the run's own from before its
+`run_started_at` are an earlier attempt's, none of this one. A newer run of the workflow on
+the head, or a newest status of the context that is another run's: cancel only (`verdict`
+skips a cancelled run). None, or the run's own `pending`: post `error`, then cancel, so a
+sweep stopped between the two leaves the `error` for the next. The run's own `failure` or
+other final state: cancel only. The run's own earlier sweep `error`: `force-cancel` (also
+after a cancel answered 409). The `error` is linked to the swept run, `queued past N min:
+part <id> on <labels>` (`plan on <labels>`, `<n> jobs, first part ...`), from a validated
+id and labels only. At most 50 requests, 10 cancels and 8 minutes a sweep, and no call
+below 100 of the token's hourly calls left (exit 1 when reached, after what was done). Cost:
+one hosted minute a sweep (every 15 minutes, about
+2,900 a month). Built in the release after `v1.18.0`; the consumers' guide §10.
 
 **The contract.** The default branch's `.github/ci-runners.toml` may set `contract = N`
 (an integer; §4.9's spec, accepted from R1). The plan job reads that file with the job
@@ -3853,7 +3885,7 @@ Rules:
 - **Rollout of `v1.N`:**
   1. A PR with tests (hosted unit tests, fixtures, a live check on one host).
   2. The stamp PR: `actions/RELEASE` set to `v1.N.0`, and, from R6, the action refs in
-     `ci.yml` and `part.yml` and `ci.yml`'s ref to `part.yml` (16.6).
+     `ci.yml`, `part.yml` and (issue #213) `sweep.yml`, and `ci.yml`'s ref to `part.yml` (16.6).
   3. The lead tags `v1.N.0` on the stamp's merge commit.
   4. `install.sh` on every host, the egress host first (17); nothing switches yet.
   5. A canary consumer branch composes the actions at `@v1.N.0` on both 3090 hosts and

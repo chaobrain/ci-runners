@@ -60,7 +60,10 @@ single-job runner the launcher starts as the user unit ``ci-pub-runner@<role>-pu
 enabled, the inventory names the host's public pool and its ``isolation``, and the conformance
 check's record (``state/confine-check.json``) passed every item within ``CHECK_MAX_AGE``, in
 this boot and kernel, for that backend, with the GPU group alone (mode (a)). At each tick a
-withdrawn audience stops every public runner at once, busy or not; while one is up, its card
+withdrawn audience stops every public runner at once, busy or not; what stops the private
+runners for the whole host (a drain of the host or of its gpu pool, a self-drain, the health
+gate) stops the idle ones (a ``Runner.Worker`` in the unit's cgroup is a job, which finishes)
+and offers no card. While one is up, its card
 is a cause of the card's private runners (``public: ...``), so they stop when idle and the
 unit's ``ExecCondition=`` keeps them down. Each enabled tick writes ``state/public.json``: the
 audience, the check's result and age, and the cards a public runner could take now (no
@@ -381,6 +384,10 @@ class Probe:
             if len(f) >= 3 and f[0].startswith(PUBLIC_UNIT) and f[2] not in DOWN:
                 out.append((f[0], f[2]))
         return out
+
+    def public_busy(self, units: Sequence[tuple[str, str]]) -> set[str] | None:
+        """The public runner units of ``units`` with a job; None if /proc cannot be read."""
+        return public_workers([u for u, _ in units], self.read, self.listdir)
 
     def check_record(self) -> dict | None:
         """The conformance check's last record (18.5), or None."""
@@ -954,6 +961,26 @@ def public_card(unit: str, role: str) -> int | None:
     return int(m.group(2)) if m and m.group(1) == role else None
 
 
+def public_workers(units: Sequence[str], read: Callable[[str], str], listdir: Callable[[str], list[str]],
+                   proc: str = '/proc') -> set[str] | None:
+    """The public runner units of ``units`` with a job: a process whose ``argv[0]`` ends in
+    ``/bin/Runner.Worker`` (as the confinement's mounts name it) in the unit's cgroup or one
+    beneath it; None when ``proc`` cannot be listed. A process the job forges keeps its own
+    runner, which runs a job anyway, up; it never stops one."""
+    want = set(units)
+    try:
+        pids = [p for p in listdir(proc) if p.isdigit()]
+    except OSError:
+        return None
+    busy = set()
+    for pid in pids:
+        if not read(os.path.join(proc, pid, 'cmdline')).split('\0', 1)[0].endswith('/bin/Runner.Worker'):
+            continue
+        for line in read(os.path.join(proc, pid, 'cgroup')).splitlines():
+            busy.update(want & set(line.split(':', 2)[-1].split('/')))
+    return busy
+
+
 def public_cards(units: Sequence[tuple[str, str]] | None, role: str) -> set[int] | None:
     """The cards the public runners hold; None (every card) where they cannot be read or a
     unit's name names no card of this host. Pure."""
@@ -995,6 +1022,29 @@ def public_audience(inv: inventory.Inventory, enabled: bool, check: tuple[str, s
     return check[1] if check[0] != 'passed' else ''
 
 
+def public_hold(inv: inventory.Inventory, probe: Probe) -> str:
+    """What stops the host's runners for the whole host now (a drain of the host or of its
+    gpu pool, a self-drain, an unreadable drain state, a failed health gate), or '': it stops
+    the idle public runners and offers no card; a busy one finishes its job."""
+    return drain_mod.refusal(drain_mod.read(str(inv.host['data'])), inv.host, 'gpu') or probe.health()
+
+
+def stop_idle_public(probe: Probe, data: str, units: Sequence[tuple[str, str]], why: str, t: float) -> None:
+    """Stop the public runners without a job, each looked at again just before its stop;
+    none where /proc cannot be read (an unproven idle is busy)."""
+    busy = probe.public_busy(units)
+    for unit, state in units:
+        if busy is None or unit in busy:
+            continue
+        now = probe.public_busy([(unit, state)])
+        if now is None or unit in now:  # a job came between the look and the stop
+            log(data, {'runner': unit, 'action': 'kept', 'cause': why, 'why': 'a job started'}, t)
+            continue
+        p = probe.systemctl('--no-block', 'stop', unit)
+        ok = p is not None and p.returncode == 0
+        log(data, {'runner': unit, 'action': 'stop' if ok else 'stop failed', 'cause': why}, t)
+
+
 def public_row(inv: inventory.Inventory, rs: Sequence[Runner], f: Facts, why: Mapping[str, list[str]],
                check: tuple[str, str], doc: Mapping | None, withdrawn: str, t: float) -> dict:
     """``state/public.json``: the capacity row's public part (18.7). The cards a public
@@ -1025,14 +1075,20 @@ def stop_public(probe: Probe, data: str, units: Sequence[tuple[str, str]] | None
 
 def public_tick(inv: inventory.Inventory, probe: Probe, data: str, enabled: bool, t: float) -> tuple[str, str, dict | None]:
     """The public runners' part of a tick: their audience now, and its stop where it is
-    withdrawn. ``(withdrawn, check state and why, the check's record)``."""
+    withdrawn, and the idle ones' stop where the host is held for the whole host (a drain, a
+    self-drain, the health gate). ``(why no card is offered, check state and why, the check's
+    record)``."""
     units = probe.public_units()
     doc = probe.check_record()
     check = check_result(doc, isolation=inv.host.get('isolation'), boot=boot_id(probe.read), kernel=probe.kernel(), now=t)
     withdrawn = public_audience(inv, enabled, check)
     if withdrawn and units != []:
         stop_public(probe, data, units, withdrawn, t)
-    return withdrawn, check, doc
+        return withdrawn, check, doc
+    held = '' if withdrawn else public_hold(inv, probe)
+    if held and units:  # units unread: no idle is proven, nothing is stopped; the row offers none
+        stop_idle_public(probe, data, units, held, t)
+    return withdrawn or held, check, doc
 
 
 def write_public(data: str, row: Mapping) -> None:

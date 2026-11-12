@@ -4644,7 +4644,10 @@ check, the relay and the issuer get an independent review (AGENTS.md, Review).
   holds. *Acceptance:* P1's event fixtures, each refused or accepted as P1 said; a public
   repository's job on a `light` or `part` runner of audience `public` refused; a public
   plan asking for `gpu2`, `timing` or the cluster red at plan time; a withdrawn audience
-  stops the public runners within one tick.
+  stops the public runners within one tick; what stops the private runners for the whole
+  host (a drain of the host or of its gpu pool, presence's self-drain, the health gate)
+  stops the idle public runners within one tick and offers no card, while a busy one
+  finishes its job (from C2's review, 2026-11-13).
 - **C3, the issuer** (18.6). *Requirements* (from C2's review, 2026-11-13): the head's code
   controls its own job on a hosted runner, so "red at plan time" and a public verdict hold
   against an honest head only, and the gate for the cards is the host: the confined

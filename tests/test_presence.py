@@ -725,6 +725,7 @@ class Check(Fixture):
 
 PUB_POOL = 'compile = 1, pub-gpu = { per_card = true, class = "gpu", audience = "public", labels = ["ci-pub-gpu", "hz-pub-gpu"] } }'
 PUB0, PUB_OTHER = 'ci-pub-runner@hz-pub-gpu0-17.service', 'ci-pub-runner@hy-pub-gpu0-3.service'
+PUB1 = 'ci-pub-runner@hz-pub-gpu1-18.service'
 
 
 class Public(Fixture):
@@ -780,7 +781,8 @@ class Public(Fixture):
                  ({'kernel': '1.0.0'}, 'the conformance check ran in another boot or kernel'),
                  ({'isolation': 'ns-subuid'}, "the conformance check proved 'ns-subuid', not the inventory's 'account'"),
                  ({'groups': 'gpu,ci'}, 'the job keeps more than the GPU group (mode (a) is required, 18.4)'),
-                 ({'groups': None}, 'the job keeps more than the GPU group (mode (a) is required, 18.4)')]
+                 ({'groups': None}, 'the job keeps more than the GPU group (mode (a) is required, 18.4)'),
+                 ({'groups': 'kept'}, 'the job keeps more than the GPU group (mode (a) is required, 18.4)')]
         for kw, why in cases:
             with self.subTest(kw=kw):
                 self.units[PUB0] = ('active', 'success')
@@ -802,6 +804,73 @@ class Public(Fixture):
                                                            presence.CHECK_FILE).read_text()),
                                                isolation='account', boot='B1', kernel=os.uname().release,
                                                now=self.now), ('passed', ''))
+
+    def pub_job(self, pid, unit, argv0='/work/runner/bin/Runner.Worker'):
+        """A process of ``unit``'s cgroup (in a cgroup the confinement made beneath it)."""
+        self.procs[pid] = {'cmdline': f'{argv0}\0spawnclient\0', 'cgroup':
+                           f'0::/user.slice/user-{UID}.slice/user@{UID}.service/app.slice/{unit}/job\n'}
+
+    def test_a_host_wide_stop_stops_the_idle_public_runners_and_a_job_finishes(self):
+        def drain_host():
+            drain_mod.change(str(self.data), True)  # a self-drain (drained: infra) is this drain
+
+        def unreadable():
+            (self.data / 'ci-runners' / 'state' / 'drain.json').write_text('{')
+
+        cases = [(drain_host, 'drained: host'),
+                 (lambda: drain_mod.change(str(self.data), True, 'gpu'), 'drained: pool gpu'),
+                 (lambda: setattr(self, 'disk', 1.0), 'health: 1 GiB free under the data directory, below 10'),
+                 (unreadable, drain_mod.UNREADABLE)]
+        for make, why in cases:
+            with self.subTest(why=why):
+                drain_mod.change(str(self.data), False)
+                self.disk = 100.0
+                self.units = {PUB0: ('active', 'success'), PUB1: ('active', 'success')}
+                self.procs.clear()
+                self.pub_job(41, PUB1)  # its job runs: it finishes
+                self.pub_job(42, PUB0, '/work/runner/bin/Runner.Listener')  # no job yet
+                self.calls.clear()
+                self.tick()
+                self.assertEqual(self.actions('stop'), [])
+                self.assertEqual(self.row()['offered'], True)
+                make()
+                self.tick()  # no second look: the private runners' drain holds at once too
+                self.assertEqual(self.actions('stop'), [PUB0])
+                self.assertEqual(self.row()['offered'], False)
+                self.assertEqual(self.row()['why'], why)
+                self.assertEqual(self.row()['cards'], [])
+                self.assertIn({'runner': PUB0, 'action': 'stop', 'cause': why},
+                              [{k: x.get(k) for k in ('runner', 'action', 'cause')} for x in self.log()])
+                self.assertNotIn(PUB1, [x.get('runner') for x in self.log()])  # never looked at again
+
+    def test_a_held_host_stops_no_public_runner_it_cannot_prove_idle(self):
+        drain_mod.change(str(self.data), True)
+        self.units[PUB0] = ('active', 'success')
+        self.calls.clear()
+        real, looks = self.listdir, []
+
+        def no_proc(path):
+            if path == '/proc':
+                raise OSError('no /proc')
+            return real(path)
+
+        self.listdir = no_proc
+        self.tick()
+        self.assertEqual(self.actions('stop'), [])
+        self.assertEqual(self.row()['offered'], False)
+        self.assertNotIn(PUB0, [x.get('runner') for x in self.log()])  # no look, no second one
+
+        def late_job(path):  # a job comes between the tick's look and the stop
+            if path == '/proc':
+                looks.append(path)
+                if len(looks) == 2:
+                    self.pub_job(43, PUB0)
+            return real(path)
+
+        self.listdir = late_job
+        self.tick()
+        self.assertEqual(self.actions('stop'), [])
+        self.assertIn('a job started', [x.get('why') for x in self.log() if x.get('runner') == PUB0])
 
     def test_the_inventory_or_presence_off_withdraws_it(self):
         for extra, public, why in (('presence = { enabled = true }\nisolation = "account"', False,

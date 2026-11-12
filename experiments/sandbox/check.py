@@ -62,7 +62,7 @@ EXPECTED = {
     'K3': 'mknod of a device node fails',
     'G1': 'the leased card works (jax.devices(); one small matmul)',
     'G2': "no other card's node exists; opening one fails",
-    'G3': 'record what nvidia-smi shows of other cards and processes',
+    'G3': "record what nvidia-smi shows of other cards and of processes outside (a marker of ours holds 64 MiB on the card)",
     'G4': "record whether a fresh allocation reads the previous process's pattern",
 }
 INFO_ITEMS = {'G3', 'G4'}          # recorded, not pass/fail
@@ -73,6 +73,17 @@ MARKER_CODE = (
     'ctypes.CDLL(None).prctl(0x59616d61, ctypes.c_ulong(-1), 0, 0, 0)  # PR_SET_PTRACER_ANY\n'
     'time.sleep(3600)\n'
 )
+
+GPU_MARKER_CODE = r'''
+import ctypes, sys, time
+cu = ctypes.CDLL('libcuda.so.1')
+dev, ctx, ptr = ctypes.c_int(), ctypes.c_void_p(), ctypes.c_uint64()
+assert cu.cuInit(0) == 0 and cu.cuDeviceGet(ctypes.byref(dev), 0) == 0
+assert cu.cuDevicePrimaryCtxRetain(ctypes.byref(ctx), dev) == 0 and cu.cuCtxSetCurrent(ctx) == 0
+assert cu.cuMemAlloc_v2(ctypes.byref(ptr), ctypes.c_size_t(64 << 20)) == 0
+print('ready', flush=True)
+time.sleep(600)
+'''
 
 G1_CODE = r'''
 import json, time
@@ -391,6 +402,8 @@ def g3(spec):
         return _item('G3', 'no nvidia-smi', None)
     try:
         cards = subprocess.run([smi, '-L'], capture_output=True, text=True, timeout=60)
+        mem = subprocess.run([smi, '--query-gpu=memory.used', '--format=csv,noheader'],
+                             capture_output=True, text=True, timeout=60)
         apps = subprocess.run([smi, '--query-compute-apps=gpu_uuid,pid,used_memory', '--format=csv,noheader'],
                               capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -402,7 +415,7 @@ def g3(spec):
     note = '' if apps.returncode == 0 else f'; query failed: {(apps.stdout + apps.stderr).strip()[:80]}'
     obs = (f'-L lists {len([c for c in cards.stdout.splitlines() if c.startswith("GPU")])} card(s)'
            f'{" (rc " + str(cards.returncode) + ")" if cards.returncode else ""}; compute apps listed: {len(lines)} '
-           f'({pids_shown} with a pid, {foreign} not in this /proc){note}')
+           f'({pids_shown} with a pid, {foreign} not in this /proc); memory.used: {", ".join(mem.stdout.split(chr(10))[:6]).strip(", ")}{note}')
     return _item('G3', obs, None)
 
 
@@ -517,6 +530,12 @@ def suite(a) -> int:
         f.write(token)
     lst, hits = _marker_listener()
     marker = subprocess.Popen([sys.executable, '-c', MARKER_CODE, token])
+    gpu_marker = None
+    if a.card is not None:  # a process of ours on the leased card, outside: does nvidia-smi inside list it?
+        gpu_marker = subprocess.Popen([sys.executable, '-c', GPU_MARKER_CODE, token], stdout=subprocess.PIPE,
+                                      text=True, env=dict(os.environ, CUDA_VISIBLE_DEVICES=_card_uuid(a.card)))
+        if gpu_marker.stdout.readline().strip() != 'ready':
+            raise SystemExit('check: the GPU marker did not start')
     home = os.path.expanduser('~')
     spec = {'token': token, 'marker_file': marker_file, 'marker_pid': marker.pid,
             'marker_port': lst.getsockname()[1], 'proxy_port': a.proxy_port, 'home': home, 'scratch': run,
@@ -567,8 +586,10 @@ def suite(a) -> int:
     out, err = proc.communicate(timeout=1800)
     wall = time.time() - t0
     w.join(5)
-    marker.kill()
-    marker.wait()
+    for m in (marker, gpu_marker):
+        if m:
+            m.kill()
+            m.wait()
     lst.close()
     lines = [ln for ln in out.splitlines() if ln.startswith('{"results"')]
     if lines:

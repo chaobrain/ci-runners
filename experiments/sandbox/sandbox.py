@@ -568,6 +568,9 @@ def run(a) -> int:
     except Cannot as e:
         print(f'sandbox: {e}', file=sys.stderr)
         os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        _rmdir(root)
+        return EXIT_CANNOT
     except OSError:
         pass  # S failed and said why
     for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
@@ -578,12 +581,16 @@ def run(a) -> int:
             break
         except InterruptedError:
             continue
-    try:
-        os.rmdir(root)
-    except OSError:
-        pass
+    _rmdir(root)
     code = os.waitstatus_to_exitcode(st)
     return code if code >= 0 else 128 - code
+
+
+def _rmdir(path: str) -> None:
+    try:
+        os.rmdir(path)
+    except OSError:
+        pass
 
 
 def probe() -> int:

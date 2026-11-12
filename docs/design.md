@@ -4181,6 +4181,15 @@ Rules:
      salvage, verdict; no retry) on a second head, after a first whose parts all passed but whose two artifact uploads
      from one host were reset on the way to the egress proxy (a network fault the release does not touch); the red
      head was red on compile, cpu, gpu, multi-a and multi-b.
+- **`v1.18.0`** (minor, stamped 2026-11-12; decision 16.6, RUN-10 R6, #211, #212, #214; brainspike's coordinator under the
+  lead's delegation of 2026-11-12): the reusable workflows `ci.yml` and `part.yml` (`workflow_call` only), the composite
+  action `flow` and `ci-run flow`, the plan JSON's optional keys (`files`, `max_parallel`; a part's `queue_minutes`,
+  `artifacts`; `needs: light`), the registry's optional `max_parallel`, and `ci_runners/stamp.py`, which stamps the two
+  workflows' references with the release (operations §5). The verdict reads only this run attempt's records when an
+  earlier attempt left artifacts (a re-run of failed jobs). No existing action's input, output, label or outcome kind
+  changes. Its notes:
+  1. **Order.** No setup file changes, so no host's plan changes and the egress proxy keeps running (the egress host's
+     hook link moves first). No registry sets `max_parallel`: the default (16) holds.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

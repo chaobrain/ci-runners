@@ -374,3 +374,35 @@ cards = { per_card = true, class = "gpu", labels = ["<host>-gpu"], slot = { cpus
 和 CI 槽位文件的关系（直到 `v2`）：CPU 部件和 `compile` 部件照旧先从主机的槽位文件（inventory `slots` 和 `files`，3090 主机上是 brainspike 的，本地的 `ci_slot.sh` 也从这里拿）拿一个 CI 槽位，拿不到就排队，直到 `queue-timeout-minutes` 后 `unavailable`。槽位文件只决定“同时能跑几个”，不带 CPU；cpuset 只看 `slot` 表。所以部件拿到的槽位文件编号和它的 `CI_RUNNER_SLOT` 不必相同。GPU 部件拿的是卡的租约，不拿 CI 槽位。把 `slots` 保持为不少于部件 runner 数，本地工作和池子运行占用的槽位才会让部件排队，而不是让槽位空着；R3 的 presence 会停掉槽位被别人占着的 runner（16.4）。
 
 上线和回退：先确认 `v1` 已经指向接受 `slot` 的版本（R1，16.3）和会读它的版本（R2），再在 inventory 加表、跑 setup 的 plan 和 apply，让各 runner 的 `.env` 带上 `CI_RUNNER_SLOT`。只有表、`.env` 里还没有 `CI_RUNNER_SLOT` 的 runner 照旧运行；`.env` 里的序号超出表的范围、表被删掉、或 per-card 池的序号和 `CI_RUNNER_CARD` 对不上，部件都以 `unavailable`（`slot: ...`）结束，不会悄悄退回旧的绑核方式。回退就是删掉表再 apply 一次。部件记录（`record.json`）的 `runner_slot` 记下序号、cpuset、`workers`、`memory`、`speed`、`isa` 和放大后的超时分钟数。
+
+## 15. presence：按资源停启空闲的 runner（design 决定 16.4，RUN-10 R3 起）
+
+presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 runner 的资源暂时用不了时，它把这个空闲的 runner 停掉（`systemctl --user stop`），资源恢复后再启动。它以 CI 账户的 `ci-presence.timer` 运行，默认每 20 秒一次（`ci-run presence`，一次一个 tick），只读本机状态，不用令牌也不联网。
+
+- **原因**（每个 runner 单独判断）：它的卡被别人占用（卡上有不属于我们的计算进程，或不属于我们的显存达到 `busy.gpu_mib`），或卡的健康门不通过（每卡一个 runner 的主机上：温度达到 `max_temp_c` 或读不到）；没有空闲的 CI slot 给它（slot 总数减去不属于我们的进程持有的，再减去我们忙着的部件 runner 占的；剩下的 slot 先给每个池一个 runner，在线的优先、再按顺序；所以 2 个空闲 slot、某池 2 个在线 runner、另一池 1 个停着时，前者的第二个 runner 会被停一次，让后者启动，之后就稳定了）；它的 slot 的 CPU 被不属于我们的进程占着（1 秒的采样，达到这些 CPU 的一半算，降到四分之一以下才解除；cgroup v2 上不会超过整机忙时减去我们所有单元的 CPU 时间，所以我们自己的短进程不算）；主机或它的池被 drain，或主机的健康门不通过（数据盘剩余低于 `disk_min_gib`，或 CI 账户对共享文件的访问缺失，决定 15.2）；一个独占的计时部件在跑或在等：CPU 和 `compile_cpus` 重叠的 runner（有 slot 的看 slot 的 cpuset，没有 slot 的 `part` runner 看主机的 `cpus`）停。
+- **"我们的"进程**按 systemd 单元和 cgroup 判断，不按 Unix 账户：在本账户 user manager（`user@<uid>.service`）下某个 `ci-` 服务或 scope 里的进程（runner、部件的 scope、定时器的服务）。cgroup v1 的主机读 `/proc/<pid>/cgroup` 里 `name=systemd` 那一行。共享账户的主机（h100）上同一个 uid 的登录会话、别人的 `systemd-run` 都不算我们的。看不到的进程不算我们的。
+- **空闲**：runner 目录下没有 `Runner.Worker` 进程，也没有这个 runner 的部件 scope。连续 2 个 tick 空闲且有原因才停；停之前再看一次，这时出现了 `Runner.Worker` 就不停（日志里记一条 `kept`）。presence 停掉的、或被单元的 `ExecCondition=` 拦下的（`Result=exec-condition`），连续 2 个 tick 没有原因就启动。忙着的 runner 永远不停；没有 `ci-` 标签的 light runner（§5.1 的 `home` 池，给本机的 salvage）永远不停；主机的 light 池还没有 `ci-light`（16.1）之前，那里的每个 light runner 都算这种 runner，drain 时也不停，所以先加能力标签、再打开 presence。别人手动停掉的 runner presence 不管。
+- **单元的 `ExecCondition=`**：runner 每次启动（包括 15.5 的自动恢复、开机）先跑 `ci-run presence check <runner>`，有原因时退出 77，systemd 跳过这次启动，等 presence 的 tick 再启动它。其他任何结果（出错、旧 release 没有这个命令）都让 runner 照常启动。systemd 243 以前不认识这个键，会忽略它。
+- **黑洞自动 drain**：15 分钟内 `presence.infra_failures`（默认 3）次基础设施失败就 drain 整台主机（和 15.2 的缺失一样，日志里是 `drained: infra`）。算数的是：部件的 `unavailable`，但不包括 busy、drained、队列满、等待超时（没有 slot、卡或主机锁：主机忙）、类别不接受的请求（调用方的 `gpus`、`lock`）和集群部件的（那是集群的问题）；主机没有重启过的 `lost` 部件；hook 的 `stale`、`policy`、`timeout`、`error` 拒绝。上次自动 drain 或上次 `drain off` 之前的失败不算。计数在停启之后进行，计数出错只记日志，不影响停启。不会自己解除 drain：修好以后运维执行 `ci-run drain off`。
+- **只在 inventory 打开的主机上生效**：主机的 inventory 写 `presence = { enabled = true }`（可选 `tick_seconds`、`infra_failures`）。每台主机都装这个定时器，但没有打开时它什么都不做。一次只打开一台主机（16.11，lead 的步骤），且 `v1` 已经指向包含 R3 的 release。
+
+**打开之前先观察**：以 CI 账户运行 `ci-run presence --dry-run`。它按"已经打开"的情况读本机，逐个 runner 打印状态、是否空闲、原因和这个 tick 会做什么（`stop`、`start`、`keep`、`never stopped`），以及 15 分钟内的基础设施失败数。它不写状态、不动任何单元、不 drain。
+
+**看日志**：每次停、启、`kept`、每个基础设施失败和每次自动 drain 都是 `<data>/ci-runners/logs/presence-<UTC 日期>.log` 里的一行 JSON（`runner`、`action`、`cause`，或 `infra`、`drain`），同时打到 `journalctl --user -u ci-presence.service`。reaper 14 天后删除这些文件。`state/presence.json` 里有每个 runner 的停、启次数（给 16.8 的统计）和两个 tick 的计数。
+
+**容量文件**（16.5）：有注册表（`etc/pool.toml`）的账户，每个打开的 tick 在停、启之后用 `pool.record_local` 重写容量文件里本机那一部分（§11），所以路由看到的空闲 runner 不会比 presence 晚一个 tick 以上（`--no-block` 的停止还没完成时，这一行仍把它算作在线，下一个 tick 更正）。写不进去时日志里记一条 `"capacity": "not written"`，tick 照常进行；`ci-capacity.timer` 仍在 30 秒内重写这个文件。
+
+**回滚**：把 inventory 改成 `presence = { enabled = false }`（或删掉这个表）。下一个 tick 就启动它停掉的和被 `ExecCondition=` 拦下的所有 runner，然后什么都不做；`check` 也总是放行。状态文件读不出来时，回滚把所有停着的 runner 都当成 presence 停的，一并启动。
+
+**仍然存在的竞争**：presence 只能缩小、不能消除取作业和资源变化之间的竞争。停之前的最后一次查看到 systemd 把 SIGTERM 送到 runner 之间（毫秒级），GitHub 仍可能把作业派给它：作业会被重新排队，或者以 `stopped`/`lost` 结束，由 16.5 的重试行重试，不会跑两次。tick 之后到作业开始之间资源也可能变化：执行器的拒绝（drain、busy、健康门、租约）仍然生效。
+
+## 16. 看懂一次路由（design 决定 16.5，RUN-10 R5）
+
+可复用工作流的 plan 作业在 `ci-light` 上跑 `ci-run route`：标准输入是计划（schema 1），标准输出是路由后的计划。容量用 `capacity.load()` 读（`pool status --fast` 的行）；`--rows FILE` 读一份事先存下的 `pool status --fast --json`，用来复现某次决定。
+
+- **输出**：`{"schema": 1, "capacity": "read" | "unreadable: <原因>", "parts": [...]}`，每个部件保留计划里的键，另加 `labels`（作业的 `runs-on`）、`timeout_minutes`（作业的 `timeout-minutes`）、`where`（`host` 或 `slurm`）、`target`（集群部件的目标，否则空）和 `why`。
+- **`why` 怎么读**：`N free`：去掉本计划前面部件订掉的之后，这组标签还有 N 个空闲 runner；`free runner unknown`：有主机 `/proc` 看不到空闲数，或者某台在线主机的 runner 表没读到，这时不溢出；`0 free; <key> can start it now`：主机上没有空闲 runner 了，这个集群目标现在就能起，部件去了 `ci-slurm`；`0 free; no cluster target can start it now`（或 `no host serves ci-slurm`、`no free ci-slurm runner`、`timing never overflows`）：留在共享标签上排队；`<m> GiB > <n> GiB`：加了 `mem-big`；`slot memory not reported`：主机行没有 `slot_pools`，没法判断要不要 `mem-big`。
+- **退出码**：0 已路由；1 计划时的路由错误，标准错误里每行一个，先写标签，例如 `route: ci-gpu2: part gpu.1: no host serves the label (...)`（带这个标签的主机全部掉线、drained、连不上或过期），或者某个部件的内存连 `mem-big` 的 slot 都放不下；2 计划读不进来（键不对、`needs` 不认识、id 重复等），是使用方的问题。
+- **容量读不到**（没有注册表、没有容量文件、行全空，或者所有主机行都过期）：每个部件都走它的共享标签，不加 `mem-big`、不溢出、不报"没有主机提供"，退出码 0，`capacity` 和标准错误里写明原因（路径只保留文件名）。这时先查 `ci-capacity.timer`（§11）。
+- **"提供"的含义**：主机行在线（没有问题项）并且它的 inventory 给这个标签注册了 runner，就算提供，哪怕 presence 因为卡被占用、slot 被占用或 timing 部件在跑而暂时停掉了全部 runner。所以"没有主机提供"只说明这些主机本身不能用（掉线、drained、过期、连不上），不是忙。
+- **重试**（`route.retry`）：按 `outcome.hint` 的五行：`cool-card` 去首次尝试那台主机上凉的那张卡（`<host>-gpu<M>`，只限单卡部件，双卡部件按 fallback）；`same-host` 去首次尝试所在主机这一类的主机标签，集群部件回同一个目标；`more-memory` 原标签加 `mem-big`（并 `resume`），容量证明不了有主机同时提供这两个标签时，就用不带 `mem-big` 的标签加 `resume` 重试，免得排队 24 小时；`any` 原标签；fallback 用现在的容量重新路由。每个部件最多重试一次；主机标签取自首次尝试的记录（`host`、`pool_labels`、`cool_card`），不读 `retry-on`。

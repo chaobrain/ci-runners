@@ -7,10 +7,17 @@ use (every account but the CI account, the local maintainer's included):
 - ``cpu``: cores, the busy time of ``/proc/stat`` minus the CI account's (``cpu.stat``
   of its ``user@<uid>.service``), per second since the previous line;
 - ``mem``: GiB, ``MemTotal`` minus ``MemAvailable``, minus the CI account's ``anon``;
-- ``gpu``: MiB per card of the compute processes whose ``/proc/<pid>`` the account cannot
-  see (under ``ProtectProc=invisible`` it sees only its own: fails closed);
-- ``lock``: the PID of an exclusive ``flock`` on the host lock that the account cannot
-  see, or null.
+- ``gpu``: MiB per card of the compute processes that are not ours (``ours``: a process
+  the account cannot see is not ours, so under ``ProtectProc=invisible`` it fails closed);
+- ``lock``: the PID of an exclusive ``flock`` on the host lock that is not ours, or null.
+
+*Ours* (decision 16.4) is decided by systemd unit and cgroup, never by Unix account: a
+process below our user manager (``user@<uid>.service``) in a ``ci-`` service or scope (a
+runner, a part's scope, a timer's service), read from the unified line of
+``/proc/<pid>/cgroup`` or, on cgroup v1, its ``name=systemd`` line. On a host where
+everything runs under one shared account (h100, 11.3) this still tells our processes from
+the co-users'. Presence (``presence.py``) reads it too, with ``load_between``: the CPU
+time on a set of CPUs that is not ours, over one short sample.
 
 ``busy`` reads the lines of a window: a part's first attempt ends ``unavailable`` when a
 rule held in every sample of its window. With fewer than half the window's samples the
@@ -80,6 +87,48 @@ def manager_cgroup(proc_cgroup: str) -> str:
     return ''
 
 
+#: a unit of ours below the CI account's user manager (decision 16.4): a runner
+#: (``ci-runner@<name>.service``), a part's scope (``ci-part-*.scope``), or another ``ci-``
+#: service or scope (the presence tick, the load sample, the hooks' copy)
+OUR_UNIT = re.compile(r'ci-[^/]*\.(?:service|scope)\Z')
+
+
+def cgroup_path(proc_cgroup: str) -> str:
+    """A process's systemd cgroup from its ``/proc/<pid>/cgroup``: the unified line's
+    (``0::``, cgroup v2 or a hybrid host) unless it is empty or the root, else the cgroup v1
+    ``name=systemd`` line's; empty with neither. Pure."""
+    v2 = v1 = ''
+    for line in proc_cgroup.splitlines():
+        hid, _, rest = line.partition(':')
+        ctrl, _, path = rest.partition(':')
+        if hid == '0' and ctrl == '':
+            v2 = path.strip()
+        elif ctrl == 'name=systemd':
+            v1 = path.strip()
+    return v2 if v2 not in ('', '/') else v1
+
+
+def ours_cgroup(path: str, uid: int) -> bool:
+    """Whether a process in cgroup ``path`` is ours (decision 16.4): below the user manager
+    of ``uid`` (``user@<uid>.service``), in a ``ci-`` service or scope. A login session's
+    process (``session-*.scope``) or another unit of the same account is not ours, so this
+    holds on a shared account too. Pure."""
+    parts = [p for p in path.split('/') if p]
+    try:
+        i = parts.index(f'user@{uid}.service')
+    except ValueError:
+        return False
+    return any(OUR_UNIT.match(p) for p in parts[i + 1:])
+
+
+def ours(pid: int, uid: int | None = None, read: Callable[[str], str] | None = None) -> bool:
+    """Whether process ``pid`` is ours, by its cgroup (``ours_cgroup``). A process whose
+    ``/proc/<pid>/cgroup`` cannot be read (gone, or hidden by ``ProtectProc=invisible``) is
+    not ours."""
+    text = (read or _read)(f'/proc/{pid}/cgroup')
+    return ours_cgroup(cgroup_path(text), os.getuid() if uid is None else uid)
+
+
 def write_flocks(locks: str, dev: tuple[int, int], ino: int) -> list[int]:
     """The PIDs holding an exclusive ``FLOCK`` on the file ``(major, minor), ino`` in
     ``/proc/locks``. Pure."""
@@ -127,11 +176,12 @@ def _smi(argv: Sequence[str], run: Callable) -> str:
 
 
 def raw(host_lock: str = '', *, read: Callable[[str], str] = _read, run: Callable = subprocess.run,
-        visible: Callable[[int], bool] = lambda pid: os.path.exists(f'/proc/{pid}'),
+        mine: Callable[[int], bool] | None = None,
         hz: int | None = None, now: Callable[[], float] = time.time) -> dict:
     """One sample's raw readings: the host's and the CI account's CPU seconds, memory, the
-    other accounts' compute memory per card, and another account's exclusive hold of the
-    host lock."""
+    compute memory per card that is not ours, and an exclusive hold of the host lock that is
+    not ours (``mine``: whether a PID is ours, by default ``ours``)."""
+    mine = mine or (lambda pid: ours(pid, read=read))
     hz = hz or os.sysconf('SC_CLK_TCK')
     cg = manager_cgroup(read('/proc/self/cgroup'))
     ci_usec = keyed(read(f'/sys/fs/cgroup{cg}/cpu.stat'), 'usage_usec') if cg else None
@@ -144,14 +194,14 @@ def raw(host_lock: str = '', *, read: Callable[[str], str] = _read, run: Callabl
     apps = compute_mib(_smi(['--query-compute-apps=pid,gpu_bus_id,used_memory', '--format=csv,noheader,nounits'], run))
     for pid, bus, mib in apps:
         card = by_bus.get(outcome.bus_key(bus))
-        if card is not None and not visible(pid):
+        if card is not None and not mine(pid):
             gpu[str(card)] = gpu.get(str(card), 0) + mib
     lock = None
     if host_lock:
         try:
             st = os.stat(host_lock)
             foreign = [p for p in write_flocks(read('/proc/locks'), (os.major(st.st_dev), os.minor(st.st_dev)),
-                                               st.st_ino) if not visible(p)]
+                                               st.st_ino) if not mine(p)]
             lock = foreign[0] if foreign else None
         except OSError:
             lock = None
@@ -225,6 +275,118 @@ def sample(data: str, host_lock: str = '', cpus: int | None = None, **kw) -> dic
     finally:
         os.close(fd)
     return line
+
+
+# ------------------------------------------------------------------ the CPUs of a slot (presence, 16.4)
+
+
+def cpu_set(spec: str) -> frozenset[int]:
+    """The CPUs of a cpuset list such as ``0-3,8-9``; empty where it is not one. Pure."""
+    ranges = inventory.cpu_ranges(spec) or []
+    return frozenset(c for lo, hi in ranges for c in range(lo, hi + 1))
+
+
+def cpu_jiffies(stat: str) -> dict[int, int]:
+    """Each CPU's busy jiffies since boot from ``/proc/stat``'s ``cpu<N>`` lines: user,
+    nice, system, irq, softirq and steal. Pure."""
+    out = {}
+    for line in stat.splitlines():
+        p = line.split()
+        if p and p[0][:3] == 'cpu' and p[0][3:].isdigit() and len(p) >= 9 and all(x.isdigit() for x in p[1:9]):
+            v = dict(zip(_BUSY_FIELDS, map(int, p[1:9])))
+            out[int(p[0][3:])] = v['user'] + v['nice'] + v['system'] + v['irq'] + v['softirq'] + v['steal']
+    return out
+
+
+def proc_ticks(stat: str) -> tuple[float, int] | None:
+    """``(start ticks since boot, utime + stime ticks)`` from a ``/proc/<pid>/stat``. Pure."""
+    try:
+        f = stat[stat.rindex(')') + 2:].split()
+        return float(f[19]), int(f[11]) + int(f[12])
+    except (ValueError, IndexError):
+        return None
+
+
+def allowed_cpus(status: str) -> frozenset[int]:
+    """``Cpus_allowed_list`` of a ``/proc/<pid>/status``; empty where it is missing. Pure."""
+    for line in status.splitlines():
+        if line.startswith('Cpus_allowed_list:'):
+            return cpu_set(line.split(':', 1)[1].strip())
+    return frozenset()
+
+
+def load_snapshot(uid: int | None = None, *, read: Callable[[str], str] = _read,
+                  listdir: Callable[[str], list[str]] = os.listdir, now: Callable[[], float] = time.monotonic) -> dict:
+    """One half of presence's load sample: the time, each CPU's busy jiffies, and each of our
+    processes (``ours``) by PID: its start, its CPU ticks and the CPUs it may run on."""
+    uid = os.getuid() if uid is None else uid
+    t, cpus = now(), cpu_jiffies(read('/proc/stat'))
+    procs = {}
+    # every unit of ours together, short-lived processes included (cgroup v2): ci.slice holds the
+    # runners and the parts, app.slice the timers' services; None where it cannot be read
+    mgr = manager_cgroup(read('/proc/self/cgroup'))
+    usec: float | None = None
+    if mgr:
+        base = f'/sys/fs/cgroup{mgr}'
+        try:
+            apps = [f'app.slice/{d}' for d in listdir(f'{base}/app.slice') if OUR_UNIT.match(d)]
+        except OSError:
+            apps = []
+        vals = [keyed(read(f'{base}/{d}/cpu.stat'), 'usage_usec') for d in ['ci.slice', *apps]]
+        usec = None if vals[0] is None else float(sum(v for v in vals if v is not None))
+    try:
+        pids = [p for p in listdir('/proc') if p.isdigit()]
+    except OSError:
+        pids = []
+    for pid in pids:
+        if not ours(int(pid), uid, read):
+            continue
+        st = proc_ticks(read(f'/proc/{pid}/stat'))
+        if st is not None:
+            procs[int(pid)] = (st[0], st[1], allowed_cpus(read(f'/proc/{pid}/status')))
+    return {'t': t, 'cpu': cpus, 'ours': procs, 'units_usec': usec}
+
+
+def load_between(a: Mapping, b: Mapping, hz: int) -> dict | None:
+    """Presence's load sample from two snapshots: each CPU's busy cores, and each of our
+    processes' cores with the CPUs it may run on (a process present in both, same start).
+    None without time between them. Pure."""
+    dt = b['t'] - a['t']
+    if dt <= 0:
+        return None
+    cpu = {c: max(0.0, (b['cpu'][c] - a['cpu'][c]) / hz / dt) for c in b['cpu'] if c in a['cpu']}
+    mine = []
+    for pid, (start, ticks, cpus) in b['ours'].items():
+        old = a['ours'].get(pid)
+        if old is not None and old[0] == start and ticks >= old[1]:
+            mine.append(((ticks - old[1]) / hz / dt, cpus))
+    total = None
+    if a.get('units_usec') is not None and b.get('units_usec') is not None and b['units_usec'] >= a['units_usec']:
+        total = max(0.0, sum(cpu.values()) - (b['units_usec'] - a['units_usec']) / 1e6 / dt)
+    return {'cpu': cpu, 'ours': mine, 'foreign': total}
+
+
+def foreign_cores(sample: Mapping, cpus: frozenset[int]) -> float:
+    """The cores of ``cpus`` kept busy by processes that are not ours in a load sample: their
+    busy time, minus each of our processes' share on them (its cores times the part of its
+    allowed CPUs that are in ``cpus``; a part pinned to another slot adds nothing), and never
+    more than the host's busy time minus every unit of ours (``foreign``, where read: our
+    processes that start or end within the sample count as ours there). Pure."""
+    busy = sum(v for c, v in sample['cpu'].items() if c in cpus)
+    for cores, allowed in sample['ours']:
+        if allowed:
+            busy -= cores * len(allowed & cpus) / len(allowed)
+    if sample.get('foreign') is not None:
+        busy = min(busy, sample['foreign'])
+    return max(0.0, busy)
+
+
+def load_sample(seconds: float, uid: int | None = None, *, sleep: Callable[[float], None] = time.sleep,
+                hz: int | None = None, **kw) -> dict | None:
+    """Presence's one load sample over ``seconds`` (``load_between`` of two snapshots)."""
+    a = load_snapshot(uid, **kw)
+    sleep(seconds)
+    return load_between(a, load_snapshot(uid, **kw), hz or os.sysconf('SC_CLK_TCK'))
 
 
 # ------------------------------------------------------------------ the rule

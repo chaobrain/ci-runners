@@ -90,17 +90,17 @@ class Sample(unittest.TestCase):
         return subprocess.CompletedProcess(argv, 0, self.smi.get(argv[1], ''), '')
 
     def kw(self, t, **over):
-        return {'read': lambda p: self.files.get(p, ''), 'run': self.run_smi, 'visible': lambda pid: pid < 100,
+        return {'read': lambda p: self.files.get(p, ''), 'run': self.run_smi, 'mine': lambda pid: pid < 100,
                 'hz': 100, 'now': lambda: t, **over}
 
     def test_one_reading(self):
         """Every value is other accounts': the CI account's CPU and anon memory are taken off,
-        a compute process or a lock holder the account can see is its own."""
+        a compute process or a lock holder of ours (by its cgroup, decision 16.4) is not counted."""
         r = hostload.raw(str(self.lock), **self.kw(NOW))
         self.assertEqual((r['t'], r['cpu_s'], r['ci_cpu_s']), (NOW, 1.7, 0.3))
         self.assertAlmostEqual(r['mem_total'], 197000000 / (1 << 20))
         self.assertAlmostEqual(r['mem'], 10000000 / (1 << 20) - 2)  # used minus the CI account's 2 GiB of anon
-        self.assertEqual(r['gpu'], {'0': 0, '1': 3100})  # pid 10 is visible: the account's own
+        self.assertEqual(r['gpu'], {'0': 0, '1': 3100})  # pid 10 is ours
         self.assertEqual(r['lock'], 900)
         self.assertIsNone(hostload.raw('', **self.kw(NOW))['lock'])  # no host lock on this host
         self.assertIsNone(hostload.raw(str(self.lock) + '.gone', **self.kw(NOW))['lock'])

@@ -14,9 +14,10 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from ci_runners import drain as drain_mod
-from ci_runners import hostload, inventory, presence, setup
+from ci_runners import hostload, inventory, pool, presence, setup
 from tests.test_part import Host
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -165,6 +166,8 @@ class Fixture(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.t = pathlib.Path(self.tmp.name)
         self.data = self.t / 'data'
+        self.etc = self.t / 'etc'  # no pool.toml unless a test writes one: no capacity file
+        self.etc.mkdir()
         (self.data / 'actions-runner').mkdir(parents=True)
         self.slot = self.t / 's.lock'
         for p in (self.slot, self.t / 's.2.lock', self.t / 's.3.lock'):
@@ -227,7 +230,7 @@ class Fixture(unittest.TestCase):
     def probe(self):
         return presence.Probe(self.inv, run=self.sysrun, read=self.read, listdir=self.listdir, uid=UID,
                               load=lambda: self.load_sample, disk_free=lambda p: self.disk,
-                              own_access=lambda h, uid: self.access, locks=lambda: self.locks)
+                              own_access=lambda h, uid: self.access, locks=lambda: self.locks, etc=str(self.etc))
 
     # helpers
 
@@ -599,18 +602,39 @@ class Tick(Fixture):
         self.assertEqual(code, 1)
         self.assertIn('cannot be read', lines[0])
 
-    def test_the_capacity_call_site_runs_at_every_tick(self):
-        """R4 (16.5) fills in the capacity file at this call; until then it does nothing."""
-        seen = []
-        orig = presence.publish_capacity
-        presence.publish_capacity = lambda inv, rows: seen.append(rows)
-        try:
-            self.tick()
-        finally:
-            presence.publish_capacity = orig
-        self.assertEqual(sorted(seen[0]), sorted(NAMES))
-        self.assertEqual(seen[0]['hz-part-1'], {'labels': ['part', 'hz'], 'online': True, 'idle': True, 'causes': []})
+    def test_the_capacity_file_is_rewritten_after_the_ticks_actions(self):
+        """16.5: each enabled tick rewrites the host's own part of the capacity file, after its
+        stops and starts; nothing without a registry or in a dry run; a failure is logged and
+        the tick goes on."""
+        order = []
+        orig = self.sysrun
+        self.sysrun = lambda argv, **kw: (order.append('stop' if 'stop' in argv else 'systemctl'), orig(argv, **kw))[1]
 
+        def record(reg, etc):
+            order.append(('record', reg, etc))
+        with mock.patch.object(pool, 'record_local', record), mock.patch.object(pool, 'load_file', lambda p: p):
+            self.tick()
+            self.assertNotIn('record', [o[0] for o in order if isinstance(o, tuple)])  # no pool.toml
+            (self.etc / 'pool.toml').write_text('')
+            self.tick(dry_run=True)
+            self.assertEqual([o for o in order if isinstance(o, tuple)], [])
+            drain_mod.change(str(self.data), True, 'gpu')
+            self.tick()
+            order.clear()
+            self.tick()  # the second tick with a cause stops the gpu runners
+            want = ('record', str(self.etc / 'pool.toml'), str(self.etc))
+            self.assertEqual(order[-1], want)
+            self.assertIn('stop', order[:-1])
+            self.assertEqual(order.count(want), 1)
+
+        def broken(reg, etc):
+            raise RuntimeError('capacity.lock busy')
+        with mock.patch.object(pool, 'record_local', broken), mock.patch.object(pool, 'load_file', lambda p: p):
+            code, _, out = self.tick()
+        self.assertEqual(code, 0)
+        self.assertIn('"capacity": "not written"', out)
+        self.assertIn('RuntimeError: capacity.lock busy', [x.get('error') for x in self.log()])
+        self.assertTrue(presence.read_state(str(self.data))[1])
 
 class Race(Host):
     def test_the_executors_refusal_still_fires_after_a_tick(self):

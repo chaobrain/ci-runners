@@ -57,10 +57,10 @@ class Plan(unittest.TestCase):
         self.assertEqual(sandbox._groups_arg(p['job_groups']), ['--groups=65537'])
 
     def test_the_inside_id_follows_a_smaller_range(self):
-        p = plan('gpu', subgid='acct:300000:2000\nacct:3000:1\n')
-        self.assertEqual(p['gid_map'], ['0', '5000', '1', '1', '300000', '2000', '2001', '3000', '1'])
-        self.assertEqual(p['uid_map'][-1], '2000')  # the pair has one size
-        self.assertEqual(p['job_groups'], [2001])
+        p = plan('gpu', subgid='acct:300000:1500\nacct:3000:1\n')
+        self.assertEqual(p['gid_map'], ['0', '5000', '1', '1', '300000', '1500', '1501', '3000', '1'])
+        self.assertEqual(p['uid_map'][-1], '1500')  # the pair has one size
+        self.assertEqual(p['job_groups'], [1501])
 
     def test_gpu_without_the_line_names_the_line_to_add(self):
         with self.assertRaises(sandbox.Cannot) as c:

@@ -326,14 +326,14 @@ jobs:
 
 **每次 sweep 做什么**：
 
-1. 列出 `workflow` 排队中（`queued`）和进行中（`in_progress`）的运行，各读一页 100 个（更多的只在日志和 summary 里报告，不再翻页）；创建不到 `minutes` 分钟的运行不读。
-2. 读每个运行最新一次尝试的作业：状态是 `queued`、创建超过 `minutes` 分钟的作业算卡住。只算 `queued`：`waiting`、`pending`、`requested` 是 environment 的审批、并发组或 `max-parallel` 的等待，换 runner 也不会结束。
-3. 运行的 head：`push` 和 `pull_request` 的运行就是它的 `head_sha`（`ci.yml` 的默认 sha），否则要那个 sha 上已经有这个运行发的状态（`target_url` 是这个运行）。都不是（比如用 `ci.yml` 的 `sha` 输入手动派发另一个 commit）：不知道它测的是哪个 head，只报告，不取消（取消了，那个 head 的 `pending` 就永远留着）。
-4. 看 head 上 `context` 最新的状态：没有，或者是这个运行自己的 `pending`：取消运行，发 `error`；这个运行自己的 `failure`（有部件红了）或别的最终状态：只取消，不发（红的就是最终状态）；这个运行自己之前被 sweep 发的 `error`（上次取消没停下来）：`force-cancel`，不再发；**别的运行**的状态（不管新旧）：不动它，只报告（同一个 head 上更新的运行拥有这个 context）。
-5. 取消之后（GitHub 回 409，即运行已经结束：什么都不做）再读一次状态，只有还是没有状态或者这个运行自己的 `pending` 时才发。
+1. 列出 `workflow` 排队中（`queued`）和进行中（`in_progress`）的运行：创建在上限之前的（`created=<T`）和之后的分开列，各读一页 100 个（更多的只在日志和 summary 里报告，不再翻页），所以年轻的运行挤不掉老的；年轻的只用来看同一个 head 上有没有更新的运行，它们的作业不读。
+2. 读每个老运行最新一次尝试的作业：状态是 `queued`、创建超过 `minutes` 分钟的作业算卡住。只算 `queued`：`waiting`、`pending`、`requested` 是 environment 的审批或并发组的等待，换 runner 也不会结束。被 `max-parallel` 压着的矩阵作业显示成 `pending` 还是 `queued`，**还没有核实**：发布时由维护者先查清楚，在那之前不要定时调用它。
+3. 运行的 head：`push` 和 `pull_request` 的运行就是它的 `head_sha`（`ci.yml` 的默认 sha；这假定调用方在这两种事件上不传 `sha` 输入），否则要那个 sha 上已经有这个运行发的状态（`target_url` 是这个运行）。都不是（比如用 `ci.yml` 的 `sha` 输入手动派发另一个 commit）：不知道它测的是哪个 head，只报告，不取消（取消了，那个 head 的 `pending` 就永远留着）。
+4. 读 head 的状态（第一页 100 个，最新的在前；合并状态 `GET .../status` 不带发布者，所以不用它），只算 job token 的身份 `github-actions[bot]` 发的；这个运行在本次尝试开始（`run_started_at`）之前发的状态属于更早的尝试，当作没有。然后：同一个 head 上有这个工作流更新的运行（排队中或进行中），或者 `context` 最新的状态是**别的运行**的：只取消，不发（更新的运行拥有这个 context；verdict 作业跳过被取消的运行）；没有状态，或者是这个运行自己的 `pending`：先发 `error`，再取消；这个运行自己的 `failure`（有部件红了）或别的最终状态：只取消（红的就是最终状态）；这个运行自己之前被 sweep 发的 `error`（上次的取消没生效）：`force-cancel`，不再发。
+5. 先发后取消：sweep 在两步之间停下（到了上限、取消失败）时，`error` 已经在了，下一次 sweep 看到运行还在列表里、上面是自己的 sweep `error`，就 `force-cancel`。取消被 GitHub 回 409（运行已结束，或者取消不生效）时，接着 `force-cancel` 一次。
 
 **发的状态**：`error`，`target_url` 是被取消的运行，描述是 `queued past <N> min: part <id> on <labels>`；卡住的是 plan 作业时是 `queued past <N> min: plan on <labels>`；几个作业卡住时是 `queued past <N> min: <n> jobs, first part <id> on <labels>`（最早排队的那个）。`<labels>` 是作业的标签去掉 `self-hosted`，用 `+` 连起来。作业名和标签来自 head 的工作流文件，所以只用校验过的部分：部件 id 要像 `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`，否则写 `a job`；标签都要像 `[a-z0-9][a-z0-9-]{0,63}`，否则不写 `on <labels>`；总长不超过 140 个字符。运行被取消了，verdict 作业不再发任何状态，所以这个 `error` 就是这次运行的最终状态。自己的重新派发按描述的开头 `queued past ` 认它：它和测试红（`failure`）、`infrastructure: `、`plan: ` 开头的 `error` 都不一样，标签说明是哪个池子没有接；重新派发（或者重跑那个被取消的运行）时 claim 读到的是 `error`，会照常运行。
 
-**上限**：每次 sweep 最多 200 个请求、取消 10 个运行；到了上限，已做的保留，作业以状态 1 结束（红）。只有剩下的请求够做完一整套（取消、重读、发状态）才会去取消一个运行。GitHub 读不到、发状态失败时作业也是红的：取消成功而 `error` 没发出去的运行，下一次 sweep 不会再看到（它已经不是排队中或进行中），它的 `pending` 会留到下一次运行。每次 sweep 在日志里每个处理过或留下的运行一行，summary 里一张表。
+**上限**：每次 sweep 最多 50 个请求（重试也算）、取消 10 个运行、8 分钟（作业的 `timeout-minutes` 是 10）；GitHub 回的 `X-RateLimit-Remaining` 低于 100 时也停（job token 每小时 1,000 次调用，和 `ci.yml` 自己的调用共用）。到了任一上限，已做的保留，作业以状态 1 结束（红）。只有剩下的请求够做完一整套（发状态、取消、可能的 `force-cancel`）才会动一个运行。GitHub 读不到、发状态失败时作业也是红的，那个运行不会被取消（没有 `error` 就不取消），下一次 sweep 再看。每次 sweep 在日志里每个处理过或留下的运行一行，summary 里一张表。
 
 **从哪个版本起**：`v1.18.0` 之后的第一个发布；`v1` 指向它之前，`sweep.yml@v1` 不存在，调用会失败。

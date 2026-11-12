@@ -3281,18 +3281,25 @@ write` and `statuses: write`: nothing of any head ever ran on that VM (ci-light 
 commands under the runner's account), and it works when the pools are what is wrong. It
 runs on a `schedule` or a `workflow_dispatch` on the default branch only (any other event
 skips the job), checks out and downloads nothing, and passes its inputs through `env:`.
-It lists the workflow's `queued` and `in_progress` runs (one page of 100 each), reads the
-latest jobs of those older than the bound, and takes a run with a job whose status is
-`queued` (not `waiting`, `pending` or `requested`: gates and holds) past the bound. Its
-head is the run's `head_sha` for a `push` or `pull_request` run, or where a status of this
-run is on that sha; any other run is left alone and reported. The newest status of the
-context decides: none or the run's own `pending`, cancel and post `error`; the run's own
-`failure` or other final state, cancel only; the run's own earlier sweep `error`,
-`force-cancel`; another run's, leave it. After a cancel it reads the status again and posts
-only over none or the run's own `pending`: `error`, linked to the swept run, `queued past
-N min: part <id> on <labels>` (`plan on <labels>`, `<n> jobs, first part ...`), from a
-validated id and labels only. At most 200 requests and 10 cancels a sweep (exit 1 when
-reached, after what was done). Cost: one hosted minute a sweep (every 15 minutes, about
+It lists the workflow's `queued` and `in_progress` runs, those created before the bound
+(`created=<T`) apart from the younger (one page of 100 each), reads the latest jobs of the
+old ones, and takes a run with a job whose status is `queued` (not `waiting`, `pending` or
+`requested`: gates and holds; whether a matrix job that `max-parallel` holds reads `pending`
+or `queued` is checked at the release, before any consumer schedules it) past the bound.
+Its head is the run's `head_sha` for a `push` or `pull_request` run (where the caller
+passes no `sha` for those events), or where a status of this run is on that sha; any other
+run is left alone and reported. Only the job token's own statuses count
+(`github-actions[bot]`, the first page of the head's), and the run's own from before its
+`run_started_at` are an earlier attempt's, none of this one. A newer run of the workflow on
+the head, or a newest status of the context that is another run's: cancel only (`verdict`
+skips a cancelled run). None, or the run's own `pending`: post `error`, then cancel, so a
+sweep stopped between the two leaves the `error` for the next. The run's own `failure` or
+other final state: cancel only. The run's own earlier sweep `error`: `force-cancel` (also
+after a cancel answered 409). The `error` is linked to the swept run, `queued past N min:
+part <id> on <labels>` (`plan on <labels>`, `<n> jobs, first part ...`), from a validated
+id and labels only. At most 50 requests, 10 cancels and 8 minutes a sweep, and no call
+below 100 of the token's hourly calls left (exit 1 when reached, after what was done). Cost:
+one hosted minute a sweep (every 15 minutes, about
 2,900 a month). Built in the release after `v1.18.0`; the consumers' guide §10.
 
 **The contract.** The default branch's `.github/ci-runners.toml` may set `contract = N`

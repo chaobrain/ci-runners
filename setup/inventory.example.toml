@@ -34,7 +34,9 @@ python = "/<path to a Python 3.11 or later>"    # export it as CI_RUNNERS_PYTHON
 # push_key = "ssh-ed25519 <key>"                # the snapshot push's key (decision 12.4)
 # probe_key = "ssh-ed25519 <key>"               # the other host's CI account's pool probe key (15.1, item 8);
 #                                               # a list of them, one per calling host, from 15.8
-# presence = { enabled = false, tick_seconds = 20, infra_failures = 3 }  # decision 16.4: accepted, inert until R3
+# presence = { enabled = true, tick_seconds = 20, infra_failures = 3 }  # decision 16.4 (from R3): stop and
+#                                               # start idle runners by their resources, one host at a time;
+#                                               # enabled = false is the rollback (operations §14)
 # the other host's pool of each class: where a drained or busy part goes (decision 13.3)
 peer_labels = { light = ["3090a-light"], part = ["3090a-cpu"], gpu = ["3090a-gpu"], multi = ["3090a-multi"] }
 
@@ -53,8 +55,8 @@ cards = { per_card = true, class = "gpu", labels = ["3090b-gpu"] }  # runners 30
 multi = { count = 1, labels = ["3090b-multi"] }
 compile = { count = 1, labels = ["3090b-compile"] }
 # From RUN-10's R1 (decision 16.3) a pool may hold `slot` (16.2) and `audience` (16.7), and a
-# host `presence` (above, 16.4): accepted and checked for shape, inert until R2 (slots), P1
-# (the public pool) and R3 (presence). A slot table has one cpuset per runner (per card for a
+# host `presence` (above, 16.4): accepted and checked for shape, inert until R2 (slots) and P1
+# (the public pool); `presence` acts from R3 where `enabled = true`. A slot table has one cpuset per runner (per card for a
 # per-card pool), no CPU in two; setup writes CI_RUNNER_SLOT=<i>, the runner's index in
 # `cpus` from 0, into its .env. No host's inventory gains these keys before `v1` accepts them.
 # part = { count = 3, labels = ["3090b-cpu"], audience = "private", slot = { cpus = ["16-19", "20-23", "24-27"], workers = 4, memory = "40G", speed = 1.0, isa = "x86-64-v3" } }

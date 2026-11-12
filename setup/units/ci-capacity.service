@@ -1,0 +1,16 @@
+[Unit]
+Description=ci-runners: the capacity file the plan's route reads (pool status, decision 16.5)
+# an account without a machine registry has no capacity to keep: skipped, not failed
+ConditionPathExists=@CI_ETC@/pool.toml
+
+[Service]
+Type=oneshot
+ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run pool status --json
+Environment=CI_RUNNERS_ETC=@CI_ETC@
+Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
+# the rows go to state/capacity.json; the table is not kept
+StandardOutput=null
+NoNewPrivileges=yes
+Nice=10
+# the probes run in parallel: a host's within 60 s, the cluster's within 90 s
+TimeoutStartSec=150s

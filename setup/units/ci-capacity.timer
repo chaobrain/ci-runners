@@ -1,0 +1,10 @@
+[Unit]
+Description=ci-runners: refresh the capacity file every 30 s (a row older than 2 min counts as down)
+
+[Timer]
+# wall-clock ticks: they keep firing where the service's condition skips it (no registry)
+OnCalendar=*-*-* *:*:00/30
+AccuracySec=2s
+
+[Install]
+WantedBy=timers.target

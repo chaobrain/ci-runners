@@ -232,8 +232,9 @@ class Probe:
                  uid: int | None = None, sleep: Callable[[float], None] = time.sleep,
                  load: Callable[[], dict | None] | None = None, disk_free: Callable[[str], float] | None = None,
                  own_access: Callable[[dict, int], list] | None = None, locks: Callable[[], str] | None = None,
-                 stat_path: Callable[[str], os.stat_result] = os.stat) -> None:
+                 stat_path: Callable[[str], os.stat_result] = os.stat, etc: str = '') -> None:
         self.inv, self.h = inv, inv.host
+        self.etc = etc  # the account's etc (the environment's by default): where pool.toml is
         self.run, self.read, self.listdir, self.sleep = run, read, listdir, sleep
         self.uid = os.getuid() if uid is None else uid
         self._load = load
@@ -244,6 +245,16 @@ class Probe:
 
     def mine(self, pid: int) -> bool:
         return hostload.ours(pid, self.uid, self.read)
+
+    def publish(self) -> bool:
+        """Rewrite this host's own part of the account's capacity file (``pool.record_local``,
+        its probe read now), where the account has a machine registry; False where it has none."""
+        from ci_runners import pool
+        path = os.path.join(pool._etc(self.etc), 'pool.toml')
+        if not os.path.isfile(path):
+            return False
+        pool.record_local(pool.load_file(path), self.etc)
+        return True
 
     def systemctl(self, *argv: str) -> subprocess.CompletedProcess | None:
         try:
@@ -469,12 +480,15 @@ def _count(st: dict, name: str, action: str) -> None:
 # ------------------------------------------------------------------ the tick
 
 
-def publish_capacity(inv: inventory.Inventory, rows: Mapping[str, Mapping[str, object]]) -> None:
-    """R4 (decision 16.5): "presence rewrites the host's own part [of
-    ``state/capacity.json``] at every tick". The capacity file is R4's; this call site is
-    where it goes, with ``rows``: each runner's labels, whether it is online and idle, and
-    its causes. Nothing until then."""
-    return None
+def publish_capacity(data: str, probe: Probe, t: float) -> None:
+    """Decision 16.5: presence rewrites this host's own part of the account's capacity file
+    at every enabled tick, after its stops and starts (``Probe.publish``). Best effort: a
+    failure is logged and the tick goes on; the file is ``pool status``'s as well, whose
+    timer keeps it within 30 s."""
+    try:
+        probe.publish()
+    except Exception as e:  # noqa: BLE001 - the capacity file never stops a tick
+        log(data, {'capacity': 'not written', 'error': f'{type(e).__name__}: {e}'[:200]}, t)
 
 
 def config(h: Mapping[str, object]) -> bool:
@@ -539,13 +553,11 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
     held = {n for n, v in st['runners'].items() if v.get('load')}
     why = causes(inv, rs, f, units, held)
     plan: list[tuple[str, Runner]] = []
-    rows: dict[str, dict[str, object]] = {}
     for r in rs:
         rst = st['runners'].setdefault(r.name, {'stop_ticks': 0, 'start_ticks': 0, 'stopped': None, 'load': False})
         a, _ = units.get(r.unit, ('', ''))
         idle = f.busy is not None and r.name not in f.busy
         rst['load'] = any(c.startswith('load:') for c in why[r.name])
-        rows[r.name] = {'labels': list(r.labels), 'online': a in RUNNING, 'idle': idle, 'causes': why[r.name]}
         if a in RUNNING:
             rst['stopped'], rst['start_ticks'] = None, 0
             rst['stop_ticks'] = rst['stop_ticks'] + 1 if why[r.name] and idle else 0
@@ -584,7 +596,7 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
                 rst['stopped'], rst['start_ticks'] = None, 0
                 log(data, {'runner': r.name, 'action': 'start', 'cause': 'no cause'}, t)
                 _count(st, r.name, 'start')
-    publish_capacity(inv, rows)  # R4 (16.5): the host's own part of the capacity file, at every tick
+    publish_capacity(data, probe, t)  # 16.5: the host's own part of the capacity file, at every tick
     names = {r.name for r in rs}
     st['runners'] = {n: v for n, v in st['runners'].items() if n in names}
     write_state(data, st)

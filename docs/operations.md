@@ -442,7 +442,7 @@ GH_TOKEN=$(gh auth token) ci-run stats [--repo OWNER/NAME ...] [--since 24h|90m|
 - **排队时间**：作业的 `started_at` − `created_at`；**运行时间**：`completed_at` − `started_at`。按标签（作业的 `labels` 去掉 `self-hosted`，用 `+` 连起来，如 `ci-cpu+mem-big`）、按仓库，部件尝试（`first`、`retry`、`fallback` 作业）另有一行。没有 `started_at` 或没有 runner 的作业（排队时被取消、还在排队）算"未被接"，不进任何时间；被跳过的作业什么都不算。差值小于 0（时钟偏差）不算，计入 `negative`。
 - **墙钟时间**（已完成的 run）：它没被跳过的作业里最晚的 `completed_at` − run 的 `created_at`。
 - **结论时间**：run 的 `verdict` 作业（最后一步发最终状态）的 `completed_at`，取有它的最新 run attempt，减去 head 被推送的时间：仓库活动（`GET /repos/{r}/activity`）里 `after` 是 head sha、分支是这个 run 的分支、在 run 的 `created_at` 之前 10 分钟以内（或之后 1 分钟以内）的那一条，只对 `push`、`pull_request`、`merge_group` 的 run；否则用 run 的 `created_at`（手动派发、定时、找不到推送、登录没有读活动的权限：403 或 404；别的错误让报告失败）。报告里写明各有几个。
-- **重跑**（`run_attempt` 大于 1）只量最新那次：墙钟时间和结论时间都从 run 的 `run_started_at`（那次的开始）算起，等人点重跑的时间不算 CI 的。
+- **重跑**（`run_attempt` 大于 1）只量最新那次：墙钟时间从 run 的 `run_started_at`（那次的开始）算起；重跑也重新跑了 `verdict` 作业时，结论时间也从那里算（没重跑 `verdict` 的，按它自己那次照旧从推送算），等人点重跑的时间不算 CI 的。
 - 每项给个数、p50、p90 和最大值：排序后下标 round(p × (n − 1)) 的那个值。
 
 **两种运行形态**：作业名按 ` / ` 切开，最后一段是类别：可复用工作流的 `part <id> / first|locate|salvage|retry|red` 和 `plan`、`pending`、`verdict`；自己组合 action 的 `part <id> / first|where|salvage|retry|fallback`、`verdict`，或平铺的 `<部件>` 加 `<部件>-retry`。

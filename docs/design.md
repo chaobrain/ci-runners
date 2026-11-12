@@ -1741,8 +1741,10 @@ Each item names what it supersedes or amends.
          after), on a `push`, `pull_request` or `merge_group` run; else the run's `created_at`
          (a dispatch, a schedule, a push not found, an activity the login may not read). The
          report counts which;
-       - a *re-run* is measured within its latest attempt: wall and verdict delay from the
-         run's `run_started_at`, since the wait for a person to re-run it is not CI's.
+       - a *re-run* is measured within its latest attempt: the wall from the run's
+         `run_started_at`, and the verdict delay too where the re-run repeated the `verdict`
+         job (one that it did not repeat keeps its own attempt's origin), since the wait for a
+         person to re-run it is not CI's.
 
        Counts, p50, p90 and max: the value at index round(p × (n − 1)) of the sorted values. A
        job's kind is the last ` / ` segment of its name: the reusable workflow's `part <id> /

@@ -17,9 +17,11 @@ the project registry (``<etc>/projects/*.toml``). The numbers, each from these t
   before the run's ``created_at`` (or up to a minute after it) on a ``push``, ``pull_request``
   or ``merge_group`` run, else the run's ``created_at`` (a dispatch, a schedule, a push not
   found, an activity the login may not read: 403 or 404); ``verdict_from`` counts each;
-- a *re-run* (``run_attempt`` above 1) is measured within its latest attempt: its wall and
-  verdict delay from the run's ``run_started_at`` (that attempt's start), since the wait for a
-  person to re-run it is not CI's; ``reruns`` counts them;
+- a *re-run* (``run_attempt`` above 1) is measured within its latest attempt: its wall from the
+  run's ``run_started_at`` (that attempt's start), and its verdict delay too where the re-run
+  repeated the ``verdict`` job (a verdict of an attempt above 1), since the wait for a person to
+  re-run it is not CI's; a verdict it did not repeat keeps its own attempt's origin;
+  ``reruns`` counts them;
 
 each as a count, p50, p90 and max in seconds (``quantile``); a difference below 0 (clock skew)
 is left out and counted as ``negative``. A run listed on two pages (one created while they are

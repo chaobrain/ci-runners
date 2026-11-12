@@ -50,7 +50,7 @@ FILL_MIB, SCAN_MIB = 384, 512
 
 EXPECTED = {
     'I1': ("the job's kernel uid and gid, read outside, are a subordinate pair and its kernel groups are "
-           "the GPU group alone (none without a card); recorded inside and outside"),
+           "the GPU group alone (no group under --groups none or without a card); recorded inside and outside"),
     'F1': 'a marker file outside the tree is not visible',
     'F2': 'creating a file in the read-only hook/policy stand-in fails',
     'F3': "the account's home path does not exist",
@@ -543,7 +543,7 @@ def _sandbox_module():
 def identity_held(ids, account_uid: int, subuid: list, subgid: list, expected_groups: list) -> bool:
     """Check 8: the job's kernel uid and gid (every one of real, effective, saved, fs) lie in the
     account's subordinate lines, none is the account's, and its kernel groups are exactly
-    ``expected_groups`` (the GPU group alone; none without a card)."""
+    ``expected_groups`` (the GPU group alone; none under ``--groups none`` or without a card)."""
     if not ids:
         return False
     def sub(x, lines):
@@ -696,7 +696,8 @@ def suite(a) -> int:
                 sublines.append(sb.subid_lines(f.read(), pw.pw_name, pw.pw_uid))
         except OSError:
             sublines.append([])
-    expected_groups = [gpu_gid] if gpu_gid is not None else []
+    # check 8: the GPU group alone; kept fails it by design (the account's other groups), none holds none
+    expected_groups = [gpu_gid] if gpu_gid is not None and (variant or ('', ''))[1] != 'none' else []
     gst = os.stat(group_file)
     for r in results:
         if r['id'] == 'I1':

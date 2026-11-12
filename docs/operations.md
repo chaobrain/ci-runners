@@ -308,10 +308,10 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 **容量文件与 `--fast`**（design 决定 16.5，RUN-10 R4）：plan 时的路由（R5）读的数据。
 
 - `pool status` 每跑一次就把它的行写进 `state/capacity.json`（`etc` 旁边的 `state/`，模式 600，加锁后原子改名，带 `schema`）：每台机器一回答就写它那几行，每行带 `read_at`（读到的时间）；`local` 那一项还存下原始探测结果。主机行另有 `label_runners`：每个 runner 标签注册了几个实例、几个在线（有活的 `Runner.Listener`）、几个空闲（在线且没有 `Runner.Worker`，即没在跑作业）；`/proc` 看不到时在线和空闲是 `null`。集群目标行有 `jobs_free`。
-- 定时器 `ci-capacity.{service,timer}`（CI 账户的 user 单元，setup 计划里和其他定时器一起装）每 30 秒（按墙上时钟）跑一次 `ci-run pool status`，所以集群的数字和另一台主机的行一直缓存在文件里。没有 `etc/pool.toml` 的账户，单元按条件跳过，不算失败。
+- 定时器 `ci-capacity.{service,timer}`（CI 账户的 user 单元，setup 计划里和其他定时器一起装）每 30 秒（按墙上时钟）跑一次 `ci-run pool status`，所以另一台主机的行一直缓存在文件里。集群的数字有自己的间隔：文件里集群的行满 `capacity.cluster_seconds` 秒（注册表顶层 `capacity = { cluster_seconds = 300 }`，默认 300，可设 30 到 450）才再问一次集群，登录节点是共享的；问集群走 gate 已有的 ssh 控制连接。每个账户每天约 288 次。没有 `etc/pool.toml` 的账户，单元按条件跳过，不算失败。
 - 强制探测（`ci-run pool probe`）在本账户文件里的探测结果还新鲜（2 分钟内）时直接返回它（带 `age`），不跑 `nvidia-smi`；过期了才现场探测。
-- `ci-run pool status --fast [--json]` 只读这些文件，2 秒内出结果（95 分位，一台主机掉线时也一样）：强制探测的主机读对方的文件；本账户自己探测的主机（`local`，或者带代码的 ssh）现场读 slot、负载和 runner，不跑 `nvidia-smi`，卡的空闲显存取自本账户文件里那一行（过期了就当没有）；集群目标直接用文件里的行。每次 ssh 都是 `ConnectTimeout=2`，整个调用最多 1.5 秒。超过 2 分钟的行算掉线：问题里加 `stale (read N s ago)`，不再有空闲 slot、核和作业。`--fast` 不写文件。
-- 路由用 `ci_runners.capacity.load()` 读（默认就是 `--fast` 的结果，`fast=False` 只读本账户的文件），过期规则在里面，路由自己不解析文件。presence（R3）每个 tick 用 `pool.record_local` 重写本机那一部分。
+- `ci-run pool status --fast [--json]` 只读这些文件，2 秒内出结果（95 分位，一台主机掉线时也一样）：强制探测的主机读对方的文件；本账户自己探测的主机（`local`，或者带代码的 ssh）现场读 slot、负载和 runner，不跑 `nvidia-smi`，卡的空闲显存取自本账户文件里那一行（过期了就当没有）；集群目标直接用文件里的行。每次 ssh 都是 `ConnectTimeout=2`，整个调用最多 1.5 秒。主机的行超过 2 分钟、集群的行超过 10 分钟算掉线：问题里加 `stale (read N s ago)`，不再有空闲 slot、核和作业。`--fast` 不写文件。
+- 路由用 `ci_runners.capacity.load()` 读（默认就是 `--fast` 的结果，`fast=False` 只读本账户的文件），过期规则在里面，路由自己不解析文件。过期的集群行等于“集群现在启动不了”，路由就把部件留在共享标签上。presence（R3）每个 tick 用 `pool.record_local` 重写本机那一部分。
 - 新 release 装好以后，每个有注册表的 CI 账户：`setup/plan.sh` 会列出两个新单元和 `systemctl --user enable --now ... ci-capacity.timer`，lead 批准后 `apply`；用 `systemctl --user list-timers ci-capacity.timer` 确认，过半分钟看 `state/capacity.json` 的 `written_at`。
 
 **运行**：`ci-run pool run [--cpu N] [--mem G] [--gpu 型号[:数量]] [--on 机器] -- 命令`。它把调用者的工作树（已跟踪的文件，加上未被忽略的未跟踪文件）送到一台现在就能启动的机器上运行。这台机器先从空闲主机里选，再选按价格从低到高的集群目标；都不行就在队列最短的主机上排队。命令的输出实时回传，退出码就是命令的退出码。主机上的占用就是 CI slot，和 CI part 的是同一套，所以两边不会同时拿到同一个 slot。集群上的占用就是作业本身，走同一个 gate。运行前先比对环境，不一致就拒绝运行（退出码 3）；加 `--env-mismatch warn` 可以照常运行，但会给出警告。调用者退出时，远端命令随之结束，slot 也随之释放。brainspike 用 `scripts/pool.sh` 包了一层。

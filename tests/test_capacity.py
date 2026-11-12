@@ -140,6 +140,47 @@ class Writer(Account):
                                       'probe': {'slots_free': 1, 'load': 0, 'cpus': 16, 'gpu_free': {'0': 9000}}})
         self.assertEqual(d['rows'][2]['problems'], ['cluster unreachable'])
 
+    def test_the_cluster_is_asked_again_only_after_its_interval(self):
+        """16.5: the cluster's figures every capacity.cluster_seconds (300 s by default), the
+        hosts' at every tick; the kept rows keep the time they were read."""
+        asked = []
+
+        def run(argv, **kw):
+            asked.append('cluster' if 'ci-slurm-gate' in argv else 'host')
+            return subprocess.CompletedProcess(argv, 255, b'' if 'ci-slurm-gate' in argv else '', b'')
+        self.assertEqual(self.reg.cluster_seconds, 300)
+        old = {f'cl:{t}': {'key': f'cl:{t}', 'access': 'slurm', 'read_at': T0 - 299, 'problems': [], 'jobs_free': 1}
+               for t in ('cpu', 'v100', 'a40')}
+        rows = pool.status(self.reg, run, here='', etc=self.etc, cached=old, now=clock(T0))
+        self.assertEqual(sorted(asked), ['host', 'host'])
+        self.assertEqual([(r['read_at'], r['jobs_free']) for r in rows[2:]], [(T0 - 299, 1)] * 3)
+        for stale in ({**old, 'cl:cpu': dict(old['cl:cpu'], read_at=T0 - 300)},  # one target due
+                      {k: v for k, v in old.items() if k != 'cl:a40'},  # one target never read
+                      {**old, 'cl:cpu': {k: v for k, v in old['cl:cpu'].items() if k != 'read_at'}}):
+            asked.clear()
+            rows = pool.status(self.reg, run, here='', etc=self.etc, cached=stale, now=clock(T0))
+            self.assertEqual(asked.count('cluster'), 1)
+            self.assertEqual(rows[2]['read_at'], T0)
+        asked.clear()
+        reg = pool.load(CI_REGISTRY + '\n[capacity]\ncluster_seconds = 60\n')
+        self.assertEqual(reg.cluster_seconds, 60)
+        pool.status(reg, run, here='', etc=self.etc, cached={k: dict(v, read_at=T0 - 61) for k, v in old.items()},
+                    now=clock(T0))
+        self.assertEqual(asked.count('cluster'), 1)
+        out = io.StringIO()  # pool status (the timer's) reads the file it keeps
+        capacity.merge(self.file, list(old.values()), self.order)
+        asked.clear()
+        with unittest.mock.patch.object(capacity, 'age', lambda r, now: 10.0), unittest.mock.patch('sys.stdout', out), \
+                unittest.mock.patch.object(pool, 'probe_cluster', lambda *a, **k: asked.append('cluster') or []), \
+                unittest.mock.patch.object(pool, '_host', lambda m, *a, **k: (dict(pool.host_row(m, None, 'x'),
+                                                                                    read_at=T0), None)):
+            self.assertEqual(pool.main(['status', '--json'], self.etc), 0)
+        self.assertNotIn('cluster', asked)
+        for bad, why in (('cluster_seconds = 29', 'from 30 to 450'), ('cluster_seconds = 451', 'from 30 to 450'),
+                         ('cluster_seconds = "300"', 'cluster_seconds'), ('other = 1', 'capacity')):
+            with self.assertRaisesRegex(pool.RegistryError, why):
+                pool.load(CI_REGISTRY + f'\n[capacity]\n{bad}\n')
+
     def test_a_file_that_cannot_be_written_is_said_once_and_status_still_prints(self):
         os.makedirs(os.path.dirname(os.path.dirname(self.file)), exist_ok=True)
         open(os.path.dirname(self.file), 'w').close()  # state is a file: nothing can be written under it
@@ -159,16 +200,22 @@ class Staleness(unittest.TestCase):
            'cpus_free': 40, 'gpu_free': {0: 1}, 'jobs_free': 2, 'labels': {'cpu': 'cl-cpu'}, 'target': 'cpu'}
 
     def test_a_row_older_than_two_minutes_counts_as_down(self):
-        self.assertEqual(capacity.STALE_S, 120)
-        self.assertEqual(capacity.mark(self.ROW, T0 + 120), self.ROW)  # 2 min: still fresh
-        old = capacity.mark(self.ROW, T0 + 121)
+        """A host's row after 120 s, a cluster target's after 600 s (its figures are read every
+        5 min); a stale cluster row cannot start anything, so the route keeps the shared label."""
+        self.assertEqual((capacity.STALE_S, capacity.CLUSTER_STALE_S), (120, 600))
+        host = dict({k: v for k, v in self.ROW.items() if k != 'jobs_free'}, key='hostb', access='local', target='')
+        self.assertEqual(capacity.mark(host, T0 + 120), host)  # 2 min: still fresh
+        old = capacity.mark(host, T0 + 121)
         self.assertEqual(old['problems'], ['stale (read 121 s ago)'])
-        self.assertEqual({k: old[k] for k in ('start_now', 'slots_free', 'cpus_free', 'gpu_free', 'jobs_free')},
-                         {'start_now': False, 'slots_free': 0, 'cpus_free': 0, 'gpu_free': {}, 'jobs_free': 0})
+        self.assertEqual({k: old[k] for k in ('start_now', 'slots_free', 'cpus_free', 'gpu_free')},
+                         {'start_now': False, 'slots_free': 0, 'cpus_free': 0, 'gpu_free': {}})
+        self.assertNotIn('jobs_free', old)  # a host row gains none
+        self.assertEqual(capacity.mark(self.ROW, T0 + 600), self.ROW)  # a cluster row: 10 min still fresh
+        old = capacity.mark(self.ROW, T0 + 601)
+        self.assertEqual(old['problems'], ['stale (read 601 s ago)'])
+        self.assertEqual((old['start_now'], old['jobs_free'], old['slots_free']), (False, 0, 0))
         self.assertEqual(self.ROW['problems'], [])  # pure
         self.assertEqual(capacity.mark(dict(self.ROW, gpu_free={'0': 5, '3': 7}), T0)['gpu_free'], {0: 5, 3: 7})  # JSON's keys
-        host = {k: v for k, v in self.ROW.items() if k != 'jobs_free'}
-        self.assertNotIn('jobs_free', capacity.mark(host, T0 + 500))  # a host row gains none
         for when in ({k: v for k, v in self.ROW.items() if k != 'read_at'}, dict(self.ROW, read_at='1')):
             self.assertEqual(capacity.mark(when, T0)['problems'], ['stale'])  # read at no known time
 
@@ -177,14 +224,14 @@ class Staleness(unittest.TestCase):
                  'bad': {'registered': '3'}}
         host = {'key': 'hostb', 'access': 'local', 'read_at': T0 - 30, 'problems': [], 'slots_free': 2, 'target': '',
                 'labels': {'cpu': 'x-cpu'}, 'label_runners': table}
-        h, c, s = capacity.rows_from([host, self.ROW, dict(self.ROW, key='cl:v100', read_at=T0 - 200)], now=T0)
+        h, c, s = capacity.rows_from([host, self.ROW, dict(self.ROW, key='cl:v100', read_at=T0 - 700)], now=T0)
         self.assertEqual((h.key, h.machine, h.target, h.access, h.age, h.down, h.jobs_free, h.slots_free),
                          ('hostb', 'hostb', '', 'local', 30, False, None, 2))
         self.assertEqual(h.runners, {'x-cpu': capacity.Runners(3, 2, 1), 'x': capacity.Runners(1, None, None)})
         self.assertEqual(dict(h.labels), {'cpu': 'x-cpu'})
         self.assertEqual((c.machine, c.target, c.jobs_free, c.down, c.runners), ('cl', 'cpu', 2, False, {}))
-        self.assertEqual((s.down, s.jobs_free, s.slots_free, s.age), (True, 0, 0, 200))
-        self.assertEqual(s.problems, ('stale (read 200 s ago)',))
+        self.assertEqual((s.down, s.jobs_free, s.slots_free, s.age), (True, 0, 0, 700))
+        self.assertEqual(s.problems, ('stale (read 700 s ago)',))
         self.assertTrue(capacity.rows_from([dict(host, problems=['drained'])], now=T0)[0].down)  # any problem
 
 
@@ -276,7 +323,10 @@ class Fast(Account):
         self.assertIn('smi=False)', local[1]['input'])  # no nvidia-smi on the host this account probes
         self.assertEqual(rows[1]['gpu_free'], {1: 7000})  # its cards from the file, not the answer
         self.assertEqual(rows[0]['gpu_free'], {0: 1})  # a forced answer's cards are its file's
-        self.cache_cluster(T0 - 121)  # the timer stopped: the cluster's rows count as down
+        self.cache_cluster(T0 - 600)  # a cluster's rows stay fresh for 10 min
+        self.assertEqual([r['jobs_free'] for r in pool.fast_status(self.reg, run, here='', etc=self.etc,
+                                                                   now=clock(T0))[2:]], [3, 3, 3])
+        self.cache_cluster(T0 - 601)  # the timer stopped: the cluster's rows count as down
         capacity.merge(self.file, [dict(pool.host_row(self.reg.machines['hostb'], {'gpu_free': {'1': 7000}}),
                                         read_at=T0 - 121)], self.order)
         rows = pool.fast_status(self.reg, run, here='', etc=self.etc, now=clock(T0))
@@ -393,6 +443,9 @@ class Timer(unittest.TestCase):
                      'Environment=CI_RUNNERS_ETC=@CI_ETC@\n', 'NoNewPrivileges=yes\n', 'StandardOutput=null\n'):
             self.assertIn(want, service)
         self.assertIn('OnCalendar=*-*-* *:*:00/30\n', timer)  # wall clock: a skipped run does not stop it
+        # a cluster: asked again once its rows are cluster_seconds old, at the next tick, within its bound
+        for s in (pool.CLUSTER_SECONDS, pool.CLUSTER_SECONDS_MAX):
+            self.assertLess(s + 30 + 2 + pool.CLUSTER_TIMEOUT, capacity.CLUSTER_STALE_S)
         self.assertNotIn('OnUnitActiveSec', timer)
         # a forced host's row in this file: its file's tick, then this one's, each with its accuracy and run
         self.assertLess(2 * (30 + 2 + 20), capacity.STALE_S)

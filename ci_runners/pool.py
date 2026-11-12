@@ -17,6 +17,7 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
     gpu_need_mib = 6000                  # free MiB a card needs
     warm = "<command>"                   # the compile-cache warm-up pool add's checks run (optional)
     numerics = "<command>"               # the numerics check pool add's checks run (optional)
+    capacity = { cluster_seconds = 300 } # s between two readings of a cluster by pool status (optional; 30-450)
 
     [machine.hostb]                      # a host: ssh (or local) access
     access = "ssh"                       # "ssh" or "local"
@@ -91,12 +92,15 @@ by the association's room; positive exactly where ``start_now`` is true.
 its rows, each with ``read_at``, into ``state/capacity.json`` beside the account's ``etc``,
 one machine's as soon as it answers, with the ``local`` machine's probe; a host row also
 has ``label_runners``, each runner label's instances registered, online and free (no
-``Runner.Worker``). The account's ``ci-capacity.timer`` runs it every 30 s. The forced
+``Runner.Worker``). The account's ``ci-capacity.timer`` runs it every 30 s; a cluster is
+asked again only once its rows in the file are ``capacity.cluster_seconds`` old (300 s by
+default: its login node is shared), and its rows count as down after 10 min, a host's after 2. The forced
 probe answers with that file's probe while it is fresh (``capacity.STALE_S``), without
 running anything. ``pool status --fast`` reads the files: the forced hosts' through their
 probes, the hosts this account probes itself without ``nvidia-smi`` (their cards from the
 file), the cluster's targets from the file; each ssh call connects within 2 s and ends
-within ``FAST_TIMEOUT``; a row older than 2 min counts as down. The route reads it through
+within ``FAST_TIMEOUT``; a host row older than 2 min, a cluster row older than 10 min,
+counts as down. The route reads it through
 ``capacity.load``.
 
 A machine that is not ``ready`` is skipped by ``pool run``'s plan unless ``--on`` names it
@@ -178,6 +182,10 @@ import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
 SCHEMA = 1
+#: s between two readings of a cluster's figures by ``pool status`` (16.5: the login node is shared)
+CLUSTER_SECONDS = 300
+#: its largest: read again, at the next 30 s tick and within the probe's 90 s, before 600 s (capacity.CLUSTER_STALE_S)
+CLUSTER_SECONDS_MAX = 450
 #: exit codes of pool run itself (any other is the command's)
 EXIT_USAGE, EXIT_ENV, EXIT_NO_ROOM, EXIT_FAILED = 2, 3, 75, 70
 #: what a host side or a cluster try returns when it could not start the command: never a
@@ -307,6 +315,7 @@ class Registry:
     gpu_need_mib: int = 6000
     warm: str = ''  # the project's compile-cache warm-up command (``pool add``'s checks)
     numerics: str = ''  # the project's numerics check command (``pool add``'s checks)
+    cluster_seconds: int = CLUSTER_SECONDS  # ``capacity.cluster_seconds``: a cluster's figures' interval (16.5)
 
 
 def _get(t: Mapping, k: str, kind: type | tuple, where: str, default: object = None, required: bool = False):
@@ -347,7 +356,7 @@ _MACHINE = {'access', 'ssh', 'hostname', 'cpus', 'memory_gib', 'gpus', 'gpu_mode
             'max_slots', 'drain', 'leases', 'site', 'account', 'probe', 'runners'}
 _TARGET = {'partition', 'cpus', 'memory_gib', 'max_minutes', 'variant', 'price', 'numerics_ok', 'labels', 'gpu_model',
            'cards', 'max_cards', 'gpu_mib', 'cuda'}
-_TOP = {'schema', 'project', 'repository', 'check', 'gpu_need_mib', 'machine', 'warm', 'numerics'}
+_TOP = {'schema', 'project', 'repository', 'check', 'gpu_need_mib', 'machine', 'warm', 'numerics', 'capacity'}
 
 
 def _unknown(t: Mapping, known: set[str], where: str) -> None:
@@ -446,10 +455,16 @@ def load(text: str) -> Registry:
     if not all(isinstance(x, str) and x for x in check):
         raise RegistryError('pool.toml: check lists distribution names')
     machines = _get(doc, 'machine', dict, 'pool.toml', {})
+    cap = _get(doc, 'capacity', dict, 'pool.toml', {})
+    _unknown(cap, {'cluster_seconds'}, 'pool.toml: capacity')
+    cluster_seconds = _get(cap, 'cluster_seconds', int, 'pool.toml: capacity', CLUSTER_SECONDS)
+    if not 30 <= cluster_seconds <= CLUSTER_SECONDS_MAX:
+        raise RegistryError(f'pool.toml: capacity.cluster_seconds must lie from 30 to {CLUSTER_SECONDS_MAX}')
     return Registry(_get(doc, 'project', str, 'pool.toml', required=True),
                     _get(doc, 'repository', str, 'pool.toml', required=True), tuple(check),
                     {k: _machine(k, v) for k, v in machines.items()}, _get(doc, 'gpu_need_mib', int, 'pool.toml', 6000),
-                    _get(doc, 'warm', str, 'pool.toml', ''), _get(doc, 'numerics', str, 'pool.toml', ''))
+                    _get(doc, 'warm', str, 'pool.toml', ''), _get(doc, 'numerics', str, 'pool.toml', ''),
+                    cluster_seconds)
 
 
 def load_file(path: str) -> Registry:
@@ -1068,17 +1083,25 @@ def probe_cluster(m: Machine, run: Runner = subprocess.run, cards: int = 1, mem_
 
 def status(reg: Registry, run: Runner = subprocess.run, here: str | None = None, cards: int = 1,
            mem_gib: int = 1, etc: str = '', on_rows: Callable[[list[dict], dict | None], None] | None = None,
-           now: Callable[[], float] = time.time) -> list[dict]:
+           now: Callable[[], float] = time.time, cached: Mapping[str, Mapping] | None = None) -> list[dict]:
     """``pool status``: every machine's rows, in the registry's order, probed in parallel,
     so that it ends within the longest probe's bound (``CLUSTER_TIMEOUT``); each row with
     ``read_at``, when its machine answered. ``on_rows(rows, local)`` is called with each
     machine's rows as they come in, ``local`` the ``local`` machine's probe
-    (``{key, read_at, probe}``) with its row, else None: the capacity file's writer (16.5)."""
+    (``{key, read_at, probe}``) with its row, else None: the capacity file's writer (16.5).
+    A cluster whose rows in ``cached`` (the capacity file's, by key) were all read less than
+    ``reg.cluster_seconds`` ago is not asked again: those rows are its rows (16.5)."""
+    from ci_runners import capacity
     here = socket.gethostname() if here is None else here
     out: dict[str, list[dict]] = {}
 
     def one(m: Machine) -> None:
         local = None
+        keep = [(cached or {}).get(f'{m.key}:{t}') for t in m.targets]
+        if m.access == 'slurm' and keep and all(
+                r is not None and (a := capacity.age(r, now())) is not None and a < reg.cluster_seconds for r in keep):
+            out[m.key] = [dict(r) for r in keep]  # read recently: the shared login node is not asked again
+            return
         if m.access == 'slurm':
             rows = probe_cluster(m, run, cards, mem_gib, etc)
             t = round(now(), 3)  # when it answered: a slow probe's rows are no older than they look
@@ -1931,6 +1954,12 @@ def pool_run(reg: Registry, a: RunArgs, *, only: str = '', here_ok: bool = False
 # ------------------------------------------------------------------ CLI
 
 
+def _cached(etc: str) -> dict[str, dict]:
+    """The capacity file's rows by key (none where it is missing or malformed)."""
+    from ci_runners import capacity
+    return {r['key']: r for r in capacity.read(capacity.path(etc))['rows']}
+
+
 def _writer(reg: Registry, etc: str) -> Callable[[list[dict], dict | None], None]:
     """``status``'s ``on_rows``: each machine's rows into the account's capacity file (16.5);
     a file that cannot be written is said once on standard error, and the rows still print."""
@@ -1986,7 +2015,7 @@ def main(argv: Sequence[str], etc: str) -> int:
             return EXIT_USAGE
         return 0
     if a.cmd == 'status':
-        rows = fast_status(reg, etc=etc) if a.fast else status(reg, etc=etc, on_rows=_writer(reg, etc))
+        rows = fast_status(reg, etc=etc) if a.fast else status(reg, etc=etc, on_rows=_writer(reg, etc), cached=_cached(etc))
         print(json.dumps(rows, indent=1, sort_keys=True) if a.json else table(rows))
         return 0
     cmd = a.command[1:] if a.command[:1] == ['--'] else a.command

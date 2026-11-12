@@ -11,6 +11,7 @@ import pathlib
 import re
 import tempfile
 import unittest
+import unittest.mock
 import urllib.parse
 import zipfile
 
@@ -40,11 +41,13 @@ class Hub:
     """A fake GitHub of the batch: small pages, ``Link`` headers (page numbers for runs and
     jobs, cursors for the activity), artifacts behind a redirect to a signed URL."""
 
-    def __init__(self, runs_page=3, jobs_page=5, activity_page=2, activity_status=200):
+    def __init__(self, runs_page=3, jobs_page=5, activity_page=2, activity_status=200, total=None, dup=False,
+                 link_host=''):
         self.runs = {r['id']: r for r in FIXTURE['runs']}
         self.calls: list[tuple[str, bool]] = []
         self.runs_page, self.jobs_page, self.activity_page = runs_page, jobs_page, activity_page
         self.activity_status = activity_status
+        self.total, self.dup, self.link_host = total, dup, link_host
         self.arts: dict[int, tuple[int, str, dict]] = {}
         n = 9000
         for rid, docs in FIXTURE['artifacts'].items():
@@ -77,8 +80,12 @@ class Hub:
         if m:
             since = epoch(q['created'][0][2:])
             rows = [self._run(r) for r in FIXTURE['runs'] if r['repo'] == m.group(1) and epoch(r['created_at']) >= since]
+            if self.dup:  # a run created while the pages are read: the next page starts with the last one again
+                rows = rows[:self.runs_page] + rows[self.runs_page - 1:]
             got, h = self._page(rows, url, self.runs_page)
-            return 200, h, json.dumps({'total_count': len(rows), 'workflow_runs': got}).encode()
+            if self.link_host and 'Link' in h:
+                h['Link'] = h['Link'].replace('https://api.example', self.link_host)
+            return 200, h, json.dumps({'total_count': self.total or len(rows), 'workflow_runs': got}).encode()
         m = re.fullmatch(r'/repos/([^/]+/[^/]+)/actions/runs/([0-9]+)', path)
         if m:
             return (200, {}, json.dumps(self._run(self.runs[int(m.group(2))])).encode()) if int(m.group(2)) in self.runs \
@@ -139,8 +146,12 @@ def independent(fixture):
                 bucket[0].append(q)
                 bucket[1].append(d)
         pushed = [epoch(p['timestamp']) for p in fixture['pushes'][r['repo']] if p['after'] == r['head_sha']
-                  and r['event'] != 'workflow_dispatch' and 0 <= epoch(r['created_at']) - epoch(p['timestamp']) <= 600]
-        start = pushed[0] if pushed else epoch(r['created_at'])
+                  and p['ref'] == 'refs/heads/' + r['head_branch'] and r['event'] != 'workflow_dispatch'
+                  and 0 <= epoch(r['created_at']) - epoch(p['timestamp']) <= 600]
+        if r['run_attempt'] > 1:  # a re-run: its own attempt, from its start
+            start = epoch(r['run_started_at'])
+        else:
+            start = pushed[0] if pushed else epoch(r['created_at'])
         last = [j for j in r['jobs'] if j['name'].split(' / ')[-1] == 'verdict'
                 and j['run_attempt'] == r['run_attempt']][0]
         verdict.setdefault(r['repo'], []).append(epoch(last['completed_at']) - start)
@@ -178,28 +189,31 @@ class Acceptance(unittest.TestCase):
                              (len(v), nearest(v, .5), nearest(v, .9), max(v)), repo)
 
     def test_the_numbers_by_hand(self):
-        cpu = self.rep['labels']['ci-cpu']['queue']  # [2, 2, 3, 4, 5, 9, 9, 9, 29, 39, 60, 60]
-        self.assertEqual((cpu['n'], cpu['p50'], cpu['p90'], cpu['max']), (12, 9, 60, 60))
+        cpu = self.rep['labels']['ci-cpu']['queue']  # [2, 2, 2, 3, 4, 5, 9, 9, 20, 29, 39, 60, 60]
+        self.assertEqual((cpu['n'], cpu['p50'], cpu['p90'], cpu['max']), (13, 9, 60, 60))
         web, lib = self.rep['repos']['acme/web'], self.rep['repos']['acme/lib']
-        # web: 101 from its push (-3), 102 from its push, 103's push an hour before (its creation),
-        # 104's re-run: the verdict of run attempt 2 from the push
-        self.assertEqual(sorted(independent(FIXTURE)[2]['acme/web']), [330, 435, 533, 2450])
-        self.assertEqual((web['verdict']['n'], web['verdict']['p50'], web['verdict']['p90']), (4, 533, 2450))
-        self.assertEqual(web['verdict_from'], {'push': 3, 'created': 1})
+        # web: 101 from its push (533), 102 from its branch's push (435, not the other branch's at 990),
+        # 103's push an hour before: its creation (330); 104's re-run: attempt 2 from its start (440)
+        self.assertEqual(sorted(independent(FIXTURE)[2]['acme/web']), [330, 435, 440, 533])
+        self.assertEqual((web['verdict']['n'], web['verdict']['p50'], web['verdict']['p90']), (4, 440, 533))
+        self.assertEqual(web['verdict_from'], {'push': 2, 'created': 1, 'rerun': 1})
         # lib: a dispatch from its creation (330), a force push (655)
         self.assertEqual((lib['verdict']['n'], lib['verdict']['p50'], lib['verdict']['p90']), (4, 655, 1332))
-        self.assertEqual(lib['verdict_from'], {'push': 3, 'created': 1})
-        self.assertEqual(web['wall']['max'], 5440 - 3000)
+        self.assertEqual(lib['verdict_from'], {'push': 3, 'created': 1, 'rerun': 0})
+        # web: 530, 430, 330 and 104's attempt 2, 5440 - 5000, not 5440 - its creation
+        self.assertEqual((web['wall']['n'], web['wall']['p50'], web['wall']['max']), (4, 440, 530))
+        self.assertEqual(web['reruns'], 1)
         # lib: 330, 430, 1330, 650; 201's red job, skipped after its verdict, is not its end
         self.assertEqual((lib['wall']['n'], lib['wall']['p50'], lib['wall']['max']), (4, 650, 1330))
         self.assertEqual(lib['parts']['queue']['n'], 8)  # 5 first attempts and 3 retries, no locate, salvage or red
+        self.assertEqual(web['parts']['queue']['n'], 11)  # the flat run's cpu, cpu-retry and gpu among them
 
     def test_both_shapes_count_their_retries_by_row(self):
-        self.assertEqual(self.rep['repos']['acme/web']['retries'], {'fallback': 1, 'any': 1})
+        self.assertEqual(self.rep['repos']['acme/web']['retries'], {'fallback': 2, 'any': 1})  # 103's cpu-retry
         self.assertEqual(self.rep['repos']['acme/lib']['retries'], {'more-memory': 1, 'cool-card': 1, 'any': 1})
 
     def test_a_refusal_after_a_start_is_counted_by_its_head(self):
-        self.assertEqual(self.rep['repos']['acme/web']['refusals'], {'busy': 1})
+        self.assertEqual(self.rep['repos']['acme/web']['refusals'], {'busy': 1, 'drained': 1})
         self.assertEqual(self.rep['repos']['acme/lib']['refusals'], {})
 
     def test_a_job_no_runner_took_is_in_no_delay(self):
@@ -213,7 +227,9 @@ class Acceptance(unittest.TestCase):
     def test_every_run_attempt_is_read_and_the_latest_verdict_counts(self):
         web = self.rep['repos']['acme/web']
         self.assertEqual(web['no_verdict'], 0)
-        self.assertEqual(web['verdict']['max'], 5440 - 2990)  # run attempt 2's verdict − the push; not 4030's
+        # run attempt 2's verdict from its own start (440): not attempt 1's from the push (1040), nor 5440 − 2990
+        self.assertEqual(web['verdict']['max'], 533)
+        self.assertEqual(web['verdict_from']['rerun'], 1)
 
     def test_the_text_report(self):
         out = io.StringIO()
@@ -223,7 +239,7 @@ class Acceptance(unittest.TestCase):
         text = out.getvalue()
         self.assertIn('acme/web: 4 runs (4 completed)', text)
         self.assertIn('retries by row: cool-card 1, more-memory 1, any 1', text)  # in 16.5's order
-        self.assertRegex(text, r'ci-cpu queue\s+12\s+9s\s+60s\s+60s')
+        self.assertRegex(text, r'ci-cpu queue\s+13\s+9s\s+60s\s+60s')
         self.assertIn('presence: not read (no --records)', text)
 
 
@@ -250,14 +266,15 @@ class Api(unittest.TestCase):
     def test_a_download_follows_the_redirect_without_the_login(self):
         _, _, hub = run_stats(*REPOS)
         blobs = [(u, a) for u, a in hub.calls if u.startswith(BLOB)]
-        self.assertEqual(len(blobs), 5)  # the retried parts' first attempts: 102 cpu, 104 cpu, 202 a and g, 203 b
+        self.assertEqual(len(blobs), 6)  # the retried parts' first attempts: 102, 103, 104 cpu, 202 a and g, 203 b
         self.assertFalse(any(a for _, a in blobs))
-        self.assertEqual(len(hub.paths(r'/artifacts\?')), 4)  # only the runs with a retry
+        self.assertEqual(len(hub.paths(r'/artifacts\?')), 5)  # only the runs with a retry
 
     def test_no_artifacts_infers_the_rows_from_the_jobs(self):
         _, rep, hub = run_stats(*REPOS, '--no-artifacts')
         self.assertFalse(hub.paths(r'artifacts'))
-        self.assertEqual(rep['repos']['acme/web']['retries'], {'fallback': 1, 'any': 1})  # a fallback job; where ran
+        # a fallback job; where ran; the flat run's first attempt shows nothing
+        self.assertEqual(rep['repos']['acme/web']['retries'], {'fallback': 1, 'any': 1, 'unknown': 1})
         self.assertEqual(rep['repos']['acme/lib']['retries'], {'any': 1, 'unknown': 2})  # locate ran; oom, thermal
         self.assertEqual(rep['repos']['acme/web']['refusals'], {})
 
@@ -269,7 +286,7 @@ class Api(unittest.TestCase):
     def test_an_unreadable_activity_takes_the_run_creation(self):
         rc, rep, _ = run_stats(*REPOS, hub=Hub(activity_status=403))
         self.assertEqual(rc, 0)
-        self.assertEqual(rep['repos']['acme/web']['verdict_from'], {'push': 0, 'created': 4})
+        self.assertEqual(rep['repos']['acme/web']['verdict_from'], {'push': 0, 'created': 3, 'rerun': 1})
         self.assertFalse(rep['repos']['acme/web']['pushes_read'])
 
     def test_a_failed_read_of_the_jobs_is_status_1(self):
@@ -295,6 +312,27 @@ class Api(unittest.TestCase):
             with self.assertRaises(stats.StatsError):
                 api.one(path)
             self.assertEqual(len(n), calls)
+
+    def test_more_runs_than_github_lists_are_refused(self):
+        rc, _, hub = run_stats(*REPOS, hub=Hub(total=1001))
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(hub.calls), 1)  # the first page says so
+        self.assertEqual(run_stats(*REPOS, hub=Hub(total=1000))[0], 0)
+
+    def test_a_run_on_two_pages_counts_once(self):
+        _, rep, _ = run_stats(*REPOS, hub=Hub(dup=True))
+        self.assertEqual(rep['repos']['acme/web']['runs'], 4)
+
+    def test_a_next_page_off_github_is_refused(self):
+        rc, _, hub = run_stats(*REPOS, hub=Hub(link_host='https://elsewhere.example'))
+        self.assertEqual(rc, 1)
+        self.assertFalse([u for u, _ in hub.calls if 'elsewhere' in u])
+
+    def test_a_failed_activity_read_is_an_error_not_a_creation_time(self):
+        with unittest.mock.patch.object(stats.time, 'sleep'):  # its three tries
+            rc, _, _ = run_stats(*REPOS, hub=Hub(activity_status=502))
+        self.assertEqual(rc, 1)
+        self.assertEqual(run_stats(*REPOS, hub=Hub(activity_status=404))[0], 0)
 
     def test_listed_runs_only(self):
         rc, rep, hub = run_stats('--repo', 'acme/web', '--run', '102', '--run', '104')
@@ -328,15 +366,15 @@ class Shapes(unittest.TestCase):
 
     def test_rows_from_the_outcome(self):
         R = stats.row
-        for doc, want in (({'outcome': 'thermal', 'cool-card': '2'}, 'cool-card'),
-                          ({'outcome': 'thermal', 'retry-on': ['self-hosted', 'hosta-gpu3']}, 'cool-card'),
-                          ({'outcome': 'thermal', 'retry-on': ['self-hosted', 'ci-gpu2']}, 'fallback'),
-                          ({'outcome': 'reboot'}, 'same-host'), ({'outcome': 'oom'}, 'more-memory'),
-                          ({'outcome': 'lost'}, 'any'), ({'outcome': 'stopped'}, 'any'),
-                          ({'outcome': 'unavailable', 'next': 'retry'}, 'same-host'),
-                          ({'outcome': 'unavailable', 'next': 'fallback'}, 'fallback'), ({'outcome': 'pass'}, 'unknown')):
-            self.assertEqual(R('retry', doc, [], []), want, doc)
-        self.assertEqual(R('fallback', {'outcome': 'oom'}, [], []), 'fallback')
+        for o, nxt, want in (('thermal', 'retry', 'cool-card'), ('thermal', 'fallback', 'fallback'),
+                             ('reboot', 'retry', 'same-host'), ('oom', 'retry', 'more-memory'), ('lost', 'retry', 'any'),
+                             ('stopped', 'retry', 'any'), ('unavailable', 'retry', 'same-host'),
+                             ('unavailable', 'fallback', 'fallback'), ('pass', 'none', 'unknown'), ('red', 'none', 'unknown')):
+            self.assertEqual(R('retry', {'outcome': o, 'next': nxt}, [], []), want, (o, nxt))
+        # the hint's row, as the route reads it: a cool card's label in retry-on does not make a fallback one
+        self.assertEqual(R('retry', {'outcome': 'thermal', 'next': 'fallback', 'retry-on': ['self-hosted', 'hosta-gpu1']},
+                           [], []), 'fallback')
+        self.assertEqual(R('fallback', {'outcome': 'oom', 'next': 'retry'}, [], []), 'fallback')
         taken = {'conclusion': 'success', 'started_at': '2027-01-15T08:00:00Z', 'runner_name': 'r'}
         self.assertEqual(R('retry', None, [], [taken]), 'any')
         self.assertEqual(R('retry', None, [{'conclusion': 'cancelled'}], []), 'any')
@@ -362,6 +400,11 @@ class Shapes(unittest.TestCase):
             self.assertEqual(got is not None, want, at)
         self.assertIsNone(stats.push_time(run, [{'after': 'x', 'timestamp': '2027-01-15T08:09:00Z',
                                                  'activity_type': 'branch_deletion'}]))
+        on = dict(run, head_branch='topic')  # the same sha pushed to another branch is not this run's push
+        self.assertIsNone(stats.push_time(on, [{'after': 'x', 'timestamp': '2027-01-15T08:09:00Z', 'activity_type': 'push',
+                                                'ref': 'refs/heads/other'}]))
+        self.assertIsNotNone(stats.push_time(on, [{'after': 'x', 'timestamp': '2027-01-15T08:09:00Z',
+                                                   'activity_type': 'push', 'ref': 'refs/heads/topic'}]))
         self.assertIsNone(stats.push_time(dict(run, event='schedule'), [{'after': 'x', 'timestamp': '2027-01-15T08:09:00Z',
                                                                           'activity_type': 'push'}]))
 
@@ -370,6 +413,41 @@ class Shapes(unittest.TestCase):
                              ('tier: hostb (tier 1) has 2 idle runner(s)', 'tier'), ('drained (pool part): x', 'drained'),
                              ('health gate: card 0 at or above 85 C', 'health gate'), ('', '?')):
             self.assertEqual(stats.reason_head(reason), want)
+
+
+class Report(unittest.TestCase):
+    """``report`` on runs made up in place: the cases the batch does not hold."""
+
+    @staticmethod
+    def j(name, c, st, e, att=1, labels=('self-hosted', 'ci-cpu'), concl='success', status='completed'):
+        return {'name': name, 'labels': list(labels), 'run_attempt': att, 'status': status, 'conclusion': concl,
+                'created_at': stats.iso(T0 + c), 'started_at': stats.iso(T0 + st),
+                'completed_at': stats.iso(T0 + e) if e is not None else None, 'runner_name': 'r'}
+
+    def one(self, run, outcomes=None):
+        return stats.report([{'repo': 'acme/x', 'runs': [run], 'pushes': [], 'outcomes': outcomes or {}}])['repos']['acme/x']
+
+    def test_a_rerun_of_the_retry_alone_takes_the_first_attempts_outcome(self):
+        run = {'id': 7, 'event': 'push', 'created_at': stats.iso(T0), 'run_started_at': stats.iso(T0 + 900),
+               'run_attempt': 2, 'status': 'completed', 'jobs': [
+                   self.j('part p / first', 0, 5, 100), self.j('part p / retry', 101, 110, 200, concl='failure'),
+                   self.j('part p / retry', 901, 905, 950, att=2), self.j('verdict', 951, 952, 960, att=2)]}
+        got = self.one(run, {(7, 1, 'p'): {'outcome': 'oom', 'next': 'retry'}})
+        self.assertEqual(got['retries'], {'more-memory': 2})
+        self.assertEqual((got['wall']['max'], got['verdict']['max'], got['verdict_from']['rerun']), (60, 60, 1))
+
+    def test_a_run_in_progress_has_no_wall_and_no_verdict_yet(self):
+        run = {'id': 8, 'event': 'push', 'created_at': stats.iso(T0), 'run_attempt': 1, 'status': 'in_progress',
+               'jobs': [self.j('part p / first', 0, 5, None, status='in_progress')]}
+        got = self.one(run)
+        self.assertEqual((got['wall']['n'], got['verdict']['n'], got['no_verdict'], got['queue']['n'], got['run']['n']),
+                         (0, 0, 0, 1, 0))
+
+    def test_a_difference_below_zero_is_counted_not_used(self):
+        run = {'id': 9, 'event': 'workflow_dispatch', 'created_at': stats.iso(T0 + 100), 'run_attempt': 1,
+               'status': 'completed', 'jobs': [self.j('part p / first', 120, 110, 150), self.j('verdict', 50, 60, 90)]}
+        got = self.one(run)
+        self.assertEqual((got['wall']['n'], got['verdict']['n'], got['queue']['n'], got['negative']), (1, 0, 1, 2))  # the verdict job's queue
 
 
 class Records(unittest.TestCase):
@@ -396,11 +474,11 @@ class Records(unittest.TestCase):
             f.write('not json\n')
 
     def test_a_record_gives_the_row_and_no_artifact_is_read_for_it(self):
-        self.record('acme/lib', 202, 1, 'a', 1, {'outcome': 'reboot', 'reason': 'the host rebooted'})
+        self.record('acme/lib', 202, 1, 'a', 1, {'outcome': 'reboot', 'reason': 'the host rebooted', 'next': 'retry'})
         rc, rep, hub = run_stats(*REPOS, '--records', self.d)
         self.assertEqual(rc, 0)
         self.assertEqual(rep['repos']['acme/lib']['retries'], {'same-host': 1, 'cool-card': 1, 'any': 1})
-        self.assertEqual(len([u for u, _ in hub.calls if u.startswith(BLOB)]), 4)
+        self.assertEqual(len([u for u, _ in hub.calls if u.startswith(BLOB)]), 5)
 
     def test_a_later_attempts_refusal_counts_and_is_no_first_attempts_outcome(self):
         self.record('acme/lib', 202, 1, 'a', 2, {'outcome': 'unavailable', 'reason': 'drained: by hand'})

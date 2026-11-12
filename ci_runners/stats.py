@@ -13,13 +13,17 @@ the project registry (``<etc>/projects/*.toml``). The numbers, each from these t
   skipped − the run's ``created_at`` (completed runs), and its *verdict delay*: the
   ``completed_at`` of the run's ``verdict`` job (the job that posts the final status, its last
   step; of the latest run attempt that has one) − the head's push, which is the repository's
-  activity entry for the head sha (``timestamp``) at most ``PUSH_WINDOW`` before the run's
-  ``created_at`` (or up to a minute after it) on a ``push``, ``pull_request`` or ``merge_group``
-  run, else the run's ``created_at`` (a dispatch, a schedule, a push not found or the activity
-  not readable: ``verdict_from`` counts each);
+  activity entry for the head sha on the run's branch (``timestamp``) at most ``PUSH_WINDOW``
+  before the run's ``created_at`` (or up to a minute after it) on a ``push``, ``pull_request``
+  or ``merge_group`` run, else the run's ``created_at`` (a dispatch, a schedule, a push not
+  found, an activity the login may not read: 403 or 404); ``verdict_from`` counts each;
+- a *re-run* (``run_attempt`` above 1) is measured within its latest attempt: its wall and
+  verdict delay from the run's ``run_started_at`` (that attempt's start), since the wait for a
+  person to re-run it is not CI's; ``reruns`` counts them;
 
 each as a count, p50, p90 and max in seconds (``quantile``); a difference below 0 (clock skew)
-is left out and counted as ``negative``. A job a runner never took (cancelled in the queue, or
+is left out and counted as ``negative``. A run listed on two pages (one created while they are
+read) counts once. A job a runner never took (cancelled in the queue, or
 still queued: no ``started_at`` or no runner) is counted as *unstarted* and is in no delay; a
 skipped job is in nothing. Jobs of every run attempt count (``filter=all``). A job's label is
 its ``labels`` but ``self-hosted``, joined by ``+`` (``ci-cpu+mem-big``, ``hosta-gpu1``). The
@@ -31,9 +35,11 @@ reusable workflow's (16.6) ``<caller> / part <id> / first|locate|salvage|retry|r
 retry|fallback``, ``verdict``, or a flat ``<part>`` with ``<part>-retry`` or ``<part>-fallback``.
 
 *Retries per row* (16.5): each retry or fallback attempt a runner took, by the row the first
-attempt's outcome gives (``row``): that outcome comes from a part record under ``--records``, else
-from the run's artifact ``ci-part-<id>-1`` (its ``outcome.json``; ``--no-artifacts`` skips them),
-else a first attempt whose host had to be found (a ``locate``/``where`` or ``salvage`` job ran),
+attempt's outcome and ``next`` give (``route.row_of``: the hint's row; the route may still move a
+retry, a cool card to a fallback, 16.5): that outcome comes from a part record under
+``--records``, else from the run's artifact ``ci-part-<id>-1`` (its ``outcome.json`` of that run
+attempt; a re-run of the retry alone takes an earlier attempt's; ``--no-artifacts`` skips
+them), else a first attempt whose host had to be found (a ``locate``/``where`` or ``salvage`` job ran),
 or that was cancelled, counts as ``any``, and a ``fallback`` job as ``fallback``; any other is
 ``unknown``. *Refusals after a start*: the outcomes read that are ``unavailable`` (the executor
 refused a job its runner had started), by the reason's head: from the API the retried parts'
@@ -44,14 +50,14 @@ runner's previous stop in the window (else as logged: ``no cause``, ``presence i
 stops a starting job prevented (``kept``), the holds set (19.8), infrastructure ends and
 self-drains; the records of parts whose ``outcome.json`` was written in the window.
 
-API use, each call 30 s and 3 tries: per repository one page of 100 runs per 100 runs, one page of
+API use, each call 30 s and 3 tries, on GitHub's API host only (a ``Link`` elsewhere is refused): per repository one page of 100 runs per 100 runs, one page of
 jobs per run (per 100 jobs), one page of activity per 100 pushes since T, and per run with a
-retried part one artifact list plus one download per retried part (two requests: GitHub's
-redirect, then the signed URL, which gets no login). A day of one repository with R runs, P
-pushes and N retried parts in K runs: ceil(R/100) + R + ceil(P/100) + K + 2N requests (jobs
-pages of 100: a run of more than 100 jobs takes more). At most ``--max-requests``
+retried part one artifact list plus one download per ``ci-part-<id>-1`` of a retried part (two
+requests: GitHub's redirect, then the signed URL, which gets no login). A day of one repository
+with R runs, P pushes and N retried parts in K runs: ceil(R/100) + R + ceil(P/100) + K + 2N
+requests (more where a run has more than 100 jobs, or a re-run uploaded a part's artifact again). At most ``--max-requests``
 (``MAX_REQUESTS``) calls: beyond them the report is refused, not shortened. GitHub's run search
-returns at most 1000 runs: more is refused too.
+returns at most 1000 runs: a first page whose ``total_count`` is more is refused too.
 
 Status: 0 the report; 1 GitHub could not be read or a bound was reached; 2 bad arguments or no login.
 """
@@ -90,12 +96,13 @@ ATTEMPTS = ('first', 'retry', 'fallback')
 HOST_FINDERS = ('locate', 'where', 'salvage')
 PART_KINDS = ATTEMPTS + HOST_FINDERS + ('red',)
 ROWS = ('cool-card', 'same-host', 'more-memory', 'any', 'fallback', 'unknown')
-GPU_LABEL = re.compile(r'.+-gpu[0-9]+\Z')
 MAX_LOG = 64 << 20  # bytes read of one presence log
 
 
 class StatsError(RuntimeError):
-    pass
+    def __init__(self, text: str, code: int = 0) -> None:
+        super().__init__(text)
+        self.code = code  # the HTTP status of a refused call; 0 for any other failure
 
 
 # ------------------------------------------------------------------ GitHub, paginated and bounded
@@ -145,11 +152,13 @@ class Api:
                     break
             if i + 1 < github.TRIES:
                 time.sleep(self.pause)
-        raise StatsError(f'GET {url.split("?")[0]}: {last}')
+        raise StatsError(f'GET {url.split("?")[0]}: {last}', int(last[5:]) if last.startswith('HTTP ') else 0)
 
-    def pages(self, path: str, key: str | None, max_pages: int) -> Iterable[list]:
+    def pages(self, path: str, key: str | None, max_pages: int, first: list | None = None) -> Iterable[list]:
         """Each page's list (``key`` of the page's object, or the page itself), following
-        the ``Link: rel="next"`` header GitHub gives (page numbers and cursors alike)."""
+        the ``Link: rel="next"`` header GitHub gives (page numbers and cursors alike), on
+        GitHub's own host only (the login goes nowhere else); ``first`` gets the first
+        page's object."""
         url = f'{self.base}{path}'
         for _ in range(max_pages):
             _, h, body = self._get(url)
@@ -160,11 +169,15 @@ class Api:
             rows = doc.get(key) if key and isinstance(doc, dict) else doc
             if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
                 raise StatsError(f'GET {path.split("?")[0]}: not a list')
+            if first is not None and not first:
+                first.append(doc)
             yield rows
             m = NEXT.search({k.lower(): v for k, v in h.items()}.get('link', ''))
             if not m or not rows:
                 return
             url = m.group(1)
+            if not url.startswith(self.base + '/'):
+                raise StatsError(f'GET {path.split("?")[0]}: a next page off {self.base}')
         raise StatsError(f'GET {path.split("?")[0]}: more than {max_pages} pages')
 
     def one(self, path: str) -> dict:
@@ -220,11 +233,16 @@ def collect(api: Api, repo: str, since: float, *, artifacts: bool = True, outcom
         since = min(ts(r.get('created_at')) or since for r in runs)
     else:
         q = urllib.parse.quote(f'>={iso(since)}')
+        head: list = []
+        seen = set()
         for page in api.pages(f'/repos/{repo}/actions/runs?per_page={PAGE}&created={q}', 'workflow_runs',
-                              MAX_RUNS // PAGE + 1):
-            runs += page
-            if len(runs) > MAX_RUNS:
-                raise StatsError(f'{repo}: more than {MAX_RUNS} runs since {iso(since)} (a shorter --since)')
+                              MAX_RUNS // PAGE + 1, head):
+            total = head[0].get('total_count') if isinstance(head[0], dict) else None
+            if not isinstance(total, int) or total > MAX_RUNS:  # GitHub's search gives no more: never a part
+                raise StatsError(f'{repo}: {total} runs since {iso(since)}, more than the {MAX_RUNS} GitHub lists '
+                                 '(a shorter --since)')
+            runs += [r for r in page if r.get('id') not in seen]  # a run new since the first page shifts the pages
+            seen |= {r.get('id') for r in page}
     for r in runs:
         r['jobs'] = [j for page in api.pages(f'/repos/{repo}/actions/runs/{r["id"]}/jobs?per_page={PAGE}&filter=all',
                                              'jobs', 50) for j in page]
@@ -236,10 +254,10 @@ def collect(api: Api, repo: str, since: float, *, artifacts: bool = True, outcom
                 pushes += page
                 if any((ts(p.get('timestamp')) or 0) < horizon for p in page):
                     break
-        except StatsError:
-            if api.requests >= api.limit:
+        except StatsError as e:
+            if e.code not in (403, 404):
                 raise
-            pushes = None  # no activity to read (a login without it): every verdict delay from the run's creation
+            pushes = None  # no activity this login may read: every verdict delay from the run's creation
     found: dict = {}
     if artifacts:
         for r in runs:
@@ -338,20 +356,9 @@ def row(kind_: str, doc: Mapping | None, first: Sequence[Mapping], finders: Sequ
     what its jobs show. Pure."""
     if kind_ == 'fallback':
         return 'fallback'
-    if doc:
-        o, on = doc.get('outcome'), [str(x) for x in doc.get('retry-on') or []]
-        if o == 'thermal':
-            return 'cool-card' if doc.get('cool-card') or any(GPU_LABEL.fullmatch(x) and not x.startswith('ci-')
-                                                              for x in on) else 'fallback'
-        if o == 'reboot':
-            return 'same-host'
-        if o == 'oom':
-            return 'more-memory'
-        if o in ('lost', 'stopped'):
-            return 'any'
-        if o == 'unavailable':
-            return 'same-host' if doc.get('next') == 'retry' else 'fallback'
-        return 'unknown'
+    if doc:  # the hint's row (route.row_of); the route may still move a retry (16.5's last column)
+        from ci_runners import route
+        return route.row_of(str(doc.get('outcome', '')), str(doc.get('next', ''))) or 'unknown'
     if any(took(j) for j in finders) or any(j.get('conclusion') == 'cancelled' for j in first):
         return 'any'
     return 'unknown'
@@ -402,12 +409,14 @@ class Acc:
 
 
 def push_time(run: Mapping, pushes: Sequence[Mapping]) -> float | None:
-    """When the run's head was pushed: the earliest activity entry for its sha at most
-    PUSH_WINDOW before the run's creation (and not after it by more than a minute). Pure."""
+    """When the run's head was pushed: the earliest activity entry for its sha on its branch
+    at most PUSH_WINDOW before the run's creation (and not after it by more than a minute). Pure."""
     c = ts(run.get('created_at'))
     if run.get('event') not in PUSH_EVENTS or c is None:
         return None
+    ref = f'refs/heads/{run["head_branch"]}' if run.get('head_branch') else None
     got = [t for p in pushes if p.get('after') == run.get('head_sha') and p.get('activity_type') != 'branch_deletion'
+           and (ref is None or p.get('ref') == ref)
            and (t := ts(p.get('timestamp'))) is not None and c - PUSH_WINDOW <= t <= c + 60]
     return min(got) if got else None
 
@@ -427,8 +436,8 @@ def report(data: Sequence[Mapping], records: Mapping | None = None, since: float
     for d in data:
         repo = d['repo']
         all_, parts, by_label = Acc(), Acc(), {}
-        wall, verdict, unstarted, no_verdict = [], [], 0, 0
-        origin = {'push': 0, 'created': 0}
+        wall, verdict, negative, unstarted, no_verdict, reruns = [], [], [], 0, 0, 0
+        origin = {'push': 0, 'created': 0, 'rerun': 0}
         retries = {r: 0 for r in ROWS}
         refusals: dict[str, int] = {}
         outcomes = dict(d.get('outcomes') or {})
@@ -437,8 +446,9 @@ def report(data: Sequence[Mapping], records: Mapping | None = None, since: float
             jobs = r.get('jobs') or []
             byp = jobs_by_part(jobs)
             attempts = {id(j) for ks in byp.values() for k in ATTEMPTS for j in ks.get(k, [])}
+            latest = int(r.get('run_attempt') or 1)
             ends = []
-            for j in jobs:
+            for j in jobs:  # a re-run's wall is its latest attempt's: from its start (below) to the last end
                 if j.get('conclusion') != 'skipped' and (e := ts(j.get('completed_at'))) is not None:
                     ends.append(e)
                 if not took(j):
@@ -450,32 +460,38 @@ def report(data: Sequence[Mapping], records: Mapping | None = None, since: float
                 if id(j) in attempts:
                     parts.add(j)
             c = ts(r.get('created_at'))
-            if r.get('status') == 'completed' and ends and c is not None:
-                wall.append(max(ends) - c)
+            start = ts(r.get('run_started_at')) if latest > 1 else c  # a re-run: its own start (a person's wait is not CI's)
+            reruns += latest > 1
+            if r.get('status') == 'completed' and ends and start is not None:
+                (wall.append(max(ends) - start) if max(ends) >= start else negative.append(1))
             vs = [j for j in jobs if kind(str(j.get('name', '')))[1] == 'verdict' and took(j)
                   and ts(j.get('completed_at')) is not None]
             if vs and c is not None:
                 last = max(vs, key=lambda j: (int(j.get('run_attempt') or 1), ts(j.get('completed_at'))))
-                p = push_time(r, d.get('pushes') or [])
-                origin['push' if p is not None else 'created'] += 1
-                verdict.append(ts(last.get('completed_at')) - (p if p is not None else c))
+                again = int(last.get('run_attempt') or 1) > 1
+                p = None if again else push_time(r, d.get('pushes') or [])
+                origin['rerun' if again else 'push' if p is not None else 'created'] += 1
+                v = ts(last.get('completed_at')) - (ts(r.get('run_started_at')) or c if again else p if p is not None else c)
+                (verdict.append(v) if v >= 0 else negative.append(1))
             elif r.get('status') == 'completed':
                 no_verdict += 1
             for (att, p), ks in byp.items():
                 doc = outcomes.get((r['id'], att, part_id(p)))
+                if doc is None and not ks.get('first'):  # a re-run of the retry alone: its first attempt is earlier
+                    doc = next((outcomes[k] for a in range(att - 1, 0, -1) if (k := (r['id'], a, part_id(p))) in outcomes),
+                               None)
                 for k in ('retry', 'fallback'):
                     for j in ks.get(k, []):
                         if took(j):
                             retries[row(k, doc, ks.get('first', []), [x for f in HOST_FINDERS for x in ks.get(f, [])])] += 1
-        seen = set()
-        for key, doc in outcomes.items():
-            if doc.get('outcome') == 'unavailable' and key not in seen:
-                seen.add(key)
+        for doc in outcomes.values():
+            if doc.get('outcome') == 'unavailable':
                 h = reason_head(doc.get('reason'))
                 refusals[h] = refusals.get(h, 0) + 1
         repos[repo] = {'runs': len(d['runs']), 'completed': sum(1 for r in d['runs'] if r.get('status') == 'completed'),
                        **all_.out(), 'unstarted': unstarted, 'parts': parts.out(), 'wall': summary(wall),
-                       'verdict': summary(verdict), 'verdict_from': origin, 'no_verdict': no_verdict,
+                       'verdict': summary(verdict), 'verdict_from': origin, 'no_verdict': no_verdict, 'reruns': reruns,
+                       'negative': len(negative) + all_.negative,
                        'retries': {k: v for k, v in retries.items() if v}, 'refusals': refusals,
                        'pushes_read': d.get('pushes') is not None,
                        'labels': {k: v.out() for k, v in sorted(by_label.items())}}
@@ -587,7 +603,8 @@ def text(rep: Mapping) -> str:
                       f'{v["unstarted"]} not taken, {v["no_verdict"]} completed without a verdict', head]
         rows = [('queue, every job', v['queue']), ('run, every job', v['run']), ('queue, part attempts', v['parts']['queue']),
                 ('run, part attempts', v['parts']['run']), ('wall (created -> last job end)', v['wall']),
-                (f'verdict (push {v["verdict_from"]["push"]}, created {v["verdict_from"]["created"]})', v['verdict'])]
+                (f'verdict (push {v["verdict_from"]["push"]}, created {v["verdict_from"]["created"]}, '
+                 f're-run {v["verdict_from"]["rerun"]})', v['verdict'])]
         rows += [(f'{k[:31]} queue', x['queue']) for k, x in v['labels'].items()]
         lines += [f'{n:<40} {_cols(s)}' for n, s in rows]
         lines.append('retries by row: ' + (', '.join(f'{k} {n}' for k, n in v['retries'].items()) or 'none'))

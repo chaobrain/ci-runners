@@ -1737,17 +1737,20 @@ Each item names what it supersedes or amends.
        - *verdict delay*: the `completed_at` of the run's `verdict` job (it posts the final
          status as its last step), of the latest run attempt that has one, − the head's push:
          the repository's activity entry (`GET /repos/{r}/activity`) whose `after` is the head
-         sha, at most 10 min before the run's `created_at` (or a minute after), on a `push`,
-         `pull_request` or `merge_group` run; else the run's `created_at` (a dispatch, a
-         schedule, a push not found, an activity the login cannot read). The report counts
-         which.
+         sha on the run's branch, at most 10 min before the run's `created_at` (or a minute
+         after), on a `push`, `pull_request` or `merge_group` run; else the run's `created_at`
+         (a dispatch, a schedule, a push not found, an activity the login may not read). The
+         report counts which;
+       - a *re-run* is measured within its latest attempt: wall and verdict delay from the
+         run's `run_started_at`, since the wait for a person to re-run it is not CI's.
 
        Counts, p50, p90 and max: the value at index round(p × (n − 1)) of the sorted values. A
        job's kind is the last ` / ` segment of its name: the reusable workflow's `part <id> /
        first|locate|salvage|retry|red`, `plan`, `pending`, `verdict`; a composing workflow's
        `part <id> / first|where|salvage|retry|fallback`, or a flat `<part>` with
        `<part>-retry`. *Retries per row*: each retry or fallback attempt a runner took, by the
-       row (16.5's table) of its first attempt's outcome, read from the host's part record
+       hint's row (`route.row_of`; the route may still move a retry, 16.5) of its first
+       attempt's outcome, read from the host's part record
        (`--records`), else from the run's artifact `ci-part-<id>-1`; without either, a first
        attempt whose host had to be found (a `locate`, `where` or `salvage` job ran) or that
        was cancelled is `any`, a `fallback` job is `fallback`, the rest `unknown`. *Refusals
@@ -1757,10 +1760,10 @@ Each item names what it supersedes or amends.
        `presence-<date>.log` lines in the window, stops by cause, starts by the cause of the
        runner's previous stop, `kept`, holds, infrastructure ends and self-drains; a host's
        logs and records are read where the caller can read them (its own account), never
-       fetched. *API use*, each call 30 s and 3 tries, at most `--max-requests` (2,000) calls
-       or the report is refused, never shortened: for one repository with R runs, P pushes and
-       N retried parts in K runs, ceil(R/100) + R + ceil(P/100) + K + 2N requests (a day of the
-       canary's 44 runs on 2026-11-12: 77). GitHub's run search gives at most 1,000 runs.
+       fetched. *API use*, each call 30 s and 3 tries, on GitHub's API host only, at most
+       `--max-requests` (2,000) calls or the report is refused, never shortened: for one repository with R runs, P pushes and
+       N retried parts in K runs, about ceil(R/100) + R + ceil(P/100) + K + 2N requests (a day of the
+       canary's 44 runs on 2026-11-12: 77). GitHub's run search gives at most 1,000 runs: a window with more is refused.
     9. **Shares** (amends 15.8 item 2 and §5.1). Shared hosts give most of their
        capacity to CI: h100 8 CPU slots of 20 threads (160 of its 176) and its 5 cards;
        3090a 2 CPU slots, its cards and its nightly. 3090b becomes the development and

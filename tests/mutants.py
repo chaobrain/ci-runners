@@ -21,6 +21,8 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tests'))
 import leaks  # noqa: E402  (tests/leaks.py)
+sys.path.insert(0, str(ROOT))
+from ci_runners import stamp  # noqa: E402  (a stamp PR's tree is mutated in main's state)
 
 WORKERS = 4  # a hosted runner's cores; each worker has its own copy of the tree
 HANG = 60  # seconds: the slowest guarded test takes about 9 s, so a mutant's tests still running have hung
@@ -3970,17 +3972,22 @@ def one(tree: pathlib.Path, rel: str, old: str, new: str, tests: list[str]) -> t
 
 
 def main() -> int:
-    for n, (rel, old, _new, _tests) in enumerate(MUTANTS, 1):
-        count = (ROOT / rel).read_text().count(old)
-        if count != 1:
-            print(f'mutant {n}: the snippet occurs {count} times in {rel}', file=sys.stderr)
-            return 2
     workers = max(1, min(WORKERS, os.cpu_count() or 1))
     with tempfile.TemporaryDirectory() as d:
+        # main's state: a stamp PR's tree (operations §5 step 2) is stamped back to hook first, so
+        # the snippets that name `@v1` are found there too
+        base = pathlib.Path(d) / 'base'
+        shutil.copytree(ROOT, base, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+        stamp.stamp(base, 'hook')
+        for n, (rel, old, _new, _tests) in enumerate(MUTANTS, 1):
+            count = (base / rel).read_text().count(old)
+            if count != 1:
+                print(f'mutant {n}: the snippet occurs {count} times in {rel}', file=sys.stderr)
+                return 2
         trees = queue.SimpleQueue()
         for w in range(workers):  # a tree per worker: a mutant is never seen by another's tests
             tree = pathlib.Path(d) / f'tree{w}'
-            shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+            shutil.copytree(base, tree)
             trees.put(tree)
         every = sorted({t for *_, ts in MUTANTS for t in ts})
         tree0 = trees.get()

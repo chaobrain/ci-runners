@@ -36,7 +36,7 @@ python = "/<path to a Python 3.11 or later>"    # export it as CI_RUNNERS_PYTHON
 #                                               # a list of them, one per calling host, from 15.8
 # presence = { enabled = false, tick_seconds = 20, infra_failures = 3 }  # decision 16.4 (from R3): enabled =
 #                                               # true stops and starts idle runners by their resources, one
-#                                               # host at a time; false is the rollback (operations §14)
+#                                               # host at a time; false is the rollback (operations §15)
 # the other host's pool of each class: where a drained or busy part goes (decision 13.3)
 peer_labels = { light = ["3090a-light"], part = ["3090a-cpu"], gpu = ["3090a-gpu"], multi = ["3090a-multi"] }
 
@@ -55,10 +55,15 @@ cards = { per_card = true, class = "gpu", labels = ["3090b-gpu"] }  # runners 30
 multi = { count = 1, labels = ["3090b-multi"] }
 compile = { count = 1, labels = ["3090b-compile"] }
 # From RUN-10's R1 (decision 16.3) a pool may hold `slot` (16.2) and `audience` (16.7), and a
-# host `presence` (above, 16.4): accepted and checked for shape, inert until R2 (slots) and P1
-# (the public pool); `presence` acts from R3 where `enabled = true`. A slot table has one cpuset per runner (per card for a
-# per-card pool), no CPU in two; setup writes CI_RUNNER_SLOT=<i>, the runner's index in
-# `cpus` from 0, into its .env. No host's inventory gains these keys before `v1` accepts them.
+# host `presence` (above, 16.4): accepted and checked for shape; `audience` is inert until P1
+# (the public pool); `presence` acts from R3 where `enabled = true`. A slot table has one cpuset per runner (per card
+# for a per-card pool, in the order of `gpus`), no CPU in two; setup writes CI_RUNNER_SLOT=<i>,
+# the runner's index in `cpus` from 0, into its .env. From R2 a part on that runner is pinned
+# to `cpus[i]` (CI_CPUS), capped at `memory` (at most the registry's maximum), gets
+# CI_WORKERS=`workers`, CI_SPEED=`speed` (per worker, how many times slower than the reference
+# host, 1.0 there) and CI_ISA=`isa` where set, and its inner timeout is its minutes x `speed`;
+# a CPU part still takes a CI slot from `files` until v2 (sizing: docs/operations.md §14).
+# No host's inventory gains these keys before `v1` accepts them.
 # part = { count = 3, labels = ["3090b-cpu"], audience = "private", slot = { cpus = ["16-19", "20-23", "24-27"], workers = 4, memory = "40G", speed = 1.0, isa = "x86-64-v3" } }
 
 [hosts.3090b.files]                             # brainspike's lock and slot files (decision 12.9)

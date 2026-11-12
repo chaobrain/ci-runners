@@ -763,6 +763,7 @@ class Start(unittest.TestCase):
     def test_the_registry_key_first(self):
         """The project input, else the repository's name (``GITHUB_REPOSITORY``: a schedule's
         payload has no repository object); a malformed one fails the step before any read."""
+        self.assertEqual(self.go(self.NEW, [])[1]['project'], 'myproj')  # chaobrain/myproj
         code, o, _, _, _ = self.go(self.NEW, [], '--project', 'other.proj_1-x')
         self.assertEqual((code, o['project']), (0, 'other.proj_1-x'))
         for bad in ('a/b', 'a b', 'x;y', '\u00e9'):

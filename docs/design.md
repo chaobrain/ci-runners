@@ -3302,7 +3302,7 @@ not load is a red plan job with the reason:
 | `parts[].memory_gib` | no | the part's memory cap; the registry's default otherwise; above the label's largest slot, the route adds `mem-big` |
 | `parts[].results` | no | as `part`'s `results` |
 | `parts[].queue_minutes` | no | (0, 240], default 15: an attempt's wait on its host for a slot or a lease (`part`'s `queue-timeout-minutes`), added to the job's bound; past it the attempt is `unavailable` and the retry's rows apply as for a lost one |
-| `parts[].history` | no | `true` or `false` (#228): with `true` both attempts check the head out with its whole history and every branch's remote ref (the default branch's too), fetched with the job's read-only token, which the checkout keeps nowhere (`persist-credentials: false`; a step after it fails the attempt where its authorization header, `http.<url>.extraheader`, stayed in the checkout's git config; other local settings a reused workspace kept from an earlier command are not the checkout's and do not fail it) and the command never gets; default one commit. A release before it refuses the key (unknown keys), it does not ignore it |
+| `parts[].history` | no | `true` or `false` (#228): with `true` both attempts check the head out with its whole history and every branch's remote ref (the default branch's too), fetched with the job's read-only token, which the checkout keeps nowhere (`persist-credentials: false`; the step after it (`ci-run flow fetch`, which then reads the plan's files where there are any, #247) fails the attempt where its authorization header, `http.<url>.extraheader`, stayed in the checkout's git config; other local settings a reused workspace kept from an earlier command are not the checkout's and do not fail it) and the command never gets; default one commit. A release before it refuses the key (unknown keys), it does not ignore it |
 | `parts[].artifacts` | no | at most 4 names (`[A-Za-z0-9][A-Za-z0-9_.]*`, no `-`, not `ci`) to paths below `RUNNER_TEMP`, uploaded after each attempt as `<name>-<id>-<attempt>`; the verdict does not read them |
 
 An unknown key is refused. Without `plan`, the plan is `{"schema": 1, "parts": [{"id":
@@ -3365,7 +3365,13 @@ where the default branch sets one, ends the run in that job, and the verdict job
 `failure` with "merge origin/main" (two light pickups, under 30 s); no part starts. A head whose file does not load counts as one without `contract`; a default
 branch whose `contract` is not a whole number, or whose file does not load, ends the plan
 job with `error` (`ci-run flow contract`). A consumer raises `contract` in the PR that
-changes what its plan or its parts expect of the head.
+changes what its plan or its parts expect of the head. The registry key, the claim's decision
+and this check are the plan job's first step, `ci-run flow start` (#247): the key first (a
+malformed one ends the step before any read), then the claim's statuses and the contract's
+reads at once; a head the claim skips ends there with no contract output, and the plan job's
+later steps (the checkout, the plan command, the checks) wait for the contract's `ok`. One
+step for three because each step of a self-hosted job costs about 1 s at the job's end, where
+the runner uploads the step logs one after another through the egress.
 
 **Onboarding** is at most 20 workflow lines and one registry entry (`etc/projects/
 <project>.toml`, §4.9's env). A private repository of the org needs no policy entry (the
@@ -3373,7 +3379,7 @@ snapshot holds it, §6.5); a public one needs the lead's entry (16.7), and `ci.y
 run its CPU work on GitHub-hosted runners and its GPU parts on the confined public pool
 (18). Until 18's C2 builds those legs, a public caller's run fails in `ci.yml`'s `public`
 job, on a GitHub-hosted runner, and no job of it waits for ours; where the event's payload
-names no repository (a schedule), the contract step reads it and a public one ends with
+names no repository (a schedule), the plan job's first step reads it and a public one ends with
 `error` before anything of its head runs. The whole workflow:
 
 ```yaml

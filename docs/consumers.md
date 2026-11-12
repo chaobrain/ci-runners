@@ -135,6 +135,20 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 
 内存上限来自 registry 的 `memory`。超出就是 `oom`，不算 `red`。
 
+**计划里的 `needs`**（design 决定 16.5 和 §4.10，RUN-10 R5 起；可复用工作流 R6 上线后生效）。计划里每个部件写它要什么，不写主机：
+
+| `needs` | 标签 | 用途 |
+|---|---|---|
+| `cpu` | `ci-cpu` | 一个 CPU slot 的部件 |
+| `gpu` | `ci-gpu` | 一张卡 |
+| `gpu2` | `ci-gpu2` | 两张卡，通过 P2P 自检的 |
+| `timing` | `ci-timing` | 独占的计时部件（`compile` 类），从不溢出到集群 |
+
+- `minutes` 是这个部件在参考主机上的时长（不超过 240）。作业的 `timeout-minutes` 是 `minutes` 乘这组标签里最慢的 slot 的 `speed`，再加 15；部件自己的超时按它拿到的那个 slot 的 `speed` 放大。
+- `memory_gib` 可选，不写就用 registry 的默认值。超过这个标签不带 `mem-big` 的最大 slot 时，路由自动加 `mem-big`；连 `mem-big` 的 slot 都放不下，计划直接失败。
+- 部件只在所有主机都没有空闲 slot、而集群现在就能起它时才去 `ci-slurm`；集群起不了就留在共享标签上排队。没有任何主机提供的标签（带它的主机都掉线或 drained）在计划时就报错，不会排队等 24 小时。
+- 不认识的 `needs`、多余的键、重复的 id 都会让 plan 作业失败并给出原因。
+
 ## 5. 看结果与常见问题
 
 - **`<project>/ci` 状态**就是结论。verdict 作业的 summary 里列出每个部件的结果、主机、卡、排队和运行时间、峰值温度。

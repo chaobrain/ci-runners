@@ -69,6 +69,10 @@ ISA = re.compile(r'[a-z0-9][a-z0-9_.-]{0,31}\Z')
 MAX_CPU = 65535
 #: the classes whose runners lease one card each, the runner's own: a per-card pool's
 PER_CARD_CLASSES = frozenset({'gpu'})
+#: the class of a host's home pool (design §5.1, decision 16.4; issue #232): the one class
+#: of which a host may have two pools, the light pool (with a ``ci-`` label) and the home pool
+#: (without one, never stopped by presence, from which a job may hold its host, 19.8)
+HOME_CLASS = 'light'
 
 
 class InventoryError(ValueError):
@@ -315,7 +319,7 @@ def load(text: str) -> Inventory:
                 if pool.startswith('pub-gpu'):  # its runners' names would read as the public pool's (C2c)
                     raise InventoryError(f'hosts.{role}.pools.{pool}: a private pool\'s key starts with pub-gpu')
                 _check_private_labels(f'hosts.{role}.pools.{pool}', role, pool, v)
-            if (cls, pub) in seen:
+            if (cls, pub) in seen and cls != HOME_CLASS:  # the home pool: _check_home
                 raise InventoryError(f'hosts.{role}.pools.{pool}: class {cls} is also the class of {seen[cls, pub]}')
             if isinstance(v, dict) and 'slot' in v:  # one cpuset per runner (16.2)
                 n = len(h['gpus']) if v.get('per_card') else v['count']
@@ -323,6 +327,7 @@ def load(text: str) -> Inventory:
                     raise InventoryError(f'hosts.{role}.pools.{pool}: slot.cpus has {len(v["slot"]["cpus"])} '
                                          f'cpusets for {n} runners')
             seen[cls, pub] = pool
+        _check_home(role, h)
         if any(pub for _, pub in seen) and ('gpu', False) not in seen:
             raise InventoryError(f'hosts.{role}: a public pool shares the cards of the host\'s own gpu pool: name one')
         if any(pub for _, pub in seen) and 'isolation' not in h:
@@ -380,14 +385,70 @@ def _class(pool: str, v: object) -> str:
     return str(v['class']) if isinstance(v, dict) and 'class' in v else pool
 
 
+def _capable(v: object) -> bool:
+    """Whether a pool gives its runners a capability label (a ``ci-`` one, 16.1). Pure."""
+    return isinstance(v, dict) and any(str(x).startswith('ci-') for x in v.get('labels') or ())
+
+
+def _check_home(role: str, h: Mapping[str, object]) -> None:
+    """A host's two pools of class light (issue #232): one, the light pool, carries a
+    ``ci-`` label and the other, the home pool, none; the home pool names its labels, one of
+    them its own (no other pool of the host gives it) and the rest the light pool's, and has
+    no ``slot`` or ``audience``
+    (per_card is a gpu pool's only). One light pool or none: nothing to check."""
+    pools = h['pools']
+    light = [p for p, v in pools.items() if _class(p, v) == HOME_CLASS]
+    if len(light) < 2:
+        return
+    where = f'hosts.{role}.pools'
+    if len(light) > 2:
+        raise InventoryError(f'{where}: {len(light)} pools of class light ({", ".join(light)}): '
+                             'a light pool and a home pool at most')
+    capable = [p for p in light if _capable(pools[p])]
+    if len(capable) != 1:
+        raise InventoryError(f'{where}: two pools of class light ({", ".join(light)}), and '
+                             f'{"both carry" if capable else "neither carries"} a ci- label: the light pool carries '
+                             'one, the home pool none')
+    home = next(p for p in light if p not in capable)
+    v = pools[home]
+    if not isinstance(v, dict) or 'labels' not in v:
+        raise InventoryError(f'{where}.{home}: the home pool names its labels (<role>-home, <role>-light)')
+    if 'slot' in v or 'audience' in v:
+        raise InventoryError(f'{where}.{home}: the home pool takes no slot and no audience')
+    others = {x for p, w in pools.items() if p != home
+              for x in (w.get('labels') if isinstance(w, dict) and w.get('labels') else [p, role])}
+    others |= {f'{role}-gpu{c}' for p, w in pools.items() if isinstance(w, dict) and w.get('per_card') for c in h['gpus']}
+    if set(v['labels']) <= others:
+        raise InventoryError(f'{where}.{home}: no label of the home pool is its own: give it one that no other '
+                             'pool of the host carries (<role>-home)')
+    lights = labels_of(h, capable[0]) or [capable[0], role]
+    if set(v['labels']) & others - set(lights):  # another pool's jobs would land on it
+        raise InventoryError(f'{where}.{home}: the home pool shares a label with a pool other than the light pool: '
+                             'its labels are its own and the light pool\'s (<role>-home, <role>-light)')
+
+
+def home_pool(host: Mapping[str, object]) -> str | None:
+    """The host's home pool (design §5.1, decision 16.4; issue #232): of its two pools of
+    class light, the one without a ``ci-`` label; None on a host with one light pool or
+    none. Pure."""
+    light = [p for p, v in host['pools'].items() if _class(p, v) == HOME_CLASS]
+    home = [p for p in light if not _capable(host['pools'][p])]
+    return home[0] if len(light) == 2 and len(home) == 1 else None
+
+
 def pool_class(host: Mapping[str, object], pool: str) -> str:
     """The runner class of a pool of ``host`` (design §5.1). Pure."""
     return _class(pool, host['pools'][pool])
 
 
 def pool_of(host: Mapping[str, object], cls: str) -> str | None:
-    """The pool of ``host`` whose runners have class ``cls`` (one at most), or None. Pure."""
-    return next((p for p, v in host['pools'].items() if _class(p, v) == cls), None)
+    """The pool of ``host`` whose runners have class ``cls``, or None: one at most, but for
+    class light beside the home pool (``home_pool``), where it is the light pool, the one
+    with a ``ci-`` label (issue #232). Pure."""
+    mine = [p for p, v in host['pools'].items() if _class(p, v) == cls]
+    if len(mine) > 1:
+        mine = [p for p in mine if p != home_pool(host)]
+    return mine[0] if mine else None
 
 
 def probe_keys(v: object) -> list[str]:
@@ -405,7 +466,13 @@ def pool_labels(inv: 'Inventory', cls: str) -> list[str] | None:
     §5.1), or None where it gives none and the runners carry ``<pool>, <role>``. A per-card
     pool's runners carry also their card's ``<role>-gpu<N>``, which is not the pool's."""
     pool = pool_of(inv.host, cls)
-    v = inv.host['pools'].get(pool) if pool is not None else None
+    return None if pool is None else labels_of(inv.host, pool)
+
+
+def labels_of(host: Mapping[str, object], pool: str) -> list[str] | None:
+    """The labels the pool ``pool`` of ``host`` gives its runners, by its key (the home pool
+    and the light pool share a class, issue #232), or None where it gives none. Pure."""
+    v = host['pools'].get(pool)
     if isinstance(v, dict) and v.get('labels'):
         return list(v['labels'])
     return None

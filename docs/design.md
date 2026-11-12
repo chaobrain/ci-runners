@@ -1635,15 +1635,16 @@ Each item names what it supersedes or amends.
        runners on any host whose conformance check passes, h100 first; the account rule
        is "a public job reaches nothing of its account", proven per host. The bullets on
        the second account, the labels and the machine name below are superseded; the
-       policy, the snapshot, the first consumers and the forks' residual stand.* The Default group's
-       `allows_public_repositories` is never turned on: on Free it is the org's only
+       policy, the snapshot, the first consumers and the forks' residual stand.* The
+       Default group's `allows_public_repositories` is never turned on: on Free it is the
+       org's only
        group, so the flag would open every runner on every host to every public
        repository, the runners of the shared account and of the hosts that hold a
        cluster key included, with the hook (a file of the account the job code runs as,
        T13) as the only barrier. A public repository opts in to a pool of its own
        instead:
-       - *A second account on one host* (the new host of 16.9; *superseded by 18.2, 18.3*), never a shared account
-         and never a host whose CI account holds a cluster key. It holds no cluster key,
+       - *A second account on one host* (the new host of 16.9; *superseded by 18.2 and
+         18.3*), never a shared account and never a host whose CI account holds a cluster key. It holds no cluster key,
          no tunnel key and no organisation token. Where the host has no direct route to
          GitHub, its runners' `.env` points at the loopback forward that the host's
          private CI account already holds (11.10): the public account gets the egress

@@ -286,14 +286,15 @@ class Slots(SlotHost):
                  (self.slotted.replace('light = 1', 'light = { count = 1, slot = { cpus = ["0"], workers = 1, '
                                        'memory = "1G", speed = 1 } }'), 'light', '', '0',
                   'a light runner is no slot: slots are for part and gpu runners'),
-                 (self.slotted.replace('speed = 2.5', 'speed = inf'), 'part', '', '0',
-                  "the slot table's speed is not finite"),
+                 (self.slotted, 'part', '', '0', "the slot table's speed is not finite"),
                  (self.slotted, 'gpu', '0', '1', "CI_RUNNER_SLOT=1 is the slot of card 1, not of CI_RUNNER_CARD's"),
                  (self.slotted.replace('["0", "1"]', '["0", "4000"]'), 'part', '', '1',
                   "slot 1's cpus 4000 are not all CPUs this runner may use")]
         for n, (text, cls, card, slot, why) in enumerate(cases):
             with self.subTest(slot=slot, why=why):
                 self.inv = inventory.load(text)
+                if 'not finite' in why:  # the loader refuses it (decision 19.7); the executor's guard stays behind it
+                    self.inv.host['pools']['part']['slot']['speed'] = float('inf')
                 _, out = self.go(self.runner(cls, slot, card), id=f'u{n}', gpus=1 if card else 0)
                 self.assertEqual((out['outcome'], out['reason'], out['next']), ('unavailable', f'slot: {why}', 'fallback'))
                 self.assertFalse(pathlib.Path(self.path(out), 'work', 'ran').exists())

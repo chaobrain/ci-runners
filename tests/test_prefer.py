@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import tempfile
 import textwrap
 import unittest
@@ -226,7 +227,8 @@ class PolicyDigest(unittest.TestCase):
         self.assertEqual(policy.repositories_digest(policy.load(same)), d)
         for why, text in {'no entry': 'schema = 2\n', 'no bot': POLICY.replace('bot_dispatch = true\n', ''),
                           'a class less': POLICY.replace('"compile", ', ''), 'another id': POLICY.replace('id = 1', 'id = 2'),
-                          'paused': POLICY + 'paused = true\n'}.items():
+                          'paused': POLICY + 'paused = true\n',
+                          'an event more': POLICY + 'extra_events = ["merge_group"]\n'}.items():
             self.assertNotEqual(policy.repositories_digest(policy.load(text)), d, why)
 
     def test_the_probe_reads_the_accounts_policy(self):
@@ -263,7 +265,8 @@ class Drift(unittest.TestCase):
         self.assertFalse(c.down)
         self.assertEqual((c.row['policy_drift'], c.row['warnings']), (True, ['policy: repository entries differ from 2 other host(s)']))
         self.assertNotIn('policy_drift', got[0].row)
-        again = capacity.flag_policy([dict(r.row) for r in got[:2]])  # c gone: no drift left
+        fixed = dict(got[2].row, policy={'file': 'f' * 12, 'repositories': 'x'})  # c's entries brought along
+        again = capacity.flag_policy([dict(r.row) for r in got[:2]] + [fixed])
         self.assertTrue(all('policy_drift' not in r and 'warnings' not in r for r in again))
         flagged = capacity.flag_policy([dict(r.row) for r in got])
         self.assertEqual(flagged[2]['warnings'], ['policy: repository entries differ from 2 other host(s)'])  # once
@@ -273,6 +276,38 @@ class Drift(unittest.TestCase):
         # the route names no part to it
         rs = [host('c', cpu('c', 3), rep='y', prefer=1), host('a', cpu('a'), rep='x'), host('b', cpu('b'), rep='x')]
         self.assertEqual(routed([part_()], *rs)[0]['host'], '')
+
+
+class PoolStatus(unittest.TestCase):
+    def test_pool_status_shows_the_drift(self):
+        with tempfile.TemporaryDirectory() as etc:
+            path = os.path.join(etc, 'pool.toml')
+            with open(path, 'w') as f:
+                f.write(REGISTRY)
+            os.chmod(path, 0o600)
+            got = [dict(host('hosta', rep='x'), read_at=T0), dict(host('hostb', rep='y'), read_at=T0),
+                   dict(host('hostc', rep='x'), read_at=T0)]
+            for r in got:
+                r.update(queue=0, gpu_free={}, cpus_free=0, mem_free_gib=0, gpu_model='', billed=False, price=0.0,
+                         start_now=True, numerics_ok=True, slots=1)
+            out = io.StringIO()
+            with unittest.mock.patch.object(pool, 'fast_status', return_value=got), \
+                    unittest.mock.patch('sys.stdout', out):
+                self.assertEqual(pool.main(['status', '--fast', '--json'], etc), 0)
+            shown = {r['key']: r.get('policy_drift', False) for r in json.loads(out.getvalue())}
+            self.assertEqual(shown, {'hosta': False, 'hostb': True, 'hostc': False})
+
+
+class Action(unittest.TestCase):
+    def test_the_part_actions_outputs_are_the_executors(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, 'actions', 'part', 'action.yml'), encoding='utf-8') as f:
+            text = f.read()
+        block = text.split('\noutputs:\n', 1)[1].split('\nruns:', 1)[0] + '\n'
+        names = re.findall(r'^  ([a-z-]+):\n', block, re.M)
+        self.assertEqual(set(names), set(part.OUTPUTS))
+        for n in names:
+            self.assertIn(f'    value: ${{{{ steps.part.outputs.{n} }}}}\n', block)
 
 
 class Rows(unittest.TestCase):
@@ -319,6 +354,8 @@ class Rows(unittest.TestCase):
         self.assertEqual(got['cards'], {'pool': 'cards', 'class': 'gpu', 'labels': ['hx-gpu', 'hx-gpu0'], 'registered': 2,
                                         'online': 2, 'free': 1})  # gpu0 is the pool's own label too; gpu3 is not
         self.assertEqual((got['light']['labels'], got['light']['free']), (['light', 'hx'], 0))
+        inv = inventory.load(inventory_text('hx').replace('labels = ["hx-gpu", "hx-gpu0"]', 'labels = ["hx-gpu"]'))
+        self.assertEqual({e['pool']: e['labels'] for e in pool.pool_table(inv, p)}['cards'], ['hx-gpu'])  # not a card's
         self.assertEqual({e['pool']: (e['online'], e['free']) for e in pool.pool_table(inv, {})}['part'], (None, None))
 
     def test_the_ci_accounts_probe_carries_them(self):

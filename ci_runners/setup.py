@@ -111,7 +111,7 @@ def _runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str, int | 
     for pool, v in inv.host['pools'].items():
         spec = v if isinstance(v, dict) else {'count': v}
         cls = inventory.pool_class(inv.host, pool)  # the pool's key unless it names its class (12.5)
-        labels = inventory.pool_labels(inv, cls) or list(dict.fromkeys([pool, inv.this]))
+        labels = inventory.labels_of(inv.host, pool) or list(dict.fromkeys([pool, inv.this]))  # by key: issue #232
         slotted = 'slot' in spec
         if spec.get('per_card'):
             for i, card in enumerate(inv.host['gpus']):
@@ -142,6 +142,16 @@ def timers(h: dict) -> list[str]:
     """The timers this host enables: the org snapshot only where the inventory sets
     ``orgsync`` (design §6.5)."""
     return [t for t in TIMERS if h.get('orgsync') or 'orgsync' not in t]
+
+
+def runner_pools(inv: inventory.Inventory) -> list[str]:
+    """The pool key of each of ``_runners``, in its order: the home pool's runners share
+    their class with the light pool's (issue #232), so a pool is told by its key. Pure."""
+    out = []
+    for pool, v in inv.host['pools'].items():
+        spec = v if isinstance(v, dict) else {'count': v}
+        out += [pool] * (len(inv.host['gpus']) if spec.get('per_card') else spec['count'])
+    return out
 
 
 def runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str]]:
@@ -267,11 +277,13 @@ def check_tunnel(etc: str) -> None:
         raise ValueError(f'{d}/ssh_config must have one "Host egress" with its HostName')
 
 
-def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = None, slot: int | None = None) -> str:
+def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = None, slot: int | None = None,
+             pool: str = '') -> str:
     """A runner's ``.env`` (design §5.3): the runner app reads it into its environment,
     which its hooks and its jobs' steps inherit. A per-card runner names its card in
     ``CI_RUNNER_CARD``; a runner of a pool with a ``slot`` table its slot in
-    ``CI_RUNNER_SLOT`` (decision 16.2; nothing reads it until R2)."""
+    ``CI_RUNNER_SLOT`` (decision 16.2; nothing reads it until R2). ``CI_RUNNER_POOL_LABELS``
+    are the labels of its ``pool`` (its key), else of its class's pool."""
     h = inv.host
     hooks = hookcopy.hooks_dir(h)  # the copies in the private /tmp on a 3090 host (decision 13.5)
     lines = []
@@ -282,7 +294,7 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
     lines += [f'ACTIONS_RUNNER_HOOK_JOB_STARTED={hooks}/job-started.sh',
               f'ACTIONS_RUNNER_HOOK_JOB_COMPLETED={hooks}/job-completed.sh',
               f'CI_RUNNER_CLASS={cls}', f'CI_RUNNERS_ETC={etc}']
-    own = inventory.pool_labels(inv, cls)
+    own = inventory.labels_of(h, pool) if pool else inventory.pool_labels(inv, cls)
     if own:  # the launcher's retry-on when this host lacks the release
         lines.append(f'CI_RUNNER_POOL_LABELS={",".join(own)}')
     if card is not None:
@@ -998,7 +1010,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
     plan.add(f'runners (actions/runner {RUNNER_VERSION}, sha256 {RUNNER_SHA256[:16]}, {via}):')
     cache = os.path.join(base, 'state', 'cache', os.path.basename(RUNNER_URL))
     waited = 'tunnel' not in h
-    for name, labels, cls, card, slot in rs:
+    for (name, labels, cls, card, slot), pool in zip(rs, runner_pools(inv), strict=True):
         rdir = os.path.join(data, 'actions-runner', name)
         if runner_complete(rdir):
             plan.add(f'  keep   {rdir}/ (runner app present)')
@@ -1008,7 +1020,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
                 plan.add(f'  wait   127.0.0.1:{t["http_port"]} (tunnel)', kind='wait', ports=[t['http_port']])
                 waited = True
             plan.add(f'  unpack {RUNNER_URL} -> {rdir}/', kind='runner', path=rdir, cache=cache, port=port)
-        _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc, card, slot), 0o600)
+        _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc, card, slot, pool), 0o600)
         plan.add(f'         labels {",".join(labels)}; work {os.path.join(data, "ci-work", name)} (at registration)')
     if plan.actions or missing:  # nothing changed and all enabled: a second apply is a no-op
         plan.add('systemd --user (timers, runners):')

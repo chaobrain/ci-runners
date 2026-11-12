@@ -103,8 +103,11 @@ def refusal(state: dict | None, host: Mapping[str, object], cls: str) -> str:
 
 def pool_key(host: Mapping[str, object], name: str) -> str:
     """The inventory key of the pool ``name`` names, by key or by class; ValueError if
-    none. Pure."""
+    none, or for the home pool, which no drain stops (issue #232). Pure."""
     pools = host['pools']
+    if name in pools and name == inventory.home_pool(host):
+        raise ValueError(f'{name} is the home pool: presence never stops it and no part reads its drain '
+                         '(drain the host, or the light pool)')
     if name in pools:
         return name
     key = inventory.pool_of(host, name)

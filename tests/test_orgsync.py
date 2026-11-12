@@ -101,6 +101,28 @@ class Merge(unittest.TestCase):
         self.assertEqual(reason(m, env('chaobrain/handkept', '6006'), push(name='chaobrain/handkept', rid=6006)), 'ok')
         self.assertFalse(m.repos['chaobrain/brainevent'].org_members)  # the snapshot lists it, but it is public
 
+    def test_members_act_in_an_opted_in_public_repository(self):
+        """Decision 16.7: an opted-in public repository's actors are the snapshot's members, on
+        its own pool's GPU runners (18.7); its entry and id are the policy's (the snapshot
+        holds private repositories only)."""
+        text = POLICY2.replace('id = 2002\n', 'id = 2002\npublic_runners = true\n')
+        private_only = {k: v for k, v in SNAP['repositories'].items() if k != 'chaobrain/brainevent'}
+        m = policy.with_snapshot(policy.load(text), snap(repositories=private_only), NOW)
+        self.assertTrue(m.repos['chaobrain/brainevent'].org_members)
+        e = env('chaobrain/brainevent', '2002', 'push', 'dave', 'gpu')
+        e.update(CI_RUNNER_AUDIENCE='public', GITHUB_REF_PROTECTED='true')
+        self.assertEqual(reason(m, e, push('dave', 'chaobrain/brainevent', 2002)), 'ok')
+        e.update(GITHUB_ACTOR='mallory', GITHUB_TRIGGERING_ACTOR='mallory')
+        self.assertEqual(reason(m, e, push('mallory', 'chaobrain/brainevent', 2002)), 'actor')
+        # not opted in, or the snapshot says it is private now: the hand-kept actors alone
+        for t, repos in ((POLICY2, private_only), (text, SNAP['repositories'])):
+            m = policy.with_snapshot(policy.load(t), snap(repositories=repos), NOW)
+            self.assertFalse(m.repos['chaobrain/brainevent'].org_members)
+        # members off: the hand-kept actors alone
+        m = policy.with_snapshot(policy.load(text.replace('members = true', 'members = false')),
+                                 snap(repositories=private_only), NOW)
+        self.assertFalse(m.repos['chaobrain/brainevent'].org_members)
+
     def test_without_the_merge_nothing_of_the_snapshot_counts(self):
         self.assertEqual(reason(P2, env(), push()), 'repository')
         self.assertEqual(reason(P2, env(repo='chaobrain/paused-one', rid='3003', actor='dave'),

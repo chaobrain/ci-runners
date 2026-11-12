@@ -134,7 +134,7 @@ class Load(unittest.TestCase):
         good = (f'part = {{ count = 2, slot = {{ cpus = ["0-3", "4-5,8"], {slot} }} }}',
                 f'part = {{ count = 1, slot = {{ cpus = ["0"], workers = 1, memory = "1T", speed = 2, isa = "avx2" }} }}',
                 f'cards = {{ per_card = true, class = "gpu", slot = {{ cpus = ["0-3", "4-7"], {slot} }} }}',
-                'light = { count = 1, audience = "public" }', 'light = { count = 1, audience = "private" }')
+                'light = { count = 1, audience = "private" }')
         for g in good:
             inv.load(base.replace('@', g))
         bad = (f'part = {{ count = 2, slot = {{ cpus = ["0-3"], {slot} }} }}',  # one cpuset a runner
@@ -160,7 +160,8 @@ class Load(unittest.TestCase):
                f'part = {{ count = 1, slot = {{ cpus = ["0"], {slot}, isa = "AVX2" }} }}',
                f'part = {{ count = 1, slot = {{ cpus = ["0"], {slot}, isa = 2 }} }}',
                'part = { count = 1, slot = ["0"] }', 'light = { count = 1, audience = "everyone" }',
-               'light = { count = 1, audience = true }', 'light = { count = 1, audiences = "public" }')
+               'light = { count = 1, audience = true }', 'light = { count = 1, audiences = "public" }',
+               'light = { count = 1, audience = "public" }')  # the public pool is GPU-only (18.7)
         for b in bad:
             with self.assertRaises(inv.InventoryError, msg=b):
                 inv.load(base.replace('@', b))
@@ -171,6 +172,70 @@ class Load(unittest.TestCase):
         for g in ('{}', '{ enabled = true }', '{ tick_seconds = 5, infra_failures = 1 }'):
             inv.load(PLAIN.replace('slots = 2', f'presence = {g}\nslots = 2', 1))
         self.assertEqual(inv.cpu_ranges('0-3,8'), [(0, 3), (8, 8)])
+
+    def test_the_keys_of_decision_18_are_accepted_and_ignored(self):
+        """C2 (decision 18.7, 16.3's rule): a host's ``isolation`` and its public pool load, as
+        the example documents them (commented), checked for shape; the public pool is out of
+        ``pools``, so the host's runners, labels and pools are those without it."""
+        from ci_runners import presence, setup
+        new = re.sub(r'^# (isolation = "[^"]*")\s.*$', r'\1', EXAMPLE, flags=re.M)
+        new = re.sub(r'^# (pub-gpu = .*)$', r'\1', new, flags=re.M)
+        old, i = inv.load(EXAMPLE), inv.load(new)
+        self.assertEqual(i.host['isolation'], 'ns-subuid')
+        self.assertEqual(inv.public_pool(i), ('pub-gpu', {'per_card': True, 'class': 'gpu', 'audience': 'public',
+                                                          'labels': ['ci-pub-gpu', '3090b-pub-gpu']}))
+        self.assertIsNone(inv.public_pool(old))
+        self.assertEqual(i.host['pools'], old.host['pools'])
+        self.assertEqual({k: v for k, v in i.host.items() if k != 'isolation'}, dict(old.host))
+        self.assertEqual(setup.runners(i), setup.runners(old))
+        self.assertEqual(setup._runners(i), setup._runners(old))
+        self.assertEqual(presence.runners(i, 28), presence.runners(old, 28))
+        for cls in ('light', 'part', 'gpu', 'multi', 'compile'):
+            self.assertEqual(inv.pool_labels(i, cls), inv.pool_labels(old, cls), cls)
+            self.assertEqual(inv.pool_of(i.host, cls), inv.pool_of(old.host, cls), cls)
+        self.assertEqual(inv.deny_tokens({'hosts': {'h': {'isolation': 'ns-subuid'}}}), set())  # a public word
+        base = new.replace('isolation = "ns-subuid"', 'isolation = "@"')
+        for g in ('account', 'ns-subuid'):
+            self.assertEqual(inv.load(base.replace('@', g)).host['isolation'], g)
+        for b in ('ns-uid', 'none', 'microvm', '', 'NS-SUBUID', 'account ', '1'):
+            with self.assertRaises(inv.InventoryError, msg=b):
+                inv.load(base.replace('@', b))
+        with self.assertRaises(inv.InventoryError):  # not a string
+            inv.load(base.replace('"@"', '1'))
+        pub = 'pub-gpu = { per_card = true, class = "gpu", audience = "public", labels = ["ci-pub-gpu", "3090b-pub-gpu"] }'
+        good = (pub, pub.replace(', "3090b-pub-gpu"', ''),
+                'gpu2 = { per_card = true, audience = "public", class = "gpu", labels = ["ci-pub-gpu"] }')
+        for g in good:
+            self.assertIsNotNone(inv.public_pool(inv.load(new.replace(pub, g))), g)
+        bad = {
+            'light': 'pub = { count = 1, class = "light", audience = "public", labels = ["ci-pub-gpu"] }',
+            'part': 'pub = { count = 1, class = "part", audience = "public", labels = ["ci-pub-gpu"] }',
+            'multi': 'pub = { count = 1, class = "multi", audience = "public", labels = ["ci-pub-gpu"] }',
+            'not per card': 'pub = { count = 1, class = "gpu", audience = "public", labels = ["ci-pub-gpu"] }',
+            'per card false': 'pub = { per_card = false, class = "gpu", audience = "public", labels = ["ci-pub-gpu"] }',
+            'a slot': pub.replace(' }', ', slot = { cpus = ["0-3", "4-7"], workers = 4, memory = "40G", speed = 1.0 } }'),
+            'no labels': 'pub-gpu = { per_card = true, class = "gpu", audience = "public" }',
+            'no ci-pub-gpu': pub.replace('"ci-pub-gpu", ', ''),
+            'a private label': pub.replace('"3090b-pub-gpu"', '"ci-gpu"'),
+            'another host label': pub.replace('"3090b-pub-gpu"', '"3090a-pub-gpu"'),
+            'the host gpu label': pub.replace('"3090b-pub-gpu"', '"3090b-gpu"'),
+            'two public pools': pub + '\n' + pub.replace('pub-gpu =', 'pub-two ='),
+        }
+        for what, b in bad.items():
+            with self.assertRaises(inv.InventoryError, msg=what):
+                inv.load(new.replace(pub, b))
+        for what in ('light', 'part', 'multi'):  # refused for its class, whatever else it holds
+            with self.assertRaisesRegex(inv.InventoryError, 'a public pool is of class gpu only', msg=what):
+                inv.load(new.replace(pub, bad[what]))
+        with self.assertRaises(inv.InventoryError):  # the host's own gpu pool is needed: it shares its cards
+            inv.load(new.replace('cards = { per_card = true, class = "gpu", labels = ["3090b-gpu"] }  # runners 3090b-gpu<N>\n', ''))
+        with self.assertRaises(inv.InventoryError):  # and the host's isolation
+            inv.load(new.replace('isolation = "ns-subuid"', ''))
+        for label in ('ci-pub-gpu', 'ci-pub-cpu', '3090b-pub-gpu', '3090a-pub-gpu'):  # never on a private pool
+            with self.assertRaises(inv.InventoryError, msg=label):
+                inv.load(EXAMPLE.replace('labels = ["3090b-gpu"]', f'labels = ["3090b-gpu", "{label}"]'))
+            with self.assertRaises(inv.InventoryError, msg=label):
+                inv.load(EXAMPLE.replace('labels = ["3090b-light"]', f'labels = ["{label}"]'))
 
     def test_pools_as_tables(self):
         """RUN-5: a pool may give its labels, or have one runner per card."""

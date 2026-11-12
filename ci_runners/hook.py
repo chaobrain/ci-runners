@@ -3,7 +3,8 @@
 Run by ``hooks/job-started.sh`` and ``hooks/job-completed.sh`` with the system Python,
 isolated (``-I``). ``job-started`` reads only local files (the policy, with a schema 2
 policy the org snapshot ``org.json``, and ``GITHUB_EVENT_PATH``), does no network I/O, bounds itself at 60 s and prints one line,
-``ci-runners: accepted|refused <reason> policy=<hash>``; details go to the host's
+``ci-runners: accepted|refused <reason> policy=<hash>``, by the runner's class and audience
+(``CI_RUNNER_CLASS``, ``CI_RUNNER_AUDIENCE``, design §6.3); details go to the host's
 ``logs/hook-<date>.log`` only. Any error refuses the job. ``job-completed`` stops the job's
 part scopes and always exits 0, within 120 s.
 """
@@ -66,7 +67,8 @@ def started(env: dict[str, str]) -> tuple[int, str]:
     detail: dict = {'runner': env.get('RUNNER_NAME', ''), 'repository': env.get('GITHUB_REPOSITORY', ''),
                     'event': env.get('GITHUB_EVENT_NAME', ''), 'actor': env.get('GITHUB_ACTOR', ''),
                     'triggering_actor': env.get('GITHUB_TRIGGERING_ACTOR', ''), 'run': env.get('GITHUB_RUN_ID', ''),
-                    'class': env.get('CI_RUNNER_CLASS', '')}
+                    'class': env.get('CI_RUNNER_CLASS', ''), 'audience': env.get('CI_RUNNER_AUDIENCE', ''),
+                    'ref_protected': env.get('GITHUB_REF_PROTECTED', '')}
     try:
         if not etc:
             raise policy.PolicyError('CI_RUNNERS_ETC is not set')

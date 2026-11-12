@@ -781,10 +781,12 @@ def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, n
         black_hole(inv, st, f, t, limit, ends=_ends(probe, data, t))
     except Exception as e:  # noqa: BLE001 - the controller goes on; the error is logged
         log(data, {'infra': 'not counted', 'error': f'{type(e).__name__}: {e}'}, t)
-    publish_capacity(data, probe, t)  # 16.5: the host's own part of the capacity file, at every tick
     names = {r.name for r in rs}
     st['runners'] = {n: v for n, v in st['runners'].items() if n in names}
     write_state(data, st)
+    # 16.5: the host's own part of the capacity file, at every tick, after the state is saved: a
+    # hung nvidia-smi in its probe that gets the tick killed then loses nothing of the tick
+    publish_capacity(data, probe, t)
     return 0
 
 

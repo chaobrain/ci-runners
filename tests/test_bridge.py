@@ -1,6 +1,8 @@
 """The egress proxy (design decision 11.10): only CONNECT to a name on the allowlist (exact,
 or strictly below a suffix entry) on port 443 is connected, directly and only to a global
-address; it answers 200 only once that connection is open, and 502 when it fails."""
+address; it answers 200 only once that connection is open, and 502 when it fails. Past its
+cap of open connections (decision 17) it answers 503, with a journal line a minute at most;
+a connection one side has finished is closed once the other is quiet."""
 from __future__ import annotations
 
 import asyncio
@@ -91,8 +93,8 @@ class AllowFile(unittest.TestCase):
         import tempfile
         served = []
 
-        async def serve(port, allow):
-            served.append((port, allow))
+        async def serve(port, allow, cap):
+            served.append((port, allow, cap))
         with tempfile.NamedTemporaryFile('w', suffix='.allow') as f, mock.patch.object(bridge, 'serve', serve):
             f.write('github.com\n.actions.githubusercontent.com\n')
             f.flush()
@@ -101,7 +103,22 @@ class AllowFile(unittest.TestCase):
                 self.assertEqual(bridge.main(['--port', '65536', '--allow', f.name]), 2)
             self.assertEqual(served, [])
             self.assertEqual(bridge.main(['--port', '18443', '--allow', f.name]), 0)
-        self.assertEqual(served, [(18443, {'github.com', '.actions.githubusercontent.com'})])
+        self.assertEqual(served, [(18443, {'github.com', '.actions.githubusercontent.com'}, 1024)])
+
+    def test_the_cap_is_an_option_of_1024_by_default(self):
+        import tempfile
+        served = []
+
+        async def serve(port, allow, cap):
+            served.append(cap)
+        with tempfile.NamedTemporaryFile('w', suffix='.allow') as f, mock.patch.object(bridge, 'serve', serve):
+            f.write('github.com\n')
+            f.flush()
+            self.assertEqual(bridge.main(['--port', '18443', '--allow', f.name]), 0)
+            self.assertEqual(bridge.main(['--port', '18443', '--allow', f.name, '--max-connections', '2048']), 0)
+            with mock.patch('sys.stderr'):
+                self.assertEqual(bridge.main(['--port', '18443', '--allow', f.name, '--max-connections', '0']), 2)
+        self.assertEqual(served, [1024, 2048])
 
     def test_main_refuses_a_bad_file(self):
         import tempfile
@@ -197,9 +214,62 @@ class Listen(unittest.IsolatedAsyncioTestCase):
         async def start_server(cb, host, port, **kw):
             got.update(host=host, port=port, **kw)
             return Server()
-        with mock.patch('asyncio.start_server', side_effect=start_server):
-            await bridge.serve(18443, ['github.com'])
+        reports = []
+
+        def report(self):
+            reports.append(self.cap)
+            return asyncio.sleep(0)
+        with mock.patch('asyncio.start_server', side_effect=start_server), \
+                mock.patch.object(bridge.Bridge, 'report', report), mock.patch('sys.stderr'):
+            await bridge.serve(18443, ['github.com'], 2048)
         self.assertEqual((got['host'], got['port'], got['limit']), ('127.0.0.1', 18443, bridge.MAX_HEAD))
+        self.assertEqual(reports, [2048])  # the cap is the option's, and the peak line runs
+
+    async def test_the_peak_line_each_period(self):
+        b = bridge.Bridge(ALLOW, log=[].append)
+        calls, slept = [], []
+
+        async def sleep(s):
+            slept.append(s)
+            if len(slept) == 3:
+                raise asyncio.CancelledError
+        with mock.patch('asyncio.sleep', sleep), mock.patch.object(b, 'peak_line', lambda: calls.append(1)):
+            with self.assertRaises(asyncio.CancelledError):
+                await b.report()
+        self.assertEqual((slept, len(calls)), ([bridge.PEAK_EVERY] * 3, 2))
+
+    def test_a_warning_when_the_descriptor_limit_is_too_low(self):
+        for soft, warned in ((1024, True), (2111, True), (2112, False), (4096, False),
+                             (bridge.resource.RLIM_INFINITY, False)):
+            with mock.patch.object(bridge.resource, 'getrlimit', return_value=(soft, bridge.resource.RLIM_INFINITY)):
+                line = bridge.fd_line(1024)
+            self.assertEqual(line is not None, warned, soft)
+            if soft == 1024:
+                self.assertEqual(line, 'egress: warning: the file-descriptor limit 1024 is below 2112 '
+                                       '(2 x 1024 connections + 64); connections past it fail')
+
+
+class Journal(unittest.TestCase):
+    """The two lines that show the cap coming: refusals at the cap, a minute apart at
+    most, and the peak of open connections, each period when it changed."""
+
+    def test_the_peak_line_only_when_the_peak_changed(self):
+        logged = []
+        b = bridge.Bridge(ALLOW, log=logged.append, cap=8)
+        b.open, b.peak = 3, 5
+        b.peak_line()
+        self.assertEqual(logged, [f'egress: peak 5 open of 8 in the last {bridge.PEAK_EVERY} s, 0 refused at the cap'])
+        self.assertEqual(b.peak, 3)  # the next window starts at the open count
+        b.peak_line()
+        self.assertEqual(len(logged), 2)
+        self.assertIn('peak 3 open of 8', logged[-1])
+        b.peak_line()  # the same peak, nothing refused: no line
+        self.assertEqual(len(logged), 2)
+        b.refused_window = 4
+        b.peak_line()
+        self.assertEqual(logged[-1], f'egress: peak 3 open of 8 in the last {bridge.PEAK_EVERY} s, 4 refused at the cap')
+        b.peak_line()
+        self.assertEqual(len(logged), 3)
 
 
 class FarEnd:
@@ -207,10 +277,14 @@ class FarEnd:
 
     def __init__(self):
         self.hold = False
+        self.trickle = 0
 
     async def handle(self, r, w):
         while data := await r.read(1024):
             w.write(data.upper())
+        for _ in range(self.trickle):  # a far end that goes on sending after the client is done
+            await asyncio.sleep(0.05)
+            w.write(b'.')
         if self.hold:  # a far end that never closes its side
             await asyncio.sleep(5)
         w.close()
@@ -292,19 +366,59 @@ class Serve(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.ask(b'CONNECT github.com:443 HTTP/1.1\r\n\r\n'))[0], 502)
         self.assertFalse(any(' open' in line for line in self.logged), self.logged)
 
-    async def test_a_side_left_open_is_closed_after_the_linger(self):
-        self.far.hold = True
+    async def half_closed(self, linger, half_idle):
+        """A tunnel whose client is done sending: the seconds until the proxy closes it,
+        and what the client read after its end of file."""
         r, w = await asyncio.open_connection('127.0.0.1', self.port)
         w.write(b'CONNECT github.com:443 HTTP/1.1\r\n\r\nping')
         await asyncio.wait_for(r.readuntil(b'\r\n\r\n'), 10)
         self.assertEqual(await asyncio.wait_for(r.readexactly(4), 10), b'PING')
-        with mock.patch.object(bridge, 'LINGER', 0.2):
-            w.write_eof()  # the client is done sending; the far end never closes its side
-            self.assertEqual(await asyncio.wait_for(r.read(), 3), b'')  # the proxy closed it
-            await asyncio.sleep(0.1)
+        loop = asyncio.get_running_loop()
+        with mock.patch.object(bridge, 'LINGER', linger), mock.patch.object(bridge, 'HALF_IDLE', half_idle):
+            t0 = loop.time()
+            w.write_eof()
+            got = await asyncio.wait_for(r.read(), 5)  # until the proxy closes it
+            took = loop.time() - t0
+            for _ in range(100):
+                if not self.b.tasks:
+                    break
+                await asyncio.sleep(0.01)
         w.close()
-        self.assertTrue(any('closed after' in line for line in self.logged), self.logged)
-        self.assertEqual(self.b.tasks, set())
+        self.assertEqual((self.b.tasks, self.b.open), (set(), 0))  # the slot is free
+        return took, got
+
+    async def test_a_side_left_open_is_closed_after_the_linger(self):
+        self.far.hold, self.far.trickle = True, 60  # it never closes, and data flows for 3 s
+        took, got = await self.half_closed(0.5, 10)
+        self.assertLess(took, 1.5)
+        self.assertGreater(len(got), 1)
+        self.assertIn('egress: github.com:443 closed, one side open, after 0.5 s', self.logged)
+
+    async def test_a_quiet_half_closed_connection_is_closed_after_half_idle(self):
+        self.far.hold = True  # the client is done sending; the far end never closes its side, nor sends
+        took, got = await self.half_closed(10, 0.3)
+        self.assertLess(took, 1.5)  # not the whole linger
+        self.assertEqual(got, b'')
+        self.assertIn('egress: github.com:443 closed, one side open, quiet for 0.3 s', self.logged)
+
+    async def test_a_half_closed_direction_that_flows_is_not_cut(self):
+        self.far.trickle = 20  # 1 s of data after the client is done, a byte every 0.05 s, then it closes
+        took, got = await self.half_closed(10, 0.6)
+        self.assertEqual(got, b'.' * 20)
+        self.assertIn('egress: github.com:443 closed, 24 bytes down', self.logged)
+
+    async def test_a_slot_is_freed_when_both_sides_are_done(self):
+        self.b.cap = 1
+        with mock.patch.object(bridge, 'LINGER', 30), mock.patch.object(bridge, 'HALF_IDLE', 30):
+            for _ in range(3):  # each one ends both ways (the far end closes at the client's end of file)
+                status, got = await self.ask(b'CONNECT github.com:443 HTTP/1.1\r\n\r\n', b'hi')
+                self.assertEqual((status, got), (200, b'HI'))
+                for _ in range(100):
+                    if not self.b.open:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(self.b.open, 0)  # at once, not after a linger
+        self.assertEqual(self.asked, ['github.com'] * 3)
 
     async def test_a_head_that_never_comes(self):
         with mock.patch.object(bridge, 'HEAD_TIMEOUT', 0.2):
@@ -326,9 +440,35 @@ class Serve(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.ask(head))[0], 431)
         self.assertEqual(self.asked, [])
 
-    async def test_too_many_connections(self):
-        self.b.slots = asyncio.Semaphore(0)
+    async def tunnel(self):
+        """An open tunnel (200), held until it is closed."""
+        r, w = await asyncio.open_connection('127.0.0.1', self.port)
+        w.write(b'CONNECT github.com:443 HTTP/1.1\r\n\r\n')
+        self.assertIn(b' 200 ', await asyncio.wait_for(r.readuntil(b'\r\n\r\n'), 10))
+        return w
+
+    async def test_refused_at_the_cap_and_not_below_it(self):
+        self.b.cap = 2
+        held = [await self.tunnel(), await self.tunnel()]  # the second is below the cap: passed
+        self.assertEqual((self.b.open, self.b.peak), (2, 2))
         self.assertEqual((await self.ask(b'CONNECT github.com:443 HTTP/1.1\r\n\r\n'))[0], 503)
+        self.assertEqual(self.asked, ['github.com'] * 2)  # the refused one is never connected
+        self.assertEqual([line for line in self.logged if '503' in line],
+                         ['egress: refused 503: too many connections, 2 open of 2; 1 refused since the last such line'])
+        for w in held:
+            w.close()
+
+    async def test_refusals_at_the_cap_are_one_line_a_minute(self):
+        now = [1000.0]
+        self.b.cap, self.b.clock = 0, lambda: now[0]
+        for t in (0, 1, 30, 59.9, 60, 61, 125):
+            now[0] = 1000.0 + t
+            self.assertEqual((await self.ask(b'CONNECT github.com:443 HTTP/1.1\r\n\r\n'))[0], 503)
+        lines = [line for line in self.logged if 'refused' in line]
+        self.assertEqual(lines, ['egress: refused 503: too many connections, 0 open of 0; 1 refused since the last such line',
+                                 'egress: refused 503: too many connections, 0 open of 0; 4 refused since the last such line',
+                                 'egress: refused 503: too many connections, 0 open of 0; 2 refused since the last such line'])
+        self.assertEqual(self.b.refused_window, 7)  # the peak line counts them all
         self.assertEqual(self.asked, [])
 
 

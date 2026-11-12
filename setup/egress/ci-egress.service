@@ -27,7 +27,15 @@ RestrictNamespaces=yes
 LockPersonality=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
-MemoryMax=512M
+# decision 17: at most 1024 connections (ci-run egress --max-connections, its default);
+# two descriptors each plus the listener, stdio, epoll, the loop's self-pipe and up to 32
+# name lookups: 2 x 1024 + 39 = 2087, so 4096 leaves room for refusals in flight. Memory:
+# about 15 KiB an idle connection, about 455 KiB one whose client stops reading while its
+# far end sends (measured, resident), 1024 x 455 KiB = 455 MiB plus the interpreter and
+# the kernel's socket buffers, so 1G. Tasks:
+# one thread runs every connection; name lookups take at most 32 more.
+LimitNOFILE=4096
+MemoryMax=1G
 TasksMax=128
 Restart=always
 RestartSec=5

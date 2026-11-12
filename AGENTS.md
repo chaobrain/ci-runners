@@ -41,8 +41,13 @@ The contract is [docs/design.md](docs/design.md); onboarding is
 - **GitHub records read as a human team's operations.** PR titles and bodies, commit
   messages, issues, comments, workflow and job names, job summaries and status
   descriptions name no agent, model, effort level, token or prompt.
-- **This repository's own CI runs on GitHub-hosted runners only.** None of its
-  workflows targets a self-hosted label, and the hook refuses this repository.
+- **This repository's own CI runs on GitHub-hosted runners only.** Only the reusable
+  workflows that consumers call (`workflow_call` only, design 16.6) target self-hosted
+  labels; no workflow that this repository's own events start does, and the hook refuses
+  this repository.
+- **Self-hosted labels.** Consumers name capability labels (`ci-light`, `ci-cpu`,
+  `ci-gpu`, ...; design 16.1), never a host label; host labels are for canaries,
+  diagnosis and the reusable workflow's own legs.
 
 ## High-impact actions go through the lead
 

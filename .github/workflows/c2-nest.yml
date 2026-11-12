@@ -1,0 +1,17 @@
+# A proof of the nesting depth (decision 18.7, C2): this branch only, never merged. Five levels:
+# this workflow -> c2-nest-caller.yml -> ci.yml -> public.yml -> public-part.yml. Hosted parts only.
+name: c2 nest
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  statuses: write
+  actions: read
+  pull-requests: read
+
+jobs:
+  wrapper:
+    uses: ./.github/workflows/c2-nest-caller.yml

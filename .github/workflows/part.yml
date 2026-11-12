@@ -56,7 +56,7 @@ jobs:
           name: ci-plan-files
           path: ${{ runner.temp }}/ci-runners-files
       - id: part
-        uses: chaobrain/ci-runners/actions/part@v1
+        uses: chaobrain/ci-runners/actions/part@c2-nest
         env:
           CIRUNNERS_FILES: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}
         with:
@@ -108,7 +108,7 @@ jobs:
           if-no-files-found: warn
       - id: retry
         if: always() && steps.part.outputs.outcome != ''
-        uses: chaobrain/ci-runners/actions/flow@v1
+        uses: chaobrain/ci-runners/actions/flow@c2-nest
         with:
           command: retry
           part: ${{ inputs.part }}
@@ -131,14 +131,14 @@ jobs:
       retry: ${{ steps.retry.outputs.retry }}
     steps:
       - id: locate
-        uses: chaobrain/ci-runners/actions/flow@v1
+        uses: chaobrain/ci-runners/actions/flow@c2-nest
         with:
           command: locate
           part-id: ${{ fromJSON(inputs.part).id }}
       # no host known: no record to read, the first attempt counts as lost
       - id: retry
         if: always() && steps.locate.outputs.labels == ''
-        uses: chaobrain/ci-runners/actions/flow@v1
+        uses: chaobrain/ci-runners/actions/flow@c2-nest
         with:
           command: retry
           part: ${{ inputs.part }}
@@ -158,13 +158,13 @@ jobs:
       retry: ${{ steps.retry.outputs.retry }}
     steps:
       - id: salvage
-        uses: chaobrain/ci-runners/actions/salvage@v1
+        uses: chaobrain/ci-runners/actions/salvage@c2-nest
         with:
           parts: ${{ fromJSON(inputs.part).id }}
           wait-seconds: ${{ fromJSON(inputs.part).salvage_wait }}
       - id: retry
         if: always()
-        uses: chaobrain/ci-runners/actions/flow@v1
+        uses: chaobrain/ci-runners/actions/flow@c2-nest
         with:
           command: retry
           part: ${{ inputs.part }}
@@ -203,7 +203,7 @@ jobs:
           name: ci-plan-files
           path: ${{ runner.temp }}/ci-runners-files
       - id: part
-        uses: chaobrain/ci-runners/actions/part@v1
+        uses: chaobrain/ci-runners/actions/part@c2-nest
         env:
           CIRUNNERS_FILES: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}
         with:
@@ -267,7 +267,7 @@ jobs:
     permissions:
       statuses: write
     steps:
-      - uses: chaobrain/ci-runners/actions/flow@v1
+      - uses: chaobrain/ci-runners/actions/flow@c2-nest
         with:
           command: status
           context: ${{ inputs.context }}

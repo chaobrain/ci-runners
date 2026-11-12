@@ -1,0 +1,22 @@
+# The second level of the nesting proof (this branch only): a consumer's own reusable workflow
+# that calls ci.yml.
+name: c2 nest caller
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  statuses: write
+  actions: read
+  pull-requests: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    with:
+      context: ci-runners/c2-nest
+      plan: >-
+        echo '{"schema": 1, "parts": [{"id": "unit", "needs": "cpu", "minutes": 10,
+        "command": "python3 -m unittest -q tests.test_public_flow"}, {"id": "light", "needs": "light", "minutes": 5,
+        "command": "test -z \"$GITHUB_TOKEN$GH_TOKEN$ACTIONS_RUNTIME_TOKEN\""}]}'

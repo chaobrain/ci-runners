@@ -53,7 +53,7 @@ jobs:
       statuses: write
       actions: read
       pull-requests: read
-    uses: chaobrain/ci-runners/.github/workflows/public.yml@v1
+    uses: chaobrain/ci-runners/.github/workflows/public.yml@c2-nest
     with:
       context: ${{ inputs.context }}
       plan: ${{ inputs.plan }}
@@ -100,7 +100,7 @@ jobs:
       # the claim's decision only (§4.1 reads statuses): its pending is the pending job's
       - id: claim
         if: ${{ !inputs.plan-only }}
-        uses: chaobrain/ci-runners/actions/flow@v1
+        uses: chaobrain/ci-runners/actions/flow@c2-nest
         with:
           command: claim
           context: ${{ inputs.context }}
@@ -109,7 +109,7 @@ jobs:
       # anything of the head runs: an older head ends the run here, and no part starts (16.6)
       - id: contract
         if: steps.claim.outputs.run == 'true' || inputs.plan-only
-        uses: chaobrain/ci-runners/actions/flow@v1
+        uses: chaobrain/ci-runners/actions/flow@c2-nest
         with:
           command: contract
           context: ${{ inputs.context }}
@@ -129,7 +129,7 @@ jobs:
       # facts reach it as variables; the read-only token only where the caller asks
       - id: command
         if: steps.contract.outcome == 'success' && inputs.plan != ''
-        uses: chaobrain/ci-runners/actions/part@v1
+        uses: chaobrain/ci-runners/actions/part@c2-nest
         env:
           CIRUNNERS_PLAN: ${{ inputs.plan }}
           CIRUNNERS_EVENT: ${{ github.event_name }}
@@ -147,7 +147,7 @@ jobs:
           timeout-minutes: '30'
       - id: plan
         if: always() && steps.contract.outcome == 'success'
-        uses: chaobrain/ci-runners/actions/flow@v1
+        uses: chaobrain/ci-runners/actions/flow@c2-nest
         with:
           command: plan
           context: ${{ inputs.context }}
@@ -182,7 +182,7 @@ jobs:
     permissions:
       statuses: write
     steps:
-      - uses: chaobrain/ci-runners/actions/flow@v1
+      - uses: chaobrain/ci-runners/actions/flow@c2-nest
         with:
           command: pending
           context: ${{ inputs.context }}
@@ -207,7 +207,7 @@ jobs:
       max-parallel: ${{ fromJSON(needs.plan.outputs.max_parallel) }}
       matrix:
         part: ${{ fromJSON(needs.plan.outputs.parts) }}
-    uses: chaobrain/ci-runners/.github/workflows/part.yml@v1
+    uses: chaobrain/ci-runners/.github/workflows/part.yml@c2-nest
     with:
       part: ${{ toJSON(matrix.part) }}
       context: ${{ inputs.context }}
@@ -233,7 +233,7 @@ jobs:
       state: ${{ needs.plan.outputs.state || (needs.plan.outputs.routed == 'true' && steps.verdict.outputs.state) || 'error' }}
     steps:
       - if: needs.plan.outputs.state != ''
-        uses: chaobrain/ci-runners/actions/flow@v1
+        uses: chaobrain/ci-runners/actions/flow@c2-nest
         with:
           command: status
           context: ${{ inputs.context }}
@@ -242,7 +242,7 @@ jobs:
           description: ${{ needs.plan.outputs.description }}
       # a plan job that ended without its end or a plan (its runner lost, a step failed)
       - if: needs.plan.outputs.state == '' && needs.plan.outputs.routed != 'true'
-        uses: chaobrain/ci-runners/actions/flow@v1
+        uses: chaobrain/ci-runners/actions/flow@c2-nest
         with:
           command: status
           context: ${{ inputs.context }}
@@ -251,7 +251,7 @@ jobs:
           description: 'plan: the plan job ended without a plan (${{ needs.plan.result }}); no part ran'
       - id: verdict
         if: needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'
-        uses: chaobrain/ci-runners/actions/verdict@v1
+        uses: chaobrain/ci-runners/actions/verdict@c2-nest
         with:
           context: ${{ inputs.context }}
           sha: ${{ needs.plan.outputs.sha || inputs.sha || github.event.pull_request.head.sha || github.sha }}

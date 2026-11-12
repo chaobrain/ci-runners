@@ -389,10 +389,14 @@ class Public(unittest.TestCase):
         policy.load(POLICY.replace('id = 1001\n', 'id = 1001\npublic_runners = false\n'))
 
     def test_the_reasons_the_hook_may_print(self):
-        for why in ('audience', 'unprotected'):
+        for why in ('audience', 'unprotected', 'runner'):
             self.assertIn(why, policy.REASONS)
             self.assertLess(policy.REASONS.index(why), policy.REASONS.index('stale'))  # a decision, not an infra end
             self.assertEqual(policy.line(policy.Decision(False, why), ''), f'ci-runners: refused {why} policy=none')
+        self.assertGreater(policy.REASONS.index('inventory'), policy.REASONS.index('stale'))  # the hook could not decide
+        self.assertEqual(policy.line(policy.Decision(False, 'inventory'), ''), 'ci-runners: refused inventory policy=none')
+        from ci_runners import presence
+        self.assertEqual(set(presence.HOOK_INFRA), set(policy.REASONS[policy.REASONS.index('stale'):]))
 
 
 class Load(unittest.TestCase):

@@ -3525,8 +3525,14 @@ is refused on a `public` runner, and a public one's on every other runner.
 `python -I` reads the inventory, the policy, the org snapshot (`etc/org.json`, §6.5) and
 `GITHUB_EVENT_PATH` as JSON, and does no network I/O. It bounds itself at 60 s (an
 alarm; if that fails, its wrapper kills it at 65 s, which refuses). It applies §6.2 to
-the runner's class (`CI_RUNNER_CLASS`) and audience (`CI_RUNNER_AUDIENCE`, 16.7) and
-checks that the event's repository id matches `GITHUB_REPOSITORY_ID`. On the public pool
+the runner's class and audience (16.7) and checks that the event's repository id matches
+`GITHUB_REPOSITORY_ID`. *From C2c (2026-11-13):* the class and the audience are the
+inventory's for the runner's name (`RUNNER_NAME`, which no workflow can set): a private
+pool's runner as setup names it, a public runner as `<role>-pub-gpu<N>-<seq>` on a card of
+a host whose inventory has a public pool. The environment's `CI_RUNNER_CLASS` and
+`CI_RUNNER_AUDIENCE` (unset: `private`) must agree; a runner the inventory does not name,
+or one whose environment disagrees, is refused (`runner`, a decision), and an inventory
+that does not load refuses (`inventory`, an infrastructure end, 16.4). On the public pool
 it also reads `GITHUB_REF_PROTECTED`. It also removes stale work directories of this runner.
 
 It prints one line, `ci-runners: accepted|refused <reason code>`, followed by the

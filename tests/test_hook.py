@@ -24,6 +24,24 @@ id = 1001
 visibility = "private"
 '''
 
+#: this host's inventory (C2c): the hook takes each runner's class and audience from it
+INVENTORY = '''schema = 1
+this = "r"
+[hosts.r]
+account = "acct-x"
+home = "/h"
+data = "/d"
+slots = 2
+memory_max = "8G"
+disk_min_gib = 1
+gpus = [0, 1]
+max_temp_c = 80
+isolation = "account"
+pools = { part = 1, gpu = { per_card = true }, pub-gpu = { per_card = true, class = "gpu", audience = "public", labels = ["ci-pub-gpu", "r-pub-gpu"] } }
+files = { slot_lock = "/d/s.lock", slot_queue = "/d/s.queue" }
+'''
+PUB_POOL = 'pub-gpu = { per_card = true, class = "gpu", audience = "public", labels = ["ci-pub-gpu", "r-pub-gpu"] }'
+
 
 class Started(unittest.TestCase):
     def setUp(self):
@@ -32,6 +50,7 @@ class Started(unittest.TestCase):
         self.etc = self.base / 'etc'
         self.etc.mkdir()
         (self.etc / 'policy.toml').write_text(POLICY)
+        (self.etc / 'inventory.toml').write_text(INVENTORY)
         self.env = {'CI_RUNNERS_ETC': str(self.etc), 'CI_RUNNER_CLASS': 'part', 'RUNNER_NAME': 'r-part-1',
                     'GITHUB_REPOSITORY': 'chaobrain/brainkit', 'GITHUB_REPOSITORY_ID': '1001',
                     'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_ACTOR': 'alice', 'GITHUB_TRIGGERING_ACTOR': 'alice',
@@ -63,17 +82,59 @@ class Started(unittest.TestCase):
         path = self.base / 'public.json'
         path.write_text(json.dumps(ev))
         env = {**self.env, 'GITHUB_REPOSITORY': 'chaobrain/brainevent', 'GITHUB_REPOSITORY_ID': '2002',
-               'GITHUB_EVENT_PATH': str(path), 'CI_RUNNER_CLASS': 'gpu', 'CI_RUNNER_AUDIENCE': 'public'}
-        cases = [(env, 'ok'), ({**env, 'CI_RUNNER_CLASS': 'light'}, 'runner-class'),
-                 ({**env, 'CI_RUNNER_CLASS': 'part'}, 'runner-class'),
-                 ({k: v for k, v in env.items() if k != 'CI_RUNNER_AUDIENCE'}, 'audience'),
-                 ({**self.env, 'CI_RUNNER_AUDIENCE': 'public'}, 'audience'), (self.env, 'ok')]
+               'GITHUB_EVENT_PATH': str(path), 'CI_RUNNER_CLASS': 'gpu', 'CI_RUNNER_AUDIENCE': 'public',
+               'RUNNER_NAME': 'r-pub-gpu0-17'}
+        gpu = {**env, 'RUNNER_NAME': 'r-gpu0', 'CI_RUNNER_AUDIENCE': 'private'}  # a private gpu runner, said so
+        cases = [(env, 'ok'), (gpu, 'audience'), ({**gpu, 'CI_RUNNER_AUDIENCE': 'public'}, 'runner'),
+                 ({**env, 'CI_RUNNER_CLASS': 'part'}, 'runner'),
+                 ({k: v for k, v in env.items() if k != 'CI_RUNNER_AUDIENCE'}, 'runner'),
+                 ({**self.env, 'CI_RUNNER_AUDIENCE': 'public'}, 'runner'), (self.env, 'ok')]
         for e, why in cases:
             code, line = hook.started(e)
             self.assertEqual((code, line.split()[2]), (0 if why == 'ok' else 1, why), e)
         got = self.log()
         self.assertEqual([r['reason'] for r in got], [why for _, why in cases])
-        self.assertEqual([r['audience'] for r in got], ['public', 'public', 'public', '', 'public', ''])
+        self.assertEqual([r['audience'] for r in got], ['public', 'private', 'public', 'public', '', 'public', ''])
+
+    def test_the_runner_s_class_and_audience_are_the_inventory_s(self):
+        """C2c (decision 18.7): by ``RUNNER_NAME``, never the environment's word alone."""
+        def why(**kw):
+            env = {k: v for k, v in {**self.env, **kw}.items() if v is not None}
+            code, line = hook.started(env)
+            self.assertEqual(code, 0 if line.split()[2] == 'ok' else 1)
+            return line.split()[2]
+        self.assertEqual(why(RUNNER_NAME='r-gpu1', CI_RUNNER_CLASS='gpu'), 'ok')
+        self.assertEqual(why(RUNNER_NAME='r-gpu1', CI_RUNNER_CLASS='gpu', CI_RUNNER_AUDIENCE='private'), 'ok')
+        for kw in ({'RUNNER_NAME': 'r-part-2'}, {'RUNNER_NAME': 'x-part-1'}, {'RUNNER_NAME': None},
+                   {'RUNNER_NAME': ''}, {'CI_RUNNER_CLASS': 'gpu'}, {'CI_RUNNER_CLASS': None},
+                   {'RUNNER_NAME': 'r-gpu1'},  # a gpu runner that says it is a part runner
+                   {'RUNNER_NAME': 'r-gpu2', 'CI_RUNNER_CLASS': 'gpu'},  # no such card
+                   {'RUNNER_NAME': 'r-pub-gpu2-1', 'CI_RUNNER_CLASS': 'gpu', 'CI_RUNNER_AUDIENCE': 'public'},
+                   {'RUNNER_NAME': 'x-pub-gpu0-1', 'CI_RUNNER_CLASS': 'gpu', 'CI_RUNNER_AUDIENCE': 'public'},
+                   {'RUNNER_NAME': 'r-pub-gpu0', 'CI_RUNNER_CLASS': 'gpu', 'CI_RUNNER_AUDIENCE': 'public'},
+                   {'RUNNER_NAME': 'r-pub-gpu0-1x', 'CI_RUNNER_CLASS': 'gpu', 'CI_RUNNER_AUDIENCE': 'public'},
+                   {'RUNNER_NAME': 'r-pub-gpu0-1', 'CI_RUNNER_CLASS': 'gpu', 'CI_RUNNER_AUDIENCE': 'private'},
+                   {'RUNNER_NAME': 'r-pub-gpu0-1', 'CI_RUNNER_CLASS': 'gpu'}):
+            self.assertEqual(why(**kw), 'runner', kw)
+        self.assertIn("runner: the inventory names it ('gpu', 'private'), its environment ('part', 'private')",
+                      [r.get('error') for r in self.log()])
+        # the public pool's runners exist only where the inventory has its pool
+        (self.etc / 'inventory.toml').write_text(INVENTORY.replace(', ' + PUB_POOL, ''))
+        self.assertEqual(why(RUNNER_NAME='r-pub-gpu0-1', CI_RUNNER_CLASS='gpu', CI_RUNNER_AUDIENCE='public'), 'runner')
+        self.assertEqual(why(), 'ok')
+        for text in ('schema = 7\n', 'not toml [', '\xff'):
+            (self.etc / 'inventory.toml').write_bytes(text.encode('latin-1'))
+            self.assertEqual(why(), 'inventory', text)
+        (self.etc / 'inventory.toml').unlink()
+        self.assertEqual(why(), 'inventory')
+        self.assertTrue(self.log()[-1]['error'].startswith('inventory: '))
+        saved = hook.MAX_INVENTORY
+        hook.MAX_INVENTORY = 100
+        try:
+            (self.etc / 'inventory.toml').write_text(INVENTORY)
+            self.assertEqual(why(), 'inventory')
+        finally:
+            hook.MAX_INVENTORY = saved
 
     def test_errors_refuse(self):
         cases = {

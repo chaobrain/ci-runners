@@ -2,9 +2,12 @@
 
 Run by ``hooks/job-started.sh`` and ``hooks/job-completed.sh`` with the system Python,
 isolated (``-I``). ``job-started`` reads only local files (the policy, with a schema 2
-policy the org snapshot ``org.json``, and ``GITHUB_EVENT_PATH``), does no network I/O, bounds itself at 60 s and prints one line,
+policy the org snapshot ``org.json``, the inventory and ``GITHUB_EVENT_PATH``), does no network I/O, bounds itself at 60 s and prints one line,
 ``ci-runners: accepted|refused <reason> policy=<hash>``, by the runner's class and audience
-(``CI_RUNNER_CLASS``, ``CI_RUNNER_AUDIENCE``, design §6.3); details go to the host's
+(design §6.3). Both are the inventory's for the runner's name (``RUNNER_NAME``, which no
+workflow can set; decision 18.7, C2c): the environment's ``CI_RUNNER_CLASS`` and
+``CI_RUNNER_AUDIENCE`` must agree with them, a runner the inventory does not name is refused
+(``runner``), and an inventory that does not load refuses (``inventory``). Details go to the host's
 ``logs/hook-<date>.log`` only. Any error refuses the job. ``job-completed`` stops the job's
 part scopes and always exits 0, within 120 s.
 """
@@ -13,6 +16,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -24,6 +28,7 @@ from ci_runners import policy
 MAX_POLICY = 1 << 20
 MAX_SNAPSHOT = 4 << 20
 MAX_EVENT = 64 << 20
+MAX_INVENTORY = 1 << 20
 START_BOUND, COMPLETE_BOUND = 60, 120
 
 
@@ -60,6 +65,22 @@ def _log(etc: str, record: dict) -> None:
         pass  # the decision stands without its log line
 
 
+def runner_facts(etc: str, name: str) -> tuple[str, str] | None:
+    """The runner's ``(class, audience)`` as this host's inventory names it: a private pool's
+    runner as setup names it, a public runner as ``<role>-pub-gpu<N>-<seq>`` on a card of the
+    host where the inventory has a public pool (decision 18.7); None for any other name.
+    Raises ValueError or OSError where the inventory does not load."""
+    from ci_runners import inventory, setup
+    inv = inventory.load(_read(os.path.join(etc, 'inventory.toml'), MAX_INVENTORY).decode('utf-8'))
+    for n, _, cls in setup.runners(inv):
+        if n == name:
+            return cls, 'private'
+    m = re.fullmatch(rf'{re.escape(inv.this)}{inventory.PUBLIC_HOST_SUFFIX}([0-9]{{1,4}})-[0-9]{{1,12}}', name)
+    if m and inventory.public_pool(inv) is not None and int(m.group(1)) in inv.host['gpus']:
+        return 'gpu', 'public'
+    return None
+
+
 def started(env: dict[str, str]) -> tuple[int, str]:
     """The decision as ``(exit status, printed line)``; never raises."""
     etc = env.get('CI_RUNNERS_ETC', '')
@@ -87,11 +108,22 @@ def started(env: dict[str, str]) -> tuple[int, str]:
             d = policy.Decision(False, 'policy')
         else:
             try:
-                event = json.loads(_read(env.get('GITHUB_EVENT_PATH', ''), MAX_EVENT))
-            except (OSError, ValueError, RecursionError) as e:
-                detail['error'] = f'event: {type(e).__name__}'
-                event = None
-            d = policy.decide(pol, env, event)
+                facts = runner_facts(etc, env.get('RUNNER_NAME', ''))
+            except (OSError, ValueError) as e:
+                detail['error'] = f'inventory: {e}'[:300]
+                d = policy.Decision(False, 'inventory')
+            else:
+                said = (env.get('CI_RUNNER_CLASS', ''), env.get('CI_RUNNER_AUDIENCE', 'private'))
+                if facts is None or said != facts:  # never the environment's word alone
+                    detail['error'] = f'runner: the inventory names it {facts}, its environment {said}'
+                    d = policy.Decision(False, 'runner')
+                else:
+                    try:
+                        event = json.loads(_read(env.get('GITHUB_EVENT_PATH', ''), MAX_EVENT))
+                    except (OSError, ValueError, RecursionError) as e:
+                        detail['error'] = f'event: {type(e).__name__}'
+                        event = None
+                    d = policy.decide(pol, env, event)  # its class and audience are the inventory's now
     except _Timeout:
         d = policy.Decision(False, 'timeout')
     except Exception as e:  # noqa: BLE001 - any failure refuses

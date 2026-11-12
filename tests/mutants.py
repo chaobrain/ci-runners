@@ -60,6 +60,7 @@ REG = 'setup/register.sh'
 INS = 'setup/install.sh'
 UNI = 'setup/uninstall.sh'
 TP = 'tests.test_policy'
+THI = 'tests.test_hook.Started.test_the_runner_s_class_and_audience_are_the_inventory_s'
 TI = 'tests.test_inventory'
 TH = 'tests.test_hook'
 TU = 'tests.test_setup'
@@ -197,6 +198,24 @@ MUTANTS = [
     (POL_, "        if r.public_runners:\n", "        if False:\n", [f'{TPF}.PolicyDigest.test_the_public_opt_in_counts_only_where_set']),
     (POL_, "        if r.public_runners:\n", "        if True:\n", [f'{TPF}.PolicyDigest.test_the_public_opt_in_counts_only_where_set']),
     (HOK, " 'audience': env.get('CI_RUNNER_AUDIENCE', ''),", "", [f'{TH}.Started.test_the_public_pool_by_the_runner_s_audience']),
+    # C2c (decision 18.7): the runner's class and audience are the inventory's, by RUNNER_NAME
+    (HOK, "                if facts is None or said != facts:  # never", "                if facts is None:  # never", [THI]),
+    (HOK, "                if facts is None or said != facts:  # never", "                if False:  # never", [THI]),
+    (HOK, "        if n == name:\n            return cls, 'private'", "        if True:\n            return cls, 'private'", [THI]),
+    (HOK, "            return cls, 'private'", "            return cls, ''", [THI]),
+    (HOK, "env.get('CI_RUNNER_AUDIENCE', 'private'))", "env.get('CI_RUNNER_AUDIENCE', ''))", [THI]),
+    (HOK, "    if m and inventory.public_pool(inv) is not None and int(m.group(1)) in inv.host['gpus']:",
+     "    if m and int(m.group(1)) in inv.host['gpus']:", [THI]),
+    (HOK, "    if m and inventory.public_pool(inv) is not None and int(m.group(1)) in inv.host['gpus']:",
+     "    if m and inventory.public_pool(inv) is not None:", [THI]),
+    (HOK, "rf'{re.escape(inv.this)}{inventory.PUBLIC_HOST_SUFFIX}", "rf'[a-z0-9]+{inventory.PUBLIC_HOST_SUFFIX}", [THI]),
+    (HOK, "-[0-9]{{1,12}}', name)", "-?[0-9]{{0,12}}', name)", [THI]),
+    (HOK, "        return 'gpu', 'public'", "        return 'gpu', 'private'", [THI]),
+    (HOK, "                d = policy.Decision(False, 'inventory')", "                d = policy.Decision(True, 'ok')", [THI]),
+    (HOK, "_read(os.path.join(etc, 'inventory.toml'), MAX_INVENTORY)", "_read(os.path.join(etc, 'inventory.toml'), 1 << 30)", [THI]),
+    (POL, "'bot', 'runner',\n", "'bot',\n", [f'{TP}.Public.test_the_reasons_the_hook_may_print']),
+    (PRS, "HOOK_INFRA = ('stale', 'policy', 'inventory', 'timeout', 'error')", "HOOK_INFRA = ('stale', 'policy', 'timeout', 'error')",
+     [f'{TP}.Public.test_the_reasons_the_hook_may_print']),
     # C2a (decision 18.7, 16.3): the public pool and the host's isolation, accepted, checked and ignored
     (INV, "    'isolation': (lambda v: isinstance(v, str) and v in ISOLATION, False),", "    'isolation': (lambda v: True, False),",
      [f'{TI}.Load.test_the_keys_of_decision_18_are_accepted_and_ignored']),

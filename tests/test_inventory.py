@@ -112,6 +112,66 @@ class Load(unittest.TestCase):
         self.assertFalse(inv.shared_path('/tmp/a/../b'))
         self.assertTrue(inv.shared_path('/tmp/a.b-c_d'))
 
+    def test_the_keys_of_decision_16_are_accepted_and_ignored(self):
+        """Decision 16.3 (R1): a pool's ``slot`` and ``audience`` and a host's ``presence``
+        load, as the example documents them (commented), checked for shape; without them
+        the inventory loads as before."""
+        new = re.sub(r'^part = .*\n', '', EXAMPLE, flags=re.M)
+        new = re.sub(r'^# (part = .*slot = .*)$', r'\1', new, flags=re.M)
+        new = re.sub(r'^# (presence = [^#]*)#.*$', r'\1', new, flags=re.M)
+        old, i = inv.load(EXAMPLE), inv.load(new)
+        self.assertEqual(i.host['presence'], {'enabled': False, 'tick_seconds': 20, 'infra_failures': 3})
+        self.assertEqual(i.host['pools']['part']['slot']['cpus'], ['16-19', '20-23', '24-27'])
+        self.assertEqual(i.host['pools']['part']['audience'], 'private')
+        self.assertNotIn('presence', old.host)
+        self.assertEqual({k: v for k, v in i.host.items() if k not in ('presence', 'pools')},
+                         {k: v for k, v in old.host.items() if k != 'pools'})
+        self.assertEqual(inv.pool_labels(i, 'part'), inv.pool_labels(old, 'part'))
+        self.assertEqual(inv.deny_tokens({'hosts': {'h': {'pools': {'p': {'audience': 'public', 'slot': {
+            'cpus': ['0-3'], 'memory': '120G', 'isa': 'x86-64-v3'}}}}}}), set())  # public words, not inventory
+        base = re.sub(_POOLS, '', PLAIN).replace('max_temp_c = 80\n', 'max_temp_c = 80\npools = { @ }\n')
+        slot = 'workers = 2, memory = "40G", speed = 1.5'
+        good = (f'part = {{ count = 2, slot = {{ cpus = ["0-3", "4-5,8"], {slot} }} }}',
+                f'part = {{ count = 1, slot = {{ cpus = ["0"], workers = 1, memory = "1T", speed = 2, isa = "avx2" }} }}',
+                f'cards = {{ per_card = true, class = "gpu", slot = {{ cpus = ["0-3", "4-7"], {slot} }} }}',
+                'light = { count = 1, audience = "public" }', 'light = { count = 1, audience = "private" }')
+        for g in good:
+            inv.load(base.replace('@', g))
+        bad = (f'part = {{ count = 2, slot = {{ cpus = ["0-3"], {slot} }} }}',  # one cpuset a runner
+               f'cards = {{ per_card = true, class = "gpu", slot = {{ cpus = ["0-3"], {slot} }} }}',
+               f'part = {{ count = 2, slot = {{ cpus = ["0-3", "3-5"], {slot} }} }}',  # a CPU in two
+               f'part = {{ count = 1, slot = {{ cpus = ["0-3,2"], {slot} }} }}',
+               f'part = {{ count = 1, slot = {{ cpus = ["3-0"], {slot} }} }}',
+               f'part = {{ count = 1, slot = {{ cpus = ["0-99999"], {slot} }} }}',
+               f'part = {{ count = 1, slot = {{ cpus = ["0;1"], {slot} }} }}',
+               f'part = {{ count = 1, slot = {{ cpus = "0-3", {slot} }} }}',
+               f'part = {{ count = 1, slot = {{ cpus = [], {slot} }} }}',
+               f'part = {{ count = 1, slot = {{ cpus = [0], {slot} }} }}',
+               'part = { count = 1, slot = { cpus = ["0"], memory = "40G", speed = 1.0 } }',  # no workers
+               'part = { count = 1, slot = { cpus = ["0"], workers = 1, speed = 1.0 } }',
+               'part = { count = 1, slot = { cpus = ["0"], workers = 1, memory = "40G" } }',
+               'part = { count = 1, slot = { workers = 1, memory = "40G", speed = 1.0 } }',
+               f'part = {{ count = 1, slot = {{ cpus = ["0"], {slot}, cpu = 1 }} }}',  # a typo
+               'part = { count = 1, slot = { cpus = ["0"], workers = 0, memory = "40G", speed = 1.0 } }',
+               'part = { count = 1, slot = { cpus = ["0"], workers = true, memory = "40G", speed = 1.0 } }',
+               'part = { count = 1, slot = { cpus = ["0"], workers = 1, memory = "40GB", speed = 1.0 } }',
+               'part = { count = 1, slot = { cpus = ["0"], workers = 1, memory = "40G", speed = 0 } }',
+               'part = { count = 1, slot = { cpus = ["0"], workers = 1, memory = "40G", speed = "1" } }',
+               f'part = {{ count = 1, slot = {{ cpus = ["0"], {slot}, isa = "AVX2" }} }}',
+               f'part = {{ count = 1, slot = {{ cpus = ["0"], {slot}, isa = 2 }} }}',
+               'part = { count = 1, slot = ["0"] }', 'light = { count = 1, audience = "everyone" }',
+               'light = { count = 1, audience = true }', 'light = { count = 1, audiences = "public" }')
+        for b in bad:
+            with self.assertRaises(inv.InventoryError, msg=b):
+                inv.load(base.replace('@', b))
+        for b in ('{ enabled = "no" }', '{ enable = false }', '{ tick_seconds = 0 }', '{ infra_failures = 1.5 }',
+                  '{ tick_seconds = true }', 'false'):
+            with self.assertRaises(inv.InventoryError, msg=b):
+                inv.load(PLAIN.replace('slots = 2', f'presence = {b}\nslots = 2', 1))
+        for g in ('{}', '{ enabled = true }', '{ tick_seconds = 5, infra_failures = 1 }'):
+            inv.load(PLAIN.replace('slots = 2', f'presence = {g}\nslots = 2', 1))
+        self.assertEqual(inv.cpu_ranges('0-3,8'), [(0, 3), (8, 8)])
+
     def test_pools_as_tables(self):
         """RUN-5: a pool may give its labels, or have one runner per card."""
         base = re.sub(_POOLS, '', PLAIN).replace(

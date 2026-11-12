@@ -3,6 +3,7 @@ infrastructure end the retry did not cure is an error; a part with no artifact i
 from its record, else it is lost."""
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import os
@@ -10,6 +11,7 @@ import pathlib
 import tempfile
 import time
 import unittest
+import zipfile
 from contextlib import redirect_stderr
 from unittest import mock
 
@@ -25,6 +27,118 @@ def art(root: pathlib.Path, name: str, outcome: dict | str, summary: str = '') -
     (d / 'outcome.json').write_text(outcome if isinstance(outcome, str) else json.dumps(outcome))
     if summary:
         (d / 'summary.md').write_text(summary)
+
+
+def zipped(members: dict) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as z:
+        for name, text in members.items():
+            z.writestr(name, text)
+    return buf.getvalue()
+
+
+#: issue #169's run 43082337585: its gpu-3 artifacts, one per run attempt; run attempt 2's
+#: ci-part-gpu-3-1 (19:38) has the lower id
+ISSUE_169 = [
+    {'id': 13887327475, 'name': 'rows-gpu-3-1', 'created_at': '2026-11-11T19:38:28Z', 'expired': False},
+    {'id': 13887210679, 'name': 'rows-gpu-3-1', 'created_at': '2026-11-11T19:23:22Z', 'expired': False},
+    {'id': 13887086600, 'name': 'ci-part-gpu-3-1', 'created_at': '2026-11-11T19:23:13Z', 'expired': False},
+    {'id': 13886754673, 'name': 'impact-gpu-3-1', 'created_at': '2026-11-11T19:38:37Z', 'expired': False},
+    {'id': 13886572319, 'name': 'impact-gpu-3-1', 'created_at': '2026-11-11T19:23:31Z', 'expired': False},
+    {'id': 13886519664, 'name': 'ci-part-gpu-3-1', 'created_at': '2026-11-11T19:38:19Z', 'expired': False},
+]
+
+
+class Latest(unittest.TestCase):
+    """Issue #169: each part's latest run attempt, whatever the artifacts' ids."""
+
+    def test_the_newest_of_a_name_where_download_artifact_took_another(self):
+        self.assertEqual(verdict.stale(ISSUE_169), {'ci-part-gpu-3-1': 13886519664})
+        ordered = [{**a, 'id': 1 if a['created_at'] < '2026-11-11T19:30' else 2} for a in ISSUE_169]
+        self.assertEqual(verdict.stale([a for a in ordered if a['name'].startswith('ci-part')]), {})  # it took the newest
+        self.assertEqual(verdict.stale([ISSUE_169[2]]), {})  # one of a name
+        expired = [ISSUE_169[2], {**ISSUE_169[5], 'expired': True}]
+        self.assertEqual(verdict.stale(expired), {})
+        same = [ISSUE_169[2], {**ISSUE_169[5], 'created_at': ISSUE_169[2]['created_at']}]  # a tie: the higher id
+        self.assertEqual(verdict.stale(same), {})
+        junk = [ISSUE_169[2], {**ISSUE_169[5], 'id': '1'}, {'name': 'ci-part-x-1'}, 'x', {**ISSUE_169[5], 'name': 3}]
+        self.assertEqual(verdict.stale(junk), {})
+
+    def test_the_listing_reads_every_page(self):
+        pages = [{'artifacts': [{}] * 100}, {'artifacts': [{}] * 3}]
+        urls = []
+
+        def call(method, url, token):
+            urls.append(url)
+            return pages[len(urls) - 1]
+        self.assertEqual(len(verdict.run_artifacts(call, 'https://api', 'o/r', '7', 't')), 103)
+        self.assertEqual(urls, ['https://api/repos/o/r/actions/runs/7/artifacts?per_page=100&page=1',
+                                'https://api/repos/o/r/actions/runs/7/artifacts?per_page=100&page=2'])
+        with self.assertRaises(verdict.github.ApiError):
+            verdict.run_artifacts(lambda *a: {'message': 'x'}, 'https://api', 'o/r', '7', 't')
+
+    def test_the_zip_s_token_does_not_follow_the_redirect(self):
+        seen = []
+
+        class R(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def opener(req, timeout):
+            seen.append(req)
+            return R(b'zipdata')
+        self.assertEqual(verdict.fetch_zip('https://api/x/zip', 'tok', opener), b'zipdata')
+        self.assertEqual(seen[0].unredirected_hdrs, {'Authorization': 'Bearer tok'})  # not sent to the storage
+        self.assertNotIn('Authorization', seen[0].headers)
+        with mock.patch.object(verdict, 'MAX_ZIP', 3), self.assertRaisesRegex(ValueError, 'larger'):
+            verdict.fetch_zip('https://api/x/zip', 'tok', opener)
+
+    def test_unpack_replaces_the_outcome_and_the_summary_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            art(root, 'ci-part-a-1', {'outcome': 'red'}, 'old summary')
+            verdict.unpack(d, 'ci-part-a-1', zipped({'outcome.json': '{"outcome": "pass"}', '../evil': 'x',
+                                                     'sub/outcome.json': 'x'}))
+            self.assertEqual(sorted(p.name for p in (root / 'ci-part-a-1').iterdir()), ['outcome.json'])
+            self.assertFalse((root / 'evil').exists())
+            verdict.unpack(d, 'ci-part-b-1', zipped({'outcome.json': '{"outcome": "pass"}', 'summary.md': 's'}))
+            self.assertEqual(verdict.collect(d)['b'][1], ({'outcome': 'pass'}, 's'))
+            with mock.patch.object(verdict, 'MAX_FILE', 3):  # an oversized member is left out
+                verdict.unpack(d, 'ci-part-c-1', zipped({'outcome.json': '{"outcome": "pass"}'}))
+            self.assertFalse((root / 'ci-part-c-1' / 'outcome.json').exists())
+            with self.assertRaises(ValueError):
+                verdict.latest(d, lambda *a: {'artifacts': ISSUE_169}, lambda url, tok: b'not a zip', 'https://api',
+                               'o/r', '7', 't')
+            # a zip that fails while it is read (here its CRC) leaves the downloaded files as they were
+            art(root, 'ci-part-gpu-3-1', {'outcome': 'red'}, 'red')
+            bad = bytearray(zipped({'outcome.json': '{"outcome": "pass"}'}))
+            at = bad.index(b'{"outcome"')
+            bad[at + 2] ^= 1
+            with self.assertRaisesRegex(ValueError, 'cannot be read'):
+                verdict.latest(d, lambda *a: {'artifacts': ISSUE_169}, lambda url, tok: bytes(bad), 'https://api',
+                               'o/r', '7', 't')
+            self.assertEqual(verdict.collect(d)['gpu-3'][1], ({'outcome': 'red'}, 'red'))
+            buf = io.BytesIO()  # a broken deflate stream: zlib's own error, not zipfile's
+            with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+                z.writestr('outcome.json', '{"outcome": "pass"}' * 50)
+            broken = bytearray(buf.getvalue())
+            broken[30 + len('outcome.json')] = 0xff  # the first byte of the data: an invalid block type
+            with self.assertRaisesRegex(ValueError, 'cannot be read'):
+                verdict.unpack(d, 'ci-part-gpu-3-1', bytes(broken))
+            self.assertEqual(verdict.collect(d)['gpu-3'][1], ({'outcome': 'red'}, 'red'))
+
+            def short(url, tok):
+                raise http.client.IncompleteRead(b'')
+            with self.assertRaises(verdict.github.ApiError):
+                verdict.latest(d, lambda *a: {'artifacts': ISSUE_169}, short, 'https://api', 'o/r', '7', 't')
+            os.rename(root / 'ci-part-gpu-3-1', root / 'elsewhere')  # a planted link in its place is replaced
+            os.symlink(root / 'elsewhere', root / 'ci-part-gpu-3-1')
+            verdict.unpack(d, 'ci-part-gpu-3-1', zipped({'outcome.json': '{"outcome": "pass"}'}))
+            self.assertFalse((root / 'ci-part-gpu-3-1').is_symlink())
+            self.assertEqual((root / 'elsewhere' / 'summary.md').read_text(), 'red')
 
 
 class Decide(unittest.TestCase):
@@ -218,14 +332,58 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
     def tearDown(self):
         self.tmp.cleanup()
 
+    listing: list | Exception = []  # the run's artifacts, as the API lists them
+    zips: dict = {}  # artifact id -> its zip
+
     def call(self, method, url, token, body=None):
+        if method == 'GET':
+            self.got.append(url)
+            if isinstance(self.listing, Exception):
+                raise self.listing
+            return {'total_count': len(self.listing), 'artifacts': self.listing}
         self.posted.append((method, url, token, body))
         return {}
 
+    def fetch(self, url, token):
+        self.fetched.append((url, token))
+        return self.zips[int(url.split('/')[-2])]
+
     def main(self, *args, env=None):
-        with mock.patch.dict(os.environ, env or self.env, clear=True), redirect_stderr(io.StringIO()):
+        self.got, self.fetched, self.err = [], [], io.StringIO()
+        with mock.patch.dict(os.environ, env or self.env, clear=True), redirect_stderr(self.err):
             return verdict.main(['--context', 'p/ci', '--sha', SHA, '--artifacts', str(self.arts), *args], self.inv,
-                                call=self.call)
+                                call=self.call, fetch=self.fetch)
+
+    def test_a_part_re_run_in_a_later_run_attempt_counts(self):
+        # issue #169, run 43082337585: attempt 1's gpu-3 red; "Re-run failed jobs" re-ran it,
+        # and it passed. Run attempt 2's ci-part-gpu-3-1 has the lower id, so download-artifact
+        # (the highest id of a name) gave the verdict run attempt 1's red one
+        art(self.arts, 'ci-part-gpu-3-1', {'outcome': 'red', 'next': 'none', 'run-attempt': 1}, 'red summary')
+        art(self.arts, 'ci-part-cpu-1', {'outcome': 'pass', 'next': 'none', 'run-attempt': 1})
+        self.listing = ISSUE_169 + [{'id': 5, 'name': 'ci-part-cpu-1', 'created_at': '2026-11-11T19:03:00Z'}]
+        self.zips = {13886519664: zipped({'outcome.json': json.dumps({'outcome': 'pass', 'next': 'none',
+                                                                       'run-attempt': 2})})}
+        env = {**self.env, 'GITHUB_RUN_ID': '43082337585', 'GITHUB_RUN_ATTEMPT': '2'}
+        self.assertEqual(self.main('--parts', 'cpu gpu-3', env=env), 0)
+        self.assertEqual(self.posted[0][3]['state'], 'success')
+        self.assertEqual(self.got, ['https://api.github.com/repos/org/repo/actions/runs/43082337585/artifacts'
+                                    '?per_page=100&page=1'])
+        self.assertEqual(self.fetched, [('https://api.github.com/repos/org/repo/actions/artifacts/13886519664/zip',
+                                         'tok')])
+        self.assertFalse((self.arts / 'ci-part-gpu-3-1' / 'summary.md').exists())  # the old attempt's is gone
+        self.assertIn('ci-part-gpu-3-1: the latest run attempt', self.err.getvalue())
+
+    def test_without_actions_read_the_downloaded_artifacts_decide(self):
+        art(self.arts, 'ci-part-gpu-3-1', {'outcome': 'red', 'next': 'none', 'run-attempt': 1})
+        self.listing = verdict.github.ApiError('GET .../artifacts: HTTP 403')
+        self.assertEqual(self.main('--parts', 'gpu-3'), 1)  # as before: the downloaded red decides
+        self.assertEqual(self.posted[0][3]['state'], 'failure')
+        self.assertIn('give the job actions: read', self.err.getvalue())
+        self.assertEqual(self.fetched, [])
+        self.listing = []  # one artifact a name: nothing fetched
+        self.assertEqual(self.main('--parts', 'gpu-3'), 1)
+        self.assertEqual(self.fetched, [])
+        self.assertNotIn('actions: read', self.err.getvalue())
 
     def test_green_parts_post_success(self):
         art(self.arts, 'ci-part-cpu-1', {'outcome': 'pass', 'next': 'none'}, '### part `cpu`\n')

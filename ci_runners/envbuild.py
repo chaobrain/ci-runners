@@ -206,9 +206,14 @@ def parse_spec(text: str) -> Spec:
         raise SpecError(f'{SPEC}: not TOML: {e}') from None
     if doc.get('schema') != 1:
         raise SpecError(f'{SPEC}: schema must be 1')
-    unknown = set(doc) - {'schema', 'python', 'requirements', 'install', 'upstream', 'variables', 'conda', 'variant'}
+    unknown = set(doc) - {'schema', 'python', 'requirements', 'install', 'upstream', 'variables', 'conda', 'variant',
+                          'contract'}
     if unknown:
         raise SpecError(f'{SPEC}: unknown keys {sorted(unknown)}')
+    # the head's contract with the default branch's (decision 16.6): accepted and ignored
+    # here from R1 (16.3), so that a consumer may write it before the reusable workflow reads it
+    if 'contract' in doc and not (type(doc['contract']) is int and doc['contract'] >= 0):
+        raise SpecError(f'{SPEC}: contract must be a whole number')
     py = doc.get('python')
     if not isinstance(py, str) or not PYTHON.fullmatch(py):
         raise SpecError(f'{SPEC}: python must be a version such as "3.12"')

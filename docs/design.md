@@ -1825,6 +1825,7 @@ ci_runners/           stdlib-only Python: pure functions, thin I/O
   part.py             the executor: gate, slot, lease, scope, supervisor, record
   drain.py            the drain switch (decision 13.1)
   hostload.py         the load record and the busy rule (decision 13.2)
+  capacity.py         the capacity file and the route's reader (16.5; from R4)
   presence.py         the presence controller and the self-drain (16.4; from R3)
   route.py            a part's needs to labels, and the retry rows (16.5; from R5)
   stats.py            `ci-run stats` (16.8; from R7)
@@ -1894,7 +1895,8 @@ account (decision 11.3; retired by 12.17, again from 15.8).
                                            {record.json, status.json, samples.csv, log};
                                            leases; the slot queue; setup.json; drain.json
                                            (13.1); hostload/ (the load record, 13.2);
-                                           every.json (the nightly part's hold, 13.6)
+                                           every.json (the nightly part's hold, 13.6);
+                                           capacity.json (pool status's rows, 16.5)
 <our subtree>/ci-runners/logs/             hook and reaper logs, kept 14 days
 <our subtree>/ci-runners/envs/<project>/   the projects' conda envs (decision 11.4)
 <our subtree>/actions-runner/<name>/       one runner each: the app, .env, credentials
@@ -2479,6 +2481,7 @@ refreshed from a546b92f (T17):
 | `ci-runner@.service`, `ci-tunnel.service`, `ci-reaper.timer` | as on h100; from `v1.5` the runner's unit also has `After=ci-hooks.service` and an `ExecStartPre=` that checks both hook copies are executable files (13.5); from 15.5 `Wants=` (not `Requires=`) `ci-hooks.service`, a first `ExecStartPre=` that it is active, and `StartLimitIntervalSec=0` |
 | `ci-hooks.service` (`v1.5`) | oneshot, `RemainAfterExit=yes`: `ci-run hooks copy` into the private `/tmp` (13.5); enabled; started before the runners, and reloaded (`ExecReload=`, the same copy) by `apply` when a hook changes; from 15.5 `Restart=on-failure` after 30 s, `StartLimitIntervalSec=0` |
 | `ci-hostload.{service,timer}` (`v1.5`) | every 60 s, `ci-run hostload sample`: one line of the load record (decision 13.2); `Nice=10`, bounded at 30 s |
+| `ci-capacity.{service,timer}` (R4) | every 30 s on the wall clock, `ci-run pool status`: the capacity file (16.5); skipped where the account has no `etc/pool.toml`; `Nice=10`, bounded at 150 s |
 | `ci-envrefresh.{service,timer}` | every 30 min, `ci-run env refresh` for each project whose registry sets `refresh` (decision 12.11) |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 120G of 188 GiB on 3090b, 80G of 125 GiB on 3090a) and `ci-<project>.slice` |
 | unit names | as on h100; on a dedicated account `plan.sh` still refuses a `ci-` unit that no apply wrote |

@@ -400,16 +400,22 @@ def records(parts_root: str, repo: str, run: str, pid: str) -> dict[int, str]:
 
 
 def to_salvage(ids: Iterable[str], found: Mapping[str, Mapping[int, tuple[dict, str]]],
-               here: Callable[[str], Mapping[int, str]]) -> list[tuple[str, int, str]]:
+               here: Callable[[str], Mapping[int, str]], now: int = 0) -> list[tuple[str, int, str]]:
     """``(id, attempt, ref)`` of the attempts this host salvages: the attempt after the
     part's last artifact, and each attempt after it, while this host has its record
-    (``here(id)``). Pure but for ``here``."""
+    (``here(id)``, this run attempt's records). Given ``now``, the run attempt, an
+    artifact of an earlier run attempt (a re-run of failed jobs) does not hide this run
+    attempt's record of the same attempt: a red first attempt whose runner died before
+    its upload is salvaged, not shadowed by the earlier run's artifact of that name. Pure
+    but for ``here``."""
     out = []
     for pid in ids:
-        refs = here(pid)
-        n = next_attempt(found.get(pid, {}))
-        while n in refs:
-            out.append((pid, n, refs[n]))
+        refs, have = here(pid), found.get(pid, {})
+        done = {n for n, a in have.items() if not now or run_attempt(a[0]) in (now, 0)}
+        last, n = max(have, default=0), 1
+        while n in done or n in refs or n <= last:
+            if n not in done and n in refs:
+                out.append((pid, n, refs[n]))
             n += 1
     return out
 
@@ -432,7 +438,7 @@ def salvage_main(argv: list[str], inv: inventory.Inventory, *, systemctl: Callab
         if a.wait_seconds < 0:
             raise ValueError('wait-seconds is negative')
         root = os.path.join(inv.host['data'], 'ci-runners', 'state', 'parts')
-        todo = to_salvage(ids, collect(a.artifacts), lambda pid: records(root, repo, run, pid))
+        todo = to_salvage(ids, collect(a.artifacts), lambda pid: records(root, repo, run, pid), int(run.split('-')[1]))
         if len(todo) > MAX_SALVAGED:
             raise ValueError(f'{len(todo)} parts to salvage, more than the action uploads ({MAX_SALVAGED})')
         names = []

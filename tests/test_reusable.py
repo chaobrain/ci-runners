@@ -202,7 +202,8 @@ class Structure(unittest.TestCase):
             self.assertEqual(sts[down[0]]['with']['name'], 'ci-plan-files')
             part = sts[ids.index('part')]
             self.assertIn('ci-runners-files', part['env']['CIRUNNERS_FILES'])
-            self.assertEqual(part['with']['queue-timeout-minutes'], "${{ fromJSON(inputs.part).queue || '60' }}")
+            # the plan's queue_minutes or flow's default, which the job's bound includes
+            self.assertEqual(part['with']['queue-timeout-minutes'], '${{ fromJSON(inputs.part).queue }}')
             ups = [st for st in sts if '.artifacts[' in st.get('if', '')]
             self.assertEqual(len(ups), flow.MAX_ARTIFACTS, jid)
             for i, st in enumerate(ups):
@@ -231,6 +232,22 @@ class Structure(unittest.TestCase):
                               'CIRUNNERS_HEAD_SHA'}, set(env))
         self.assertFalse([k for k in env if k.startswith('CI_')])  # the part action strips CI_* names
         self.assertNotIn('token', str(env).lower())  # the plan command gets no token
+
+    def test_the_parts_run_once_the_plan_is_routed_whatever_failed_after(self):
+        cond = load('ci.yml')['jobs']['parts']['if']
+        self.assertTrue(cond.startswith('!cancelled() && '))  # a status function: no implicit success()
+        self.assertIn("needs.plan.outputs.posted == 'false'", cond)
+        self.assertIn("needs.plan.outputs.files != 'failure'", cond)
+        plan = load('ci.yml')['jobs']['plan']
+        self.assertEqual(plan['outputs']['files'], '${{ steps.files.outcome }}')
+        self.assertEqual(plan['steps'][0]['id'], 'project')  # before anything reads it
+        text = (WF / 'ci.yml').read_text()
+        self.assertNotIn('github.event.repository.name', text)  # absent on a schedule
+        self.assertEqual(load('ci.yml')['jobs']['parts']['with']['project'], '${{ needs.plan.outputs.project }}')
+
+    def test_a_locate_step_that_failed_still_decides_the_retry(self):
+        st = [s for s in load('part.yml')['jobs']['locate']['steps'] if s.get('id') == 'retry'][0]
+        self.assertEqual(st['if'], "always() && steps.locate.outputs.labels == ''")
 
     def test_the_verdict_runs_unless_cancelled_or_posted(self):
         cond = load('ci.yml')['jobs']['verdict']['if']

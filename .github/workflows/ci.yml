@@ -68,7 +68,19 @@ jobs:
       ids: ${{ steps.plan.outputs.ids }}
       max_parallel: ${{ steps.plan.outputs.max-parallel }}
       posted: ${{ steps.contract.outputs.posted || steps.plan.outputs.posted }}
+      project: ${{ steps.project.outputs.name }}
+      files: ${{ steps.files.outcome }}
     steps:
+      # the registry key: the input, else the repository's name, from GITHUB_REPOSITORY (a
+      # schedule's payload has no repository object)
+      - id: project
+        shell: bash
+        env:
+          CIRUNNERS_PROJECT: ${{ inputs.project }}
+        run: |
+          p="${CIRUNNERS_PROJECT:-${GITHUB_REPOSITORY#*/}}"
+          case "$p" in ''|*[!A-Za-z0-9._-]*) echo "::error::the project input is not a registry name"; exit 1;; esac
+          echo "name=$p" >> "$GITHUB_OUTPUT"
       - id: claim
         if: ${{ !inputs.plan-only }}
         uses: chaobrain/ci-runners/actions/claim@v1
@@ -84,7 +96,7 @@ jobs:
           command: contract
           context: ${{ inputs.context }}
           sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
-          default-branch: ${{ github.event.repository.default_branch }}
+          default-branch: ${{ github.event.repository.default_branch || '' }}
       - if: steps.contract.outcome == 'success' && inputs.plan != ''
         uses: actions/checkout@v4
         with:
@@ -110,7 +122,7 @@ jobs:
           CIRUNNERS_HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
           CIRUNNERS_HEAD_SHA: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
         with:
-          project: ${{ inputs.project || github.event.repository.name }}
+          project: ${{ steps.project.outputs.name }}
           id: plan
           command: mkdir -p "$RUNNER_TEMP/ci-runners-plan" && eval "$CIRUNNERS_PLAN" > "$RUNNER_TEMP/ci-runners-plan/plan.json"
           timeout-minutes: '30'
@@ -121,14 +133,15 @@ jobs:
           command: plan
           context: ${{ inputs.context }}
           sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
-          project: ${{ inputs.project || github.event.repository.name }}
+          project: ${{ steps.project.outputs.name }}
           plan-file: ${{ inputs.plan != '' && format('{0}/ci-runners-plan/plan.json', runner.temp) || '' }}
           plan-outcome: ${{ inputs.plan != '' && (steps.command.outputs.outcome || 'lost') || '' }}
           plan-reason: ${{ steps.command.outputs.reason }}
           plan-only: ${{ inputs.plan-only }}
           workspace: ${{ github.workspace }}
       # the plan's files, once, for every part (CIRUNNERS_FILES there)
-      - if: steps.plan.outputs.files != '' && steps.plan.outputs.posted == 'false'
+      - id: files
+        if: steps.plan.outputs.files != '' && steps.plan.outputs.posted == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: ci-plan-files
@@ -139,7 +152,12 @@ jobs:
   parts:
     name: part ${{ matrix.part.id }}
     needs: plan
-    if: needs.plan.outputs.parts != '' && needs.plan.outputs.parts != '[]'
+    # a status function of its own: a later step of the plan job that failed (an upload of
+    # the plan part's own record) skips no part once the plan is routed; a failed upload of
+    # the plan's files does, and the verdict reads the parts as lost
+    if: >-
+      !cancelled() && needs.plan.outputs.posted == 'false' && needs.plan.outputs.files != 'failure' &&
+      needs.plan.outputs.parts != '' && needs.plan.outputs.parts != '[]'
     permissions:
       contents: read
       statuses: write
@@ -154,7 +172,7 @@ jobs:
       part: ${{ toJSON(matrix.part) }}
       context: ${{ inputs.context }}
       sha: ${{ needs.plan.outputs.sha }}
-      project: ${{ inputs.project || github.event.repository.name }}
+      project: ${{ needs.plan.outputs.project }}
 
   # after every part, unless the run was cancelled (a newer head's run posts) or the plan
   # job posted the state itself; a plan job lost before its parts were known posts error

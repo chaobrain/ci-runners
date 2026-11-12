@@ -2914,7 +2914,11 @@ id>-<run attempt>`), is uploaded: its `outcome.json` as `ci-part-<id>-<attempt>`
 `salvaged: true`. Whatever the last artifact said in `next`: a consumer's own fallback
 job after a retry that did not start is the part's attempt 3, after an attempt 2 that
 said `none` (issue #161; until then only a retry the last artifact asked for, up to
-attempt 2, was read). A part whose next attempt this host did not record is left alone. Only this run's records are read: every run's part has
+attempt 2, was read). A part whose next attempt this host did not record is left alone.
+An artifact of an earlier run attempt does not stop the chain: a record of this run
+attempt that no artifact of this run attempt holds is uploaded, so that after a re-run of
+failed jobs a red first attempt whose runner died before its upload is not hidden by the
+earlier run attempt's artifact of the same name (R6). Only this run's records are read: every run's part has
 its own record (`<repo>/<run>/<id>-<attempt>`), so a part of the same id in another run,
 older or newer, changes nothing (`v1.5.1`; until then "newest" was read across runs, and
 a later run's part of the same id on the host left the lost part `lost`). A composite
@@ -3065,7 +3069,7 @@ every rule of §4.1 to §4.5 holds inside it.
 | `context` | required | the project's status context, e.g. `myproj/ci` |
 | `plan` | none | a command, run in the head's checkout and env on `ci-light`, that prints the plan; none: one `pytest` part |
 | `project` | the repository's name | registry key, as `part`'s |
-| `sha` | the pull request's head, else `github.sha` | the head to run (a dispatch of a given head) |
+| `sha` | the pull request's head, else `github.sha` | the head to run (a dispatch of a given head); not checked: the caller keeps a fork's commit out |
 | `plan-only` | `false` | the plan job without its claim: contract, plan command, checks, route and summary; no part; posts `success` "plan only: N part(s) routed, none run" (a context of its own) |
 
 Its output `state` is the verdict's (`success`, `failure` or `error`), empty where the
@@ -3119,7 +3123,7 @@ not load is a red plan job with the reason:
 | `parts[].minutes` | yes | the part's time on the reference host, at most 240; its bounds scale by speed (16.2) |
 | `parts[].memory_gib` | no | the part's memory cap; the registry's default otherwise; above the label's largest slot, the route adds `mem-big` |
 | `parts[].results` | no | as `part`'s `results` |
-| `parts[].queue_minutes` | no | (0, 240], default 60: an attempt's wait on its host for a slot or a lease (`part`'s `queue-timeout-minutes`); past it the attempt is `unavailable` and the retry's rows apply as for a lost one |
+| `parts[].queue_minutes` | no | (0, 240], default 15: an attempt's wait on its host for a slot or a lease (`part`'s `queue-timeout-minutes`), added to the job's bound; past it the attempt is `unavailable` and the retry's rows apply as for a lost one |
 | `parts[].artifacts` | no | at most 4 names (`[A-Za-z0-9][A-Za-z0-9_.]*`, no `-`, not `ci`) to paths below `RUNNER_TEMP`, uploaded after each attempt as `<name>-<id>-<attempt>`; the verdict does not read them |
 
 An unknown key is refused. Without `plan`, the plan is `{"schema": 1, "parts": [{"id":
@@ -3131,8 +3135,8 @@ plan that does not load and a red plan command post `failure`; a plan command's 
 end (§4.4) and a route error (16.5) post `error`. The checks and the route are `ci-run
 flow plan` (`ci_runners/flow.py`); the consumers' guide lists every key's error text. A
 run starts at most the registry's `max_parallel` parts at once (1 to 256, default 16;
-§7 rule 1). `memory_gib` is at most 4096, and the routed matrix at most 900 KB (one job
-output). `files`, `max_parallel`, `light`, `queue_minutes`, `artifacts` and the empty list
+§7 rule 1). `memory_gib` is at most 4096, and the routed matrix at most 500 KB (one job
+output and one expression, each under GitHub's 1 MB). `files`, `max_parallel`, `light`, `queue_minutes`, `artifacts` and the empty list
 are additions to schema 1: a plan without them reads as before.
 
 The plan command reads the event's facts as variables, with no token: `CIRUNNERS_EVENT`,
@@ -3160,7 +3164,9 @@ changes what its plan or its parts expect of the head.
 snapshot holds it, §6.5); a public one needs the lead's entry (16.7), and `ci.yml` is to
 run its CPU work on GitHub-hosted runners and its GPU parts on the confined public pool
 (18). Until 18's C2 builds those legs, a public caller's run fails in `ci.yml`'s `public`
-job, on a GitHub-hosted runner, and no job of it waits for ours. The whole workflow:
+job, on a GitHub-hosted runner, and no job of it waits for ours; where the event's payload
+names no repository (a schedule), the contract step reads it and a public one ends with
+`error` before anything of its head runs. The whole workflow:
 
 ```yaml
 name: ci

@@ -67,7 +67,7 @@ jobs:
           gpus: ${{ fromJSON(inputs.part).gpus }}
           memory: ${{ fromJSON(inputs.part).memory }}
           timeout-minutes: ${{ fromJSON(inputs.part).minutes }}
-          queue-timeout-minutes: ${{ fromJSON(inputs.part).queue || '60' }}
+          queue-timeout-minutes: ${{ fromJSON(inputs.part).queue }}
           results: ${{ fromJSON(inputs.part).results }}
           target: ${{ fromJSON(inputs.part).target }}
       # the part step fails on red and on a failed upload: upload once more (the same file)
@@ -146,7 +146,7 @@ jobs:
           part-id: ${{ fromJSON(inputs.part).id }}
       # no host known: no record to read, the first attempt counts as lost
       - id: retry
-        if: steps.locate.outputs.labels == ''
+        if: always() && steps.locate.outputs.labels == ''
         uses: chaobrain/ci-runners/actions/flow@v1
         with:
           command: retry
@@ -221,7 +221,7 @@ jobs:
           gpus: ${{ fromJSON(inputs.part).gpus }}
           memory: ${{ fromJSON(env.RETRY).memory }}
           timeout-minutes: ${{ fromJSON(inputs.part).minutes }}
-          queue-timeout-minutes: ${{ fromJSON(inputs.part).queue || '60' }}
+          queue-timeout-minutes: ${{ fromJSON(inputs.part).queue }}
           results: ${{ fromJSON(inputs.part).results }}
           target: ${{ fromJSON(env.RETRY).target }}
           resume: ${{ fromJSON(env.RETRY).resume }}

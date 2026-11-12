@@ -4831,6 +4831,8 @@ MUTANTS = [
      '    # reads them holds the token, the command never does\n    permissions:\n      contents: read\n      actions: write\n    outputs:\n      outcome: ${{ steps.part.outputs.outcome }}\n      # its outcome', [f'{TRU}.Structure.test_permissions_explicit_and_least']),
     (AFL, '        [ -z "$IN_DEST" ] || args+=("--dest=$IN_DEST")\n',
      '', [f'{TRU}.Flow.test_each_input_reaches_its_flag']),
+    ('actions/flow/action.yml', "  fallback:\n    description: \"true where the plan's files", "  fallback-x:\n    description: \"true where the plan's files",
+     [f'{TRU}.Structure.test_every_output_read_of_an_action_step_is_one_it_declares']),
 ]
 
 

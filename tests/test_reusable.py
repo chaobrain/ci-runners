@@ -171,6 +171,20 @@ class Structure(unittest.TestCase):
         self.assertEqual([jid for jid, st in steps(load('part.yml')) if st.get('uses', '').startswith('actions/checkout@')],
                          ['first', 'retry'])
 
+    def test_every_output_read_of_an_action_step_is_one_it_declares(self):
+        """An output a composite action does not declare reads as empty: #245's ``fallback``
+        was written by ``flow fetch`` and never seen, so download-artifact never ran."""
+        for name in REUSABLE:
+            doc = load(name)
+            for jid, job in doc['jobs'].items():
+                uses = {st['id']: st['uses'] for st in job.get('steps') or [] if st.get('id') and st.get('uses')}
+                text = str(job)
+                for sid, out in re.findall(r'steps\.([a-z0-9_-]+)\.outputs\.([a-z0-9_-]+)', text):
+                    m = re.fullmatch(r'chaobrain/ci-runners/actions/([a-z]+)@\S+', uses.get(sid, ''))
+                    if m:
+                        declared = yamlsub.load((ROOT / 'actions' / m.group(1) / 'action.yml').read_text())['outputs']
+                        self.assertIn(out, declared, f'{name}: {jid}: steps.{sid}.outputs.{out}')
+
     def test_the_token_reaches_the_files_step_alone(self):
         """#245: in a job that runs head code, the job's token reaches one step, the one that
         reads the plan's files (``actions/flow``'s default ``token``, into that step's own env),

@@ -107,6 +107,9 @@ outputs:
   role:
     description: "the first attempt's host role, or empty (locate)"
     value: ${{ steps.flow.outputs.role }}
+  fallback:
+    description: "true where the plan's files could not be read through the API, so that download-artifact downloads them (fetch)"
+    value: ${{ steps.flow.outputs.fallback }}
 runs:
   using: composite
   steps:

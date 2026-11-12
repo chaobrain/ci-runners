@@ -98,7 +98,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 
 1. **每个作业都要加 guard**：`pull_request` 只接受 `head.repo.full_name == github.repository`，此外是 `push`、`workflow_dispatch`、`schedule`。
 2. **标签**：写 `self-hosted` 加上某台主机的池子标签，比如 `3090b-cpu`、`3090b-gpu`、`3090b-gpu1`、`3090b-multi`、`3090b-compile`、`3090a-nightly`。不要只写类名。每一类接受的 `gpus`、`lock`、`timeout-minutes` 见 design §4.8 的表，超出范围的部件直接 `unavailable`。`compile` 和 `nightly` 需要仓库在 `policy.toml` 里登记了这一类（design 决定 12.14）。
-3. **一个作业只跑一个 `part`**，作业的 `timeout-minutes` 至少比部件的多 15。部件 id 在一次 run 里不能重复。matrix 各分支的输出到不了后面的作业，所以后面的作业要读 `ci-part-<id>-<attempt>` artifact。
+3. **一个作业只跑一个 `part`**，作业的 `timeout-minutes` 至少比部件的多 15；部件可能落到有槽位的 runner 上时，按部件的分钟数 × 标签里最大的 `speed` 再加 15（design 16.2，内层超时会按 `speed` 放大，作业的上限要盖住它）。部件 id 在一次 run 里不能重复。matrix 各分支的输出到不了后面的作业，所以后面的作业要读 `ci-part-<id>-<attempt>` artifact。
 4. **重试**：`next` 为 `retry` 或 `fallback` 的部件最多再跑一次，带上 `attempt-of`（第一次的 `record`）和 `resume`，跑在 `retry-on` 给出的标签上，`fallback` 时也可以换到别的主机。在另一台主机上重试时，`attempt-of` 照样填第一次的 `record`（它在第一台主机上，v1.5 起按名字取次数，design 决定 13.3）。
 5. **salvage 和 verdict**：verdict 放在最后，跑在某一台跑过部件的主机的 light 池上。它能直接读这台主机上的记录。其他跑过部件的主机，每台在 verdict 之前加一个 `salvage` 作业，跑在那台主机的 light 池上：
 
@@ -133,10 +133,23 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 命令还能读到这些环境变量：
 
 - `CI_PROJECT`、`CI_PART_DIR`、`CI_RUNNERS_HOST`；
+- 在有槽位的 runner 上（design 16.2，从 RUN-10 的 R2 起；见下面的“槽位”）：`CI_WORKERS`、`CI_SPEED`，以及槽位设了 `isa` 时的 `CI_ISA`；
 - registry 里的 `variables`；
 - runner 的 `https_proxy`、`http_proxy`、`no_proxy`。主机访问外网要经过 egress，所以 pip、git、下载数据集都会自动走代理；只能访问 egress 允许清单上的域名（见 [operations.md](operations.md) §6）。
 
 内存上限来自 registry 的 `memory`。超出就是 `oom`，不算 `red`。
+
+**槽位**（design 16.2，从 RUN-10 的 R2 起）。一个部件 runner 就是一个槽位：固定的一组 CPU 和一个内存上限。部件跑在这样的 runner 上时：
+
+- 进程绑到槽位的 cpuset，`CI_CPUS` 就是它；
+- 内存上限是槽位的 `memory`；部件自己的 `memory` 更小时用它，但永远不超过 registry 的上限；
+- 内层超时是部件的 `timeout-minutes` × 槽位的 `speed`（参考主机上是 1.0）：慢的主机按比例多给时间，`timeout-minutes` 照旧写在参考主机上需要的分钟数；
+- 命令多拿到三个变量，作业自己设的同名变量不会传进来：
+  - `CI_WORKERS`：该起几个 worker 进程，例如 `pytest -n "${CI_WORKERS:-auto}"`。慢的主机给的 worker 更多；不要自己按 CPU 个数另算。
+  - `CI_SPEED`：这个槽位上一个测试比参考主机慢几倍。命令自己的单个测试超时乘上它，例如 `pytest --timeout "$(awk -v s="${CI_SPEED:-1}" 'BEGIN { print int(60 * s + 0.5) }')"`；计时类断言也一样。
+  - `CI_ISA`（只在槽位设了 `isa` 时有）：命令可以用的最高指令集级别，例如 `x86-64-v3`（AVX2）。执行器不强制它：命令要把它传给自己的数值库（比如 XLA 的 `--xla_cpu_max_isa`、oneDNN 的 `ONEDNN_MAX_CPU_ISA`），这样同一个标签下各主机的结果才能逐位相同。
+
+没有槽位的 runner 不设这三个变量，其它一切照旧，所以命令要给它们默认值（`${CI_WORKERS:-…}`、`CI_SPEED` 缺省按 1）。
 
 **计划里的 `needs`**（design 决定 16.5 和 §4.10，RUN-10 R5 起；可复用工作流 R6 上线后生效）。计划里每个部件写它要什么，不写主机：
 

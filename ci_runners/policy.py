@@ -2,8 +2,11 @@
 
 The policy is schema 2 (design §6.5; schema 1 is retired, decision 11.12). It may take
 its actors and private repositories from the org snapshot (``etc/org.json``):
-``with_snapshot`` merges them in, or refuses a stale one. Only private repositories run
-(design §6.2): a repository listed as public is refused.
+``with_snapshot`` merges them in, or refuses a stale one. Private repositories run on every
+runner of audience ``private`` (design §6.2). A public repository runs only where the lead
+opted it in (``public_runners = true``, decision 16.7), and there only on a runner of
+audience ``public`` and class ``gpu`` (decision 18.7), for a same-repository pull request
+or a push to a protected ref; every other public repository is refused.
 
 ``decide`` is a pure function of the policy, the job's environment and its event
 payload. It reads only what it is given, prints nothing and returns a fixed reason
@@ -39,9 +42,18 @@ BOT_EVENTS = frozenset({'workflow_dispatch', 'repository_dispatch'})
 EXTRA_EVENTS = frozenset({'pull_request_target', 'pull_request_review', 'pull_request_review_comment',
                           'merge_group'})
 
+#: the runner audiences (``CI_RUNNER_AUDIENCE``, decision 16.7): ``private`` where unset
+AUDIENCES = frozenset({'private', 'public'})
+#: an opted-in public repository's runner class (decision 18.7: the public pool is GPU-only)
+PUBLIC_CLASSES = frozenset({'gpu'})
+#: an opted-in public repository's events (decision 16.7, 18.7): a same-repository pull
+#: request, and a push whose ``GITHUB_REF_PROTECTED`` is ``true``
+PUBLIC_EVENTS = frozenset({'pull_request', 'push'})
+
 #: the reason codes ``decide`` returns; the hook prints one of them and nothing else
-REASONS = ('ok', 'runner-class', 'self', 'repository', 'repository-id', 'payload', 'paused', 'event', 'fork',
-           'actor', 'bot', 'stale', 'policy', 'timeout', 'error')  # from 'stale' on: the hook could not decide
+REASONS = ('ok', 'runner-class', 'self', 'repository', 'repository-id', 'payload', 'paused', 'audience', 'event',
+           'unprotected', 'fork', 'actor', 'bot',
+           'stale', 'policy', 'timeout', 'error')  # from 'stale' on: the hook could not decide
 
 #: the org snapshot's schema, its age bound's range (minutes) and how far ahead of the
 #: host's clock its time may be (seconds)
@@ -74,6 +86,7 @@ class Repo:
     bot_dispatch: bool = False  # private only: the bot may start BOT_EVENTS (lead, 2026-11-05)
     org_members: bool = False  # set by ``with_snapshot`` only: the org's members may run here too
     classes: frozenset[str] = frozenset()  # private only: the OPT_IN classes it may use (decision 12.14)
+    public_runners: bool = False  # public only: the lead opted it in to the public pool (decision 16.7, 18.7)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -156,7 +169,7 @@ def load(data: bytes | str) -> Policy:
             raise PolicyError('policy: a repository key is not owner/name')
         if name == SELF:
             raise PolicyError(f'policy: {SELF} may not be listed')
-        unknown = set(r) - {'id', 'visibility', 'paused', 'extra_events', 'bot_dispatch', 'classes'}
+        unknown = set(r) - {'id', 'visibility', 'paused', 'extra_events', 'bot_dispatch', 'classes', 'public_runners'}
         if unknown:
             raise PolicyError(f'policy: {name}: unknown keys {sorted(unknown)}')
         rid, vis, paused = r.get('id'), r.get('visibility'), r.get('paused', False)
@@ -181,9 +194,15 @@ def load(data: bytes | str) -> Policy:
             raise PolicyError(f'policy: {name}: classes must name classes of {sorted(OPT_IN)}')
         if classes and vis == 'public':
             raise PolicyError(f'policy: {name}: a public repository takes no classes')
+        public_runners = r.get('public_runners', False)
+        if type(public_runners) is not bool:
+            raise PolicyError(f'policy: {name}: public_runners must be a boolean')
+        if public_runners and vis != 'public':
+            raise PolicyError(f'policy: {name}: public_runners is for a public repository only')
         if name in repos:
             raise PolicyError(f'policy: {name} is listed twice')
-        repos[name] = Repo(name, rid, vis, paused, frozenset(extra), bot_dispatch, classes=frozenset(classes))
+        repos[name] = Repo(name, rid, vis, paused, frozenset(extra), bot_dispatch, classes=frozenset(classes),
+                           public_runners=public_runners)
     return Policy(frozenset(actors), repos, bot, hashlib.sha256(raw).hexdigest(), org)
 
 
@@ -247,8 +266,10 @@ def with_snapshot(policy: Policy, snap: Snapshot, now: float) -> Policy:
       can pause it, and a public one is never made private;
     - if ``members``, the snapshot's members may act in the org's private repositories
       of the snapshot (``Repo.org_members``), and only there: a repository listed by hand
-      is open to them only if it is private and the snapshot holds it with the same id.
-      A public repository, or any other listed one, keeps the hand-kept actors alone.
+      is open to them only if it is private and the snapshot holds it with the same id,
+      or if it is a public one the lead opted in (``public_runners``, decision 16.7: the
+      snapshot holds private repositories only, so the policy's entry and its id stand).
+      Any other listed one keeps the hand-kept actors alone.
 
     Raises StaleSnapshot when the snapshot is older than ``max_age_minutes`` or more
     than ``CLOCK_SKEW`` seconds in the future, and PolicyError when it is another
@@ -270,6 +291,8 @@ def with_snapshot(policy: Policy, snap: Snapshot, now: float) -> Policy:
     if members:
         for name, repo in repos.items():
             if repo.visibility == 'private' and snap.repos.get(name) == repo.id and name != SELF:
+                repos[name] = dataclasses.replace(repo, org_members=True)
+            elif repo.visibility == 'public' and repo.public_runners and name not in snap.repos and name != SELF:
                 repos[name] = dataclasses.replace(repo, org_members=True)
     return dataclasses.replace(policy, repos=repos, members=members, snapshot_digest=snap.digest)
 
@@ -305,12 +328,14 @@ def _actors(env: Mapping[str, str], event: dict, name: str) -> list[str | None]:
 
 
 def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
-    """Accept or refuse a job, by design §6.2, for the runner class ``CI_RUNNER_CLASS``.
+    """Accept or refuse a job, by design §6.2, for the runner class ``CI_RUNNER_CLASS`` and
+    the runner audience ``CI_RUNNER_AUDIENCE`` (``private`` where unset, decision 16.7).
 
     ``env`` is the job's environment as the runner sets it for the hook
     (``GITHUB_REPOSITORY``, ``GITHUB_REPOSITORY_ID``, ``GITHUB_EVENT_NAME``,
-    ``GITHUB_ACTOR``, ``GITHUB_TRIGGERING_ACTOR``) plus the runner's ``CI_RUNNER_CLASS``;
-    ``event`` is the parsed ``GITHUB_EVENT_PATH``. Pure.
+    ``GITHUB_ACTOR``, ``GITHUB_TRIGGERING_ACTOR``, ``GITHUB_REF_PROTECTED``) plus the
+    runner's ``CI_RUNNER_CLASS`` and ``CI_RUNNER_AUDIENCE``; ``event`` is the parsed
+    ``GITHUB_EVENT_PATH``. Pure.
     """
     def no(reason: str) -> Decision:
         return Decision(False, reason)
@@ -318,6 +343,9 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
     cls = env.get('CI_RUNNER_CLASS')
     if cls not in CLASSES:
         return no('runner-class')
+    audience = env.get('CI_RUNNER_AUDIENCE', 'private')
+    if audience not in AUDIENCES:
+        return no('audience')
     name = _ascii_lower(env.get('GITHUB_REPOSITORY'), _REPO)
     if name == SELF:
         return no('self')
@@ -339,12 +367,27 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
         return no('payload')
     if repo.paused:
         return no('paused')
-    if repo.visibility != 'private':  # public repositories stay on hosted runners (design §6.2)
-        return no('repository')
-    if cls in OPT_IN and cls not in repo.classes:  # an exclusive class, not listed for it (12.14)
-        return no('runner-class')
-    if event_name not in PRIVATE_EVENTS | repo.extra_events:
-        return no('event')
+    if repo.visibility == 'private':
+        if audience != 'private':  # the public pool serves opted-in public repositories alone (16.7)
+            return no('audience')
+        if cls in OPT_IN and cls not in repo.classes:  # an exclusive class, not listed for it (12.14)
+            return no('runner-class')
+        if event_name not in PRIVATE_EVENTS | repo.extra_events:
+            return no('event')
+    else:  # public: the lead's opt-in, its own pool's GPU runners only (16.7, 18.7)
+        if repo.visibility != 'public' or not repo.public_runners:
+            return no('repository')
+        if audience != 'public':
+            return no('audience')
+        if cls not in PUBLIC_CLASSES:
+            return no('runner-class')
+        if event_name not in PUBLIC_EVENTS:
+            return no('event')
+        if event_name == 'push' and env.get('GITHUB_REF_PROTECTED') != 'true':
+            return no('unprotected')
+        r = event.get('repository')
+        if not isinstance(r, dict) or r.get('private') is not False:  # its payload says it is public
+            return no('repository')
     # not a fork: a pull request's head and base, and a workflow_run's head, are this repository
     if 'pull_request' in event or event_name.startswith('pull_request'):
         pr = event.get('pull_request')
@@ -359,6 +402,8 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
         if not isinstance(wr, dict) or not _repo_matches(wr.get('head_repository'), repo):
             return no('fork')
     for login in _actors(env, event, event_name):  # None (absent or malformed) is on no list
+        if repo.visibility != 'private' and login is not None and login.endswith('[bot]'):
+            return no('bot')  # never a bot on the public pool, the policy's included (16.7)
         if login == policy.bot:  # on no allowlist: passes only where the repository's switch is on
             if not repo.bot_dispatch or event_name not in BOT_EVENTS:
                 return no('bot')
@@ -376,6 +421,9 @@ def repositories_digest(policy: Policy) -> str:
                     'extra_events': sorted(r.extra_events), 'bot_dispatch': r.bot_dispatch,
                     'classes': sorted(r.classes)}
              for name, r in policy.repos.items()}
+    for name, r in policy.repos.items():  # only where set: an entry without it keeps its digest (16.3)
+        if r.public_runners:
+            canon[name]['public_runners'] = True
     return hashlib.sha256(json.dumps(canon, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 

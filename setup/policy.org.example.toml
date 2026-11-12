@@ -19,3 +19,13 @@ max_age_minutes = 60
 # visibility = "private"
 # paused = true
 # classes = ["compile", "nightly", "slurm"]      # the hosts' compile and nightly runners, the cluster (14.2)
+#
+# From C2 (decisions 16.7, 18.7) the lead may opt a public repository in to the public pool:
+# its jobs then run on runners of audience `public` and class `gpu` only (its own pool's
+# confined single-job runners), for a same-repository pull request or a push to a protected
+# ref, its actors the snapshot's members, never a bot. Write it only once every host runs a
+# release that knows the key (an older one refuses the whole policy).
+# [repositories."chaobrain/a-public-repo"]
+# id = 2
+# visibility = "public"
+# public_runners = true

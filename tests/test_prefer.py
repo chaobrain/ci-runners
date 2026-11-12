@@ -8,6 +8,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -814,6 +815,17 @@ class PolicyDigest(unittest.TestCase):
                           'paused': POLICY + 'paused = true\n',
                           'an event more': POLICY + 'extra_events = ["merge_group"]\n'}.items():
             self.assertNotEqual(policy.repositories_digest(policy.load(text)), d, why)
+
+    def test_the_public_opt_in_counts_only_where_set(self):
+        """C2 (decision 18.7): an entry without ``public_runners``, or with it false, keeps the
+        digest it had before the key existed; the lead's opt-in changes it."""
+        pub = 'schema = 2\n[repositories."chaobrain/pubkit"]\nid = 9\nvisibility = "public"\n'
+        d = policy.repositories_digest(policy.load(pub))
+        self.assertEqual(policy.repositories_digest(policy.load(pub + 'public_runners = false\n')), d)
+        self.assertNotEqual(policy.repositories_digest(policy.load(pub + 'public_runners = true\n')), d)
+        canon = {'chaobrain/pubkit': {'id': 9, 'visibility': 'public', 'paused': False, 'extra_events': [],
+                                      'bot_dispatch': False, 'classes': []}}
+        self.assertEqual(d, hashlib.sha256(json.dumps(canon, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
 
     def test_the_probe_reads_the_accounts_policy(self):
         with tempfile.TemporaryDirectory() as etc:

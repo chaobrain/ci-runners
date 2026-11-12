@@ -51,6 +51,18 @@ POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class', 'slot', 'audience
 SLOT_KEYS = {'cpus': True, 'workers': True, 'memory': True, 'speed': True, 'isa': False}
 #: the runner audiences (decision 16.7): every pool is ``private`` but the public pool's
 AUDIENCES = frozenset({'private', 'public'})
+#: the public pool (decision 18.7): per card, of class ``gpu``, beside the host's own ``gpu``
+#: pool, whose cards it shares through the leases; its runners come from the issuer (18.6),
+#: never from setup, and it holds no ``count`` or ``slot`` of its own
+PUBLIC_CLASSES = frozenset({'gpu'})
+PUBLIC_POOL_KEYS = frozenset({'per_card', 'class', 'labels', 'audience'})
+#: the public pool's capability label (16.1, 18.7): no private pool carries a ``ci-pub-`` label
+PUBLIC_LABEL = 'ci-pub-gpu'
+PUBLIC_PREFIX = 'ci-pub-'
+PUBLIC_HOST_SUFFIX = '-pub-gpu'  # its host label, <role>-pub-gpu
+#: a host's ``isolation`` (decision 18.2): the backend the host is set up for, which the probe
+#: and the check prove; accepted and inert until a later phase reads it (16.3)
+ISOLATION = frozenset({'account', 'ns-subuid'})
 #: a slot's ``isa``: the name of the highest instruction-set level a part may use
 ISA = re.compile(r'[a-z0-9][a-z0-9_.-]{0,31}\Z')
 #: the highest CPU number a cpuset of a slot may name
@@ -223,6 +235,8 @@ HOST_KEYS = {
     'busy': (lambda v: _busy(v), False),
     # the presence controller's switch and bounds (decision 16.4): accepted, inert until R3 (16.3)
     'presence': (lambda v: _presence(v), False),
+    # the public pool's isolation backend (decision 18.2, 18.7): accepted, inert until a later phase
+    'isolation': (lambda v: isinstance(v, str) and v in ISOLATION, False),
 }
 #: the first path's keys (decision 11.12): accepted and ignored in v1.3, so that a host's
 #: inventory needs no change in the release's window (design §9); nothing reads them
@@ -244,7 +258,11 @@ TUNNEL_KEYS = {
 @dataclasses.dataclass(frozen=True)
 class Inventory:
     this: str  # the role of the host that reads it
-    hosts: Mapping[str, Mapping[str, object]]
+    hosts: Mapping[str, Mapping[str, object]]  # each host's ``pools`` without its public pool
+    #: per host role, its public pool (decision 18.7): ``{pool: spec}``, taken out of the
+    #: host's ``pools`` at load, so that setup, presence, the route and the executor, which
+    #: read ``pools``, see the inventory they saw before the key existed (16.3)
+    public: Mapping[str, Mapping[str, Mapping[str, object]]] = dataclasses.field(default_factory=dict)
 
     @property
     def host(self) -> Mapping[str, object]:
@@ -285,7 +303,7 @@ def load(text: str) -> Inventory:
         _check_table(f'hosts.{role}', h, HOST_KEYS)
         if 'tunnel' in h:
             _check_table(f'hosts.{role}.tunnel', h['tunnel'], TUNNEL_KEYS)
-        seen: dict[str, str] = {}
+        seen: dict[tuple[str, bool], str] = {}
         for pool, v in h['pools'].items():
             if isinstance(v, dict) and v.get('per_card') and not h['gpus']:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: per_card on a host without gpus')
@@ -294,15 +312,24 @@ def load(text: str) -> Inventory:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: no runner class {cls!r}: name one in its class')
             if isinstance(v, dict) and v.get('per_card') and cls not in PER_CARD_CLASSES:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: per_card for a class of {sorted(PER_CARD_CLASSES)} only')
-            if cls in seen and cls != HOME_CLASS:  # the home pool: _check_home
-                raise InventoryError(f'hosts.{role}.pools.{pool}: class {cls} is also the class of {seen[cls]}')
+            pub = _public(v)
+            if pub:
+                _check_public(f'hosts.{role}.pools.{pool}', role, cls, v)
+            else:
+                _check_private_labels(f'hosts.{role}.pools.{pool}', role, pool, v)
+            if (cls, pub) in seen and cls != HOME_CLASS:  # the home pool: _check_home
+                raise InventoryError(f'hosts.{role}.pools.{pool}: class {cls} is also the class of {seen[cls, pub]}')
             if isinstance(v, dict) and 'slot' in v:  # one cpuset per runner (16.2)
                 n = len(h['gpus']) if v.get('per_card') else v['count']
                 if len(v['slot']['cpus']) != n:
                     raise InventoryError(f'hosts.{role}.pools.{pool}: slot.cpus has {len(v["slot"]["cpus"])} '
                                          f'cpusets for {n} runners')
-            seen[cls] = pool
+            seen[cls, pub] = pool
         _check_home(role, h)
+        if any(pub for _, pub in seen) and ('gpu', False) not in seen:
+            raise InventoryError(f'hosts.{role}: a public pool shares the cards of the host\'s own gpu pool: name one')
+        if any(pub for _, pub in seen) and 'isolation' not in h:
+            raise InventoryError(f'hosts.{role}: a public pool needs the host\'s isolation')
         if 'local_accounts' in h:  # shared with local accounts: root's step names /tmp only
             for k, p in h['files'].items():
                 if not shared_path(p):
@@ -310,7 +337,45 @@ def load(text: str) -> Inventory:
     this = doc.get('this')
     if this not in hosts:
         raise InventoryError('inventory: this names no host')
-    return Inventory(this, hosts)
+    public = {}
+    for role, h in hosts.items():  # the public pools out of ``pools``: every reader of it ignores them
+        pub = {k: v for k, v in h['pools'].items() if _public(v)}
+        if pub:
+            public[role] = pub
+            h['pools'] = {k: v for k, v in h['pools'].items() if k not in pub}
+    return Inventory(this, hosts, public)
+
+
+def _public(v: object) -> bool:
+    """Whether a pool is of audience ``public`` (decision 16.7). Pure."""
+    return isinstance(v, dict) and v.get('audience') == 'public'
+
+
+def _check_public(where: str, role: str, cls: str, v: Mapping[str, object]) -> None:
+    """A public pool (decision 18.7): per card, of class ``gpu``, labelled ``ci-pub-gpu`` and
+    at most its host label ``<role>-pub-gpu``, with no count or slot of its own."""
+    if cls not in PUBLIC_CLASSES:
+        raise InventoryError(f'{where}: a public pool is of class {"/".join(sorted(PUBLIC_CLASSES))} only')
+    if set(v) - PUBLIC_POOL_KEYS:  # no count, so per card (``_pool``)
+        raise InventoryError(f'{where}: a public pool is per card and takes {sorted(PUBLIC_POOL_KEYS)} only')
+    labels = v.get('labels', [])
+    if PUBLIC_LABEL not in labels or not set(labels) <= {PUBLIC_LABEL, f'{role}{PUBLIC_HOST_SUFFIX}'}:
+        raise InventoryError(f'{where}: a public pool\'s labels are {PUBLIC_LABEL} and {role}-pub-gpu only')
+
+
+def _check_private_labels(where: str, role: str, pool: str, v: object) -> None:
+    """No private pool carries a label of the public pool's (decision 18.7), its own or the
+    ``<pool>, <role>`` its runners carry without them (setup's rule, §5.1). Pure."""
+    labels = (v.get('labels') if isinstance(v, dict) else None) or [pool, role]
+    if any(x.startswith(PUBLIC_PREFIX) or x.endswith(PUBLIC_HOST_SUFFIX) for x in labels):
+        raise InventoryError(f'{where}: a label of the public pool on a private pool')
+
+
+def public_pool(inv: Inventory, role: str | None = None) -> tuple[str, Mapping[str, object]] | None:
+    """The public pool of the host ``role`` (this host by default) as ``(key, spec)``, or None
+    (decision 18.7). Pure."""
+    pools = inv.public.get(inv.this if role is None else role) or {}
+    return next(iter(pools.items()), None)
 
 
 def _class(pool: str, v: object) -> str:
@@ -416,7 +481,7 @@ def labels_of(host: Mapping[str, object], pool: str) -> list[str] | None:
 #: string values that are not inventory: they appear in the design already. Every other string value of the inventory and the policy is denied.
 PUBLIC_KEYS = frozenset({'this', 'memory_max', 'cpus', 'compile_cpus', 'host_lock', 'slot_lock', 'slot_queue', 'bot',
                          'visibility', 'extra_events', 'labels', 'default_project', 'class', 'classes',
-                         'peer_labels', 'memory', 'isa', 'audience'})
+                         'peer_labels', 'memory', 'isa', 'audience', 'isolation'})
 #: ``tunnel.direct`` values the repository holds (the example, the tests): public, so not
 #: denied. Every other ``direct`` value is denied, as any inventory value is.
 #: the policy's ``[org] name`` is the org's, public as the repository is.

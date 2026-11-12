@@ -43,6 +43,7 @@ config, never in the repository: it names hosts, ssh aliases and paths, which is
     cache = "/abs/compile/cache"         # its compile cache (optional)
     ready = true                         # pool add writes false, pool ready true; no key: ready
     tier = 1                             # its tier, 1 to 99: a later tier's runners yield to it (optional; 19.1)
+    dev_slots = { lock = "/abs/dev.lock", cpus = ["0-15", "16-31"], memory_gib = 64 }   # pool run's own (16.8; optional)
 
     [machine.cluster]                    # a Slurm cluster: access through the account's gate
     access = "slurm"
@@ -127,6 +128,25 @@ problem ``drained`` and starts no pool run. A host whose entry names ``runners``
 account's ``<data>/actions-runner``) gets ``runners_online``, how many of them have a live process,
 and with none the problem ``no runner online`` (decision 15.5): brainspike's plan places no
 part there, while a pool run, which takes a slot and no runner, ignores it.
+
+**Dev slots** (decision 16.8, R7): a host entry's ``dev_slots`` gives ``pool run`` slots of its
+own, outside every CI slot: ``cpus``, one cpuset per dev slot (disjoint, below the entry's
+``cpus``), ``memory_gib``, the most a run there may ask (at most the entry's), and their lock
+files (``lock``, ``<stem>.<i>.lock`` from the second, created when taken; ``queue``, default
+``<stem>.queue``), which may not be the CI slots' files. On such a host a CPU run takes a dev
+slot (in line, as a CI slot) and never a CI slot, runs pinned to its cpuset (``taskset``), and
+its row shows ``dev_slots``, ``dev_free`` and ``dev_queue`` (its tickets, waiting or not); a run
+that asks more cores than the smallest dev slot holds is skipped there, since it may get any of
+them; a GPU run takes the cards' leases as before. Before it takes one, the host side reads the
+host's inventory (``inventory``, default ``$CI_RUNNERS_ETC/inventory.toml`` or
+``~/data/ci-runners/etc/inventory.toml`` of the account it runs as) and refuses the run
+(NOT_STARTED) if a dev slot's cpuset meets a CI slot's (a pool's ``slot.cpus``), the parts'
+``cpus`` or ``compile_cpus``, or if a pool's parts are pinned to no cpuset at all (``ci_unpinned``);
+an ``inventory`` named that cannot be read or loaded is a refusal too, while a default one that
+cannot (a pool account's host side, which is not the CI account) skips the check and says so:
+name the CI account's inventory where the pool account may read it. A host without
+``dev_slots`` keeps the claim below. An older release refuses the key (``unknown keys``): it goes into a registry only
+once every host that reads that registry has this release and ``v1`` points at it.
 
 **The claim**: a host's capacity is a slot of its CI slot queue, the same ``SlotQueue``
 (and files) that the parts' ``ci-slot`` and brainspike's ``ci_slot.sh`` take, first come
@@ -265,6 +285,20 @@ LEASE_PARTS = 1
 
 
 @dataclasses.dataclass(frozen=True)
+class DevSlots:
+    """A host's dev slots (decision 16.8): one cpuset each, a memory cap, their lock files."""
+    lock: str
+    cpus: tuple[str, ...]
+    memory_gib: int
+    queue: str = ''
+    inventory: str = ''  # the host's inventory, for the overlap check ('' : the host's default)
+
+
+#: the most dev slots a host entry may name
+DEV_SLOTS_MAX = 64
+
+
+@dataclasses.dataclass(frozen=True)
 class LeaseDir:
     dir: str
     parts: int = 1  # leases per card (the parts' max_parts)
@@ -310,6 +344,7 @@ class Machine:
     account: str = ''
     probe: str = ''  # 'forced': a host whose key is forced to ``ci-run pool probe`` (item 8)
     tier: int | None = None  # a host's tier, 1 first; None: it neither yields nor is yielded to (19.1)
+    dev_slots: DevSlots | None = None  # pool run's own slots, outside every CI slot (16.8); None: CI slots
 
     @property
     def status_only(self) -> bool:
@@ -369,7 +404,7 @@ def _labels(t: Mapping, where: str) -> dict[str, str]:
 
 _MACHINE = {'access', 'ssh', 'hostname', 'cpus', 'memory_gib', 'gpus', 'gpu_model', 'gpu_mib', 'cuda', 'p2p', 'billed',
             'price', 'python', 'host_python', 'work', 'slots', 'labels', 'numerics_ok', 'cache', 'gate', 'targets', 'ready',
-            'max_slots', 'drain', 'leases', 'site', 'account', 'probe', 'runners', 'tier'}
+            'max_slots', 'drain', 'leases', 'site', 'account', 'probe', 'runners', 'tier', 'dev_slots'}
 _TARGET = {'partition', 'cpus', 'memory_gib', 'max_minutes', 'variant', 'price', 'numerics_ok', 'labels', 'gpu_model',
            'cards', 'max_cards', 'gpu_mib', 'cuda'}
 _TOP = {'schema', 'project', 'repository', 'check', 'gpu_need_mib', 'machine', 'warm', 'numerics', 'capacity'}
@@ -379,6 +414,99 @@ def _unknown(t: Mapping, known: set[str], where: str) -> None:
     extra = sorted(set(t) - known)
     if extra:
         raise RegistryError(f'{where}: unknown keys {extra}')
+
+
+def cpus_of(spec: str) -> frozenset[int] | None:
+    """The CPUs of a cpuset list (``0-3,8``), or None where it is not one. Pure."""
+    from ci_runners import inventory
+    ranges = inventory.cpu_ranges(spec)
+    return None if ranges is None else frozenset(c for lo, hi in ranges for c in range(lo, hi + 1))
+
+
+def _dev_slots(t: Mapping, where: str, cpus: int, memory_gib: int, slots: Slots) -> DevSlots:
+    """An entry's ``dev_slots`` (decision 16.8), checked against the entry itself: disjoint
+    cpusets below its ``cpus``, a cap within its memory, lock files that are not its CI slots'."""
+    from ci_runners import slots as slots_mod
+    w = f'{where}.dev_slots'
+    d = _get(t, 'dev_slots', dict, where)
+    _unknown(d, {'lock', 'cpus', 'memory_gib', 'queue', 'inventory'}, w)
+    sets = _get(d, 'cpus', list, w, required=True)
+    if not sets or len(sets) > DEV_SLOTS_MAX or not all(isinstance(x, str) for x in sets):
+        raise RegistryError(f'{w}: cpus lists 1 to {DEV_SLOTS_MAX} cpusets, one per dev slot')
+    seen: set[int] = set()
+    for x in sets:
+        got = cpus_of(x)
+        if not got:
+            raise RegistryError(f'{w}: {x!r} is not a cpuset')
+        if seen & got:
+            raise RegistryError(f'{w}: the cpusets overlap (CPUs {sorted(seen & got)})')
+        if cpus and max(got) >= cpus:
+            raise RegistryError(f'{w}: {x!r} names a CPU beyond the entry\'s {cpus}')
+        seen |= got
+    mem = _get(d, 'memory_gib', int, w, required=True)
+    if not 1 <= mem <= memory_gib:
+        raise RegistryError(f'{w}: memory_gib from 1 to the entry\'s {memory_gib}')
+    dev = DevSlots(_abs(d, 'lock', w, required=True), tuple(sets), mem, _abs(d, 'queue', w), _abs(d, 'inventory', w))
+    ci = slots_mod.slot_paths(slots.lock, slots.count)
+    ci_queue = slots.queue or (slots.lock[:-len('.lock')] if slots.lock.endswith('.lock') else slots.lock) + '.queue'
+    dev_queue = dev.queue or (dev.lock[:-len('.lock')] if dev.lock.endswith('.lock') else dev.lock) + '.queue'
+    norm = lambda paths: {os.path.normpath(x) for x in paths}  # noqa: E731
+    if norm(ci) & norm(slots_mod.slot_paths(dev.lock, len(sets))) or os.path.normpath(ci_queue) == os.path.normpath(dev_queue):
+        raise RegistryError(f'{w}: its lock files or queue are the CI slots\' (a dev slot is never a CI slot)')
+    return dev
+
+
+def ci_cpusets(inv) -> list[tuple[str, frozenset[int]]]:
+    """The cpusets CI pins its parts to on the inventory's own host (``inv.host``): each
+    pool's ``slot.cpus`` (16.2), the parts' ``cpus`` and ``compile_cpus``. Pure."""
+    h = inv.host
+    out = []
+    for k in ('cpus', 'compile_cpus'):
+        got = cpus_of(str(h.get(k) or ''))
+        if got:
+            out.append((k, got))
+    for name, v in (h.get('pools') or {}).items():
+        slot = v.get('slot') if isinstance(v, dict) else None
+        for i, x in enumerate((slot or {}).get('cpus') or []):
+            got = cpus_of(str(x))
+            if got:
+                out.append((f'pools.{name}.slot.cpus[{i}]', got))
+    return out
+
+
+#: the runner classes whose parts run on the host itself (a light job is no part; slurm's run
+#: on a cluster)
+PART_CLASSES = ('part', 'gpu', 'multi', 'compile', 'nightly')
+
+
+def ci_unpinned(inv) -> list[str]:
+    """The pools of the inventory's own host whose parts are pinned to no cpuset (part.py's
+    pin: the runner's ``slot.cpus``, else ``compile_cpus`` for compile parts, else ``cpus``):
+    they may run on every CPU, a dev slot's too. Pure."""
+    from ci_runners import inventory
+    h = inv.host
+    out = []
+    for name, v in (h.get('pools') or {}).items():
+        cls = inventory.pool_class(h, name)
+        if cls not in PART_CLASSES or (isinstance(v, dict) and (v.get('slot') or {}).get('cpus')):
+            continue
+        if not cpus_of(str(h.get('compile_cpus' if cls == 'compile' else 'cpus') or '')):
+            out.append(name)
+    return out
+
+
+def dev_overlaps(dev_cpus: Sequence[str], inv) -> list[str]:
+    """Each dev slot that meets a cpuset CI pins its parts to (``ci_cpusets``), and each pool
+    whose parts are pinned to none (``ci_unpinned``): why; empty where none is. Pure."""
+    out = [f'pool {name}\'s parts are pinned to no cpuset (no slot.cpus, no host cpus): they may run on a dev slot\'s CPUs'
+           for name in ci_unpinned(inv)]
+    ci = ci_cpusets(inv)
+    for i, x in enumerate(dev_cpus):
+        mine = cpus_of(x) or frozenset()
+        for name, theirs in ci:
+            if mine & theirs:
+                out.append(f'dev slot {i + 1} (CPUs {x}) meets the inventory\'s {name} (CPUs {sorted(mine & theirs)})')
+    return out
 
 
 def _target(name: str, t: Mapping, where: str) -> Target:
@@ -418,6 +546,8 @@ def _machine(key: str, t: Mapping) -> Machine:
     tier = _get(t, 'tier', int, where)
     if tier is not None and (access == 'slurm' or not 1 <= tier <= TIER_MAX):
         raise RegistryError(f'{where}: tier is an integer from 1 to {TIER_MAX}, on a host (decision 19.1)')
+    if 'dev_slots' in t and access == 'slurm':
+        raise RegistryError(f'{where}: dev_slots on a host only (a cluster job is its own claim)')
     m = dict(key=key, access=access, ssh=_get(t, 'ssh', str, where, ''), hostname=_get(t, 'hostname', str, where, ''),
              billed=_get(t, 'billed', bool, where, access == 'slurm'), price=float(_get(t, 'price', float, where, 0.0)),
              labels=_labels(t, where), numerics_ok=_get(t, 'numerics_ok', bool, where, False),
@@ -452,6 +582,10 @@ def _machine(key: str, t: Mapping) -> Machine:
     if max_slots is not None and not 1 <= max_slots <= slots.count:
         raise RegistryError(f'{where}.max_slots: from 1 to the slot count ({slots.count})')
     m.update(max_slots=max_slots, drain=_abs(t, 'drain', where), leases=leases, runners=_abs(t, 'runners', where))
+    if 'dev_slots' in t and m['probe'] == 'forced':
+        raise RegistryError(f'{where}: dev_slots on an entry for pool status only (probe = "forced")')
+    m.update(dev_slots=_dev_slots(t, where, _get(t, 'cpus', int, where, required=True),
+                                  _get(t, 'memory_gib', int, where, required=True), slots) if 'dev_slots' in t else None)
     m.update(cpus=_get(t, 'cpus', int, where, required=True), memory_gib=_get(t, 'memory_gib', int, where, required=True),
              gpus=gpus, gpu_model=_get(t, 'gpu_model', str, where, '', required=bool(gpus)),
              gpu_mib=_get(t, 'gpu_mib', int, where, 0), cuda=_get(t, 'cuda', str, where, ''),
@@ -682,14 +816,15 @@ def runners_alive(root: str, proc: str = '/proc') -> 'set[str] | None':
 
 
 def probe(lock: str, count: int, queue: str, drain: str = '', leases: str = '', parts: int = 1, gpus: int = 0,
-          runners: str = '', smi: bool = True) -> dict:
+          runners: str = '', smi: bool = True, dev_lock: str = '', dev_count: int = 0, dev_queue: str = '') -> dict:
     """What a host's row needs, read on the host without taking anything: its free CI slots
     (``/proc/locks``, as ``slots._flocked``), the tickets waiting, the load, the available
     memory, the cards' free MiB, whether ``drain`` drains it, with ``leases`` (the
     leases' directory, ``parts`` a card) the leases held per card, and with ``runners``
     how many of the CI account's runners have a live process (decision 15.5), their names
     and those running a job (16.5) and those whose listener holds a connection
-    (19.2). Without ``smi`` the cards are not read (no
+    (19.2), and with ``dev_count`` the dev slots free (a missing lock file is free: a take
+    creates it) and waiting (16.8). Without ``smi`` the cards are not read (no
     ``nvidia-smi``: ``pool status --fast``). Self-contained (its source, ``drained``'s and
     ``runner_procs``'s run on the host). Stdlib."""
     import os
@@ -716,6 +851,14 @@ def probe(lock: str, count: int, queue: str, drain: str = '', leases: str = '', 
         out['queue'] = sum(1 for n in os.listdir(queue or stem + '.queue') if n.endswith('.ticket'))
     except OSError:
         out['queue'] = 0
+    if dev_count:
+        dstem = dev_lock[:-len('.lock')] if dev_lock.endswith('.lock') else dev_lock
+        dpaths = [dev_lock] + [f'{dstem}.{i}.lock' for i in range(2, dev_count + 1)]
+        out['dev_free'] = sum(1 for p in dpaths if not flocked(p))
+        try:
+            out['dev_queue'] = sum(1 for n in os.listdir(dev_queue or dstem + '.queue') if n.endswith(('.ticket', '.wait')))
+        except OSError:
+            out['dev_queue'] = 0
     with open('/proc/loadavg') as f:
         out['load'] = float(f.read().split()[0])
     out['cpus'] = os.cpu_count() or 0
@@ -1006,6 +1149,8 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
     ``runners``: its ``runner_labels``, where it has a well-formed one. Pure."""
     row = _base_row(m.key, m, here)
     row.update(gpu_model=m.gpu_model, cuda=m.cuda, multi_gpu=m.p2p, price=m.price, slots=m.slots.count if m.slots else 0)
+    if m.dev_slots:
+        row.update(dev_slots=len(m.dev_slots.cpus), dev_free=0, dev_queue=0)
     if m.tier is not None:
         row['tier'] = m.tier  # the reading registry's tier (19.1)
     if p is None:
@@ -1049,6 +1194,8 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
         gpu_free = {c: v for c, v in gpu_free.items() if leased.get(c, 0) < parts}
     row.update(slots_free=free, queue=int(p.get('queue', 0)), cpus_free=cores if free else 0,
                mem_free_gib=int(p.get('mem_free_gib', 0)), gpu_free=gpu_free, scope=bool(p.get('scope')))
+    if m.dev_slots:  # 16.8: pool run's own slots; the CI figures above stay the CI slots'
+        row.update(dev_slots=len(m.dev_slots.cpus), dev_free=int(p.get('dev_free', 0)), dev_queue=int(p.get('dev_queue', 0)))
     return row
 
 
@@ -1279,9 +1426,12 @@ def _host(m: Machine, run: Runner, here: str, etc: str, fast: bool = False, cach
         argv, kw = [*_ssh(m.ssh, key, probe_config(etc), connect), FORCED_PROBE], {'stdin': subprocess.DEVNULL}
     else:
         lz = m.leases or LeaseDir('', 1)
+        dv = m.dev_slots
         src = _probe_src() + (f'\nimport json; print(json.dumps(probe({m.slots.lock!r}, {m.slots.count}, '
                               f'{m.slots.queue!r}, {m.drain!r}, {lz.dir!r}, {lz.parts}, {m.gpus}, {m.runners!r}'
-                              f'{", smi=False" if fast else ""})))\n')
+                              f'{", smi=False" if fast else ""}'
+                              + (f', dev_lock={dv.lock!r}, dev_count={len(dv.cpus)}, dev_queue={dv.queue!r}' if dv else '')
+                              + ')))\n')
         argv, kw = _remote(m, [m.host_python, '-I', '-'], connect), {'input': src}
     try:
         r = run(argv, capture_output=True, text=True, timeout=timeout, **kw)
@@ -1451,6 +1601,8 @@ def table(rows: Sequence[Mapping]) -> str:
     for r in rows:
         cards = ','.join(f'{i}:{v // 1024}G' for i, v in sorted(r['gpu_free'].items())) if r['gpu_free'] else '-'
         slots = f'{r["slots_free"]}/{r["slots"]}' if r['access'] != 'slurm' else '-'
+        if r.get('dev_slots'):
+            slots += f' dev {r.get("dev_free", 0)}/{r["dev_slots"]}'
         lines.append((r['key'] + (' (here)' if r.get('here') else ''), slots, str(r['queue']), str(r['cpus_free']),
                       str(r['mem_free_gib']) if r['access'] != 'slurm' else '-', cards, r['gpu_model'] or '-',
                       f'{r["price"]:g}/h' if r['billed'] else 'free',
@@ -1513,6 +1665,12 @@ def fits(row: Mapping, ask: Ask, m: Machine, need_mib: int) -> str:
             return f'{m.cpus} cores, {ask.cpus} asked'
         if ask.memory_gib > m.memory_gib:
             return f'{m.memory_gib} GiB, {ask.memory_gib} asked'
+        if m.dev_slots and not ask.cards:  # 16.8: a CPU run takes a dev slot here, never a CI slot
+            least = min(len(cpus_of(x) or ()) for x in m.dev_slots.cpus)  # the run may get any of them
+            if ask.cpus > least:
+                return f'{least} cores the smallest dev slot, {ask.cpus} asked'
+            if ask.memory_gib > m.dev_slots.memory_gib:
+                return f'{m.dev_slots.memory_gib} GiB a dev slot, {ask.memory_gib} asked'
     return ''
 
 
@@ -1525,6 +1683,8 @@ def free_now(row: Mapping, ask: Ask, need_mib: int) -> bool:
         return False
     if ask.cards:  # its cards' leases instead of a CI slot, as a GPU part (design §7)
         return sum(1 for v in row['gpu_free'].values() if v >= need_mib) >= ask.cards
+    if row.get('dev_slots'):  # a dev slot, its own cpuset (16.8): the CI slots and their cores do not count
+        return row.get('dev_free', 0) >= 1
     return row['slots_free'] >= 1 and row['cpus_free'] >= ask.cpus
 
 
@@ -1559,8 +1719,10 @@ def pick(rows: Sequence[Mapping], ask: Ask, reg: Registry, *, here_ok: bool = Fa
             later.append(dict(r))
         else:
             skipped.append(f'{key}: cannot start it now')
-    now.sort(key=lambda r: (r['billed'], r['price'] if r['billed'] else 0, -r['cpus_free']))
-    later.sort(key=lambda r: (r['queue'], -r['slots']))
+    now.sort(key=lambda r: (r['billed'], r['price'] if r['billed'] else 0,
+                            -r['dev_free'] if r.get('dev_slots') and not ask.cards else -r['cpus_free']))
+    later.sort(key=lambda r: (r['dev_queue'], -r['dev_slots']) if r.get('dev_slots') and not ask.cards
+               else (r['queue'], -r['slots']))
     return now, later, skipped
 
 
@@ -1719,7 +1881,7 @@ def _user_bus(env: Mapping[str, str]) -> str:
     return rt if os.path.exists(os.path.join(rt, 'bus')) else ''
 
 
-def _take_slot(spec: Mapping, q, rounds_max: int, deadline: float) -> int | None:
+def _take_slot(spec: Mapping, q, rounds_max: int, deadline: float, what: str = 'CI slot') -> int | None:
     """Wait in line for a slot of ``q``, within the project's ``max_slots`` (``q``'s
     ``default_cap``: the run's project is the queue's default one, whose ``ci_slot.sh``
     tickets and holders count as its own): the slot's fd, or None once the host is drained,
@@ -1737,14 +1899,14 @@ def _take_slot(spec: Mapping, q, rounds_max: int, deadline: float) -> int | None
         if fd is not None:
             return fd
         if rounds_max and rounds >= rounds_max:
-            _say('no CI slot free on this host now')
+            _say(f'no {what} free on this host now')
             return None
         if time.time() >= deadline:
-            _say('no CI slot within the queue bound')
+            _say(f'no {what} within the queue bound')
             return None
         ahead = sum(1 for t in q.waiting() if t.seq < q.seq)
         if ahead != shown:
-            _say(f'waiting in line for a CI slot: {ahead} ahead')
+            _say(f'waiting in line for a {what}: {ahead} ahead')
             shown = ahead
         time.sleep(q.poll)
 
@@ -1899,7 +2061,8 @@ def remote(argv: Sequence[str], stdin=None) -> int:
         _remove_stale(os.path.dirname(d), d, time.time())
         rounds_max = int(spec.get('rounds') or 0)
         deadline = time.time() + float(spec['queue_seconds'])
-        visible = ''
+        visible, cpus = '', ''
+        dev = spec.get('dev') if not int(spec.get('cards', 0)) else None
         if int(spec.get('cards', 0)):
             if not spec.get('leases'):
                 _say('this host leases no cards to pool runs')
@@ -1910,6 +2073,20 @@ def remote(argv: Sequence[str], stdin=None) -> int:
                 return NOT_STARTED
             visible = ','.join(str(c) for c in sorted(got))
             _say(f'holding card(s) {visible}')
+        elif dev:  # 16.8: a dev slot of its own, never a CI slot
+            why = dev_refusal(dev) or (f"{spec['memory_gib']} GiB asked, a dev slot holds {dev['memory_gib']}"
+                                       if int(spec['memory_gib']) > int(dev.get('memory_gib') or 0) else '')
+            if why:
+                _say(f'refused: {why}')
+                return NOT_STARTED
+            q = slots_mod.SlotQueue(dev['lock'], len(dev['cpus']), dev.get('queue') or None, float(spec.get('poll', 3)),
+                                    default_project=spec['project'])
+            slot = _take_slot(spec, q, rounds_max, deadline, 'dev slot')
+            if slot is None:
+                return NOT_STARTED
+            fds.append(slot)
+            cpus = dev['cpus'][q._index(slot)]
+            _say(f"holding dev slot {q._index(slot) + 1} of {len(dev['cpus'])} (CPUs {cpus})")
         else:
             q = slots_mod.SlotQueue(spec['lock'], int(spec['count']), spec.get('queue') or None,
                                     float(spec.get('poll', 3)), default_project=spec['project'],
@@ -1933,7 +2110,7 @@ def remote(argv: Sequence[str], stdin=None) -> int:
             sigs['starting'] = True
             try:
                 unit = _start_supervisor(spec, d, record, env, [*fds, *(leases.fds if leases else [])],
-                                         part.command_argv(spec['command']), started)
+                                         part.command_argv(spec['command'], cpus=cpus), started)
             finally:
                 sigs['starting'] = False
             sup = started[-1]
@@ -1977,6 +2154,27 @@ def remote(argv: Sequence[str], stdin=None) -> int:
                 pass
         if ours and (sup is None or sup.poll() is not None):  # a supervisor still running keeps its directory
             subprocess.run(['rm', '-rf', '--one-file-system', d], timeout=600)
+
+
+def dev_refusal(dev: Mapping) -> str:
+    """Why the host side refuses its dev slots (16.8): one meets a cpuset CI pins its parts
+    to, or a pool's parts are pinned to none, in the host's inventory (``dev['inventory']``,
+    else this account's ``<etc>/inventory.toml``); a named inventory that cannot be read or
+    loaded is a refusal too. Where the default one cannot, the check is skipped and said."""
+    from ci_runners import cli, inventory
+    named = dev.get('inventory') or ''
+    path = named or os.path.join(cli.etc_dir(), 'inventory.toml')
+    try:
+        with open(path, encoding='utf-8') as f:
+            inv = inventory.load(f.read())
+    except (OSError, ValueError) as e:
+        why = f'{path}: {e.strerror if isinstance(e, OSError) and e.strerror else e}'
+        if named:
+            return f'the inventory named cannot be read: {why}'
+        _say(f'dev slots: overlap with the CI slots not checked: {why}')
+        return ''
+    bad = dev_overlaps(dev['cpus'], inv)
+    return '; '.join(bad[:3]) + ' (a dev slot is outside every CI slot)' if bad else ''
 
 
 def _read(path: str) -> dict:
@@ -2047,7 +2245,10 @@ def host_spec(reg: Registry, m: Machine, a: RunArgs, wait: bool) -> dict:
             'need_mib': reg.gpu_need_mib, 'timeout_seconds': a.timeout_min * 60,
             'rounds': 0 if wait else FREE_NOW_ROUNDS, 'queue_seconds': LONG_WAIT_MIN * 60 if wait else 120,
             'max_slots': m.max_slots, 'drain': m.drain, 'leases': m.leases.dir if m.leases else '',
-            'lease_parts': m.leases.parts if m.leases else 1, 'gpus': m.gpus, 'variables': dict(a.variables)}
+            'lease_parts': m.leases.parts if m.leases else 1, 'gpus': m.gpus, 'variables': dict(a.variables),
+            'dev': {'lock': m.dev_slots.lock, 'cpus': list(m.dev_slots.cpus), 'queue': m.dev_slots.queue,
+                    'memory_gib': m.dev_slots.memory_gib, 'inventory': m.dev_slots.inventory}
+            if m.dev_slots and not a.ask.cards else None}
 
 
 def run_host(reg: Registry, m: Machine, a: RunArgs, files: Sequence[str], run: Runner = subprocess.run,
@@ -2231,7 +2432,8 @@ def pool_run(reg: Registry, a: RunArgs, *, only: str = '', here_ok: bool = False
     if later and not a.no_wait:
         r = later[0]
         m = reg.machines[r['key']]
-        _say(f'no machine free now; waiting in line on {r["key"]} (queue {r["queue"]})')
+        dq = bool(r.get('dev_slots')) and not a.ask.cards
+        _say(f'no machine free now; waiting in line on {r["key"]} ({"dev queue" if dq else "queue"} {r["dev_queue" if dq else "queue"]})')
         rc = run_host(reg, m, a, files, run, popen, wait=True)
         return EXIT_NO_ROOM if rc == NOT_STARTED else rc
     _say('no machine can start it now' + (f' (tried {", ".join(tried)})' if tried else '')

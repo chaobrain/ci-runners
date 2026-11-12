@@ -24,6 +24,36 @@ id = 1001
 visibility = "private"
 '''
 
+#: this host's inventory (C2c): the hook takes each runner's class and audience from it
+INVENTORY = '''schema = 1
+this = "r"
+[hosts.r]
+account = "acct-x"
+home = "/h"
+data = "/d"
+slots = 2
+memory_max = "8G"
+disk_min_gib = 1
+gpus = [0, 1]
+max_temp_c = 80
+isolation = "account"
+pools = { part = 1, gpu = { per_card = true }, pub-gpu = { per_card = true, class = "gpu", audience = "public", labels = ["ci-pub-gpu", "r-pub-gpu"] } }
+files = { slot_lock = "/d/s.lock", slot_queue = "/d/s.queue" }
+'''
+PUB_POOL = 'pub-gpu = { per_card = true, class = "gpu", audience = "public", labels = ["ci-pub-gpu", "r-pub-gpu"] }'
+PUBLIC_REPO = '[repositories."chaobrain/brainevent"]\nid = 2002\nvisibility = "public"\npublic_runners = true\n'
+
+
+def example() -> str:
+    """The example inventory with its public pool, isolation and home runner (issue #232,
+    once the light pool carries ci-light, as the example says) uncommented."""
+    import re
+    text = (ROOT / 'setup' / 'inventory.example.toml').read_text()
+    text = re.sub(r'^# (isolation = "[^"]*")\s.*$', r'\1', text, flags=re.M)
+    text = re.sub(r'^# (pub-gpu = .*)$', r'\1', text, flags=re.M)
+    return re.sub(r'^# (home = \{.*)$', r'\1', text, flags=re.M).replace(
+        'labels = ["3090b-light"] }', 'labels = ["ci-light", "3090b-light"] }', 1)
+
 
 class Started(unittest.TestCase):
     def setUp(self):
@@ -32,6 +62,7 @@ class Started(unittest.TestCase):
         self.etc = self.base / 'etc'
         self.etc.mkdir()
         (self.etc / 'policy.toml').write_text(POLICY)
+        (self.etc / 'inventory.toml').write_text(INVENTORY)
         self.env = {'CI_RUNNERS_ETC': str(self.etc), 'CI_RUNNER_CLASS': 'part', 'RUNNER_NAME': 'r-part-1',
                     'GITHUB_REPOSITORY': 'chaobrain/brainkit', 'GITHUB_REPOSITORY_ID': '1001',
                     'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_ACTOR': 'alice', 'GITHUB_TRIGGERING_ACTOR': 'alice',
@@ -52,28 +83,191 @@ class Started(unittest.TestCase):
         self.assertEqual([r['reason'] for r in self.log()], ['ok', 'fork'])
         self.assertEqual(self.log()[0]['runner'], 'r-part-1')
 
-    def test_the_public_pool_by_the_runner_s_audience(self):
-        """C2 (decision 16.7, 18.7): the runner's ``CI_RUNNER_AUDIENCE`` from its environment;
-        an opted-in public repository on its pool's GPU runners only, with its reason logged."""
-        (self.etc / 'policy.toml').write_text(POLICY + '[repositories."chaobrain/brainevent"]\nid = 2002\n'
-                                              'visibility = "public"\npublic_runners = true\n')
+    def public_event(self) -> pathlib.Path:
+        """A same-repository pull request of the opted-in public repository."""
         ev = json.loads((EVENTS / 'pr_same_repo.json').read_text())
         pub = {'id': 2002, 'full_name': 'chaobrain/brainevent', 'private': False}
         ev['repository'] = ev['pull_request']['head']['repo'] = ev['pull_request']['base']['repo'] = pub
         path = self.base / 'public.json'
         path.write_text(json.dumps(ev))
+        return path
+
+    def test_the_public_pool_by_the_runner_s_audience(self):
+        """C2 (decision 16.7, 18.7): the runner's audience, the inventory's for its name (C2c);
+        an opted-in public repository on its pool's GPU runners only, with its reason logged."""
+        (self.etc / 'policy.toml').write_text(POLICY + PUBLIC_REPO)
+        path = self.public_event()
         env = {**self.env, 'GITHUB_REPOSITORY': 'chaobrain/brainevent', 'GITHUB_REPOSITORY_ID': '2002',
-               'GITHUB_EVENT_PATH': str(path), 'CI_RUNNER_CLASS': 'gpu', 'CI_RUNNER_AUDIENCE': 'public'}
-        cases = [(env, 'ok'), ({**env, 'CI_RUNNER_CLASS': 'light'}, 'runner-class'),
-                 ({**env, 'CI_RUNNER_CLASS': 'part'}, 'runner-class'),
-                 ({k: v for k, v in env.items() if k != 'CI_RUNNER_AUDIENCE'}, 'audience'),
-                 ({**self.env, 'CI_RUNNER_AUDIENCE': 'public'}, 'audience'), (self.env, 'ok')]
+               'GITHUB_EVENT_PATH': str(path), 'CI_RUNNER_CLASS': 'gpu', 'CI_RUNNER_AUDIENCE': 'public',
+               'RUNNER_NAME': 'r-pub-gpu0-17'}
+        gpu = {**env, 'RUNNER_NAME': 'r-gpu0', 'CI_RUNNER_AUDIENCE': 'private'}  # a private gpu runner
+        # what a caller's CI_RUNNER_CLASS and CI_RUNNER_AUDIENCE say changes nothing
+        cases = [(env, 'ok'), (gpu, 'audience'), ({**gpu, 'CI_RUNNER_AUDIENCE': 'public'}, 'audience'),
+                 ({**env, 'CI_RUNNER_CLASS': 'part', 'CI_RUNNER_AUDIENCE': 'private'}, 'ok'),
+                 ({k: v for k, v in env.items() if not k.startswith('CI_RUNNER_')}, 'ok'),
+                 ({**self.env, 'CI_RUNNER_AUDIENCE': 'public', 'CI_RUNNER_CLASS': 'gpu'}, 'ok'), (self.env, 'ok')]
         for e, why in cases:
             code, line = hook.started(e)
             self.assertEqual((code, line.split()[2]), (0 if why == 'ok' else 1, why), e)
         got = self.log()
         self.assertEqual([r['reason'] for r in got], [why for _, why in cases])
-        self.assertEqual([r['audience'] for r in got], ['public', 'public', 'public', '', 'public', ''])
+        self.assertEqual([(r['class'], r['audience']) for r in got],
+                         [('gpu', 'public'), ('gpu', 'private'), ('gpu', 'private'), ('gpu', 'public'), ('gpu', 'public'),
+                          ('part', 'private'), ('part', 'private')])
+
+    def test_every_runner_setup_makes_is_accepted_as_its_own_env_says(self):
+        """C2c: each runner setup registers (``setup._runners``), with the class its ``.env``
+        says (``setup.env_file``), is the inventory's to the hook, on every host of the example."""
+        import re
+        from ci_runners import inventory, setup
+        text = example()
+        seen = []
+        for role in inventory.load(text).hosts:
+            doc = re.sub(r'^this = "[^"]*"', f'this = "{role}"', text, count=1, flags=re.M)
+            (self.etc / 'inventory.toml').write_text(doc)
+            i = inventory.load(doc)
+            for (name, _, cls, card, slot), pool in zip(setup._runners(i), setup.runner_pools(i), strict=True):
+                env = dict(x.split('=', 1) for x in setup.env_file(i, cls, str(self.etc), card, slot, pool).splitlines())
+                self.assertEqual(hook.runner_facts(str(self.etc), name), (env['CI_RUNNER_CLASS'], 'private'), name)
+                self.assertNotIn('CI_RUNNER_AUDIENCE', env)  # unset: private
+                seen.append((name, env['CI_RUNNER_CLASS']))
+        self.assertGreater(len(seen), 5)
+        self.assertIn(('3090b-home-1', 'light'), seen)  # a home runner: class light, no ci- label
+        self.assertIn(('3090b-light-1', 'light'), seen)
+
+    def test_the_decision_s_environment_is_the_allowlist_for_every_pool_kind(self):
+        """C2c (review): ``job-started.sh`` starts the decision under ``env -i`` with what the
+        hook reads (``hook.ENV``) where it is set, ``HOME`` and a fixed ``PATH``. Every variable
+        the hook reads arrives, as it was, on a runner of each pool kind of the example's hosts
+        and on a public runner; nothing else does, whatever a job's ``env:`` or the runner's
+        ``.env`` plants (``LD_*``, ``PYTHON*``, ``CI_RUNNER*``)."""
+        import re
+        from ci_runners import inventory, policy, setup
+        src = (ROOT / 'hooks' / 'job-started.sh').read_text()
+        listed = re.search(r'\nfor v in (.*?); do\n', src, re.S).group(1).replace('\\\n', ' ').split()
+        self.assertEqual(listed, [*hook.ENV, 'HOME'])
+        read = set()
+        for mod in (hook, policy):
+            read |= set(re.findall(r"env\.get\('((?:GITHUB|RUNNER)_[A-Z_]+)'", pathlib.Path(mod.__file__).read_text()))
+        self.assertEqual(read, set(hook.ENV))  # what the hook reads, and nothing it does not
+        rel = self.base / 'releases'
+        rel.mkdir()
+        os.symlink(ROOT, rel / 'hook')
+        mark = self.base / 'env.0'
+        fake = self.base / 'py' / 'python3'  # the interpreter setup wrote, recording what it gets
+        fake.parent.mkdir()
+        fake.write_text(f'#!/bin/sh\n/usr/bin/env -0 > {mark}\nexec {sys.executable} "$@"\n')
+        fake.chmod(0o755)
+        hooks = self.base / 'hooks'
+        hooks.mkdir()
+        (hooks / 'job-started.sh').write_text(setup.hook_text(src, str(fake), str(self.base), str(self.etc)))
+        (self.etc / 'policy.toml').write_text(POLICY + 'classes = ["compile", "nightly", "slurm"]\n' + PUBLIC_REPO)
+        planted = self.base / 'planted'
+        planted.mkdir()
+        (planted / 'policy.toml').write_text('schema = 2\n')
+        forged = {'LD_PRELOAD': str(planted / 'x.so'), 'LD_LIBRARY_PATH': str(planted), 'PYTHONPATH': str(planted),
+                  'PYTHONSTARTUP': str(planted / 'x.py'), 'PYTHONHOME': str(planted), 'CI_RUNNER_CLASS': 'slurm',
+                  'CI_RUNNER_AUDIENCE': 'public', 'CI_RUNNERS_ETC': str(planted), 'CI_RUNNERS_PYTHON': '/bin/true',
+                  'RUNNER_TEMP': str(planted), 'GITHUB_TOKEN': 'x', 'BASH_ENV': str(planted / 'x.sh'), 'ENV': 'x'}
+        text = example()
+        kinds = {}
+        for role in inventory.load(text).hosts:
+            doc = re.sub(r'^this = "[^"]*"', f'this = "{role}"', text, count=1, flags=re.M)
+            i = inventory.load(doc)
+            for (name, _, cls, card, slot), pool in zip(setup._runners(i), setup.runner_pools(i), strict=True):
+                runner_env = dict(x.split('=', 1) for x in setup.env_file(i, cls, str(self.etc), card, slot, pool).splitlines())
+                kinds.setdefault((cls, pool == inventory.home_pool(i.host)), (doc, name, runner_env, self.env))
+            if inventory.public_pool(i) is not None:
+                pub = {**self.env, 'GITHUB_REPOSITORY': 'chaobrain/brainevent', 'GITHUB_REPOSITORY_ID': '2002',
+                       'GITHUB_EVENT_PATH': str(self.public_event())}
+                kinds.setdefault(('gpu', 'public'), (doc, f'{role}-pub-gpu{i.host["gpus"][-1]}-17', {}, pub))
+        self.assertEqual({k[0] for k in kinds}, {'light', 'part', 'gpu', 'multi', 'compile'})
+        self.assertIn(('light', True), kinds)  # a home runner
+        self.assertIn(('gpu', 'public'), kinds)
+        odd = 'a b"\'$(touch x)`touch y`\\\n*'  # read for a protected push alone: passed as it is
+        for n, (kind, (doc, name, runner_env, job)) in enumerate(sorted(kinds.items(), key=str)):
+            with self.subTest(kind=kind, runner=name):
+                (self.etc / 'inventory.toml').write_text(doc)
+                env = {**runner_env, **forged, **job, 'RUNNER_NAME': name, 'HOME': str(self.base),
+                       'PATH': f'{planted}:/usr/bin:/bin', 'GITHUB_RUN_ID': str(100 + n), 'GITHUB_REF_PROTECTED': odd}
+                if n % 3 == 1:
+                    del env['GITHUB_REF_PROTECTED']  # unset stays unset
+                elif n % 3 == 2:
+                    env['GITHUB_REF_PROTECTED'] = ''  # and set but empty, set
+                r = subprocess.run(['sh', str(hooks / 'job-started.sh')], env=env, capture_output=True, text=True,
+                                   timeout=60, cwd=self.base)
+                self.assertEqual((r.returncode, r.stdout.split()[:3]), (0, ['ci-runners:', 'accepted', 'ok']), r.stderr)
+                got = dict(x.split('=', 1) for x in mark.read_text().split('\0') if x)
+                got = {k: v for k, v in got.items() if k not in ('PWD', 'SHLVL', '_')}  # the recorder's shell's
+                self.assertEqual(got, {'PATH': '/usr/bin:/bin', 'HOME': str(self.base),
+                                       **{k: env[k] for k in hook.ENV if k in env}})
+        self.assertFalse((self.base / 'x').exists() or (self.base / 'y').exists())
+
+    def test_the_hook_decides_from_the_public_runner_s_stripped_inventory(self):
+        """C2's review (C3 generates it): a public runner's etc holds ``inventory.public_view``,
+        never the host's inventory; the hook decides from it as from the host's."""
+        from ci_runners import inventory
+        host = INVENTORY.replace('isolation = "account"\n', 'isolation = "account"\npush_key = "ssh-ed25519 '
+                                 f'AAAAC3NzaC1lZDI1NTE5AAAAI{"k" * 43}"\n'
+                                 'cpus = "0-15"\n') + '[hosts.other]\n' + INVENTORY.split('[hosts.r]\n', 1)[1] \
+            .replace('pub-gpu = { per_card = true, class = "gpu", audience = "public", labels = ["ci-pub-gpu", "r-pub-gpu"] }',
+                     'light = 1')
+        inv = inventory.load(host)
+        view = inventory.public_view(inv, [1])
+        for secret in ('acct-x', '"/h"', '"/d"', 'ssh-ed25519', 'other', '0-15', '/d/s.lock'):
+            self.assertNotIn(secret, view)
+        self.assertEqual(inventory.load(view).public, inv.public)
+        (self.etc / 'policy.toml').write_text(POLICY + PUBLIC_REPO)
+        (self.etc / 'inventory.toml').write_text(view)
+        pub = {**self.env, 'GITHUB_REPOSITORY': 'chaobrain/brainevent', 'GITHUB_REPOSITORY_ID': '2002',
+               'GITHUB_EVENT_PATH': str(self.public_event())}
+        for name, why in (('r-pub-gpu1-17', 'ok'), ('r-pub-gpu0-17', 'runner'), ('r-part-1', 'runner'),
+                          ('other-pub-gpu1-17', 'runner'), ('r-gpu1', 'audience')):
+            self.assertEqual(hook.started({**pub, 'RUNNER_NAME': name})[1].split()[2], why, name)
+        for bad in ([], [2], [0, 5]):
+            with self.assertRaisesRegex(inventory.InventoryError, 'are not the host'):
+                inventory.public_view(inv, bad)
+        with self.assertRaisesRegex(inventory.InventoryError, 'no public pool'):
+            inventory.public_view(inventory.load(INVENTORY.replace(', ' + PUB_POOL, '')), [0])
+        self.assertEqual(inventory.public_view(inv, [1, 0, 1]), inventory.public_view(inv, [0, 1]))
+
+    def test_the_runner_s_class_and_audience_are_the_inventory_s(self):
+        """C2c (decision 18.7): by ``RUNNER_NAME``, never the environment's word."""
+        def why(**kw):
+            env = {k: v for k, v in {**self.env, **kw}.items() if v is not None}
+            code, line = hook.started(env)
+            self.assertEqual(code, 0 if line.split()[2] == 'ok' else 1)
+            return line.split()[2]
+        for kw in ({'RUNNER_NAME': 'r-gpu1'}, {'RUNNER_NAME': 'r-gpu1', 'CI_RUNNER_CLASS': None},
+                   {'CI_RUNNER_CLASS': 'gpu', 'CI_RUNNER_AUDIENCE': 'public'}, {'CI_RUNNER_CLASS': 'nightly'}):
+            self.assertEqual(why(**kw), 'ok', kw)
+        self.assertEqual([(r['runner'], r['class'], r['audience']) for r in self.log()],
+                         [('r-gpu1', 'gpu', 'private')] * 2 + [('r-part-1', 'part', 'private')] * 2)
+        for kw in ({'RUNNER_NAME': 'r-part-2'}, {'RUNNER_NAME': 'x-part-1'}, {'RUNNER_NAME': None},
+                   {'RUNNER_NAME': ''}, {'RUNNER_NAME': 'r-gpu2'},  # no such card
+                   {'RUNNER_NAME': 'r-pub-gpu2-1'}, {'RUNNER_NAME': 'x-pub-gpu0-1'}, {'RUNNER_NAME': 'r-pub-gpu0'},
+                   {'RUNNER_NAME': 'r-pub-gpu0-1x'}, {'RUNNER_NAME': 'r-pub-gpu0-12345678901234'}):
+            self.assertEqual(why(**kw, CI_RUNNER_CLASS='gpu', CI_RUNNER_AUDIENCE='public'), 'runner', kw)
+        self.assertEqual(self.log()[-1]['error'], 'runner: the inventory names no such runner')
+        self.assertEqual(why(RUNNER_NAME='r-pub-gpu1-12345678'), 'audience')  # a public runner: brainkit is private
+        self.assertEqual(self.log()[-1]['audience'], 'public')
+        # the public pool's runners exist only where the inventory has its pool
+        (self.etc / 'inventory.toml').write_text(INVENTORY.replace(', ' + PUB_POOL, ''))
+        self.assertEqual(why(RUNNER_NAME='r-pub-gpu0-1'), 'runner')
+        self.assertEqual(why(), 'ok')
+        for text in ('schema = 7\n', 'not toml [', '\xff'):
+            (self.etc / 'inventory.toml').write_bytes(text.encode('latin-1'))
+            self.assertEqual(why(), 'inventory', text)
+        (self.etc / 'inventory.toml').unlink()
+        self.assertEqual(why(), 'inventory')
+        self.assertTrue(self.log()[-1]['error'].startswith('inventory: '))
+        saved = hook.MAX_INVENTORY
+        hook.MAX_INVENTORY = 100
+        try:
+            (self.etc / 'inventory.toml').write_text(INVENTORY)
+            self.assertEqual(why(), 'inventory')
+        finally:
+            hook.MAX_INVENTORY = saved
 
     def test_errors_refuse(self):
         cases = {
@@ -156,6 +350,13 @@ class Started(unittest.TestCase):
         hooks.mkdir()
         for n in ('job-started.sh', 'job-completed.sh'):
             (hooks / n).write_bytes((ROOT / 'hooks' / n).read_bytes())
+        # as the repository has it, no etc: the environment's is never read, so it refuses
+        r = subprocess.run(['bash', '-e', str(hooks / 'job-started.sh')], env={**self.env, 'PATH': '/usr/bin:/bin'},
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual((r.returncode, r.stdout.split()[:3]), (1, ['ci-runners:', 'refused', 'error']), r.stderr)
+        from ci_runners import setup
+        src = (ROOT / 'hooks' / 'job-started.sh').read_text()
+        (hooks / 'job-started.sh').write_text(setup.hook_text(src, sys.executable, str(self.base), str(self.etc)))
         r = subprocess.run(['bash', '-e', str(hooks / 'job-started.sh')], env={**self.env, 'PATH': '/usr/bin:/bin'},
                            capture_output=True, text=True, timeout=60)
         self.assertEqual((r.returncode, r.stdout.count('\n')), (0, 1), r.stderr)
@@ -184,8 +385,23 @@ class Started(unittest.TestCase):
         fake.write_text(f'#!/bin/sh\necho "$@" >> {mark}\nexec {sys.executable} "$@"\n')
         fake.chmod(0o755)
         for n in ('job-started.sh', 'job-completed.sh'):
-            (hooks / n).write_text(setup.hook_text((ROOT / 'hooks' / n).read_text(), str(fake), str(self.base)))
+            (hooks / n).write_text(setup.hook_text((ROOT / 'hooks' / n).read_text(), str(fake), str(self.base),
+                                                   str(self.etc)))
+        # C2c: the hook reads the etc setup wrote, never the one a job's environment names
+        planted = self.base / 'planted'
+        planted.mkdir()
+        (planted / 'policy.toml').write_text(POLICY)
+        (planted / 'inventory.toml').write_text(INVENTORY)
         (self.etc / 'policy.toml').write_text('schema = 2\n')  # refuses every job
+        r = subprocess.run(['sh', str(hooks / 'job-started.sh')], env={**self.env, 'CI_RUNNERS_ETC': str(planted),
+                                                                        'PATH': '/usr/bin:/bin'},
+                           capture_output=True, text=True, timeout=60, cwd=self.base)
+        # the planted policy would accept it; the host's has no such repository
+        self.assertEqual((r.returncode, r.stdout.split()[:3]), (1, ['ci-runners:', 'refused', 'repository']), r.stderr)
+        with self.assertRaisesRegex(ValueError, 'no absolute etc'):
+            setup.hook_text((ROOT / 'hooks' / 'job-started.sh').read_text(), str(fake), str(self.base), 'etc')
+        self.assertIn("\netc='/data/x y/etc'\n", setup.hook_text((ROOT / 'hooks' / 'job-started.sh').read_text(),
+                                                               str(fake), str(self.base), '/data/x y/etc'))
         trap = self.base / 'trap'  # a job may put its own dirname and readlink first in PATH
         for tool in ('dirname', 'readlink'):
             (trap / tool).parent.mkdir(exist_ok=True)
@@ -206,11 +422,11 @@ class Started(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'no release line'):
             setup.hook_text(src.replace(setup.HOOK_BASE, ''), str(fake), str(self.base))
         # a copy whose release line names no release refuses every job (fail closed)
-        (hooks / 'job-started.sh').write_text(setup.hook_text(src, str(fake), str(self.base / 'nowhere')))
+        (hooks / 'job-started.sh').write_text(setup.hook_text(src, str(fake), str(self.base / 'nowhere'), str(self.etc)))
         r = subprocess.run(['sh', str(hooks / 'job-started.sh')], env={**self.env, 'PATH': '/usr/bin:/bin'},
                            capture_output=True, text=True, timeout=60, cwd=self.base)
         self.assertEqual((r.returncode, r.stdout), (1, 'ci-runners: refused error policy=none\n'))
-        text = setup.hook_text(src, '/opt/py/bin/python3', '/data/x/ci-runners')
+        text = setup.hook_text(src, '/opt/py/bin/python3', '/data/x/ci-runners', '/data/x/ci-runners/etc')
         self.assertIn('\nbase=/data/x/ci-runners\nroot=', text)
         self.assertNotIn('@CI_', text)
 

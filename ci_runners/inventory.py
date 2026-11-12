@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import math
 import os
 import re
@@ -316,6 +317,8 @@ def load(text: str) -> Inventory:
             if pub:
                 _check_public(f'hosts.{role}.pools.{pool}', role, cls, v)
             else:
+                if pool.startswith('pub-gpu'):  # its runners' names would read as the public pool's (C2c)
+                    raise InventoryError(f'hosts.{role}.pools.{pool}: a private pool\'s key starts with pub-gpu')
                 _check_private_labels(f'hosts.{role}.pools.{pool}', role, pool, v)
             if (cls, pub) in seen and cls != HOME_CLASS:  # the home pool: _check_home
                 raise InventoryError(f'hosts.{role}.pools.{pool}: class {cls} is also the class of {seen[cls, pub]}')
@@ -361,6 +364,34 @@ def _check_public(where: str, role: str, cls: str, v: Mapping[str, object]) -> N
     labels = v.get('labels', [])
     if PUBLIC_LABEL not in labels or not set(labels) <= {PUBLIC_LABEL, f'{role}{PUBLIC_HOST_SUFFIX}'}:
         raise InventoryError(f'{where}: a public pool\'s labels are {PUBLIC_LABEL} and {role}-pub-gpu only')
+
+
+#: the stripped inventory's paths (``public_view``): no path of the host's
+NOWHERE = '/nonexistent'
+
+
+def public_view(inv: Inventory, cards: Iterable[int]) -> str:
+    """The inventory a public runner's hook reads, never the host's (C2's review, 2026-11-13;
+    the launcher writes it into the runner's own etc, C3): this host's public pool, with the gpu
+    pool that validation needs, on ``cards`` alone, and nothing of the host's own: no account,
+    path, egress, key, probe or other host; placeholders where the schema needs a value. The
+    hook takes from it the class and audience of ``<role>-pub-gpu<N>-<seq>`` on those cards.
+    InventoryError where the host has no public pool or a card is not the host's. Pure."""
+    pub = public_pool(inv)
+    if pub is None:
+        raise InventoryError(f'hosts.{inv.this}: no public pool to view')
+    want = sorted(set(cards))
+    if not want or not set(want) <= set(inv.host['gpus']):
+        raise InventoryError(f'hosts.{inv.this}: cards {want} are not the host\'s {inv.host["gpus"]}')
+    key, spec = pub
+    pool = ', '.join(f'{k} = {json.dumps(v)}' for k, v in sorted(spec.items()))
+    text = (f'schema = {SCHEMA}\nthis = "{inv.this}"\n[hosts.{inv.this}]\naccount = "public"\n'
+            f'home = "{NOWHERE}"\ndata = "{NOWHERE}"\nslots = 1\nmemory_max = "1G"\ndisk_min_gib = 0\n'
+            f'gpus = {json.dumps(want)}\nmax_temp_c = 1\nisolation = {json.dumps(inv.host["isolation"])}\n'
+            f'pools = {{ gpu = {{ per_card = true }}, {key} = {{ {pool} }} }}\n'
+            f'files = {{ slot_lock = "{NOWHERE}/slot.lock", slot_queue = "{NOWHERE}/slot.queue" }}\n')
+    load(text)  # it loads as the hook loads it (a public pool's values are strings, bools and lists)
+    return text
 
 
 def _check_private_labels(where: str, role: str, pool: str, v: object) -> None:

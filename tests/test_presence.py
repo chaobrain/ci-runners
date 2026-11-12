@@ -1085,13 +1085,14 @@ class BlackHole(Fixture):
         (self.data / 'ci-runners/state/parts/org/repo/77-1/n-1/exit.json').write_text('{}')  # its supervisor ended
         self.hook_line('stale')
         self.hook_line('policy')
+        self.hook_line('runner')  # a runner directory its inventory does not know: the host's
         self.hook_line('actor')  # a refusal by the policy: not the host's fault
         self.hook_line('error', accepted=True)
         self.hook_line('timeout', hook='job-completed')
         with open(next((self.data / 'ci-runners' / 'logs').glob('hook-*.log')), 'a') as f:
             f.write('[' * 100000 + '\n')  # a line too deep to parse: skipped
         got = sorted((e['why'], e.get('record', e.get('runner'))) for e in self.ends())
-        self.assertEqual(got, [('hook: policy', 'hz-part-1'), ('hook: stale', 'hz-part-1'),
+        self.assertEqual(got, [('hook: policy', 'hz-part-1'), ('hook: runner', 'hz-part-1'), ('hook: stale', 'hz-part-1'),
                                ('lost', 'org/repo/77-1/f-1'), ('lost', 'org/repo/77-1/j-1'),
                                ('unavailable: low disk: 1 GiB free under the data directory', 'org/repo/77-1/a-1')])
 

@@ -173,6 +173,14 @@ class Load(unittest.TestCase):
             inv.load(PLAIN.replace('slots = 2', f'presence = {g}\nslots = 2', 1))
         self.assertEqual(inv.cpu_ranges('0-3,8'), [(0, 3), (8, 8)])
 
+    def test_a_private_pool_never_takes_the_public_runners_names(self):
+        """C2c: a private pool keyed ``pub-gpu…`` would name its runners ``<role>-pub-gpu<N>-<i>``,
+        as the hook reads a public runner's name."""
+        for key in ('pub-gpu0', 'pub-gpu', 'pub-gpu12x'):
+            with self.assertRaisesRegex(inv.InventoryError, f'pools.{key}: a private pool.s key starts with pub-gpu'):
+                inv.load(PLAIN.replace('compile = { count = 1', f'{key} = {{ class = "compile", count = 1', 1))
+        inv.load(PLAIN.replace('compile = { count = 1', 'gpu-pub = { class = "compile", count = 1', 1))
+
     def test_the_keys_of_decision_18_are_accepted_and_ignored(self):
         """C2 (decision 18.7, 16.3's rule): a host's ``isolation`` and its public pool load, as
         the example documents them (commented), checked for shape; the public pool is out of

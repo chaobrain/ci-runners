@@ -60,6 +60,9 @@ REG = 'setup/register.sh'
 INS = 'setup/install.sh'
 UNI = 'setup/uninstall.sh'
 TP = 'tests.test_policy'
+THI = 'tests.test_hook.Started.test_the_runner_s_class_and_audience_are_the_inventory_s'
+THE = 'tests.test_hook.Started.test_the_decision_s_environment_is_the_allowlist_for_every_pool_kind'
+THV = 'tests.test_hook.Started.test_the_hook_decides_from_the_public_runner_s_stripped_inventory'
 TI = 'tests.test_inventory'
 TH = 'tests.test_hook'
 TU = 'tests.test_setup'
@@ -410,7 +413,51 @@ MUTANTS = [
      [f'{TZ}.Merge.test_members_act_in_an_opted_in_public_repository']),
     (POL_, "        if r.public_runners:\n", "        if False:\n", [f'{TPF}.PolicyDigest.test_the_public_opt_in_counts_only_where_set']),
     (POL_, "        if r.public_runners:\n", "        if True:\n", [f'{TPF}.PolicyDigest.test_the_public_opt_in_counts_only_where_set']),
-    (HOK, " 'audience': env.get('CI_RUNNER_AUDIENCE', ''),", "", [f'{TH}.Started.test_the_public_pool_by_the_runner_s_audience']),
+    (HOK, "                    detail['class'], detail['audience'] = facts\n", "",
+     [f'{TH}.Started.test_the_public_pool_by_the_runner_s_audience', THI]),
+    # C2c (decision 18.7): the runner's class and audience are the inventory's, by RUNNER_NAME
+    (HOK, "        if len(argv) == 2 and argv[1]:  # the etc", "        if False:  # the etc", [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
+    (SET, "    if src.count(HOOK_ETC) and not os.path.isabs(etc):", "    if False:", [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
+    (SET, "shlex.quote(os.path.abspath(etc)) if etc", "os.path.abspath(etc) if etc", [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
+    (SET, "        .replace(HOOK_ETC, f'etc=", "        .replace('@@', f'etc=", [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
+    (SET, "hook_text(f.read(), python, base, etc), 0o755)", "hook_text(f.read(), python, base, '/x'), 0o755)",
+     [f'{TU}.Standalone.test_plan_without_a_proxy']),
+    (HKS, 'job-started "$etc"\n', 'job-started\n', [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
+    (INV, "                if pool.startswith('pub-gpu'):  # its runners'", "                if False:  # its runners'",
+     [f'{TI}.Load.test_a_private_pool_never_takes_the_public_runners_names']),
+    (HOK, "                if facts is None:  # a runner directory", "                if False:  # a runner directory", [THI]),
+    (HOK, "env = {**env, 'CI_RUNNER_CLASS': facts[0], 'CI_RUNNER_AUDIENCE': facts[1]}",
+     "env = {'CI_RUNNER_CLASS': facts[0], 'CI_RUNNER_AUDIENCE': facts[1], **env}",
+     [f'{TH}.Started.test_the_public_pool_by_the_runner_s_audience', THI]),
+    # review: the decision under env -i, with what the hook reads; the public runner's stripped inventory
+    (HKS, "exec /usr/bin/env -i PATH=/usr/bin:/bin", "exec /usr/bin/env PATH=/usr/bin:/bin", [THE]),
+    (HKS, " RUNNER_NAME HOME; do", " RUNNER_NAME; do", [THE]),
+    (HKS, "GITHUB_RUN_ID GITHUB_TRIGGERING_ACTOR", "GITHUB_TRIGGERING_ACTOR", [THE]),
+    (HKS, '[ -z \\"\\${$v+x}\\" ]', '[ -z \\"\\${$v}\\" ]', [THE]),
+    (HOK, "'GITHUB_REPOSITORY_ID', 'GITHUB_RUN_ID',", "'GITHUB_REPOSITORY_ID',", [THE]),
+    (INV, "    if not want or not set(want) <= set(inv.host['gpus']):", "    if not want:", [THV]),
+    (INV, "    want = sorted(set(cards))", "    want = list(cards)", [THV]),
+    (INV, "gpus = {json.dumps(want)}", "gpus = {json.dumps(inv.host['gpus'])}", [THV]),
+    (INV, "f'home = \"{NOWHERE}\"\\ndata", "f'home = \"{inv.host[\"home\"]}\"\\ndata", [THV]),
+    (INV, "    if pub is None:\n        raise InventoryError(f'hosts.{inv.this}: no public pool to view')",
+     "    if pub is None:\n        raise InventoryError(f'hosts.{inv.this}: cards are not the host')", [THV]),
+    (HOK, "        if n == name:\n            return cls, 'private'", "        if True:\n            return cls, 'private'", [THI]),
+    (HOK, "            return cls, 'private'", "            return cls, ''", [THI]),
+    (HOK, "    if m and inventory.public_pool(inv) is not None and int(m.group(1)) in inv.host['gpus']:",
+     "    if m and int(m.group(1)) in inv.host['gpus']:", [THI]),
+    (HOK, "    if m and inventory.public_pool(inv) is not None and int(m.group(1)) in inv.host['gpus']:",
+     "    if m and inventory.public_pool(inv) is not None:", [THI]),
+    (HOK, "rf'{re.escape(inv.this)}{inventory.PUBLIC_HOST_SUFFIX}", "rf'[a-z0-9]+{inventory.PUBLIC_HOST_SUFFIX}", [THI]),
+    (HOK, "-[0-9]{{1,12}}', name)", "-?[0-9]{{0,12}}', name)", [THI]),
+    (HOK, "        return 'gpu', 'public'", "        return 'gpu', 'private'", [THI]),
+    (HOK, "                d = policy.Decision(False, 'inventory')", "                d = policy.Decision(True, 'ok')", [THI]),
+    (HOK, "_read(os.path.join(etc, 'inventory.toml'), MAX_INVENTORY)", "_read(os.path.join(etc, 'inventory.toml'), 1 << 30)", [THI]),
+    (POL, "'stale', 'runner', 'policy',", "'stale', 'policy',", [f'{TP}.Public.test_the_reasons_the_hook_may_print']),
+    (PRS, "HOOK_INFRA = ('stale', 'runner', 'policy', 'inventory', 'timeout', 'error')",
+     "HOOK_INFRA = ('stale', 'policy', 'inventory', 'timeout', 'error')",
+     [f'{TP}.Public.test_the_reasons_the_hook_may_print', f'{TPR}.BlackHole.test_what_counts']),
+    (PRS, "HOOK_INFRA = ('stale', 'runner', 'policy', 'inventory', 'timeout', 'error')",
+     "HOOK_INFRA = ('stale', 'runner', 'policy', 'timeout', 'error')", [f'{TP}.Public.test_the_reasons_the_hook_may_print']),
     # C2a (decision 18.7, 16.3): the public pool and the host's isolation, accepted, checked and ignored
     (INV, "    'isolation': (lambda v: isinstance(v, str) and v in ISOLATION, False),", "    'isolation': (lambda v: True, False),",
      [f'{TI}.Load.test_the_keys_of_decision_18_are_accepted_and_ignored']),
@@ -1623,7 +1670,7 @@ MUTANTS = [
      [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
     (LCH, 'retry_on="[\\"self-hosted\\",\\"${own//,/\\",\\"}\\"]"', 'retry_on="[\\"self-hosted\\",\\"$own\\"]"',
      [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
-    (HKS, 'exec /usr/bin/timeout -k 5 65 "$py" -I', 'exec /usr/bin/timeout -k 5 65 /usr/bin/python3 -I',
+    (HKS, ' /usr/bin/timeout -k 5 65 "$py" -I', ' /usr/bin/timeout -k 5 65 /usr/bin/python3 -I',
      [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
     (HKC, 'exec "$py" -I', 'exec /usr/bin/python3 -I', [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
     (LCH, 'if [[ $etc == /* ]]; then', 'if [[ -n $etc ]]; then', [f'{TA}.Launcher.test_the_release_is_found_beside_ci_runners_etc']),
@@ -1751,7 +1798,7 @@ MUTANTS = [
     (SET, "    return src.replace(HOOK_PYTHON, f'py={python}\\n')", "    return src",
      [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
     (SET, "    if src.count(HOOK_PYTHON) != 1:", "    if False:", [f'{TH}.Started.test_the_wrappers_run_the_interpreter_setup_wrote']),
-    (SET, "hook_text(f.read(), python, base), 0o755)", "f.read(), 0o755)", [f'{TU}.Standalone.test_plan_without_a_proxy']),
+    (SET, "hook_text(f.read(), python, base, etc), 0o755)", "f.read(), 0o755)", [f'{TU}.Standalone.test_plan_without_a_proxy']),
     (SET, "    except (OSError, subprocess.SubprocessError) as e:\n        raise ValueError(f'python",
      "    except OSError as e:\n        raise ValueError(f'python", [f'{TU}.Setup.test_a_hung_or_missing_python_is_refused']),
     (SET, "        _record(state_path, plan.digest(), made)", "        pass", [f'{TU}.Setup.test_a_failed_apply_records_what_it_made']),

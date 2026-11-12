@@ -393,6 +393,13 @@ class Public(unittest.TestCase):
             self.assertIn(why, policy.REASONS)
             self.assertLess(policy.REASONS.index(why), policy.REASONS.index('stale'))  # a decision, not an infra end
             self.assertEqual(policy.line(policy.Decision(False, why), ''), f'ci-runners: refused {why} policy=none')
+        # the host's fault: a runner directory its inventory does not know, an unread inventory
+        for why in ('runner', 'inventory'):
+            self.assertGreater(policy.REASONS.index(why), policy.REASONS.index('stale'))
+            self.assertEqual(policy.line(policy.Decision(False, why), ''), f'ci-runners: refused {why} policy=none')
+        from ci_runners import presence
+        self.assertEqual(set(presence.HOOK_INFRA), {'stale', 'runner', 'policy', 'inventory', 'timeout', 'error'})
+        self.assertEqual(set(presence.HOOK_INFRA), set(policy.REASONS[policy.REASONS.index('stale'):]))
 
 
 class Load(unittest.TestCase):

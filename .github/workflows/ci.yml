@@ -152,7 +152,8 @@ jobs:
           plan-reason: ${{ steps.command.outputs.reason }}
           plan-only: ${{ inputs.plan-only }}
           workspace: ${{ github.workspace }}
-      # the plan's files, once, for every part (CIRUNNERS_FILES there)
+      # the plan's files, once, for every part (CIRUNNERS_FILES there): hidden entries too (the
+      # plan named the directory; flow plan refused what this upload cannot carry)
       - id: files
         if: ${{ !cancelled() && steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != '' }}
         uses: actions/upload-artifact@v4
@@ -161,6 +162,7 @@ jobs:
           path: ${{ github.workspace }}/${{ steps.plan.outputs.files }}
           retention-days: 7
           if-no-files-found: error
+          include-hidden-files: true
 
   # the claim's pending, beside the parts: only once the plan is routed (never on a head the
   # claim skipped as green), and only where nothing was posted since the claim read the
@@ -209,8 +211,8 @@ jobs:
       project: ${{ needs.plan.outputs.project }}
 
   # the run's one final status: the plan's end where it ended the run (an old contract, a
-  # plan that does not load, a red plan command, a route error, nothing to run, plan only),
-  # else every part's. Not where the claim skipped a green head, nor in a cancelled run (a
+  # plan that does not load, a red plan command, a route error, nothing to run, plan only,
+  # its files not uploaded after the route: no part started), else every part's. Not where the claim skipped a green head, nor in a cancelled run (a
   # newer head's run posts); a plan job lost before its parts were known posts error
   verdict:
     name: verdict
@@ -243,8 +245,17 @@ jobs:
           sha: ${{ needs.plan.outputs.sha }}
           state: error
           description: 'plan: the plan job ended without a plan (${{ needs.plan.result }}); no part ran'
+      # a plan job that ended after the route, its files not uploaded: no part started, none was lost
+      - if: needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' && needs.plan.outputs.files == 'failure'
+        uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: status
+          context: ${{ inputs.context }}
+          sha: ${{ needs.plan.outputs.sha }}
+          state: error
+          description: 'plan: the upload of the plan''s files failed after the route; no part ran'
       - id: verdict
-        if: needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'
+        if: needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' && needs.plan.outputs.files != 'failure'
         uses: chaobrain/ci-runners/actions/verdict@v1
         with:
           context: ${{ inputs.context }}

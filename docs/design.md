@@ -1804,8 +1804,10 @@ where root is not ours (15.8), so "a second account with root-owned files" canno
 there, and more hosts without root are expected to join. And a public repository's CPU work
 runs free on GitHub-hosted runners, so only its GPU jobs need our machines. Decision 18
 replaces 16.7's account rule by a property that a check proves on each host, and confines
-each public GPU job so that the property holds without root. Each item names what it
-supersedes or amends.
+each public GPU job so that the property holds without root. C1's prototype (issue #196)
+measured it on three hosts; the text below says what was measured (18.9) and marks the
+points it left for the lead (*Open for the lead*). Each item names what it supersedes or
+amends.
 
 18. **Public GPU jobs on confined single-job runners.**
     1. **The lead's rulings** (2026-11-12).
@@ -1833,8 +1835,8 @@ supersedes or amends.
        | backend (`isolation`) | how it gives (a), (b), (c) | GPU | public audience |
        |---|---|---|---|
        | `microvm` | a kernel of its own: a VM per job, where the KVM device opens | none: a card needs VFIO passthrough, which needs root and takes the card from the host | not for this pool |
-       | `account` | a dedicated Unix account whose host layer is root's (16.7): (a), (b) and "signal or trace" by uid and file modes; "see" only with the account's own mount namespace and `ProtectProc=invisible` (12.16), since without them every account reads every command line in `/proc` | the account in the GPU group | yes, with the check (item 5) |
-       | `ns-subuid` | the confined single-job runner (item 3), its job as a subordinate uid: (a) by a mount namespace that holds nothing of the account and a uid that owns nothing of it; (b) by read-only mounts and a runner that lives for one job; (c) by a PID namespace and the uid | the leased card only (item 4) | yes, with the check |
+       | `account` | an account for public jobs alone (16.7's second account, never the host's private CI account), whose host layer is root's: (a), (b) and "signal or trace" by uid and file modes; "see" only with the account's own mount namespace and `ProtectProc=invisible` (12.16), since without them every account reads every command line in `/proc`. Needs root once | the account in the GPU group | yes, with the check (item 5) |
+       | `ns-subuid` | the confined single-job runner (item 3), its job as a subordinate uid: (a) by a mount namespace that holds nothing of the account and a uid that owns nothing of it; (b) by read-only mounts and a runner that lives for one job; (c) by a PID namespace and the uid. Needs unprivileged user namespaces with capabilities inside, a subordinate range and the set-uid id-map helpers: given on the shared-account host (Ubuntu 22.04); on Ubuntu 24.04 (the dedicated-account host and the reference host, measured) the default AppArmor setting gives an unprivileged user namespace no capabilities and the helpers are not installed, so there it needs root once: an AppArmor profile that allows user namespaces for the launcher, and the helpers' package | the leased card only (item 4), in one of two group modes | yes, with the check |
        | `ns-uid` | the same namespaces, the job keeping the account's own uid | as `ns-subuid` | **no** (below) |
        | `none` | — | — | no |
 
@@ -1880,9 +1882,10 @@ supersedes or amends.
          reach the egress proxy (11.10, 17) through one relay: a listener on the
          namespace's loopback, set as `https_proxy`, passes each connection over a Unix
          socket bound in to a relay process outside, which connects it to the host's
-         forwarded port of the proxy and to nothing else. The relay passes a connection only
-         after a `CONNECT <name>:443` line, holds at most 64 connections per job, and logs
-         their count; the proxy's allowlist decides the name, as for every job. The job
+         forwarded port of the proxy and to nothing else. The relay accepts only `CONNECT
+         <name>:443` (a production requirement: C1's relay passed bytes and left the
+         filtering to the proxy), holds at most 64 connections per job, and logs their
+         count; the proxy's allowlist decides the name, as for every job. The job
          cannot reach the host's loopback, the forwarded port directly, the host's abstract
          Unix sockets (they belong to a network namespace) or its pathname sockets (none is
          mounted).
@@ -1911,33 +1914,57 @@ supersedes or amends.
          file only, with a size cap, and parsed as data; nothing from the tree runs
          outside.
     4. **The GPU** (the pool is GPU-only).
-       - *Only the leased card.* The mount namespace holds the leased card's device node,
-         the control node and the UVM nodes CUDA needs, and the driver's user-space
-         libraries, read-only (the vendor's container CLI lists them; C1). No other card's
-         node exists there and none can be made (no capability). The mount namespace is the
-         enforcement; `CUDA_VISIBLE_DEVICES` is set for the tools' sake and enforces
-         nothing.
-       - *The GPU group alone.* On the shared-account host the card nodes and the control
-         node are open to a GPU group, which the account is in, and the UVM nodes to
-         everyone. A subordinate uid is in no group of the host, so the launcher runs with
-         the GPU group as its primary group, `newgidmap` maps that one gid into the
-         namespace beside the job's own, and the job's supplementary groups are set to it
-         alone: every other group of the account is dropped, so a group-readable file of
-         the account is closed to the job like any other.
-       - *What the control node shows* (a residual). Through the control node the driver
-         answers system-wide queries: the host's cards, the driver's version, and perhaps
-         other cards' use and the processes on them. C1 records what an unprivileged probe
-         reads there from inside; the job gets no handle to another card's memory or
-         contexts. It is information, like `/proc`'s global files (item 8).
-       - *Memory between jobs.* A card serves a private job and then a public one, or the
-         reverse. C1 measures whether this driver gives a new context memory that another
-         process wrote (fill the card with a pattern, end, then allocate every free byte
-         from another process and read it). If it does, a scrub outside the confinement
-         writes zeros over the card's free memory before a public runner takes the card,
-         and the check verifies that the scrub leaves nothing; if no scrub can be shown to
-         work, the host's public cards are set apart from private jobs (a pool of their
-         own). If the driver clears memory itself, nothing is added and the measurement is
-         recorded with C1.
+       - *Only the leased card* (held in C1). The mount namespace holds the leased card's
+         device node, the control node and the UVM nodes CUDA needs, and the driver's
+         user-space libraries, read-only. No other card's node exists there and none can
+         be made (no capability); inside, the driver's card list under `/proc` is masked
+         to the leased card. The mount namespace is the enforcement;
+         `CUDA_VISIBLE_DEVICES` is set for the tools' sake and enforces nothing. What it
+         needed: the card is named by its *device minor*, not by the vendor tool's or
+         CUDA's index, which differ; the driver's `ModifyDeviceFiles` must read 0 inside
+         (a read-only bind over the driver's params file, as the vendor's container
+         library does), and `/sys` must be there read-only (the driver reads its module
+         state from it), else the user-space driver tries to create or fix the nodes it
+         cannot see and fails (CUDA error 304). A host may already limit, by a device
+         cgroup per login session, which minors the account opens (the shared-account
+         host does): the launcher inherits that, so a lease names a minor the account may
+         open.
+       - *The GPU group: two modes* (measured; supersedes "the GPU group alone" as first
+         written). On the shared-account host the card nodes and the control node are open
+         to a GPU group, which the account is in, and the UVM nodes to everyone. The host's
+         `newgidmap` maps only the subordinate range and the account's passwd primary gid,
+         and refuses a caller whose real gid is another, so making the GPU group the
+         launcher's primary group (`sg`) is refused. Measured there: the job's kernel uid
+         and gid are a subordinate pair, and it keeps every supplementary group the
+         launcher inherited (it must not call `setgroups`, or it loses the GPU group and
+         the card with it).
+         - *(a) `gpu`, the GPU group alone:* one line in the host's `/etc/subgid` giving the
+           account the GPU group's gid (its administrator adds it; no root or account for
+           us). The launcher maps that gid and sets the job's groups to it alone, so a
+           group-readable file of the account is closed to the job like any other.
+         - *(b) `kept`, the account's groups kept:* the job holds every group of the
+           account. The mount namespace is then the only barrier to the account's
+           group-readable files; the uid barrier still covers its owner-only files (the
+           keys, the runner credentials).
+
+         The capacity row says which mode a host is in (item 7). *Open for the lead:* which
+         mode the public audience requires, for the canary and for the first real public
+         repository. Recommendation: (a) before the first real public repository; (b)
+         acceptable for the canary.
+       - *What the control node shows* (a residual, measured). Inside, the vendor's tool
+         lists the leased card only, with its total memory use and utilisation (which
+         include other processes' use of that card), and lists no process: our own marker
+         process holding memory on the same card outside was not listed. Outside, the same
+         tool lists every card and every compute process. The job gets no handle to
+         another card's memory or contexts. It is information, like `/proc`'s global files
+         (item 8).
+       - *Memory between jobs* (measured). A card serves a private job and then a public
+         one, or the reverse. One process filled 384 MiB with a pattern and exited without
+         freeing it; a second allocated 512 MiB and read it uninitialised: no pattern,
+         about all zero words, on each of the three hosts' drivers, inside and outside the
+         confinement. So there is no scrub step. The measurement stays an item of the
+         check (item 5, check 9), so a driver that stops clearing memory withdraws the audience;
+         a scrub, or cards set apart, would then be decided again.
        - *The kernel driver* is attack surface that neither a namespace nor a dedicated
          account reduces: every job with a card reaches the driver's `ioctl`s. What reduces
          it is who may run code there: the hook's actor rules (org members only; a
@@ -1965,14 +1992,19 @@ supersedes or amends.
           only the relay answers;
        5. through the relay a name on the proxy's allowlist answers, and a name off it, a
           bare address and a port other than 443 are refused;
-       6. no namespace, mount, device node, capability or set-uid elevation can be had;
+       6. no namespace, mount, device node, capability or set-uid elevation can be had (a
+          nested user namespace reads `ENOSPC`: the namespace limits are 0 inside);
        7. no other card can be opened, by any path, and the leased one can (a CUDA context
           and a kernel run on it);
-       8. the job's uid, gid and groups are the expected ones, and a widened CPU affinity is
-          refused or reset.
+       8. the job's uid and gid are a subordinate pair, its groups are those of the host's
+          mode (item 4), and a widened CPU affinity is refused or reset;
+       9. a fresh allocation on the card reads none of a previous process's data (item 4).
 
        *A control run* of the same check without the confinement, as the account, must fail
-       items 1, 3 and 4 at least, so a check that cannot see a leak never passes. The check
+       items 1, 3, 4 and 7 (files, processes, network, the other card), so a check that
+       cannot see a leak never passes. Item 6 does not count in the control: `mknod` is
+       refused for the account on every host measured, and `mount` too (on the Ubuntu
+       24.04 hosts even inside a new user namespace), with or without the confinement. The check
        runs before a host first gets the public audience, then daily, at each boot and
        after any change of the kernel, the driver, the launcher's release or the host's
        mounts (its record names the boot id and the versions; a difference makes it stale).
@@ -2021,8 +2053,9 @@ supersedes or amends.
          or `ns-subuid`); the probe and the check prove it. A pool's `audience` (16.3) is
          `public` on the public GPU pool: a per-card pool of 0 static instances (its runners
          come from the issuer) on the cards of the host's `gpu` pool, shared through the
-         leases. The capacity row (16.5) carries the proven backend, the check's result and
-         age, and the cards a public runner could take now.
+         leases. The capacity row (16.5) carries the proven backend, its group mode (`gpu`
+         or `kept`, item 4), the check's result and age, and the cards a public runner could
+         take now.
     8. **Residual risks**, plainly.
        - *Kernel and driver bugs* reachable from inside. User namespaces open more of the
          kernel to an unprivileged job (namespaced mounts and networking), and the GPU
@@ -2047,21 +2080,90 @@ supersedes or amends.
          `/sys` (load, memory, CPUs, the driver's card list) and the proxy's allowlist are
          visible to a public job, as a hosted runner's VM shows its own. Nothing there is a
          key or a private repository's content.
-       - *The other direction.* The confinement protects the account from the job, not the
-         job from the account. Co-users of h100's shared account can still read a public
-         runner's configuration in flight, its job's token while it runs and its results
-         (T6), as they can a private job's.
-    9. **Evidence.** C1's measured table (the launcher and the check on a shared-account
-       host, a dedicated-account host and the reference host: each item of item 5
-       confined and in the control run, the GPU smoke, the memory residue, the start-up
-       cost) follows with C1's PR. The facts it starts from are listed below (*Facts*).
+       - *The other direction* (measured). The confinement protects the account from the
+         job, not the job from the account. The account owns the job's user namespace, so
+         any process of the account outside has every capability in it: in C1 such a
+         process traced the confined job, where Yama stops the same trace on an ordinary
+         process of the account (the control). It can also enter the job's namespaces and
+         read or change its tree. Co-users of h100's shared account can therefore read a
+         public runner's configuration in flight, its job's token while it runs and its
+         results (T6), as they can a private job's; only a separate kernel uid for the
+         namespace's owner, which needs root, would close it. *Open for the lead:* is this
+         acceptable for the public audience? Recommendation: accept; a public job carries
+         no secret, and co-users can already do the same to private jobs.
+    9. **Evidence** (C1, issue #196, 2026-11-12). The prototype launcher and check ran on a
+       shared-account host (Ubuntu 22.04, kernel 5.15, cgroup v1), a dedicated-account host
+       and the reference host (both Ubuntu 24.04), on an idle card named by its device
+       minor. Columns: *control*, the check without confinement, where "not confined" is
+       the expected result (the check sees the difference) and "blocked anyway" means the
+       host refuses it without confinement too; *subuid-gpu*, `ns-subuid` in mode (b) (the
+       account's groups kept, the GPU group among them); *subuid-none*, `ns-subuid` with no
+       supplementary group; *single*, `ns-uid`. "did not start": the Ubuntu 24.04 hosts
+       give an unprivileged user namespace no capabilities and have no id-map helpers
+       (18.2), so only the control ran there.
+
+       | item | expected | shared-account host: control | shared-account host: subuid-gpu | shared-account host: subuid-none | shared-account host: single | dedicated-account host: control | dedicated-account host: subuid-gpu | dedicated-account host: single | reference host: control | reference host: subuid-gpu | reference host: single |
+       |---|---|---|---|---|---|---|---|---|---|---|---|
+       | I1 | record uid, gid, groups inside and the kernel ids outside; the job's kernel uid is not the account's | not confined | held | held | **not held** | not confined | did not start | did not start | not confined | did not start | did not start |
+       | F1 | a marker file outside the tree is not visible | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | F2 | creating a file in the read-only hook/policy stand-in fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | F3 | the account's home path does not exist | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | F4 | writing outside the per-job tree (and the per-job /tmp) fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | P1 | /proc lists only the sandbox's processes; the marker is not among them | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | P2 | signal 0 to the marker's pid fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | P3 | a trace attach to the marker fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | N1 | connecting to the marker listener on the host's loopback fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | N2 | the forwarded proxy port is not reachable directly | not confined | held | held | held | not confined | did not start | did not start | n/a | did not start | did not start |
+       | N3 | through the relay the allowlisted URL answers and a non-allowlisted one is refused by the proxy | works | works | works | works | works | did not start | did not start | n/a | did not start | did not start |
+       | K1 | creating a nested user namespace fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | K2 | mount fails (also after trying a new user namespace) | not confined | held | held | held | blocked anyway | did not start | did not start | blocked anyway | did not start | did not start |
+       | K3 | mknod of a device node fails | blocked anyway | held | held | held | blocked anyway | did not start | did not start | blocked anyway | did not start | did not start |
+       | G1 | the leased card works (jax.devices(); one small matmul) | works | works | **fails** | works | works | did not start | did not start | works | did not start | did not start |
+       | G2 | no other card's node exists; opening one fails | not confined | held | held | held | not confined | did not start | did not start | not confined | did not start | did not start |
+       | G3 | record what nvidia-smi shows of other cards and of processes outside (a marker of ours holds 64 MiB on the card) | recorded | recorded | recorded | recorded | recorded | did not start | did not start | recorded | did not start | did not start |
+       | G4 | record whether a fresh allocation reads the previous process's pattern | recorded | recorded | recorded | recorded | recorded | did not start | did not start | recorded | did not start | did not start |
+       | R1 | record whether a process of the account outside can trace the job (the reverse direction) | recorded | recorded | recorded | recorded | recorded | did not start | did not start | recorded | did not start | did not start |
+
+       Expected in it: I1 is "not held" under `single` by construction (the job keeps the
+       account's uid), and G1 fails under `subuid-none` (the card nodes are open to the GPU
+       group only: CUDA finds no device, the vendor's tool reports insufficient
+       permissions). Observed values that the decision relies on: under `subuid-gpu` the
+       job's kernel uid and gid are the subordinate range's first id plus 999 and its
+       groups are all of the account's (item 4); the nested user namespace reads `ENOSPC`
+       and a mount `EPERM`; inside, `/dev` holds one card node and opening another reads
+       `ENOENT`, where the control opened 4 of 9 other card nodes (the session's device
+       cgroup refused the rest); the vendor's tool lists 1 card and no process inside, 5
+       cards and every compute process outside; the relay passed an allowlisted name (200)
+       and the proxy refused another (403 on `CONNECT`), while the proxy's port and a
+       loopback listener of the host were refused from inside; a process of the account
+       outside attached to the confined job (R1), while the control's ordinary process
+       could not be attached (Yama). *Cost* on the shared-account host, idle card, 5 runs
+       each of a fresh process that imports JAX and runs one 1024 × 1024 product: 4.02 s
+       inside against 3.82 s outside (medians, +5 %); an empty confinement takes 0.11 s.
+
+       *From C1 to production* (each a requirement of C2 or later, none built in C1): the
+       relay accepts only `CONNECT <name>:443` and caps its connections (item 3; C1's
+       relay passed bytes); a seccomp filter (at least `sched_setaffinity`, as a second
+       fence beside the namespace limits that C1 used alone); the rlimits on the job's uid
+       (`RLIMIT_NPROC` and the others of item 3); the watchdog for memory, disk, affinity
+       and time on cgroup v1, and the user scope on cgroup v2; the lease by device minor and
+       presence's public runner (item 4); the tree's deletion inside the namespace's map and
+       the link-free, size-capped read-back; the whole runner inside, from a single-job
+       configuration (item 6); the hooks, policy and members-only snapshot as the real
+       read-only binds; and item 5's checks 2, 6 and 8 in full (C1 tried a stand-in for the
+       hooks and policy, and no set-uid elevation or affinity).
     10. **Phases and rollout** (§10; they supersede P1 and P2, whose tests carry over): C1
         the launcher and the check, as an experiment; C2 the policy, `ci.yml`'s hosted legs
         for a public caller and the inventory (`isolation`, `audience`, the opt-in); C3 the
         off-host issuer; C4 a public canary repository on `6000pro`, then on h100 once its
         check passes there; C5 the first real public repository. Ruling 2's order is the
         issuer's in production; the canary starts on the host whose isolation needs no new
-        code. The host and org steps are the lead's: each host's subordinate range and
+        code. `6000pro` runs on `account` (Ubuntu 24.04: `ns-subuid` would need root's
+        AppArmor profile and the helpers' package, item 2). *Open for the lead:* whether it
+        also confines its public jobs (`ns-subuid` inside the public account, item 7 of
+        *Considered*). Recommendation: yes, once the production launcher exists. The host
+        and org steps are the lead's: each host's subordinate range, its `/etc/subgid` line
+        for the GPU group where mode (a) is required (item 4), and
         forced key line (on h100 a line in the shared account's `authorized_keys`, as 15.8
         item 4), the issuer's token, the canary repository, each repository's opt-in and its
         approval setting for outside contributors.
@@ -2093,13 +2195,14 @@ supersedes or amends.
   hide other accounts' command lines without root's `ProtectProc=invisible`; on a host
   whose administrator gives us an account but no root, `ns-subuid` runs inside that account
   and the check judges the pair. (8) *A launcher of our own* rather than podman or a shipped
-  bubblewrap: podman's rootless GPU access keeps the GPU group only by keeping every group
-  of the account (`keep-groups` works by not calling `setgroups`), and its defaults
-  (outbound network, its storage and configuration in the account's home) need overriding
-  one by one; bubblewrap maps only the caller's own uid, which is `ns-uid`, unless it joins
-  a namespace made beforehand by `newuidmap`, and it is not installed here. Our launcher
-  makes exactly the map, the groups and the mounts of items 3 and 4, the same on every
-  host, at the price of owning security-critical code: it stays small, gets an independent
+  bubblewrap. On the GPU group they are now equal: C1 showed that our launcher, too, keeps
+  every group of the account unless the host gives mode (a)'s `/etc/subgid` line (item 4),
+  which is what podman's `keep-groups` does. What remains: podman's defaults (outbound
+  network, its storage and configuration in the account's home) need overriding one by
+  one; bubblewrap maps only the caller's own uid, which is `ns-uid`, unless it joins a
+  namespace made beforehand by `newuidmap`, and it is not installed here. Our launcher
+  makes exactly the map and the mounts of items 3 and 4 (the device minor, the driver's
+  params overlay), the same on every host, at the price of owning security-critical code: it stays small, gets an independent
   review, and the check does not trust it. The check does not depend on the backend, so if
   C1 shows the launcher harder than podman configured to the same effect, podman can be
   swapped in without changing this contract.
@@ -2111,7 +2214,7 @@ supersedes or amends.
   | (a) one more unprivileged account from the host's administrator | (a), (b), signal and trace by uid; not "see" without root's `ProtectProc=invisible` or our namespaces | an account in the GPU group, with linger | nothing; combined with `ns-subuid` (7 above) it gives all three | one request per host; not possible on h100 now (15.8) |
   | (b) only a subordinate range | `ns-subuid`: all three, with the check | one line each in `/etc/subuid` and `/etc/subgid`; `newuidmap`, `newgidmap`; unprivileged user namespaces | nothing; h100 already has it | the smallest request; **chosen** |
   | (c) world-accessible GPU nodes | spares the GPU-group step | a driver option changed by the administrator | every local user of the host gets every card | rejected: it weakens the host for its other users to save us one map |
-  | (d) rootless podman with the vendor's toolkit | as `ns-subuid` once configured | podman; the toolkit with `no-cgroups` on cgroup v1; storage in the account's home | the GPU group only with every group of the account (`keep-groups`); its network outbound by default; much to override | heavy: images, configuration, two upstreams; kept as the fallback (8 above) |
+  | (d) rootless podman with the vendor's toolkit | as `ns-subuid` once configured | podman; the toolkit with `no-cgroups` on cgroup v1; storage in the account's home | the GPU group only with every group of the account (`keep-groups`), as our launcher without mode (a)'s line; its network outbound by default; much to override | heavy: images, configuration, two upstreams; kept as the fallback (8 above) |
   | (e) a shipped bubblewrap | `ns-uid` only, unless joined to a namespace made by `newuidmap` | a static binary in our subtree | the subordinate uid needs a helper of ours anyway | light, well-reviewed code; not alone |
   | (f) a micro-VM | all three, and a kernel of its own | an openable KVM device; VFIO and root for a card | no GPU: useless for a GPU-only pool | heavy; not on h100 (no KVM) |
   | (g) Landlock and seccomp alone, without namespaces | on 5.15 files only (ABI 1): no network rules (ABI 4, kernel 6.7), no signal or abstract-socket scoping (ABI 6, 6.12); every process visible, and the account's processes' `/proc/<pid>/environ` readable (Yama limits attaching only); pathname Unix sockets and the user's D-Bus reachable (a connect is no file access); the job keeps the account's uid and may signal any of its processes | Landlock in the kernel | (b) and (c) fail | light; kept as a second fence inside the namespaces |
@@ -3048,7 +3151,7 @@ bound).
 | T21 | (14) Runaway cost: a lost driver, a stuck job, a retry loop. | every job has `--time`; the reaper cancels a job whose GitHub job is gone; pending is bounded; one retry (§4.4); the daily and monthly caps (14.7) | job code (T19) can spend up to the site's association limits |
 | T22 | (14) A node silently corrupts multi-card results (peer copies that read zeros). | the P2P self-test before every two-card part (12.6); a target's `max_cards` from its canary | – |
 | T23 | (16.7, 18) Code of an opted-in public repository, from a member's same-repository branch (fork commits nobody reviewed included) or a compromised dependency, runs on the public pool and reads what the account holds, or its public logs show the host. | the confinement (18.3): the account's files, processes and sockets out of reach, the checks read-only, one relay to the proxy, one job per runner; the conformance check per host (18.5); a snapshot without private repositories; repository-level single-job runners issued off the host; the hooks at a fixed path, the machine name the confinement's | the member vouches for their branch (consumers' guide); the job reaches its own tree, its card, the proxy's allowlist and what the host shows (18.8) |
-| T24 | (18) A public job uses a bug of the kernel or of the GPU driver (its `ioctl`s on the card and control nodes) to leave the confinement, or reads another job's data left on its card. | who may run code: members' same-repository pull requests and protected pushes of listed repositories only (16.7); kernels and drivers kept current; one job per card; the memory measurement, and a scrub or cards set apart if the driver leaves data (18.4) | a local privilege escalation in the kernel or the driver gives the host; neither a namespace nor a dedicated account removes it (18.8) |
+| T24 | (18) A public job uses a bug of the kernel or of the GPU driver (its `ioctl`s on the card and control nodes) to leave the confinement, or reads another job's data left on its card. | who may run code: members' same-repository pull requests and protected pushes of listed repositories only (16.7); kernels and drivers kept current; one job per card; the card memory a new context gets, measured clean on three drivers and kept as check 9 of 18.5, so a driver that leaves data withdraws the audience (18.4) | a local privilege escalation in the kernel or the driver gives the host; neither a namespace nor a dedicated account removes it (18.8) |
 
 ### 6.5 The org snapshot
 
@@ -3941,12 +4044,15 @@ a mutant, and its evidence; host and org steps are the lead's (18.10). The launc
 check, the relay and the issuer get an independent review (AGENTS.md, Review).
 
 - **C0**: this contract (decision 18). *Acceptance:* the lead approves the PR.
-- **C1, the launcher and the check, as an experiment** (18.3 to 18.5): `ci-run confine`
-  and `ci-run confine check`, wired to no runner. *Acceptance:* on a shared-account host, a
-  dedicated-account host and the reference host, the check passes confined and its control
-  run fails items 1, 3 and 4; a one-card CUDA smoke passes inside with no other card
-  visible; the card memory a new context gets after another process's job is measured; the
-  start-up cost of a confined runner is recorded; the table becomes 18.9.
+- **C1, the launcher and the check, as an experiment** (18.3 to 18.5; issue #196, its
+  prototype in `experiments/sandbox/`, wired to no runner). *Acceptance:* on a
+  shared-account host, a dedicated-account host and the reference host, the check passes
+  confined and its control run fails on files, processes, network and the other card; a
+  one-card CUDA smoke passes inside with no other card visible; the card memory a new
+  context gets after another process's job is measured; the start-up cost is recorded; the
+  table becomes 18.9. *Measured:* all of it on the shared-account host; on the two Ubuntu
+  24.04 hosts the confinement does not start without root (18.2), and only the control ran.
+  The gaps to production are 18.9's list.
 - **C2, policy, workflow and inventory** (18.7): the policy's `public_runners` and the
   audience, GPU class only; `ci.yml`'s hosted legs for a public caller; the keys
   `isolation` and a pool's public `audience` (accepted and ignored first, 16.3); the

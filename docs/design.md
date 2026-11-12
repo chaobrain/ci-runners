@@ -18,7 +18,10 @@ Decision 15.9 (2026-11-11) makes `claim` count only the runners' own statuses.
 Decision 16 (2026-11-12) makes this repository the self-hosted runner layer of every
 chaobrain repository: capability labels in place of host labels, one runner per slot,
 presence, an overflow-only route, a reusable workflow, and a public pool for public
-repositories that opt in, delivered in the phases of RUN-10.
+repositories that opt in, delivered in the phases of RUN-10. Decision 18 (2026-11-12)
+narrows that public pool to GPU jobs (public repositories' CPU work stays on GitHub-hosted
+runners) and opens it to any host, h100's shared account first, where a conformance check
+proves that a confined single-job runner keeps the job from everything of the account.
 
 Guides, in Chinese: [consumers.md](consumers.md) for the repositories that use the CI,
 [operations.md](operations.md) for the maintainer of the hosts. This file is the contract;
@@ -42,7 +45,8 @@ are listed with what replaced them.
    runners only when `github.event.pull_request.head.repo.full_name ==
    github.repository`, or on `push` or `workflow_dispatch`. *Amended by 16.7: a public
    repository that opts in reaches a pool of its own (repository-level runners on a
-   separate account), never the org's runners.*
+   separate account), never the org's runners.* *Amended by 18: for its GPU jobs only, on
+   confined single-job runners of any host whose check passes.*
 3. *h100, option A (runners on 3090b, parts over ssh).* Superseded by 11.3 and retired by
    11.12. Its safeguard 4 stands: **the exit path is a dedicated account from the host's
    admin, then normal runners.**
@@ -66,10 +70,13 @@ are listed with what replaced them.
    2. "Tamper gap (§5.3, T13): accepted for private consumers for now." It stays
       accepted, since only private repositories use the runners (11.1, 11.12).
       *Amended by 16.7: on the public pool the gap is closed (the hooks, the policy and
-      the `.env` files are root's), not accepted.*
+      the `.env` files are root's), not accepted.* *Amended by 18: closed by read-only
+      mounts in the confinement and a runner that lives for one job.*
    3. *The hook's path in job logs.* Moot while no public repository used the runners.
       *Amended by 16.7: on the public pool the logs are public; the hooks' path names no
-      disk or account, and the lead checks the machine name before P2.*
+      disk or account, and the lead checks the machine name before P2.* *Amended by 18:
+      the machine name is the confinement's (`<host>-pub-gpu<N>`); the lead checks the
+      logs in C4.*
 
 ## Lead decisions (2026-11-06): a standard test CI on h100 (RUN-5)
 
@@ -85,7 +92,8 @@ the first path.
        `allows_public_repositories` stays off. `Default` goes from `selected` to every
        private repository (supersedes §12 item 9; the lead makes the change).
        *Amended by 11.12: there is no public GPU path.* *Amended by 16.7: the flag stays
-       off; a public repository that opts in reaches a pool of its own.*
+       off; a public repository that opts in reaches a pool of its own.* *Amended by 18:
+       for its GPU jobs only.*
     2. **Allowlists synced from the org.** The actor allowlist is the org's members, and
        the repository allowlist is the org's private repositories with their ids. A
        timer fetches both every 10 min into a local snapshot on h100 (§6.5; where the
@@ -188,7 +196,7 @@ the first path.
         - RUN-2 (the ssh driver, the manifest, the keyed verify, `compare`,
           `disagreement`), RUN-3 (3090a) and RUN-4 (`gpu.yml`, public consumers) are not
           built. Public repositories stay on GitHub-hosted runners (*amended by 16.7*:
-          an opted-in one reaches the public pool);
+          an opted-in one reaches the public pool; *by 18*: for its GPU jobs only);
         - the hosted branch of `claim` goes: every job of `h100-test.yml` runs on h100;
         - policy schema 1 goes; the hook reads schema 2 only (§6.5).
 
@@ -1622,14 +1630,19 @@ Each item names what it supersedes or amends.
        most 20 workflow lines (§4.10) and one registry entry. Composing the actions
        (§4.8, 12.12) stays allowed, with capability labels.
     7. **A public pool** (amends decisions 2, 10.2, 10.3, 11.1 and 11.12; brings back
-       §12 item 2; amends §6.1, §6.2, §6.5, T1, T12 and T13). The Default group's
+       §12 item 2; amends §6.1, §6.2, §6.5, T1, T12 and T13). *Amended by 18: the pool is
+       GPU-only (public CPU work on hosted runners); its runners are confined single-job
+       runners on any host whose conformance check passes, h100 first; the account rule
+       is "a public job reaches nothing of its account", proven per host. The bullets on
+       the second account, the labels and the machine name below are superseded; the
+       policy, the snapshot, the first consumers and the forks' residual stand.* The Default group's
        `allows_public_repositories` is never turned on: on Free it is the org's only
        group, so the flag would open every runner on every host to every public
        repository, the runners of the shared account and of the hosts that hold a
        cluster key included, with the hook (a file of the account the job code runs as,
        T13) as the only barrier. A public repository opts in to a pool of its own
        instead:
-       - *A second account on one host* (the new host of 16.9), never a shared account
+       - *A second account on one host* (the new host of 16.9; *superseded by 18.2, 18.3*), never a shared account
          and never a host whose CI account holds a cluster key. It holds no cluster key,
          no tunnel key and no organisation token. Where the host has no direct route to
          GitHub, its runners' `.env` points at the loopback forward that the host's
@@ -1640,7 +1653,8 @@ Each item names what it supersedes or amends.
          gap is closed for this pool, not accepted).
        - *Runners registered at repository level* on each opted-in public repository,
          in no runner group of the org, with labels of their own (`ci-pub-light`,
-         `ci-pub-cpu`, `ci-pub-gpu`) and the runner audience `public`
+         `ci-pub-cpu`, `ci-pub-gpu`; *by 18.1, `ci-pub-gpu` only, one job per runner,
+         18.6*) and the runner audience `public`
          (`CI_RUNNER_AUDIENCE`, from the pool's inventory `audience`; every other
          runner's is `private`).
        - *The policy* (schema 2, additive). A repository entry gains `public_runners =
@@ -1661,14 +1675,16 @@ Each item names what it supersedes or amends.
          Every job log shows the runner's machine name and the hook's path (`v1.4.0`
          notes item 5): the hooks sit at a root-owned path that names no disk or
          account. The machine name is shown as the host has it, which the lead checks
-         before P2: it may name no person, site or address.
+         before P2: it may name no person, site or address. *Amended by 18.7: a fixed
+         path in the confinement, and the UTS namespace's machine name.*
        - *First consumers:* a public copy of the canary, then one public library. Never
          this repository (`policy.SELF`; its own CI stays on hosted runners).
        - *Residuals.* A member's same-repository branch may carry fork commits nobody
          reviewed; the hook cannot see that, and the member vouches for them (consumers'
          guide). A job reads the account's files as on every pool: there that is the
          runners' registrations of the opted-in repositories, the env and the host's
-         network.
+         network. *Amended by 18.8: the job reads none of the account's files; the
+         residuals are 18.8's.*
     8. **Statistics and dev slots** (amends §7 rule 5, and 15.1 items 3, 5 and 7: a pool
        run's claim). `ci-run stats [--repo R] [--since T]` reports, per label and per
        repository, the queue delay (created to started), the run time and the verdict
@@ -1685,7 +1701,8 @@ Each item names what it supersedes or amends.
        `compile` (`ci-timing`) and `slurm` pools. A new host (128 threads, 377 GiB,
        four 96 GB cards) joins with a dedicated CI account, its slots sized from the
        parts' measured memory peaks (about 96 threads and its 4 cards), and holds the
-       public pool (16.7). The cluster is overflow only (16.5).
+       public pool (16.7). The cluster is overflow only (16.5). *Amended by 18.1: h100
+       comes first for public GPU jobs too, the new host (`6000pro`) after it.*
     10. **`v2`** (§9). Once every consumer names capability labels only (the org's
         repositories searched), `v2` removes: host-label routing for consumers (the host
         labels stay for 16.1's own uses; `3090-light` goes), `peer_labels` and

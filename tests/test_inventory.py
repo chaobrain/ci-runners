@@ -292,6 +292,43 @@ class Load(unittest.TestCase):
         with self.assertRaises(inv.InventoryError):
             inv.load(base.replace('@', 'light = 1').replace('compile_cpus = "4-15"', 'compile_cpus = "4-15;x"'))
 
+    def test_a_home_pool_beside_the_light_pool(self):
+        """Issue #232 (design §5.1, decision 16.4): a second pool of class light, the home
+        pool: no ci- label, labels of its own; exactly one of the two carries a ci- label."""
+        base = re.sub(_POOLS, '', PLAIN).replace('max_temp_c = 80\n', 'max_temp_c = 80\npools = { @ }\n')
+        light = 'light = { count = 2, labels = ["ci-light", "hx-light"] }'
+        home = 'home = { count = 1, class = "light", labels = ["hx-home", "hx-light"] }'
+        for pools in (f'{light}, {home}, part = 1', f'{home}, {light}, part = 1'):  # either order
+            i = inv.load(base.replace('@', pools))
+            self.assertEqual((inv.home_pool(i.host), inv.pool_of(i.host, 'light')), ('home', 'light'), pools)
+            self.assertEqual((inv.labels_of(i.host, 'home'), inv.pool_labels(i, 'light')),
+                             (['hx-home', 'hx-light'], ['ci-light', 'hx-light']))
+        example = EXAMPLE.replace('\n# home = ', '\nhome = ').replace('labels = ["3090b-light"] }',
+                                                                       'labels = ["ci-light", "3090b-light"] }', 1)
+        self.assertEqual(inv.home_pool(inv.load(example).host), 'home')  # the example's line, as commented
+        i = inv.load(base.replace('@', f'{light}, part = 1'))  # no home pool: as before
+        self.assertEqual((inv.home_pool(i.host), inv.pool_of(i.host, 'light')), (None, 'light'))
+        self.assertIsNone(inv.home_pool(inv.load(base.replace('@', 'light = 1')).host))
+        bad = {
+            f'{light}, home = {{ count = 1, class = "light", labels = ["hx-home", "ci-light"] }}': 'both carry a ci- label',
+            f'light = 2, {home}': 'neither carries a ci- label',
+            f'{light}, {home}, more = {{ count = 1, class = "light", labels = ["hx-more"] }}': '3 pools of class light',
+            f'{light}, home = {{ count = 1, class = "light" }}': 'names its labels',
+            f'{light}, home = {{ count = 1, class = "light", labels = ["hx-light"] }}': 'no label of the home pool',
+            f'{light}, home = {{ count = 1, class = "light", labels = ["3090b"] }}, part = 1': 'no label',
+            f'{light}, home = {{ count = 1, class = "light", labels = ["3090b-gpu1"] }}, cards = {{ per_card = true, '
+            'class = "gpu" }': 'no label',
+            f'{light}, home = {{ count = 1, class = "light", labels = ["hx-home", "hx-cpu"] }}, '
+            'part = { count = 1, labels = ["hx-cpu"] }': 'a pool other than the light pool',
+            f'{light}, home = {{ count = 1, class = "light", labels = ["hx-home"], audience = "private" }}': 'no slot',
+            f'{light}, home = {{ count = 1, class = "light", labels = ["hx-home"], slot = {{ cpus = ["0"], workers = 1, '
+            'memory = "1G", speed = 1.0 } }': 'no slot',
+            'part = 1, cpu = { count = 1, class = "part" }': 'class part is also the class of part',
+        }
+        for b, why in bad.items():
+            with self.assertRaisesRegex(inv.InventoryError, why, msg=b):
+                inv.load(base.replace('@', b))
+
     def test_peer_labels(self):
         """Decision 13.3: the other host's pool per class; labels, so public."""
         self.assertEqual(inv.peer_labels(inv.load(EXAMPLE), 'multi'), ['3090a-multi'])

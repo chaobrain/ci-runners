@@ -150,6 +150,11 @@ class State(unittest.TestCase):
         self.assertEqual((drain.pool_key(self.host, 'cards'), drain.pool_key(self.host, 'gpu')), ('cards', 'cards'))
         with self.assertRaisesRegex(ValueError, 'no pool or class'):
             drain.pool_key(self.host, 'multi')
+        home = {**self.host, 'pools': {'light': {'count': 1, 'labels': ['ci-light', 'hx-light']},
+                                       'home': {'count': 1, 'class': 'light', 'labels': ['hx-home', 'hx-light']}}}
+        self.assertEqual(drain.pool_key(home, 'light'), 'light')  # by key or by class: the light pool
+        with self.assertRaisesRegex(ValueError, 'home pool'):  # issue #232: a drain that would do nothing
+            drain.pool_key(home, 'home')
 
     def test_status(self):
         text = drain.status_text({'host': None, 'pools': {'cards': 0.0}}, ['ci-part-a.scope'])

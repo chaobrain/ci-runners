@@ -5,6 +5,8 @@ expressions. They run through ``actions/flow``, from the action's own checkout (
 release the workflow names, §9), not from the host's installed release: they read the
 host's files (the capacity, the registry) but change nothing there.
 
+``ci-run flow start``     the plan job's first step: the registry key, the claim's decision
+                          and the contract check in one step (``run_start``).
 ``ci-run flow contract``  the contract check: the default branch's ``.github/ci-runners.toml``
                           ``contract`` against the head's; a lower or missing one posts
                           ``failure`` ("merge origin/<default>") and exits 1.
@@ -16,6 +18,8 @@ host's files (the capacity, the registry) but change nothing there.
                           the retry's labels, or ``none``; ``retry`` in the step's outputs.
 ``ci-run flow locate``    the host of a part's first attempt, from its job's ``runner_name``
                           (§2): the salvage leg's labels, ``[self-hosted, <role>-light]``.
+``ci-run flow fetch``     a part's step after its checkout: the checkout's credential check,
+                          then the plan's files through the API (``run_fetch``).
 ``ci-run flow status``    post a state on the context (a red part's fail-fast status).
 ``ci-run flow admit``     a public caller (decision 18.7, ``public.yml``): a repository of this
                           organisation and its events; prints the refusal and exits 1.
@@ -43,6 +47,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tomllib
 import urllib.parse
@@ -138,15 +143,20 @@ def _statuses(env: Mapping[str, str], call: Callable, context: str, sha: str, bo
     return [st for st in claim.parse_statuses(got, context) if st.creator.lower() == bot.lower()]
 
 
-def run_claim(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc: str) -> int:
-    """The claim's decision (§4.1) with a read-only token: ``run``, ``reason``, and ``seen``,
-    the time of the newest status of the runners it read (0: none), for ``pending``."""
+def claimed(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc: str) -> dict[str, str]:
+    """The claim's decision (§4.1) with a read-only token, as the step's outputs: ``run``,
+    ``reason``, and ``seen``, the time of the newest status of the runners it read (0: none),
+    for ``pending``."""
     bot = _bot(etc, env)
     mine = _statuses(env, call, a.context, a.sha, bot)
     c = claim.decide(mine, bot=bot)
     seen = max((st.time for st in mine), default=0.0)
     print(f'ci-run flow claim: {"run" if c.run else "skip"} ({c.reason})', file=sys.stderr)
-    _out(env, run='true' if c.run else 'false', reason=c.reason, seen=repr(seen))
+    return {'run': 'true' if c.run else 'false', 'reason': c.reason, 'seen': repr(seen)}
+
+
+def run_claim(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc: str) -> int:
+    _out(env, **claimed(a, env, call, etc))
     return 0
 
 
@@ -357,7 +367,9 @@ def check_contract(default: str | None, head: str | None, branch: str) -> tuple[
     return 'ok', f'contract {have}, {branch} {want}'
 
 
-def run_contract(a: argparse.Namespace, env: Mapping[str, str], call: Callable) -> int:
+def contract_state(a: argparse.Namespace, env: Mapping[str, str], call: Callable) -> tuple[str, str]:
+    """``(state, description)`` of the head's contract (``check_contract``), read with the
+    job token; a read that fails is ``error``. Writes nothing."""
     try:
         # the three reads at once (#239: about 2 s one after another through the egress); the
         # default branch's spec waits for the repository only where the event names no branch
@@ -373,6 +385,11 @@ def run_contract(a: argparse.Namespace, env: Mapping[str, str], call: Callable) 
             state, text = 'error', PRIVATE_ON_PUBLIC if private else PUBLIC
     except github.ApiError as e:
         state, text = 'error', f'contract: {SPEC} not read ({e})'
+    return state, text
+
+
+def contract_end(a: argparse.Namespace, env: Mapping[str, str], state: str, text: str) -> int:
+    """The contract's outputs: ``ok``, else the end the verdict job posts, and exit 1."""
     print(f'ci-run flow contract: {state}: {text}', file=sys.stderr)
     if state == 'ok':
         _out(env, ok='true')
@@ -380,6 +397,40 @@ def run_contract(a: argparse.Namespace, env: Mapping[str, str], call: Callable) 
     _summary(env, f'## {a.context}: {state}\n\n{text}\n')
     _out(env, ok='false', state=state, description=_text(text))  # the verdict job posts it
     return EXIT_RED
+
+
+def run_contract(a: argparse.Namespace, env: Mapping[str, str], call: Callable) -> int:
+    return contract_end(a, env, *contract_state(a, env, call))
+
+
+#: a registry key (``registry.load``'s file name)
+PROJECT = re.compile(r'[A-Za-z0-9._-]+')
+
+
+def run_start(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc: str) -> int:
+    """The plan job's first step, before anything of the head runs: the registry key, the
+    claim's decision (none with ``--plan-only``) and the contract, in one step (each step of a
+    self-hosted job costs about 1 s of log upload at its end). The key is ``--project``, else
+    the repository's name from ``GITHUB_REPOSITORY`` (a schedule's payload has no repository
+    object); it is checked first, and a malformed one ends the step before any read. The
+    claim's and the contract's reads overlap; a head the claim skips (``run=false``) ends here
+    with exit 0 and no contract output, as when the contract did not run; else the contract's
+    outputs and exit status are ``contract``'s."""
+    name = a.project or env.get('GITHUB_REPOSITORY', '').split('/', 1)[-1]
+    if not PROJECT.fullmatch(name):
+        print('::error::the project input is not a registry name', file=sys.stderr)
+        return EXIT_RED
+    _out(env, project=name)
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        claim_ = None if a.plan_only == 'true' else pool.submit(claimed, a, env, call, etc)
+        state, text = contract_state(a, env, call)
+        got = claim_.result() if claim_ else None
+    if got is not None:
+        _out(env, **got)
+        if got['run'] != 'true':
+            print('ci-run flow start: the claim skips the head; its contract is not read', file=sys.stderr)
+            return 0
+    return contract_end(a, env, state, text)
 
 
 # ------------------------------------------------------------------ the plan (§4.10)
@@ -535,12 +586,46 @@ def unpack_files(data: bytes, dest: str) -> int:
     return len(files)
 
 
+#: what a part's checkout may not keep in its git config (#228): actions/checkout's header
+EXTRAHEADER = r'^http\..*\.extraheader$'
+
+
+def check_checkout(workspace: str, env: Mapping[str, str]) -> bool:
+    """A part's checkout before its command (#228): made whole (a workspace another workflow
+    left sparse keeps only its pattern's files; a failure there is ignored), and false where
+    its git config kept an authorization header (``http.<url>.extraheader``), which it prints
+    with the error. Other local settings a reused workspace kept from an earlier command are
+    not the checkout's and pass. git runs without the step's token in its environment, and
+    with no hooks and no fsmonitor; no git (a checkout without one has no ``.git``) passes."""
+    genv = {k: v for k, v in env.items() if k != 'GITHUB_TOKEN'}
+    git = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false']
+    quiet = {'cwd': workspace, 'env': genv, 'stdin': subprocess.DEVNULL}
+    try:
+        subprocess.run([*git, 'sparse-checkout', 'disable'], **quiet, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False)
+        r = subprocess.run([*git, 'config', '--local', '--name-only', '--get-regexp', EXTRAHEADER], **quiet,
+                           capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return True
+    if r.returncode != 0:
+        return True
+    print(r.stdout, end='')
+    print('::error::the checkout kept its authorization header in its git config')
+    return False
+
+
 def run_fetch(a: argparse.Namespace, env: Mapping[str, str], call: Callable, fetch: Callable) -> int:
-    """The plan's files through the API (#245): the run's newest ``ci-plan-files``, its zip
-    read and unpacked into ``--dest`` (``unpack_files``). Where the API cannot be read (no
-    ``actions: read``, an outage, no such artifact) it says so in ``fallback=true`` and
-    exits 0, and the workflow's next step downloads them with ``download-artifact``; what
-    the zip holds is never a reason to fall back: a refusal fails the step."""
+    """A part's step after its checkout: ``check_checkout`` first (a failed one exits 1, and
+    nothing is read), then, with ``--dest``, the plan's files through the API (#245): the
+    run's newest ``ci-plan-files``, its zip read and unpacked into ``--dest``
+    (``unpack_files``). Where the API cannot be read (no ``actions: read``, an outage, no
+    such artifact) it says so in ``fallback=true`` and exits 0, and the workflow's next step
+    downloads them with ``download-artifact``; what the zip holds is never a reason to fall
+    back: a refusal fails the step. One step for both: each costs about 1 s of log upload."""
+    if not check_checkout(a.workspace, env):
+        return EXIT_RED
+    if not a.dest:
+        return 0
     from ci_runners import verdict
     base, repo, token = _env(env)
     run = env.get('GITHUB_RUN_ID', '')
@@ -889,6 +974,12 @@ def parser() -> argparse.ArgumentParser:
     lo = sub.add_parser('locate')
     lo.add_argument('--part-id', required=True)
     lo.add_argument('--rows', default='')
+    st = sub.add_parser('start')
+    st.add_argument('--context', required=True)
+    st.add_argument('--sha', required=True)
+    st.add_argument('--default-branch', default='')
+    st.add_argument('--project', default='')
+    st.add_argument('--plan-only', choices=('true', 'false', ''), default='')
     cl = sub.add_parser('claim')
     cl.add_argument('--context', required=True)
     cl.add_argument('--sha', required=True)
@@ -899,7 +990,8 @@ def parser() -> argparse.ArgumentParser:
     pe.add_argument('--description', default='queued on the runners')
     sub.add_parser('admit')
     fe = sub.add_parser('fetch')
-    fe.add_argument('--dest', required=True)
+    fe.add_argument('--workspace', required=True)
+    fe.add_argument('--dest', default='')
     v = sub.add_parser('verdict')
     v.add_argument('--context', required=True)
     v.add_argument('--sha', required=True)
@@ -927,6 +1019,8 @@ def main(argv: Sequence[str], etc: str, call: Callable | None = None, env: Mappi
     try:
         if a.cmd == 'fetch':
             return run_fetch(a, env, call, fetch)
+        if a.cmd == 'start':
+            return run_start(a, env, call, etc)
         if a.cmd == 'contract':
             return run_contract(a, env, call)
         if a.cmd == 'plan':

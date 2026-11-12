@@ -6,7 +6,9 @@ import contextlib
 import io
 import os
 import pathlib
+import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -167,7 +169,7 @@ class Fetch(unittest.TestCase):
     def run_fetch(self, **kw):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            code = flow.main(['fetch', '--dest', self.dest], '/nonexistent', env=self.e.env, **kw)
+            code = flow.main(['fetch', '--workspace', self.tmp.name, '--dest', self.dest], '/nonexistent', env=self.e.env, **kw)
         return code, err.getvalue()
 
     def test_the_newest_files_through_the_api(self):
@@ -234,6 +236,106 @@ class Fetch(unittest.TestCase):
         self.assertEqual(len(made), 1)
         self.assertTrue(made[0].closed)
         self.assertEqual((len(self.calls), len(self.fetched)), (1, 1))
+
+
+class Checkout(unittest.TestCase):
+    """The part's step after its checkout checks the checkout first (#228), with or without
+    the plan's files (one step: each costs about 1 s of log upload): a header that stayed in
+    its git config fails the step before anything is read."""
+
+    def setUp(self):
+        if not shutil.which('git'):
+            self.skipTest('no git')
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = os.path.join(self.tmp.name, 'ws')
+        self.dest = os.path.join(self.tmp.name, 'files')
+        self.e = Env(self.tmp.name)
+        self.genv = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': self.tmp.name, 'GIT_CONFIG_NOSYSTEM': '1'}
+        self.git('init', '-q', self.ws, cwd=self.tmp.name)
+        self.calls = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *argv, cwd=None):
+        subprocess.run(['git', *argv], cwd=cwd or self.ws, env=self.genv, check=True, capture_output=True)
+
+    def call(self, method, url, token, body=None):
+        self.calls.append(url)
+        return {'artifacts': [{'id': 3, 'name': 'ci-plan-files', 'created_at': '2026-11-13T11:00:00Z'}]}
+
+    def fetch(self, url, token, limit):
+        self.calls.append(url)
+        return zipped({'keys.json': 'k'})
+
+    def go(self, *extra, env=None):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = flow.main(['fetch', '--workspace', self.ws, *extra], '/nonexistent', call=self.call,
+                             fetch=self.fetch, env=env or {**self.e.env, **self.genv})
+        return code, out.getvalue() + err.getvalue()
+
+    def test_a_header_the_checkout_kept_fails_the_step_before_any_read(self):
+        self.assertEqual(self.go('--dest', self.dest)[0], 0)
+        self.assertEqual(len(self.calls), 2)
+        shutil.rmtree(self.dest)
+        for key in ('http.https://github.com/.extraheader', 'http.https://ghe.example/.extraheader'):
+            with self.subTest(key=key):
+                self.calls.clear()
+                if os.path.exists(self.e.out):
+                    os.unlink(self.e.out)
+                self.git('config', '--local', key, 'AUTHORIZATION: basic x')
+                for extra in (('--dest', self.dest), ()):
+                    code, text = self.go(*extra)
+                    self.assertEqual(code, flow.EXIT_RED, extra)
+                    self.assertIn('::error::the checkout kept its authorization header in its git config', text)
+                    self.assertIn(key, text)  # which one, never its value
+                    self.assertNotIn('basic x', text)
+                    self.assertEqual((self.calls, self.e.outputs()), ([], {}))  # nothing read, no fallback
+                    self.assertFalse(os.path.exists(self.dest))
+                self.git('config', '--local', '--unset', key)
+
+    def test_what_a_reused_workspace_kept_passes_and_without_files_nothing_is_read(self):
+        """Other local settings an earlier command left are not the checkout's token: failing
+        on them would let one head fail every later attempt on that runner."""
+        for key, value in (('http.postBuffer', '1'), ('credential.helper', 'store'), ('include.path', '../x')):
+            self.git('config', '--local', key, value)
+        self.assertEqual(self.go(), (0, ''))
+        self.assertEqual((self.calls, self.e.outputs()), ([], {}))  # no --dest: the check alone
+        self.assertEqual(self.go('--dest', self.dest)[0], 0)
+        self.assertEqual((len(self.calls), self.e.outputs()), (2, {'fallback': 'false'}))
+
+    def test_a_sparse_workspace_is_made_whole(self):
+        os.makedirs(os.path.join(self.ws, 'a'))
+        os.makedirs(os.path.join(self.ws, 'b'))
+        for rel in ('a/x', 'b/y'):
+            pathlib.Path(self.ws, rel).write_text(rel)
+        self.git('add', '.')
+        self.git('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'x')
+        self.git('sparse-checkout', 'set', 'a')
+        self.assertFalse(os.path.exists(os.path.join(self.ws, 'b', 'y')))
+        self.assertEqual(self.go()[0], 0)
+        self.assertEqual(pathlib.Path(self.ws, 'b', 'y').read_text(), 'b/y')
+
+    def test_git_gets_no_token_no_hooks_and_no_fsmonitor(self):
+        bin_ = os.path.join(self.tmp.name, 'bin')
+        os.makedirs(bin_)
+        log = os.path.join(self.tmp.name, 'git.log')
+        fake = os.path.join(bin_, 'git')
+        with open(fake, 'w') as f:
+            f.write(f'#!/bin/sh\n{{ echo "argv: $*"; env; }} >> {log}\nexit 1\n')
+        os.chmod(fake, 0o755)
+        env = {**self.e.env, **self.genv, 'PATH': f'{bin_}:/usr/bin:/bin'}
+        self.assertEqual(self.go(env=env)[0], 0)
+        text = pathlib.Path(log).read_text()
+        self.assertEqual(text.count('argv: -c core.hooksPath=/dev/null -c core.fsmonitor=false '), 2)
+        self.assertIn('argv: -c core.hooksPath=/dev/null -c core.fsmonitor=false sparse-checkout disable', text)
+        self.assertNotIn('GITHUB_TOKEN', text)
+        self.assertIn('GITHUB_REPOSITORY', text)  # the rest of the step's env
+        # no git at all: a checkout without git has no .git, so nothing can have kept a header
+        empty = os.path.join(self.tmp.name, 'empty')
+        os.makedirs(empty)
+        self.assertEqual(self.go(env={**env, 'PATH': empty})[0], 0)
 
 
 if __name__ == '__main__':

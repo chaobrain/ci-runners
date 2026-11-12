@@ -57,22 +57,18 @@ jobs:
           ref: ${{ inputs.sha }}
           fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}
           persist-credentials: false
-      - shell: bash
-        run: |
-          git sparse-checkout disable 2> /dev/null || true
-          if git config --local --name-only --get-regexp '^http\..*\.extraheader$'; then
-            echo "::error::the checkout kept its authorization header in its git config"
-            exit 1
-          fi
-      # the plan's files (its key files), for the command as CIRUNNERS_FILES: through the API
-      # (#245), with the job's token in this step's env alone (the action's default input), never
-      # the command's; download-artifact only where the API refuses (no actions: read)
+      # one step after the checkout (a step costs about 1 s of log upload): the checkout made
+      # whole and failed where its authorization header stayed in its git config (#228), before
+      # the files and the command; then the plan's files (its key files), for the command as
+      # CIRUNNERS_FILES: through the API (#245), with the job's token in this step's env alone
+      # (the action's default input), never the command's; download-artifact only where the
+      # API refuses (no actions: read)
       - id: files
-        if: fromJSON(inputs.part).files
         uses: chaobrain/ci-runners/actions/flow@v1.19.0
         with:
           command: fetch
-          dest: ${{ runner.temp }}/ci-runners-files
+          workspace: ${{ github.workspace }}
+          dest: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}
       - if: fromJSON(inputs.part).files && steps.files.outputs.fallback == 'true'
         uses: actions/download-artifact@v4
         with:
@@ -231,22 +227,18 @@ jobs:
           ref: ${{ inputs.sha }}
           fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}
           persist-credentials: false
-      - shell: bash
-        run: |
-          git sparse-checkout disable 2> /dev/null || true
-          if git config --local --name-only --get-regexp '^http\..*\.extraheader$'; then
-            echo "::error::the checkout kept its authorization header in its git config"
-            exit 1
-          fi
-      # the plan's files (its key files), for the command as CIRUNNERS_FILES: through the API
-      # (#245), with the job's token in this step's env alone (the action's default input), never
-      # the command's; download-artifact only where the API refuses (no actions: read)
+      # one step after the checkout (a step costs about 1 s of log upload): the checkout made
+      # whole and failed where its authorization header stayed in its git config (#228), before
+      # the files and the command; then the plan's files (its key files), for the command as
+      # CIRUNNERS_FILES: through the API (#245), with the job's token in this step's env alone
+      # (the action's default input), never the command's; download-artifact only where the
+      # API refuses (no actions: read)
       - id: files
-        if: fromJSON(inputs.part).files
         uses: chaobrain/ci-runners/actions/flow@v1.19.0
         with:
           command: fetch
-          dest: ${{ runner.temp }}/ci-runners-files
+          workspace: ${{ github.workspace }}
+          dest: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}
       - if: fromJSON(inputs.part).files && steps.files.outputs.fallback == 'true'
         uses: actions/download-artifact@v4
         with:

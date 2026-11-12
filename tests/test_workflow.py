@@ -40,10 +40,6 @@ class FlowExpressions(unittest.TestCase):
                 self.assertEqual(self.bad(b.splitlines()), [], f.name)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class OwnCheck(unittest.TestCase):
     """This repository's check (test.yml): the unit tests and every mutant shard side by
     side, each job bounded at 15 min, and the required ``unit (3.12)`` green only where all are."""
@@ -91,3 +87,7 @@ class OwnCheck(unittest.TestCase):
                 unittest.mock.patch('shutil.copytree'), unittest.mock.patch('builtins.print'):
             self.assertEqual(mutants.main(['--shard', '2/4']), 0)
         self.assertEqual(calls, [['t1', 't5', 't9']])  # the shard's own tests, once, unmutated
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -40,7 +40,7 @@ step on a guess):
   error need every serving host to report its pools of the label; a label whose speeds
   are not reported counts 1.0, as a pool without ``slot`` runs its minutes unscaled.
 
-**Unreadable capacity** (the reader's ``CapacityError``, or no rows at all): every part
+**Unreadable capacity** (the reader's ``CapacityError``, no rows, or every host row stale): every part
 goes to its shared label, without ``mem-big``, overflow or the plan-time error, and its
 ``why`` says so: a missing capacity file must not fail every plan.
 
@@ -48,11 +48,13 @@ goes to its shared label, without ``mem-big``, overflow or the plan-time error, 
 or derived from its outcome and ``next``) and its routed part give the retry's labels:
 
 ====================  ==========================================================
-``cool-card``         the cool card's host label, ``<host>-gpu<M>``
+``cool-card``         the cool card's host label, ``<host>-gpu<M>`` (a one-card
+                      part; else as fallback)
 ``same-host``         the first attempt's host label of its class; a cluster part
                       ``ci-slurm`` and its target
 ``more-memory``       the part's labels plus ``mem-big`` (a cluster part: its
-                      need's host label plus ``mem-big``), with ``resume``
+                      need's label plus ``mem-big``), with ``resume``; without a
+                      host proven to serve that, the labels without ``mem-big``
 ``any``               the part's labels again
 ``fallback``          the part's needs routed again
 ====================  ==========================================================
@@ -71,6 +73,8 @@ import math
 import re
 import sys
 from collections.abc import Mapping, Sequence
+
+from ci_runners import capacity
 
 BASE = 'self-hosted'
 #: a need to its capability label (16.1)
@@ -112,7 +116,7 @@ def load_plan(doc: object) -> list[dict]:
     """The parts of a schema 1 plan (design §4.10), checked; ``PlanError`` names each fault."""
     if not isinstance(doc, dict) or set(doc) != {'schema', 'parts'}:
         raise PlanError('a plan is an object with exactly "schema" and "parts"')
-    if doc['schema'] != 1:
+    if type(doc['schema']) is not int or doc['schema'] != 1:
         raise PlanError(f'plan schema {doc["schema"]!r}: this release reads schema 1')
     parts = doc['parts']
     if not isinstance(parts, list) or not 1 <= len(parts) <= MAX_PARTS:
@@ -129,12 +133,12 @@ def load_plan(doc: object) -> list[dict]:
             errors.append(f'{name}: ' + '; '.join(([f'unknown key(s) {bad}'] if bad else [])
                                                   + ([f'missing {missing}'] if missing else [])))
             continue
-        if not ID.match(p['id']) or p['id'] in seen:
+        if not isinstance(p['id'], str) or not ID.match(p['id']) or p['id'] in seen:
             errors.append(f'{name}: an id is [A-Za-z0-9][A-Za-z0-9_.-]*, unique in the plan')
-        seen.add(p['id'])
+        seen.add(str(p['id']))
         if not isinstance(p['command'], str) or not p['command'].strip():
             errors.append(f'{name}: command is a non-empty string')
-        if p['needs'] not in NEEDS:
+        if not isinstance(p['needs'], str) or p['needs'] not in NEEDS:
             errors.append(f'{name}: needs {p["needs"]!r} is not one of {", ".join(NEEDS)}')
         if not _num(p['minutes']) or not 0 < p['minutes'] <= MAX_MINUTES:
             errors.append(f'{name}: minutes is a number in (0, {MAX_MINUTES}]')
@@ -322,9 +326,12 @@ def route(parts: Sequence[Mapping], rows: Sequence | None, unread: str = '') -> 
     deterministic: the plan's earlier parts book the runners and cluster jobs they take.
     An unknown need raises ``PlanError``."""
     bad = [f'{p.get("id")}: needs {p.get("needs")!r} is not one of {", ".join(NEEDS)}'
-           for p in parts if p.get('needs') not in NEEDS]
+           for p in parts if not isinstance(p.get('needs'), str) or p['needs'] not in NEEDS]
     if bad:
         raise PlanError('; '.join(bad))
+    hosts = _hosts(rows or [])
+    if hosts and all(any(str(x).startswith(capacity.STALE) for x in r.problems) for r in hosts):
+        rows, unread = None, 'every host row is stale'  # the capacity timer stopped, not every host
     f = _Facts(rows) if rows else None
     unread = unread or 'no rows'
     errors: list[str] = []
@@ -368,10 +375,10 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
     host = str(first.get('host') or '')
     if row == 'cool-card':
         card = first.get('cool_card')
-        if host and type(card) is int and card >= 0:
+        if host and type(card) is int and card >= 0 and part['needs'] == 'gpu':  # a card's runner: one card
             return {**same, 'labels': [BASE, f'{host}-gpu{card}'], 'where': 'host', 'target': '',
                     'why': f'thermal: a cool card of {host}'}
-        row = 'fallback'  # no cool card recorded: the thermal row's other branch
+        row = 'fallback'  # no cool card recorded, or a two-card part: the thermal row's other branch
     if row == 'same-host':
         if part.get('where') == 'slurm':
             return {**same, 'why': f'same target {part.get("target")}'}
@@ -382,8 +389,10 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
     if row == 'more-memory':
         labels = [BASE, NEEDS[part['needs']]] if part.get('where') == 'slurm' else list(part['labels'])
         labels += [] if MEM_BIG in labels else [MEM_BIG]
-        if rows and _Facts(rows).unserved(labels[1:]):
-            return {**same, 'retry': False, 'labels': [], 'why': f'oom: no host serves {" + ".join(labels[1:])}'}
+        if not rows or not _Facts(rows).serving(labels[1:]):  # unproven: mem-big would wait 24 h
+            plain = [x for x in labels if x != MEM_BIG]
+            return {**same, 'labels': plain, 'where': 'host', 'target': '', 'resume': True,
+                    'why': f'oom: no host proven to serve {" + ".join(labels[1:])}; {" + ".join(plain[1:])} with resume'}
         return {**same, 'labels': labels, 'where': 'host', 'target': '', 'resume': True, 'why': 'oom: more memory'}
     if row == 'any':
         return {**same, 'why': 'the part\'s labels again'}
@@ -419,7 +428,6 @@ def main(argv: Sequence[str], etc: str, stdin=None, stdout=None, stderr=None) ->
     except (ValueError, PlanError) as e:
         print(f'route: the plan does not load: {e}', file=stderr)
         return EXIT_PLAN
-    from ci_runners import capacity
     rows, unread = None, ''
     try:
         if a.rows:

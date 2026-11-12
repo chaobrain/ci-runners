@@ -131,10 +131,34 @@ class Overflow(unittest.TestCase):
 
     def test_stale_rows(self):
         with self.assertRaisesRegex(rt.RouteError, 'ci-cpu: part p: no host serves'):
-            one(part(), host(ci_cpu=R(1), age=121))
-        got = one(part(), host(ci_cpu=R(0)), SLURMS, target(age=121))
+            one(part(), host(ci_cpu=R(1), age=121), host('hostb', ci_gpu=R(1)))
+        got = one(part(needs='gpu2'), host(ci_cpu=R(1), age=121), host('hostb', age=200, ci_slurm=R(1)))
+        self.assertEqual(got['labels'], ['self-hosted', 'ci-gpu2'])  # every host row stale: the file, not the hosts
+        self.assertIn('capacity unreadable (every host row is stale)', got['why'])
+        got = one(part(), host(ci_cpu=R(0)), SLURMS, target(age=capacity.CLUSTER_STALE_S + 1))
         self.assertEqual(got['where'], 'host')  # a stale cluster row cannot start it now
         self.assertEqual(one(part(), host(ci_cpu=R(0)), host('hostb', age=121, ci_slurm=R(4)), target())['where'], 'host')
+
+
+class PoolRows(unittest.TestCase):
+    """Rows as ``pool`` writes them (``host_row``, ``target_row``), read by ``capacity``."""
+
+    def test_the_route_reads_pools_own_rows(self):
+        from ci_runners import pool
+        from tests.test_pool import SINFO, reg
+        r = reg()
+        cl = r.machines['cl']
+        lr = {'ci-cpu': {'registered': 2, 'online': 1, 'free': 0}, 'ci-slurm': {'registered': 8, 'online': 8, 'free': 8},
+              'hosta-cpu': {'registered': 2, 'online': 1, 'free': 0}}
+        h = dict(pool.host_row(r.machines['hosta'], {'slots_free': 0, 'load': 0, 'cpus': 16, 'label_runners': lr}),
+                 read_at=T0)
+        self.assertEqual(h['problems'], [])
+        ts = [dict(pool.target_row(cl, cl.targets[t], pool.parse_sinfo(SINFO), {}, {}), read_at=T0) for t in cl.targets]
+        self.assertEqual(one(part(), h, *ts)['where'], 'host')  # the fixture's targets have not passed numerics
+        ts = [dict(t, numerics_ok=True) for t in ts]
+        got = rt.route([part('a'), part('b'), part('c')], rows(h, *ts))
+        self.assertEqual([(g['where'], g['target']) for g in got], [('slurm', 'cpu'), ('slurm', 'cpu'), ('host', '')])
+        self.assertLessEqual({x for g in got for x in g['labels']}, rt.SHARED)
 
 
 class MemBig(unittest.TestCase):
@@ -193,6 +217,8 @@ class PlanTime(unittest.TestCase):
     def test_an_unknown_need_is_the_plans_fault(self):
         with self.assertRaisesRegex(rt.PlanError, "p: needs 'tpu' is not one of cpu, gpu, gpu2, timing"):
             rt.route([part(needs='tpu')], rows(host(ci_cpu=R(1))))
+        with self.assertRaisesRegex(rt.PlanError, r"p: needs \['cpu'\]"):
+            rt.route([part(needs=['cpu'])], rows(host(ci_cpu=R(1))))
         with self.assertRaisesRegex(rt.PlanError, 'needs'):
             rt.route([part(needs='light')], None)
 
@@ -221,7 +247,10 @@ class Plan(unittest.TestCase):
                  ({'schema': 1, 'parts': [part(minutes=241)]}, 'minutes'), ({'schema': 1, 'parts': [part(minutes=0)]}, 'minutes'),
                  ({'schema': 1, 'parts': [part(minutes=True)]}, 'minutes'),
                  ({'schema': 1, 'parts': [part(memory_gib=0)]}, 'memory_gib'),
-                 ({'schema': 1, 'parts': [dict(part(), command=' ')]}, 'command'), ({'schema': 1, 'parts': [3]}, 'not an object')]
+                 ({'schema': 1, 'parts': [dict(part(), command=' ')]}, 'command'), ({'schema': 1, 'parts': [3]}, 'not an object'),
+                 ({'schema': True, 'parts': [part()]}, 'schema True'), ({'schema': 1, 'parts': [part(5)]}, 'part 0: an id'),
+                 ({'schema': 1, 'parts': [part(['x'])]}, 'part 0: an id'),
+                 ({'schema': 1, 'parts': [part(needs=['cpu'])]}, r"needs \['cpu'\]")]
         for doc, why in cases:
             with self.assertRaisesRegex(rt.PlanError, why):
                 rt.load_plan(doc)
@@ -247,6 +276,9 @@ class Retry(unittest.TestCase):
         self.assertEqual((got['retry'], got['row'], got['labels'], got['resume']), (True, 'cool-card', ['self-hosted', 'hosta-gpu3'], False))
         got = rt.retry(self.HOSTP, first('thermal'), rows(host(ci_gpu=R(1))))  # no card recorded: routed again
         self.assertEqual((got['row'], got['labels']), ('fallback', ['self-hosted', 'ci-gpu']))
+        two = dict(self.HOSTP, needs='gpu2', labels=['self-hosted', 'ci-gpu2'])
+        got = rt.retry(two, first('thermal', cool_card=3), rows(host(ci_gpu2=R(1))))  # a card's runner holds one card
+        self.assertEqual((got['row'], got['labels']), ('fallback', ['self-hosted', 'ci-gpu2']))
 
     def test_same_host(self):
         got = rt.retry(self.HOSTP, first('reboot', pool_labels=['ci-gpu', 'hosta-gpu', 'hosta-gpu1', 'mem-big']))
@@ -258,12 +290,16 @@ class Retry(unittest.TestCase):
         self.assertEqual((got['row'], got['labels']), ('any', ['self-hosted', 'ci-gpu']))
 
     def test_more_memory(self):
-        got = rt.retry(self.HOSTP, first('oom', where='more-memory'))
+        big = rows(host(ci_gpu=R(1), mem_big=R(1)))
+        got = rt.retry(self.HOSTP, first('oom', where='more-memory'), big)
         self.assertEqual((got['labels'], got['resume']), (['self-hosted', 'ci-gpu', 'mem-big'], True))
-        self.assertEqual(rt.retry(dict(self.HOSTP, labels=got['labels']), first('oom'))['labels'], got['labels'])
-        self.assertEqual(rt.retry(self.SLURMP, first('oom'))['labels'], ['self-hosted', 'ci-gpu', 'mem-big'])
-        got = rt.retry(self.HOSTP, first('oom'), rows(host(ci_gpu=R(1))))
-        self.assertEqual((got['retry'], got['why']), (False, 'oom: no host serves ci-gpu + mem-big'))
+        self.assertEqual(rt.retry(dict(self.HOSTP, labels=got['labels']), first('oom'), big)['labels'], got['labels'])
+        self.assertEqual(rt.retry(self.SLURMP, first('oom'), big)['labels'], ['self-hosted', 'ci-gpu', 'mem-big'])
+        for cap in (rows(host(ci_gpu=R(1))), None):  # mem-big not proven served: it would wait 24 h
+            got = rt.retry(self.SLURMP, first('oom'), cap)
+            self.assertEqual((got['retry'], got['labels'], got['where'], got['resume']),
+                             (True, ['self-hosted', 'ci-gpu'], 'host', True))
+            self.assertIn('no host proven to serve ci-gpu + mem-big', got['why'])
 
     def test_any(self):
         for o in ('lost', 'stopped'):

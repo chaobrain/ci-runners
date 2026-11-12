@@ -88,6 +88,7 @@
      - `retries = 1`；
      - `memory`；
      - `refresh = true`（可选）：让 `ci-envrefresh.timer` 每 30 分钟检查这个项目的 upstream，见下面的"环境刷新"；
+     - `max_parallel`（可选，1 到 256，默认 16）：可复用工作流一次运行同时跑的部件数（design 16.6、§7 第 1 条），只有 plan 作业读它。更旧的主机层不认识这个键，会把整个条目当成格式错误、部件全部 `unavailable`：`v1` 指向接受它的版本、每台主机都装上之后才写；
      - `[hosts.<role>]` 下的 `env`、`memory_max`、`max_slots`、`variables`。
   2. 建环境。在主机的 CI 账户 shell 里：
      ```

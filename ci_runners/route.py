@@ -87,7 +87,7 @@ from ci_runners import capacity
 
 BASE = 'self-hosted'
 #: a need to its capability label (16.1)
-NEEDS = {'cpu': 'ci-cpu', 'gpu': 'ci-gpu', 'gpu2': 'ci-gpu2', 'timing': 'ci-timing'}
+NEEDS = {'cpu': 'ci-cpu', 'gpu': 'ci-gpu', 'gpu2': 'ci-gpu2', 'timing': 'ci-timing', 'light': 'ci-light'}
 SLURM = 'ci-slurm'
 MEM_BIG = 'mem-big'
 #: the labels a route may name: never a host's (16.1)
@@ -97,8 +97,15 @@ GRACE_MIN = 15
 #: the largest ``tier`` of a host row (``pool.TIER_MAX``)
 TIER_MAX = 99
 MAX_MINUTES = 240
+#: a ``light`` part's bound: its job's, plus 15, stays within the light class's 30 (§4.8)
+LIGHT_MAX_MINUTES = 15
+#: needs that never overflow to the cluster
+NO_OVERFLOW = ('timing', 'light')
 MAX_PARTS = 256
-PART_KEYS = {'id': True, 'command': True, 'needs': True, 'minutes': True, 'memory_gib': False, 'results': False}
+PART_KEYS = {'id': True, 'command': True, 'needs': True, 'minutes': True, 'memory_gib': False, 'results': False,
+             'queue_minutes': False, 'artifacts': False}
+#: a plan's keys; ``schema`` and ``parts`` required (the rest the reusable workflow's, ``flow.load``)
+PLAN_KEYS = {'schema': True, 'parts': True, 'files': False, 'max_parallel': False}
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]*\Z')
 #: the five rows of ``outcome.hint`` (16.5)
 ROWS = ('cool-card', 'same-host', 'more-memory', 'any', 'fallback')
@@ -125,13 +132,13 @@ def _num(v: object) -> bool:
 
 def load_plan(doc: object) -> list[dict]:
     """The parts of a schema 1 plan (design §4.10), checked; ``PlanError`` names each fault."""
-    if not isinstance(doc, dict) or set(doc) != {'schema', 'parts'}:
-        raise PlanError('a plan is an object with exactly "schema" and "parts"')
+    if not isinstance(doc, dict) or not {k for k, req in PLAN_KEYS.items() if req} <= set(doc) <= set(PLAN_KEYS):
+        raise PlanError(f'a plan is an object with "schema" and "parts", and optionally {", ".join(k for k, req in PLAN_KEYS.items() if not req)}')
     if type(doc['schema']) is not int or doc['schema'] != 1:
         raise PlanError(f'plan schema {doc["schema"]!r}: this release reads schema 1')
     parts = doc['parts']
-    if not isinstance(parts, list) or not 1 <= len(parts) <= MAX_PARTS:
-        raise PlanError(f'"parts" is a list of 1 to {MAX_PARTS} parts')
+    if not isinstance(parts, list) or len(parts) > MAX_PARTS:
+        raise PlanError(f'"parts" is a list of at most {MAX_PARTS} parts')
     errors, seen = [], set()
     for i, p in enumerate(parts):
         if not isinstance(p, dict):
@@ -151,8 +158,9 @@ def load_plan(doc: object) -> list[dict]:
             errors.append(f'{name}: command is a non-empty string')
         if not isinstance(p['needs'], str) or p['needs'] not in NEEDS:
             errors.append(f'{name}: needs {p["needs"]!r} is not one of {", ".join(NEEDS)}')
-        if not _num(p['minutes']) or not 0 < p['minutes'] <= MAX_MINUTES:
-            errors.append(f'{name}: minutes is a number in (0, {MAX_MINUTES}]')
+        most = LIGHT_MAX_MINUTES if p['needs'] == 'light' else MAX_MINUTES
+        if not _num(p['minutes']) or not 0 < p['minutes'] <= most:
+            errors.append(f'{name}: minutes is a number in (0, {most}]' + (' for needs light' if most != MAX_MINUTES else ''))
         if 'memory_gib' in p and (not _num(p['memory_gib']) or p['memory_gib'] <= 0):
             errors.append(f'{name}: memory_gib is a positive number')
     if errors:
@@ -254,8 +262,8 @@ def _target_kind_fits(need: str, t) -> bool:
 def _overflow(f: _Facts, part: Mapping, labels: Sequence[str]) -> tuple[object, str]:
     """The cluster target a part overflows to, or (None, why not)."""
     need = part['needs']
-    if need == 'timing':
-        return None, 'timing never overflows'
+    if need in NO_OVERFLOW:
+        return None, f'{need} never overflows'
     if not f.serving([SLURM]):
         return None, f'no host serves {SLURM}'
     left = f.free([SLURM])

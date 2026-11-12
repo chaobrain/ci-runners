@@ -3072,23 +3072,50 @@ not load is a red plan job with the reason:
 | key | required | meaning |
 |---|---|---|
 | `schema` | yes | `1`; a later schema is a new key set, read by the release that brings it |
-| `parts` | yes | a list of at most 256 parts (GitHub's matrix limit) |
-| `parts[].id` | yes | `[A-Za-z0-9][A-Za-z0-9_.-]*`, unique in the plan |
-| `parts[].command` | yes | as `part`'s `command` |
-| `parts[].needs` | yes | `cpu`, `gpu`, `gpu2` or `timing` (16.5) |
+| `parts` | yes | a list of at most 256 parts (GitHub's matrix limit); an empty list is a plan: no part job, the plan job posts `success` "nothing to run" |
+| `files` | no | a directory below the checkout (relative, no `..`, no links, at most 1000 entries and 64 MiB) the plan command wrote: uploaded once (`ci-plan-files`), downloaded into every attempt before its command, at `CIRUNNERS_FILES` |
+| `max_parallel` | no | an integer in [1, 256]: lowers the registry's `max_parallel` for this run, never raises it |
+| `parts[].id` | yes | `[A-Za-z0-9][A-Za-z0-9_.-]*`, at most 64 characters (its artifact's name), unique in the plan; not `plan`, the plan command's own part |
+| `parts[].command` | yes | as `part`'s `command`, at most 32 KiB |
+| `parts[].needs` | yes | `cpu`, `gpu`, `gpu2`, `timing` (16.5) or `light`: `ci-light`, no slot and no card, `minutes` at most 15, never overflows |
 | `parts[].minutes` | yes | the part's time on the reference host, at most 240; its bounds scale by speed (16.2) |
 | `parts[].memory_gib` | no | the part's memory cap; the registry's default otherwise; above the label's largest slot, the route adds `mem-big` |
 | `parts[].results` | no | as `part`'s `results` |
+| `parts[].queue_minutes` | no | (0, 240], default 15: an attempt's wait on its host for a slot or a lease (`part`'s `queue-timeout-minutes`), added to the job's bound; past it the attempt is `unavailable` and the retry's rows apply as for a lost one |
+| `parts[].artifacts` | no | at most 4 names (`[A-Za-z0-9][A-Za-z0-9_.]*`, no `-`, not `ci`) to paths below `RUNNER_TEMP`, uploaded after each attempt as `<name>-<id>-<attempt>`; the verdict does not read them |
 
 An unknown key is refused. Without `plan`, the plan is `{"schema": 1, "parts": [{"id":
-"pytest", "command": "python -m pytest", "needs": "cpu", "minutes": 60}]}`.
+"pytest", "command": "python -m pytest", "needs": "cpu", "minutes": 60}]}`. The plan
+command runs as a part of its own, `plan`, in the plan job (the `part` action on its
+light runner, an inner bound of 30 min), and its standard output, at most 1 MiB, is the
+plan. The plan job posts the state itself where it ends the run, and no part starts: a
+plan that does not load and a red plan command post `failure`; a plan command's other
+end (§4.4) and a route error (16.5) post `error`. The checks and the route are `ci-run
+flow plan` (`ci_runners/flow.py`); the consumers' guide lists every key's error text. A
+run starts at most the registry's `max_parallel` parts at once (1 to 256, default 16;
+§7 rule 1). `memory_gib` is at most 4096, and the routed matrix at most 500 KB (one job
+output and one expression, each under GitHub's 1 MB). `files`, `max_parallel`, `light`, `queue_minutes`, `artifacts` and the empty list
+are additions to schema 1: a plan without them reads as before.
+
+The plan command reads the event's facts as variables, with no token: `CIRUNNERS_EVENT`,
+`CIRUNNERS_PR`, `CIRUNNERS_PR_LABELS` (a JSON list of names), `CIRUNNERS_BASE_REF`,
+`CIRUNNERS_BASE_SHA`, `CIRUNNERS_HEAD_REF` and `CIRUNNERS_HEAD_SHA`. Neither the plan
+command nor a part command gets a token. A read-only token for the plan command alone, an
+input off by default, is never offered to a public caller; it is not built (one token per
+job, and the plan job's carries `statuses: write`).
+
+*Bounds of a queued part.* `queue_minutes` bounds the wait on the host. A job that GitHub
+never hands to a runner (a later tier's black hole, 19.9) waits in GitHub's queue up to
+its 24 hours: GitHub cancels no single job, and the backstop 19.9 names is not built yet.
 
 **The contract.** The default branch's `.github/ci-runners.toml` may set `contract = N`
 (an integer; §4.9's spec, accepted from R1). The plan job reads that file with the job
 token before it runs the plan, and a head whose own file sets a lower `contract`, or none
 where the default branch sets one, ends red in that job with "merge origin/main"; no part
-starts. A consumer raises `contract` in the PR that changes what its plan or its parts
-expect of the head.
+starts. A head whose file does not load counts as one without `contract`; a default
+branch whose `contract` is not a whole number, or whose file does not load, ends the plan
+job with `error` (`ci-run flow contract`). A consumer raises `contract` in the PR that
+changes what its plan or its parts expect of the head.
 
 **Onboarding** is at most 20 workflow lines and one registry entry (`etc/projects/
 <project>.toml`, §4.9's env). A private repository of the org needs no policy entry (the

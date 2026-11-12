@@ -1633,6 +1633,25 @@ Each item names what it supersedes or amends.
        reference to `part.yml`, to the release's tag. *Onboarding* a repository is at
        most 20 workflow lines (§4.10) and one registry entry. Composing the actions
        (§4.8, 12.12) stays allowed, with capability labels.
+
+       *Amended in R6 (coordinator's ruling, 2026-11-12): the claim's decision in the
+       plan job, its post with the parts; the plan job holds no write permission.* The
+       plan job runs the head's plan command, so its token is read-only (`contents`,
+       `statuses`, `actions` and `pull-requests`, all `read`): a token that can post
+       statuses, handed to the head's code, would let a head post its own green under the
+       identity the claim trusts, and a separate job for the plan command would cost a
+       serial pickup. The plan job makes the claim's decision (§4.1 only reads statuses),
+       the contract check, the plan command, the route and the matrix, and posts
+       nothing: where it ends the run (an old contract, a plan that does not load, a red
+       plan command, a route error, nothing to run, plan only) its state is an output.
+       The claim's `pending` comes from a job of its own on `ci-light`, beside the parts,
+       only where the plan routed parts, and only where the runners posted nothing on the
+       context since the claim read it (a red attempt is never covered, nor a green). The
+       verdict job, which needs the plan, the pending job and the parts, posts every final
+       state, the plan's included: on those paths it is the run's second pickup, and the
+       critical path stays three. A caller may hand the plan command the plan job's
+       read-only token (input `plan-token`, off by default; never a public caller's, whose
+       run is refused in any case); a part never gets one.
     7. **A public pool** (amends decisions 2, 10.2, 10.3, 11.1 and 11.12; brings back
        §12 item 2; amends §6.1, §6.2, §6.5, T1, T12 and T13). *Amended by 18: the pool is
        GPU-only (public CPU work on hosted runners); its runners are confined single-job
@@ -2150,6 +2169,12 @@ amends.
        each of a fresh process that imports JAX and runs one 1024 × 1024 product: 4.02 s
        inside against 3.82 s outside (medians, +5 %); an empty confinement takes 0.11 s.
 
+       Mode (a), 2026-11-12 (issue #203): with the GPU group's single-gid line in the
+       shared-account host's `/etc/subgid`, the job's kernel groups were the GPU group
+       alone, every item held, the card worked, and a file of another of the account's
+       groups was both hidden and closed to the job's credentials (F5); the identity item
+       failed under `kept`, as check 8 requires; cost 3.87 s inside against 3.91 s outside.
+
        *From C1 to production* (each a requirement of C2 or later, none built in C1): the
        relay accepts only `CONNECT <name>:443` and caps its connections (item 3; C1's
        relay passed bytes); a seccomp filter (at least `sched_setaffinity`, as a second
@@ -2235,7 +2260,7 @@ amends.
   | (g) Landlock and seccomp alone, without namespaces | on 5.15 files only (ABI 1): no network rules (ABI 4, kernel 6.7), no signal or abstract-socket scoping (ABI 6, 6.12); every process visible, and the account's processes' `/proc/<pid>/environ` readable (Yama limits attaching only); pathname Unix sockets and the user's D-Bus reachable (a connect is no file access); the job keeps the account's uid and may signal any of its processes | Landlock in the kernel | (b) and (c) fail | light; kept as a second fence inside the namespaces |
   | (h) public GPU jobs on `6000pro` only | `account` | root on that host (we have it) | ruling 2: h100's cards stay closed to public repositories, and no host without root ever joins | the lightest now; it is C4's first step anyway |
 
-## Lead decision (proposed, 2026-11-12): the preferred host first, by presence (decision 19, issue #200)
+## Lead decision (2026-11-12, approved with #201): the preferred host first, by presence (decision 19, issue #200)
 
 Proposed with RUN-10's R5b (issue #200); this text is approved with its PR. The lead ruled on
 2026-11-12 that all tests of every repository that uses the pool run on h100 first: the
@@ -2463,7 +2488,9 @@ The order is therefore made where the runners are, by presence, and no plan name
            keeps the later tiers yielding. A listener without a connection is caught, and
            a hook that refuses drains its host after three refusals (16.4's black hole).
            One that GitHub never serves is not caught until a maintainer drains it. This
-           is an open point; R6's bound of a queued part is the backstop.
+           is an open point. R6 bounds a part's wait on its host only (`queue_minutes`):
+           GitHub cancels no single queued job. The backstop is a scheduled sweeper of
+           the consumer's runs (issue #213); until it exists, the consumer's own.
          - *Host labels.* A job on a later tier's own host label waits while that host
            yields, unless the host is held (19.8).
        - *The rollout* (the host steps are the lead's).
@@ -3070,10 +3097,21 @@ every rule of §4.1 to §4.5 holds inside it.
 | `plan` | none | a command, run in the head's checkout and env on `ci-light`, that prints the plan; none: one `pytest` part |
 | `project` | the repository's name | registry key, as `part`'s |
 | `sha` | the pull request's head, else `github.sha` | the head to run (a dispatch of a given head); not checked: the caller keeps a fork's commit out |
-| `plan-only` | `false` | the plan job without its claim: contract, plan command, checks, route and summary; no part; posts `success` "plan only: N part(s) routed, none run" (a context of its own) |
+| `plan-only` | `false` | the plan job without its claim: contract, plan command, checks, route and summary; no part; the verdict job posts `success` "plan only: N part(s) routed, none run" (a context of its own) |
+| `plan-token` | `false` | hand the plan job's read-only token to the plan command alone, as `GH_TOKEN` (16.6 as amended); a part never gets one |
 
-Its output `state` is the verdict's (`success`, `failure` or `error`), empty where the
-plan job posted the state itself. Its own steps that are not an action of §4 (the
+Its output `state` is the state the verdict job posted (`success`, `failure` or `error`),
+empty where the claim skipped a green head.
+
+*Who posts what* (16.6 as amended). The plan job (`contents`, `statuses`, `actions`,
+`pull-requests`: `read`) posts nothing; its end, where it ends the run, is an output.
+The `pending` job (`statuses: write`, on `ci-light`) posts the claim's pending once,
+beside the parts, only where the plan routed parts on a head the claim did not skip, and
+only where the runners posted nothing on the context since the claim read it. A part's
+attempt posts `failure` from its own job where it ends red. The verdict job, after the
+plan, the pending job and the parts, posts the run's one final status: the plan's end, or
+every part's. A cancelled run posts no final status (a newer head's run does), and a head
+the claim skipped keeps its green. Its own steps that are not an action of §4 (the
 contract check, the plan's checks and route, the retry's row, the salvage leg's host, a
 red attempt's status) are `ci-run flow` commands (`ci_runners/flow.py`), run through
 `actions/flow` from the action's own checkout, the release the workflow names (§9):
@@ -3114,7 +3152,7 @@ not load is a red plan job with the reason:
 | key | required | meaning |
 |---|---|---|
 | `schema` | yes | `1`; a later schema is a new key set, read by the release that brings it |
-| `parts` | yes | a list of at most 256 parts (GitHub's matrix limit); an empty list is a plan: no part job, the plan job posts `success` "nothing to run" |
+| `parts` | yes | a list of at most 256 parts (GitHub's matrix limit); an empty list is a plan: no part job, the verdict job posts `success` "nothing to run" |
 | `files` | no | a directory below the checkout (relative, no `..`, no links, at most 1000 entries and 64 MiB) the plan command wrote: uploaded once (`ci-plan-files`), downloaded into every attempt before its command, at `CIRUNNERS_FILES` |
 | `max_parallel` | no | an integer in [1, 256]: lowers the registry's `max_parallel` for this run, never raises it |
 | `parts[].id` | yes | `[A-Za-z0-9][A-Za-z0-9_.-]*`, at most 64 characters (its artifact's name), unique in the plan; not `plan`, the plan command's own part |
@@ -3130,9 +3168,9 @@ An unknown key is refused. Without `plan`, the plan is `{"schema": 1, "parts": [
 "pytest", "command": "python -m pytest", "needs": "cpu", "minutes": 60}]}`. The plan
 command runs as a part of its own, `plan`, in the plan job (the `part` action on its
 light runner, an inner bound of 30 min), and its standard output, at most 1 MiB, is the
-plan. The plan job posts the state itself where it ends the run, and no part starts: a
-plan that does not load and a red plan command post `failure`; a plan command's other
-end (§4.4) and a route error (16.5) post `error`. The checks and the route are `ci-run
+plan. Where the plan job ends the run, no part starts and the verdict job posts its end:
+a plan that does not load and a red plan command are `failure`; a plan command's other
+end (§4.4) and a route error (16.5) are `error`. The checks and the route are `ci-run
 flow plan` (`ci_runners/flow.py`); the consumers' guide lists every key's error text. A
 run starts at most the registry's `max_parallel` parts at once (1 to 256, default 16;
 §7 rule 1). `memory_gib` is at most 4096, and the routed matrix at most 500 KB (one job
@@ -3142,19 +3180,20 @@ are additions to schema 1: a plan without them reads as before.
 The plan command reads the event's facts as variables, with no token: `CIRUNNERS_EVENT`,
 `CIRUNNERS_PR`, `CIRUNNERS_PR_LABELS` (a JSON list of names), `CIRUNNERS_BASE_REF`,
 `CIRUNNERS_BASE_SHA`, `CIRUNNERS_HEAD_REF` and `CIRUNNERS_HEAD_SHA`. Neither the plan
-command nor a part command gets a token. A read-only token for the plan command alone, an
-input off by default, is never offered to a public caller; it is not built (one token per
-job, and the plan job's carries `statuses: write`).
+command nor a part command gets a token, but for the plan job's read-only token that a
+caller hands its plan command (`plan-token`); a public caller's run is refused in any case.
 
 *Bounds of a queued part.* `queue_minutes` bounds the wait on the host. A job that GitHub
 never hands to a runner (a later tier's black hole, 19.9) waits in GitHub's queue up to
-its 24 hours: GitHub cancels no single job, and the backstop 19.9 names is not built yet.
+its 24 hours: GitHub cancels no single job. The backstop is a small reusable workflow a
+consumer schedules, which lists its runs, cancels one whose job has queued past its bound
+and posts `error` (issue #213, not built); until then, the consumer's own sweeper.
 
 **The contract.** The default branch's `.github/ci-runners.toml` may set `contract = N`
 (an integer; §4.9's spec, accepted from R1). The plan job reads that file with the job
 token before it runs the plan, and a head whose own file sets a lower `contract`, or none
-where the default branch sets one, ends red in that job with "merge origin/main"; no part
-starts. A head whose file does not load counts as one without `contract`; a default
+where the default branch sets one, ends the run in that job, and the verdict job posts
+`failure` with "merge origin/main" (two light pickups, under 30 s); no part starts. A head whose file does not load counts as one without `contract`; a default
 branch whose `contract` is not a whole number, or whose file does not load, ends the plan
 job with `error` (`ci-run flow contract`). A consumer raises `contract` in the PR that
 changes what its plan or its parts expect of the head.
@@ -3182,16 +3221,15 @@ jobs:
   ci:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     uses: chaobrain/ci-runners/.github/workflows/ci.yml@v1
-    permissions:
-      contents: read
-      statuses: write
-      actions: read
+    permissions: { contents: read, statuses: write, actions: read, pull-requests: read }
     with:
       context: myproj/ci
       plan: python scripts/ci_plan.py
 ```
 
-`actions: read` lets the parts' salvage leg read its run's jobs (§2's `runner_name`). A
+`actions: read` lets the parts' salvage leg read its run's jobs (§2's `runner_name`);
+`pull-requests: read` is the plan job's (16.6 as amended), and GitHub refuses a run whose
+called job asks for more than the caller grants. A
 fork's pull request skips the job (the guard, §4.8 rule 1); a consumer that wants a check
 for it runs one on GitHub-hosted runners.
 

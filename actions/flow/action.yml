@@ -2,13 +2,13 @@ name: ci-runners flow
 description: One step of the reusable workflow ci.yml and part.yml (design 16.6, §4.10), run from this action's own checkout; not for consumers' own workflows.
 inputs:
   command:
-    description: contract, plan, retry, locate or status (ci_runners/flow.py)
+    description: claim, contract, plan, pending, retry, locate or status (ci_runners/flow.py)
     required: true
   context:
-    description: the status context (contract, plan, status)
+    description: the status context (claim, contract, plan, pending, status)
     default: ''
   sha:
-    description: the head (contract, plan, status)
+    description: the head (claim, contract, plan, pending, status)
     default: ''
   default-branch:
     description: the repository's default branch (contract; empty reads it from the API)
@@ -46,18 +46,39 @@ inputs:
   part-id:
     description: the part whose first attempt to locate (locate)
     default: ''
+  seen:
+    description: the newest of the runners' statuses the claim read, epoch seconds (pending)
+    default: ''
   state:
-    description: failure or error (status)
+    description: failure, error or success (status)
     default: ''
   description:
     description: the status description (status)
     default: ''
   token:
-    description: the job's token (statuses write to post; actions read to locate)
+    description: the job's token (statuses read to claim, write to post; contents read for the contract; actions read to locate)
     default: ${{ github.token }}
 outputs:
+  run:
+    description: "true or false, the claim's decision (claim)"
+    value: ${{ steps.flow.outputs.run }}
+  reason:
+    description: "why (claim)"
+    value: ${{ steps.flow.outputs.reason }}
+  seen:
+    description: "the newest of the runners' statuses read, epoch seconds, 0.0 for none (claim)"
+    value: ${{ steps.flow.outputs.seen }}
+  state:
+    description: "the run's end where this step ends it, for the verdict job to post (contract, plan)"
+    value: ${{ steps.flow.outputs.state }}
+  description:
+    description: "that end's status description (contract, plan)"
+    value: ${{ steps.flow.outputs.description }}
+  routed:
+    description: "true where the plan has parts to run (plan)"
+    value: ${{ steps.flow.outputs.routed }}
   posted:
-    description: "true where this step posted the head's state itself (contract, plan)"
+    description: "true where pending was posted (pending)"
     value: ${{ steps.flow.outputs.posted }}
   parts:
     description: "the routed parts, a JSON array: the matrix of part.yml (plan)"
@@ -102,10 +123,11 @@ runs:
         IN_FALLBACK_FILE: ${{ inputs.fallback-file }}
         IN_ROLE: ${{ inputs.role }}
         IN_PART_ID: ${{ inputs.part-id }}
+        IN_SEEN: ${{ inputs.seen }}
         IN_STATE: ${{ inputs.state }}
         IN_DESCRIPTION: ${{ inputs.description }}
       run: |
-        case "$IN_COMMAND" in contract|plan|retry|locate|status) ;; *) echo "::error::ci-runners flow: unknown command '$IN_COMMAND'"; exit 2;; esac
+        case "$IN_COMMAND" in claim|contract|plan|pending|retry|locate|status) ;; *) echo "::error::ci-runners flow: unknown command '$IN_COMMAND'"; exit 2;; esac
         args=()
         [ -z "$IN_CONTEXT" ] || args+=("--context=$IN_CONTEXT")
         [ -z "$IN_SHA" ] || args+=("--sha=$IN_SHA")
@@ -121,6 +143,7 @@ runs:
         [ -z "$IN_FALLBACK_FILE" ] || args+=("--outcome-file=$IN_FALLBACK_FILE")
         [ -z "$IN_ROLE" ] || args+=("--role=$IN_ROLE")
         [ -z "$IN_PART_ID" ] || args+=("--part-id=$IN_PART_ID")
+        [ -z "$IN_SEEN" ] || args+=("--seen=$IN_SEEN")
         [ -z "$IN_STATE" ] || args+=("--state=$IN_STATE")
         [ -z "$IN_DESCRIPTION" ] || args+=("--description=$IN_DESCRIPTION")
         # this action's own checkout, the release the workflow names (design §9), not the host's

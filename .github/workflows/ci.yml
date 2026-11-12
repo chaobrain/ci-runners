@@ -1,10 +1,10 @@
 # The reusable workflow a consumer calls (decision 16.6, design §4.10): its CI in three
-# pickups. *plan*, on ci-light: the claim (§4.1), the contract check, the consumer's plan
-# command, the plan checked and routed to capability labels (16.5). *parts*: part.yml once
-# per part, at most the registry's max_parallel at once, each with its retry and, on the
-# lost path, its salvage leg. *verdict*, on ci-light: every part's artifacts, one status.
-# The plan job posts the state itself where it ends the run (an old contract, a plan that
-# does not load, a red plan command, a route error); the verdict then does not run.
+# pickups. *plan*, on ci-light, with a read-only token: the claim's decision (§4.1), the
+# contract check, the consumer's plan command, the plan checked and routed to capability
+# labels (16.5); it posts nothing, and where it ends the run its state is an output.
+# *parts*: part.yml once per part, at most the registry's max_parallel at once, each with
+# its retry and, on the lost path, its salvage leg; beside them *pending*, the claim's post.
+# *verdict*, on ci-light: the run's one final status, the plan's end or every part's.
 # workflow_call only: no event of this repository starts it (AGENTS.md); jobs name
 # capability labels only (16.1). Each job's permissions narrow the caller's grant.
 name: ci-runners
@@ -25,16 +25,20 @@ on:
         type: string
         default: ''
       sha:
-        description: the head to run; empty, the pull request's head, else github.sha
+        description: the head to run; empty, the pull request's head, else github.sha (not checked; keep a fork's commit out)
         type: string
         default: ''
       plan-only:
         description: plan, route and summary only, no part; posts success "plan only" (use a context of its own)
         type: boolean
         default: false
+      plan-token:
+        description: hand the plan job's read-only token to the plan command alone, as GH_TOKEN (never to a part; a public caller is refused in any case)
+        type: boolean
+        default: false
     outputs:
       state:
-        description: the verdict's state (success, failure or error); empty where the plan job posted the state itself
+        description: the state the verdict job posted (success, failure or error); empty where the claim skipped a green head
         value: ${{ jobs.verdict.outputs.state }}
 
 jobs:
@@ -51,6 +55,7 @@ jobs:
       - shell: bash
         run: echo "::error::ci-runners ci.yml serves private repositories only until decision 18's C2" && exit 1
 
+  # read-only (16.6 as amended): nothing of the head runs with a token that can post a status
   plan:
     name: plan
     if: >-
@@ -60,14 +65,19 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      statuses: write
+      statuses: read
+      actions: read
+      pull-requests: read
     outputs:
       run: ${{ inputs.plan-only && 'true' || steps.claim.outputs.run }}
+      seen: ${{ steps.claim.outputs.seen }}
       sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
       parts: ${{ steps.plan.outputs.parts }}
       ids: ${{ steps.plan.outputs.ids }}
       max_parallel: ${{ steps.plan.outputs.max-parallel }}
-      posted: ${{ steps.contract.outputs.posted || steps.plan.outputs.posted }}
+      routed: ${{ steps.plan.outputs.routed }}
+      state: ${{ steps.contract.outputs.state || steps.plan.outputs.state }}
+      description: ${{ steps.contract.outputs.description || steps.plan.outputs.description }}
       project: ${{ steps.project.outputs.name }}
       files: ${{ steps.files.outcome }}
     steps:
@@ -81,14 +91,16 @@ jobs:
           p="${CIRUNNERS_PROJECT:-${GITHUB_REPOSITORY#*/}}"
           case "$p" in ''|*[!A-Za-z0-9._-]*) echo "::error::the project input is not a registry name"; exit 1;; esac
           echo "name=$p" >> "$GITHUB_OUTPUT"
+      # the claim's decision only (§4.1 reads statuses): its pending is the pending job's
       - id: claim
         if: ${{ !inputs.plan-only }}
-        uses: chaobrain/ci-runners/actions/claim@v1
+        uses: chaobrain/ci-runners/actions/flow@v1
         with:
+          command: claim
           context: ${{ inputs.context }}
           sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
       # the default branch's contract against the head's, both read with the job token, before
-      # anything of the head runs: an older head is red here, and no part starts (16.6)
+      # anything of the head runs: an older head ends the run here, and no part starts (16.6)
       - id: contract
         if: steps.claim.outputs.run == 'true' || inputs.plan-only
         uses: chaobrain/ci-runners/actions/flow@v1
@@ -108,7 +120,7 @@ jobs:
         run: git sparse-checkout disable 2> /dev/null || true
       # the plan command, a part of its own on this light runner (the project's env, its
       # record and artifact ci-part-plan-1); its standard output is the plan. The event's
-      # facts reach it as variables, so a planner needs no API call for them; no token does
+      # facts reach it as variables; the read-only token only where the caller asks
       - id: command
         if: steps.contract.outcome == 'success' && inputs.plan != ''
         uses: chaobrain/ci-runners/actions/part@v1
@@ -121,6 +133,7 @@ jobs:
           CIRUNNERS_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           CIRUNNERS_HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
           CIRUNNERS_HEAD_SHA: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+          GH_TOKEN: ${{ inputs.plan-token && github.token || '' }}
         with:
           project: ${{ steps.project.outputs.name }}
           id: plan
@@ -141,13 +154,34 @@ jobs:
           workspace: ${{ github.workspace }}
       # the plan's files, once, for every part (CIRUNNERS_FILES there)
       - id: files
-        if: steps.plan.outputs.files != '' && steps.plan.outputs.posted == 'false'
+        if: steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != ''
         uses: actions/upload-artifact@v4
         with:
           name: ci-plan-files
           path: ${{ github.workspace }}/${{ steps.plan.outputs.files }}
           retention-days: 7
           if-no-files-found: error
+
+  # the claim's pending, beside the parts: only once the plan is routed (never on a head the
+  # claim skipped as green), and only where nothing was posted since the claim read the
+  # statuses (a red attempt is never covered); the verdict waits for it
+  pending:
+    name: pending
+    needs: plan
+    if: >-
+      !cancelled() && needs.plan.outputs.routed == 'true' && needs.plan.outputs.files != 'failure' &&
+      needs.plan.outputs.run == 'true'
+    runs-on: [self-hosted, ci-light]
+    timeout-minutes: 10
+    permissions:
+      statuses: write
+    steps:
+      - uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: pending
+          context: ${{ inputs.context }}
+          sha: ${{ needs.plan.outputs.sha }}
+          seen: ${{ needs.plan.outputs.seen || '0.0' }}
 
   parts:
     name: part ${{ matrix.part.id }}
@@ -156,8 +190,8 @@ jobs:
     # the plan part's own record) skips no part once the plan is routed; a failed upload of
     # the plan's files does, and the verdict reads the parts as lost
     if: >-
-      !cancelled() && needs.plan.outputs.posted == 'false' && needs.plan.outputs.files != 'failure' &&
-      needs.plan.outputs.parts != '' && needs.plan.outputs.parts != '[]'
+      !cancelled() && needs.plan.outputs.routed == 'true' && needs.plan.outputs.files != 'failure' &&
+      needs.plan.outputs.run == 'true'
     permissions:
       contents: read
       statuses: write
@@ -174,14 +208,15 @@ jobs:
       sha: ${{ needs.plan.outputs.sha }}
       project: ${{ needs.plan.outputs.project }}
 
-  # after every part, unless the run was cancelled (a newer head's run posts) or the plan
-  # job posted the state itself; a plan job lost before its parts were known posts error
+  # the run's one final status: the plan's end where it ended the run (an old contract, a
+  # plan that does not load, a red plan command, a route error, nothing to run, plan only),
+  # else every part's. Not where the claim skipped a green head, nor in a cancelled run (a
+  # newer head's run posts); a plan job lost before its parts were known posts error
   verdict:
     name: verdict
-    needs: [plan, parts]
+    needs: [plan, pending, parts]
     if: >-
-      always() && !cancelled() && needs.plan.result != 'skipped' &&
-      needs.plan.outputs.run != 'false' && needs.plan.outputs.posted != 'true'
+      always() && !cancelled() && needs.plan.result != 'skipped' && needs.plan.outputs.run != 'false'
     runs-on: [self-hosted, ci-light]
     timeout-minutes: 20
     permissions:
@@ -189,9 +224,18 @@ jobs:
       statuses: write
       actions: read
     outputs:
-      state: ${{ steps.verdict.outputs.state }}
+      state: ${{ needs.plan.outputs.state || steps.verdict.outputs.state }}
     steps:
+      - if: needs.plan.outputs.state != ''
+        uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: status
+          context: ${{ inputs.context }}
+          sha: ${{ needs.plan.outputs.sha }}
+          state: ${{ needs.plan.outputs.state }}
+          description: ${{ needs.plan.outputs.description }}
       - id: verdict
+        if: needs.plan.outputs.state == ''
         uses: chaobrain/ci-runners/actions/verdict@v1
         with:
           context: ${{ inputs.context }}

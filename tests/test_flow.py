@@ -97,10 +97,10 @@ class Contract(unittest.TestCase):
             api = Api({'main': 'schema = 1\ncontract = 2\n', SHA: 'schema = 1\ncontract = 1\n'})
             code, _, err = run(['contract', '--context', 'myproj/ci', '--sha', SHA, '--default-branch', 'main'], e.env, api)
             self.assertEqual(code, 1)
-            [p] = api.posted()
-            self.assertEqual((p['state'], p['context']), ('failure', 'myproj/ci'))
-            self.assertIn('merge origin/main', p['description'])
-            self.assertEqual(e.outputs(), {'ok': 'false', 'posted': 'true'})
+            self.assertEqual(api.posted(), [])  # read-only: the verdict job posts the state
+            o = e.outputs()
+            self.assertEqual((o['ok'], o['state']), ('false', 'failure'))
+            self.assertIn('merge origin/main', o['description'])
             self.assertTrue(api.calls[0][1].endswith(f'/repos/{REPO}'))  # private or not
             self.assertIn('/contents/.github/ci-runners.toml?ref=main', api.calls[1][1])
             self.assertIn(f'?ref={SHA}', api.calls[2][1])
@@ -121,23 +121,23 @@ class Contract(unittest.TestCase):
             api = Api({'main': 'contract = 2\n', SHA: 'contract = 2\n'}, private=False)
             code, _, _ = run(['contract', '--context', 'myproj/ci', '--sha', SHA], e.env, api)
             self.assertEqual(code, 1)
-            self.assertEqual([(p['state'], p['description']) for p in api.posted()], [('error', flow.PUBLIC)])
-            self.assertEqual(e.outputs(), {'ok': 'false', 'posted': 'true'})
+            self.assertEqual(api.posted(), [])
+            self.assertEqual(e.outputs(), {'ok': 'false', 'state': 'error', 'description': flow.PUBLIC})
 
     def test_absent_on_the_head_where_the_default_branch_sets_one(self):
         with tempfile.TemporaryDirectory() as d:
             e = Env(d)
             api = Api({'main': 'contract = 1\n'})
             self.assertEqual(run(['contract', '--context', 'c/ci', '--sha', SHA, '--default-branch', 'main'], e.env, api)[0], 1)
-            self.assertIn('merge origin/main', api.posted()[0]['description'])
+            self.assertIn('merge origin/main', e.outputs()['description'])
 
     def test_an_unreadable_spec_is_an_error_posted(self):
         with tempfile.TemporaryDirectory() as d:
             e = Env(d)
             api = Api({'main': 'contract = 1\n'}, fail='/contents/')
             self.assertEqual(run(['contract', '--context', 'c/ci', '--sha', SHA, '--default-branch', 'main'], e.env, api)[0], 1)
-            self.assertEqual(api.posted()[0]['state'], 'error')
-            self.assertEqual(e.outputs()['posted'], 'true')
+            self.assertEqual(e.outputs()['state'], 'error')
+            self.assertEqual(api.posted(), [])
 
 
 class Plan(unittest.TestCase):
@@ -160,7 +160,11 @@ class Plan(unittest.TestCase):
                 argv += ['--plan-outcome', outcome]
             with mock.patch('time.time', return_value=T0), mock.patch.object(flow, '_project', return_value=project):
                 code, _, err = run(argv, e.env, api)
-            return code, e.outputs(), api.posted(), e.summary(), err
+            self.assertEqual(api.calls, [])  # the plan job holds a read-only token: it posts nothing
+            o = e.outputs()
+            # the run's end where the plan ends it, as an output: the verdict job posts it
+            ended = [{'state': o['state'], 'description': o['description']}] if 'state' in o else []
+            return code, o, ended, e.summary(), err
 
     def test_without_a_plan_command_one_pytest_part(self):
         code, out, posted, summ, _ = self.plan()
@@ -169,7 +173,7 @@ class Plan(unittest.TestCase):
         [p] = json.loads(out['parts'])
         self.assertEqual((p['id'], p['command'], p['needs'], p['minutes'], p['labels']),
                          ('pytest', 'python -m pytest', 'cpu', 60, ['self-hosted', 'ci-cpu']))
-        self.assertEqual((out['ids'], out['count'], out['max_parallel'], out['posted']), ('pytest', '1', '16', 'false'))
+        self.assertEqual((out['ids'], out['count'], out['max_parallel'], out['routed']), ('pytest', '1', '16', 'true'))
         self.assertIn('| `pytest` | cpu | ci-cpu |', summ)
 
     def test_the_matrix_carries_what_part_yml_reads(self):
@@ -196,13 +200,13 @@ class Plan(unittest.TestCase):
                          ({'schema': 1, 'parts': [part('a', 'tpu')]}, 'needs')]:
             code, out, posted, summ, _ = self.plan(doc)
             self.assertEqual(code, 2, doc)
-            self.assertEqual((posted[0]['state'], out['posted']), ('failure', 'true'), doc)
+            self.assertEqual((posted[0]['state'], 'routed' in out), ('failure', False), doc)
             self.assertIn(why, posted[0]['description'] + summ, doc)
             self.assertNotIn('parts', out)
 
     def test_the_plan_commands_own_end(self):
         code, out, posted, _, _ = self.plan({'schema': 1, 'parts': [part()]}, outcome='red')
-        self.assertEqual((code, posted[0]['state'], out['posted']), (1, 'failure', 'true'))
+        self.assertEqual((code, posted[0]['state'], 'routed' in out), (1, 'failure', False))
         for o in ('unavailable', 'lost', 'oom'):
             code, _, posted, _, _ = self.plan({'schema': 1, 'parts': [part()]}, outcome=o)
             self.assertEqual((code, posted[0]['state']), (1, 'error'), o)
@@ -264,10 +268,10 @@ class Plan(unittest.TestCase):
 
     def test_nothing_to_run_is_green_and_plan_only_runs_no_part(self):
         code, out, posted, _, _ = self.plan({'schema': 1, 'parts': []})
-        self.assertEqual((code, out['parts'], out['posted']), (0, '[]', 'true'))
+        self.assertEqual((code, out['parts'], out['state'], 'routed' in out), (0, '[]', 'success', False))
         self.assertEqual((posted[0]['state'], posted[0]['description']), ('success', 'nothing to run'))
         code, out, posted, summ, _ = self.plan({'schema': 1, 'parts': [part('a'), part('b')]}, '--plan-only', 'true')
-        self.assertEqual((code, out['parts'], out['ids'], out['posted']), (0, '[]', '', 'true'))
+        self.assertEqual((code, out['parts'], out['ids'], out['state'], 'routed' in out), (0, '[]', '', 'success', False))
         self.assertEqual((posted[0]['state'], posted[0]['description']), ('success', 'plan only: 2 part(s) routed, none run'))
         self.assertIn('| `a` |', summ)
 
@@ -288,11 +292,11 @@ class Plan(unittest.TestCase):
             code, _, _ = run(['plan', '--context', 'c/ci', '--sha', SHA, '--project', 'p', '--plan-file',
                               os.path.join(d, 'none.json'), '--plan-outcome', 'pass', '--rows', os.path.join(d, 'x')],
                              e.env, api)
-            self.assertEqual((code, api.posted()[0]['state']), (2, 'error'))
+            self.assertEqual((code, e.outputs()['state'], api.calls), (2, 'error', []))
 
     def test_a_route_error_is_an_error_naming_the_label(self):
         code, out, posted, _, err = self.plan({'schema': 1, 'parts': [part('a', 'gpu2')]})
-        self.assertEqual((code, posted[0]['state'], out['posted']), (1, 'error', 'true'))
+        self.assertEqual((code, posted[0]['state'], 'routed' in out), (1, 'error', False))
         self.assertTrue(posted[0]['description'].startswith('route: ci-gpu2: part a'))
         self.assertIn('no host serves', err)
 
@@ -302,13 +306,12 @@ class Plan(unittest.TestCase):
         self.assertEqual(json.loads(out['parts'])[0]['labels'], ['self-hosted', 'ci-gpu2'])
         self.assertIn('capacity: unreadable', summ)
 
-    def test_a_post_that_fails_leaves_posted_unset(self):
-        with tempfile.TemporaryDirectory() as d:
-            e = Env(d)
-            api = Api(fail='/statuses/')
-            code, _, _ = run(['plan', '--context', 'c/ci', '--sha', SHA, '--project', 'p', '--plan-outcome', 'red'], e.env, api)
-            self.assertEqual(code, 2)
-            self.assertNotIn('posted', e.outputs())  # so the verdict still posts
+    def test_a_description_is_one_line_of_140(self):
+        code, out, _, _, _ = self.plan('{"schema": 1, "parts": [{"id": "a\\nb"}]}')
+        self.assertEqual(code, 2)
+        self.assertNotIn('\n', out['description'])
+        self.assertLessEqual(len(out['description']), 140)
+        self.assertEqual(flow._text('a\nb  c'), 'a b c')
 
     def test_the_registry_max_parallel(self):
         self.assertEqual(flow.MAX_PARALLEL, 16)
@@ -498,6 +501,66 @@ class Locate(unittest.TestCase):
         self.assertGreaterEqual(100 * flow.MAX_JOB_PAGES, 2 + 256 * 4)
 
 
+class Claim(unittest.TestCase):
+    """The claim's decision in the plan job (read-only), its pending post in a job of its own."""
+    BOT = 'github-actions[bot]'
+
+    def st(self, state, t, who=BOT, context='myproj/ci'):
+        return {'state': state, 'context': context, 'creator': {'login': who}, 'description': '',
+                'created_at': f'2026-11-12T10:00:{t:02d}Z'}
+
+    def api(self, statuses):
+        api = Api()
+        inner = api.__call__
+
+        def call(method, url, token, body=None):
+            if '/commits/' in url and method == 'GET':
+                api.calls.append((method, url, body))
+                return statuses
+            return inner(method, url, token, body)
+        api.__call__ = call
+        return api, call
+
+    def go(self, argv, statuses):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'policy.toml'), 'w') as f:
+                f.write('schema = 2\n')
+            e = Env(d)
+            api, call = self.api(statuses)
+            code, _, _ = run(argv, e.env, call, etc=d)
+            return code, e.outputs(), api.posted()
+
+    def claim(self, statuses):
+        return self.go(['claim', '--context', 'myproj/ci', '--sha', SHA], statuses)
+
+    def pending(self, seen, statuses):
+        return self.go(['pending', '--context', 'myproj/ci', '--sha', SHA, '--seen', seen], statuses)
+
+    def test_the_decision_posts_nothing(self):
+        code, out, posted = self.claim([self.st('success', 5), self.st('failure', 9, who='someone')])
+        self.assertEqual((code, out['run'], posted), (0, 'false', []))  # green by the runners: skipped
+        code, out, posted = self.claim([self.st('failure', 7), self.st('success', 3), self.st('success', 9, context='x')])
+        self.assertEqual((out['run'], posted), ('true', []))
+        self.assertEqual(float(out['seen']), flow.claim._epoch('2026-11-12T10:00:07+00:00'))  # the newest it read
+        self.assertEqual(self.claim([self.st('success', 9, who='someone')])[1]['seen'], '0.0')  # a person's counts not
+
+    def test_pending_only_where_nothing_was_posted_since_the_claim(self):
+        seen = repr(flow.claim._epoch('2026-11-12T10:00:07+00:00'))
+        code, out, posted = self.pending(seen, [self.st('failure', 7)])
+        self.assertEqual((code, out['posted'], [(p['state'], p['description']) for p in posted]),
+                         (0, 'true', [('pending', 'queued on the runners')]))
+        for later in ('failure', 'success'):  # a red attempt, or a green, is never covered
+            code, out, posted = self.pending(seen, [self.st(later, 8), self.st('failure', 7)])
+            self.assertEqual((code, out['posted'], posted), (0, 'false', []), later)
+        self.assertEqual(self.pending(seen, [self.st('failure', 8, who='someone')])[1]['posted'], 'true')
+        self.assertEqual(self.pending('0.0', [])[1]['posted'], 'true')
+        self.assertEqual(self.pending('soon', [])[0], 2)
+
+    def test_no_policy_no_decision(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(run(['claim', '--context', 'c', '--sha', SHA], Env(d).env, Api(), etc=d)[0], 2)
+
+
 class Status(unittest.TestCase):
     def test_a_red_part_posts_failure_at_once(self):
         api = Api()
@@ -509,9 +572,9 @@ class Status(unittest.TestCase):
         self.assertEqual((b['state'], len(b['description']), b['target_url']),
                          ('failure', 140, f'https://github.com/{REPO}/actions/runs/9'))
 
-    def test_only_failure_or_error_and_a_well_formed_head(self):
+    def test_only_a_final_state_and_a_well_formed_head(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            flow.main(['status', '--context', 'c', '--sha', SHA, '--state', 'success', '--description', 'd'], '', Api(), {})
+            flow.main(['status', '--context', 'c', '--sha', SHA, '--state', 'pending', '--description', 'd'], '', Api(), {})
         env = {'GITHUB_REPOSITORY': REPO, 'GITHUB_TOKEN': 't'}
         self.assertEqual(run(['status', '--context', 'c', '--sha', 'abc', '--state', 'error', '--description', 'd'],
                              env, Api())[0], 2)

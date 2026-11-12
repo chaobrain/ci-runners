@@ -32,7 +32,9 @@ COMPUTED = {
 #: each job's permissions, the least it needs (§4.8 rule 6)
 PERMISSIONS = {
     'ci.yml': {'public': {'contents': 'read'},
-               'plan': {'contents': 'read', 'statuses': 'write'},
+               # read-only (16.6 as amended): the head's plan command never holds a token that posts
+               'plan': {'contents': 'read', 'statuses': 'read', 'actions': 'read', 'pull-requests': 'read'},
+               'pending': {'statuses': 'write'},
                'parts': {'contents': 'read', 'statuses': 'write', 'actions': 'read'},
                'verdict': {'contents': 'read', 'statuses': 'write', 'actions': 'read'}},
     'part.yml': {'first': {'contents': 'read', 'statuses': 'write'},
@@ -137,10 +139,12 @@ class Structure(unittest.TestCase):
             for k, v in {**call.get('inputs', {}), **call.get('outputs', {})}.items():
                 self.assertTrue(v.get('description'), f'{name}: {k}')
             for k, v in call.get('inputs', {}).items():
-                self.assertEqual(v.get('type'), 'boolean' if k == 'plan-only' else 'string', f'{name}: {k}')
+                self.assertEqual(v.get('type'), 'boolean' if k in ('plan-only', 'plan-token') else 'string',
+                                 f'{name}: {k}')
         self.assertEqual(set(load('ci.yml')['on']['workflow_call']['inputs']),
-                         {'context', 'plan', 'project', 'sha', 'plan-only'})
-        self.assertIs(load('ci.yml')['on']['workflow_call']['inputs']['plan-only']['default'], False)
+                         {'context', 'plan', 'project', 'sha', 'plan-only', 'plan-token'})
+        for k in ('plan-only', 'plan-token'):
+            self.assertIs(load('ci.yml')['on']['workflow_call']['inputs'][k]['default'], False)
         self.assertTrue(load('ci.yml')['on']['workflow_call']['inputs']['context']['required'])
 
     def test_each_action_gets_only_inputs_it_declares(self):
@@ -226,17 +230,19 @@ class Structure(unittest.TestCase):
         self.assertEqual(plan['if'], "always() && steps.contract.outcome == 'success'")
         up = [st for st in sts if st.get('uses', '').startswith('actions/upload-artifact@')]
         self.assertEqual([u['with']['name'] for u in up], ['ci-plan-files'])
-        self.assertIn("steps.plan.outputs.posted == 'false'", up[0]['if'])
+        self.assertIn("steps.plan.outputs.routed == 'true'", up[0]['if'])
         env = [st for st in sts if st.get('id') == 'command'][0]['env']
         self.assertLessEqual({'CIRUNNERS_PLAN', 'CIRUNNERS_EVENT', 'CIRUNNERS_PR_LABELS', 'CIRUNNERS_BASE_SHA',
                               'CIRUNNERS_HEAD_SHA'}, set(env))
         self.assertFalse([k for k in env if k.startswith('CI_')])  # the part action strips CI_* names
-        self.assertNotIn('token', str(env).lower())  # the plan command gets no token
+        # the plan command gets no token but the read-only one its caller asks for (plan-token)
+        self.assertEqual([k for k in env if 'token' in k.lower() + env[k].lower()], ['GH_TOKEN'])
 
     def test_the_parts_run_once_the_plan_is_routed_whatever_failed_after(self):
         cond = load('ci.yml')['jobs']['parts']['if']
         self.assertTrue(cond.startswith('!cancelled() && '))  # a status function: no implicit success()
-        self.assertIn("needs.plan.outputs.posted == 'false'", cond)
+        self.assertIn("needs.plan.outputs.routed == 'true'", cond)
+        self.assertIn("needs.plan.outputs.run == 'true'", cond)
         self.assertIn("needs.plan.outputs.files != 'failure'", cond)
         plan = load('ci.yml')['jobs']['plan']
         self.assertEqual(plan['outputs']['files'], '${{ steps.files.outcome }}')
@@ -251,9 +257,48 @@ class Structure(unittest.TestCase):
 
     def test_the_verdict_runs_unless_cancelled_or_posted(self):
         cond = load('ci.yml')['jobs']['verdict']['if']
-        for c in ('always()', '!cancelled()', "needs.plan.outputs.run != 'false'", "needs.plan.outputs.posted != 'true'"):
+        for c in ('always()', '!cancelled()', "needs.plan.outputs.run != 'false'"):
             self.assertIn(c, cond)
         self.assertNotIn('wait-seconds', str(load('ci.yml')['jobs']['verdict']['steps']))
+
+    def test_the_plan_job_posts_nothing_and_hands_a_token_only_to_the_plan_command(self):
+        """16.6 as amended: the plan job's token is read-only, its flow steps read (claim,
+        contract) or compute (plan), and the only token a step's environment carries is
+        the plan command's GH_TOKEN, and only where the caller sets plan-token."""
+        job = load('ci.yml')['jobs']['plan']
+        self.assertLessEqual(set(job['permissions'].values()), {'read'})
+        flows = [st['with']['command'] for st in job['steps'] if st.get('uses', '').startswith('chaobrain/ci-runners/actions/flow@')]
+        self.assertEqual(flows, ['claim', 'contract', 'plan'])
+        uses = {st.get('uses', '').split('@')[0] for st in job['steps']} - {''}
+        self.assertEqual(uses, {'chaobrain/ci-runners/actions/flow', 'actions/checkout', 'chaobrain/ci-runners/actions/part',
+                                'actions/upload-artifact'})  # no claim action: it posts pending
+        for st in job['steps']:
+            text = str(st.get('env', {})) + str(st.get('with', {}))
+            if st.get('id') == 'command':
+                self.assertEqual(st['env']['GH_TOKEN'], "${{ inputs.plan-token && github.token || '' }}")
+                self.assertNotIn('token', str(st.get('with', {})))
+            else:
+                self.assertNotIn('token', text.lower(), st.get('id'))
+        self.assertNotIn('GH_TOKEN', str(load('part.yml')))  # the parts never get one
+
+    def test_one_final_status_and_its_pending_beside_the_parts(self):
+        jobs = load('ci.yml')['jobs']
+        pend = jobs['pending']
+        self.assertEqual(pend['needs'], 'plan')
+        self.assertIn("needs.plan.outputs.routed == 'true'", pend['if'])
+        self.assertIn("needs.plan.outputs.run == 'true'", pend['if'])  # never over a green the claim skipped
+        self.assertEqual(pend['if'].replace(' ', ''), jobs['parts']['if'].replace(' ', ''))  # pending iff parts
+        self.assertEqual([st['with']['command'] for st in pend['steps']], ['pending'])
+        self.assertEqual(pend['steps'][0]['with']['seen'], "${{ needs.plan.outputs.seen || '0.0' }}")
+        v = jobs['verdict']
+        self.assertEqual(v['needs'], ['plan', 'pending', 'parts'])  # no pending after the final status
+        post, verd = v['steps']
+        self.assertEqual((post['if'], verd['if']), ("needs.plan.outputs.state != ''", "needs.plan.outputs.state == ''"))
+        self.assertEqual((post['with']['command'], post['with']['state']), ('status', '${{ needs.plan.outputs.state }}'))
+        self.assertEqual(jobs['plan']['outputs']['state'], '${{ steps.contract.outputs.state || steps.plan.outputs.state }}')
+        # who posts: pending, a red attempt (part.yml) and the verdict job; nothing else
+        posters = {j for j, job in jobs.items() if 'write' in (job.get('permissions') or {}).values()}
+        self.assertEqual(posters, {'pending', 'parts', 'verdict'})
 
     def test_the_retry_names_the_first_attempt(self):
         part = [st for st in load('part.yml')['jobs']['retry']['steps'] if st.get('id') == 'part'][0]['with']

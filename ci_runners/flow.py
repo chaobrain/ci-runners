@@ -34,7 +34,7 @@ import tomllib
 import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 
-from ci_runners import capacity, github, registry
+from ci_runners import capacity, claim, github, policy, registry
 from ci_runners import route as rt
 
 SPEC = '.github/ci-runners.toml'
@@ -65,7 +65,8 @@ MAX_JOB_PAGES = 20
 MAX_PARALLEL = registry.MAX_PARALLEL
 #: the salvage leg's bound past the part's own job bound
 SALVAGE_GRACE = 10
-STATES = ('failure', 'error')
+#: the states ``flow status`` posts: a red attempt's, and the plan job's end states (the verdict job)
+STATES = ('failure', 'error', 'success')
 GPUS = {'gpu': 1, 'gpu2': 2}
 EXIT_RED, EXIT_PLAN = 1, 2
 
@@ -85,15 +86,66 @@ def _env(env: Mapping[str, str]) -> tuple[str, str, str]:
 
 def post(env: Mapping[str, str], call: Callable, *, context: str, sha: str, state: str, description: str) -> None:
     """Post ``state`` on ``context`` of ``sha``, linked to this run."""
-    if state not in (*STATES, 'success', 'pending'):
+    if state not in (*STATES, 'pending'):
         raise FlowError(f'state {state!r}')
     if not re.fullmatch(r'[A-Za-z0-9._/-]{1,100}', context) or not github.SHA.fullmatch(sha):
         raise FlowError('context or sha is malformed')
     base, repo, token = _env(env)
     target = f'{env.get("GITHUB_SERVER_URL", "https://github.com")}/{repo}/actions/runs/{env.get("GITHUB_RUN_ID", "")}'
-    text = description if len(description) <= 140 else description[:137] + '...'
+    text = _text(description)
     call('POST', f'{base}/repos/{repo}/statuses/{sha}', token,
          {'state': state, 'context': context, 'description': text, 'target_url': target})
+
+
+def _text(description: str) -> str:
+    """A status description: one line, at most 140 characters."""
+    one = ' '.join(description.split())
+    return one if len(one) <= 140 else one[:137] + '...'
+
+
+def _bot(etc: str) -> str:
+    """The runners' identity (the policy's ``bot``, decision 15.9): only its statuses count."""
+    with open(os.path.join(etc, 'policy.toml'), 'rb') as f:
+        return policy.load(f.read(1 << 20)).bot
+
+
+def _statuses(env: Mapping[str, str], call: Callable, context: str, sha: str, bot: str) -> list[claim.Status]:
+    """The runners' own statuses of ``context`` on ``sha``, newest first."""
+    if not github.SHA.fullmatch(sha):
+        raise FlowError('sha is malformed')
+    base, repo, token = _env(env)
+    got = github.statuses(call, f'{base}/repos/{repo}/commits/{sha}/statuses?per_page={github.PAGE}', token)
+    return [st for st in claim.parse_statuses(got, context) if st.creator.lower() == bot.lower()]
+
+
+def run_claim(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc: str) -> int:
+    """The claim's decision (§4.1) with a read-only token: ``run``, ``reason``, and ``seen``,
+    the time of the newest status of the runners it read (0: none), for ``pending``."""
+    bot = _bot(etc)
+    mine = _statuses(env, call, a.context, a.sha, bot)
+    c = claim.decide(mine, bot=bot)
+    seen = max((st.time for st in mine), default=0.0)
+    print(f'ci-run flow claim: {"run" if c.run else "skip"} ({c.reason})', file=sys.stderr)
+    _out(env, run='true' if c.run else 'false', reason=c.reason, seen=repr(seen))
+    return 0
+
+
+def run_pending(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc: str) -> int:
+    """The claim's ``pending`` post, from a job of its own beside the parts: only where the
+    runners posted nothing on the context since the claim read it (``--seen``). A red
+    attempt posted meanwhile, or a green, is never covered by a pending."""
+    try:
+        seen = float(a.seen)
+    except ValueError:
+        raise FlowError('--seen is not a time') from None
+    newer = [st for st in _statuses(env, call, a.context, a.sha, _bot(etc)) if st.time > seen]
+    if newer:
+        print(f'ci-run flow pending: not posted: {newer[0].state} posted since the claim', file=sys.stderr)
+        _out(env, posted='false')
+        return 0
+    post(env, call, context=a.context, sha=a.sha, state='pending', description=a.description)
+    _out(env, posted='true')
+    return 0
 
 
 def contents(env: Mapping[str, str], call: Callable, path: str, ref: str) -> str | None:
@@ -176,8 +228,7 @@ def run_contract(a: argparse.Namespace, env: Mapping[str, str], call: Callable) 
         _out(env, ok='true')
         return 0
     _summary(env, f'## {a.context}: {state}\n\n{text}\n')
-    post(env, call, context=a.context, sha=a.sha, state=state, description=text)
-    _out(env, ok='false', posted='true')
+    _out(env, ok='false', state=state, description=_text(text))  # the verdict job posts it
     return EXIT_RED
 
 
@@ -316,8 +367,7 @@ def run_plan(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc:
     def fail(state: str, text: str, code: int) -> int:
         print(f'ci-run flow plan: {state}: {text}', file=sys.stderr)
         _summary(env, f'## {a.context}: {state}\n\n{text}\n')
-        post(env, call, context=a.context, sha=a.sha, state=state, description=text)
-        _out(env, posted='true')  # only once posted: else the verdict posts
+        _out(env, state=state, description=_text(text))  # the run's end: the verdict job posts it
         return code
 
     if a.plan_outcome and a.plan_outcome != 'pass':  # the plan command's own end (§4.4)
@@ -363,12 +413,11 @@ def run_plan(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc:
     print(f'ci-run flow plan: {len(matrix)} part(s), max_parallel {most}, capacity {note}', file=sys.stderr)
     if not matrix or a.plan_only == 'true':  # nothing to run, or a plan-only run: the plan job's state is the run's
         text_ = 'nothing to run' if not matrix else f'plan only: {len(matrix)} part(s) routed, none run'
-        post(env, call, context=a.context, sha=a.sha, state='success', description=text_)
         _out(env, parts='[]', ids='', max_parallel=str(most), count=str(len(matrix)), files=opts['files'],
-             posted='true')
+             state='success', description=text_)
         return 0
     _out(env, parts=text, ids=' '.join(p['id'] for p in matrix), max_parallel=str(most), count=str(len(matrix)),
-         files=opts['files'], posted='false')
+         files=opts['files'], routed='true')
     return 0
 
 
@@ -566,6 +615,14 @@ def parser() -> argparse.ArgumentParser:
     lo = sub.add_parser('locate')
     lo.add_argument('--part-id', required=True)
     lo.add_argument('--rows', default='')
+    cl = sub.add_parser('claim')
+    cl.add_argument('--context', required=True)
+    cl.add_argument('--sha', required=True)
+    pe = sub.add_parser('pending')
+    pe.add_argument('--context', required=True)
+    pe.add_argument('--sha', required=True)
+    pe.add_argument('--seen', required=True)
+    pe.add_argument('--description', default='queued on the runners')
     s = sub.add_parser('status')
     s.add_argument('--context', required=True)
     s.add_argument('--sha', required=True)
@@ -587,8 +644,12 @@ def main(argv: Sequence[str], etc: str, call: Callable | None = None, env: Mappi
             return run_retry(a, env, etc)
         if a.cmd == 'locate':
             return run_locate(a, env, call, etc)
+        if a.cmd == 'claim':
+            return run_claim(a, env, call, etc)
+        if a.cmd == 'pending':
+            return run_pending(a, env, call, etc)
         post(env, call, context=a.context, sha=a.sha, state=a.state, description=a.description)
         return 0
-    except (FlowError, github.ApiError, OSError) as e:
+    except (ValueError, github.ApiError, OSError) as e:  # FlowError, a policy that does not load
         print(f'ci-run flow {a.cmd}: {e}', file=sys.stderr)
         return 2

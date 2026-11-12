@@ -49,6 +49,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import shutil
 import socket
 import stat
@@ -160,6 +161,8 @@ def python_of(inv: inventory.Inventory) -> str:
 HOOK_PYTHON = 'py=/usr/bin/python3  # @CI_PYTHON@\n'
 #: the hook's release line (decision 13.5): its own path's grandparent until setup names the base
 HOOK_BASE = 'base=$(/usr/bin/dirname "$(/usr/bin/dirname "$(/usr/bin/readlink -f "$0")")")  # @CI_BASE@\n'
+#: the job-started hook's etc line (C2c): empty until setup names the host's etc
+HOOK_ETC = 'etc=  # @CI_ETC@\n'
 
 
 def hooks_check() -> str:
@@ -199,16 +202,20 @@ def runners_now(inv: inventory.Inventory) -> str:
         (f'; none for {", ".join(down)}' if down else '')
 
 
-def hook_text(src: str, python: str, base: str) -> str:
+def hook_text(src: str, python: str, base: str, etc: str = '') -> str:
     """A hook as installed: its interpreter line names ``python`` and its release line
     ``base`` (``<data>/ci-runners``), both validated by the caller as one absolute path, so
-    that a copy of it elsewhere runs the same release (decision 13.5). Raises ValueError if
-    the hook lacks either line. Pure."""
+    that a copy of it elsewhere runs the same release (decision 13.5); a hook with an etc
+    line (job-started, C2c) names ``etc``, quoted. Raises ValueError if the hook lacks the
+    interpreter or the release line, or names an etc that is not absolute. Pure."""
     if src.count(HOOK_PYTHON) != 1:
         raise ValueError('a hook has no interpreter line')
     if src.count(HOOK_BASE) != 1:
         raise ValueError('a hook has no release line')
-    return src.replace(HOOK_PYTHON, f'py={python}\n').replace(HOOK_BASE, f'base={base}\n')
+    if src.count(HOOK_ETC) and not os.path.isabs(etc):
+        raise ValueError('a hook names no absolute etc')
+    return src.replace(HOOK_PYTHON, f'py={python}\n').replace(HOOK_BASE, f'base={base}\n') \
+        .replace(HOOK_ETC, f'etc={shlex.quote(os.path.abspath(etc)) if etc else ""}\n')
 
 
 def check_python(path: str, run=subprocess.run) -> None:
@@ -837,7 +844,7 @@ def build(etc: str, adopt: bool = False) -> Plan:
     before = len(plan.actions)
     for name in hookcopy.NAMES:
         with open(os.path.join(release, 'hooks', name)) as f:
-            _file(plan, os.path.join(base, 'hooks', name), hook_text(f.read(), python, base), 0o755)
+            _file(plan, os.path.join(base, 'hooks', name), hook_text(f.read(), python, base, etc), 0o755)
     hooks_changed = len(plan.actions) > before
     plan.add('units:')
     subs = {'CI_MEMORY_MAX': h['memory_max'], 'CI_DATA': data, 'CI_ETC': etc,

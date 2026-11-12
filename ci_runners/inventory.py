@@ -312,6 +312,8 @@ def load(text: str) -> Inventory:
             if pub:
                 _check_public(f'hosts.{role}.pools.{pool}', role, cls, v)
             else:
+                if pool.startswith('pub-gpu'):  # its runners' names would read as the public pool's (C2c)
+                    raise InventoryError(f'hosts.{role}.pools.{pool}: a private pool\'s key starts with pub-gpu')
                 _check_private_labels(f'hosts.{role}.pools.{pool}', role, pool, v)
             if (cls, pub) in seen:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: class {cls} is also the class of {seen[cls, pub]}')

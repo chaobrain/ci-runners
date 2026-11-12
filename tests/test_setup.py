@@ -556,6 +556,7 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
         self.assertIn(f'\npy={sys.executable}\n', hook)  # written in: no job's environment picks it
         self.assertNotIn('CI_RUNNERS_PYTHON', hook)
         self.assertIn(f'\nbase={self.data}/ci-runners\n', hook)  # its release, wherever it is copied (13.5)
+        self.assertIn(f'\netc={self.etc}\n', hook)  # C2c: its etc, never the environment's
         self.assertFalse((self.units / 'ci-hooks.service').exists())  # no private /tmp: hooks stay under data
         env = (self.data / 'actions-runner' / 'hx-part-1' / '.env').read_text()
         self.assertIn(f'ACTIONS_RUNNER_HOOK_JOB_STARTED={self.data}/ci-runners/hooks/job-started.sh\n', env)

@@ -15,4 +15,7 @@ fi
 # the interpreter: setup writes the inventory's python into this line when it installs
 # the hook (design §3.2); the environment never chooses it, since a job's could
 py=/usr/bin/python3  # @CI_PYTHON@
-exec /usr/bin/timeout -k 5 65 "$py" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.hook import main; sys.exit(main(sys.argv[1:]))' "$root" job-started
+# the host's etc (the policy, the snapshot, the inventory): setup writes it into this line
+# (C2c), so the hook reads them where setup put them, never where a job's environment says
+etc=  # @CI_ETC@
+exec /usr/bin/timeout -k 5 65 "$py" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from ci_runners.hook import main; sys.exit(main(sys.argv[1:]))' "$root" job-started "$etc"

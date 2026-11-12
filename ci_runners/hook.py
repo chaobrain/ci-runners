@@ -166,7 +166,9 @@ def main(argv: list[str]) -> int:
         raise _Timeout()
     signal.signal(signal.SIGALRM, alarm)
     env = dict(os.environ)
-    if argv == ['job-started']:
+    if argv[:1] == ['job-started'] and len(argv) <= 2:
+        if len(argv) == 2 and argv[1]:  # the etc setup wrote into the hook: the environment's never wins
+            env['CI_RUNNERS_ETC'] = argv[1]
         signal.alarm(START_BOUND)
         try:
             code, out = started(env)

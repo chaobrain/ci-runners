@@ -3532,7 +3532,11 @@ pool's runner as setup names it, a public runner as `<role>-pub-gpu<N>-<seq>` on
 a host whose inventory has a public pool. The environment's `CI_RUNNER_CLASS` and
 `CI_RUNNER_AUDIENCE` (unset: `private`) must agree; a runner the inventory does not name,
 or one whose environment disagrees, is refused (`runner`, a decision), and an inventory
-that does not load refuses (`inventory`, an infrastructure end, 16.4). On the public pool
+that does not load refuses (`inventory`, an infrastructure end, 16.4). The hook reads the policy, the
+snapshot and the inventory from the etc setup writes into the installed job-started hook,
+as it writes its interpreter and its release, never from the environment's
+`CI_RUNNERS_ETC` (an unstamped copy, before setup runs again, falls back to it). A private
+pool's key never starts with `pub-gpu`, so no private runner's name reads as a public one. On the public pool
 it also reads `GITHUB_REF_PROTECTED`. It also removes stale work directories of this runner.
 
 It prints one line, `ci-runners: accepted|refused <reason code>`, followed by the

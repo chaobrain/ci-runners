@@ -96,6 +96,26 @@ class Started(unittest.TestCase):
         self.assertEqual([r['reason'] for r in got], [why for _, why in cases])
         self.assertEqual([r['audience'] for r in got], ['public', 'private', 'public', 'public', '', 'public', ''])
 
+    def test_every_runner_setup_makes_is_accepted_as_its_own_env_says(self):
+        """C2c: each runner setup registers (``setup._runners``), with the class its ``.env``
+        says (``setup.env_file``), is the inventory's to the hook, on every host of the example."""
+        import re
+        from ci_runners import inventory, setup
+        text = (ROOT / 'setup' / 'inventory.example.toml').read_text()
+        text = re.sub(r'^# (isolation = "[^"]*")\s.*$', r'\1', text, flags=re.M)
+        text = re.sub(r'^# (pub-gpu = .*)$', r'\1', text, flags=re.M)
+        seen = 0
+        for role in inventory.load(text).hosts:
+            doc = re.sub(r'^this = "[^"]*"', f'this = "{role}"', text, count=1, flags=re.M)
+            (self.etc / 'inventory.toml').write_text(doc)
+            i = inventory.load(doc)
+            for name, _, cls, card, slot in setup._runners(i):
+                env = dict(x.split('=', 1) for x in setup.env_file(i, cls, str(self.etc), card, slot).splitlines())
+                self.assertEqual(hook.runner_facts(str(self.etc), name), (env['CI_RUNNER_CLASS'], 'private'), name)
+                self.assertNotIn('CI_RUNNER_AUDIENCE', env)  # unset: private
+                seen += 1
+        self.assertGreater(seen, 5)
+
     def test_the_runner_s_class_and_audience_are_the_inventory_s(self):
         """C2c (decision 18.7): by ``RUNNER_NAME``, never the environment's word alone."""
         def why(**kw):
@@ -245,8 +265,23 @@ class Started(unittest.TestCase):
         fake.write_text(f'#!/bin/sh\necho "$@" >> {mark}\nexec {sys.executable} "$@"\n')
         fake.chmod(0o755)
         for n in ('job-started.sh', 'job-completed.sh'):
-            (hooks / n).write_text(setup.hook_text((ROOT / 'hooks' / n).read_text(), str(fake), str(self.base)))
+            (hooks / n).write_text(setup.hook_text((ROOT / 'hooks' / n).read_text(), str(fake), str(self.base),
+                                                   str(self.etc)))
+        # C2c: the hook reads the etc setup wrote, never the one a job's environment names
+        planted = self.base / 'planted'
+        planted.mkdir()
+        (planted / 'policy.toml').write_text(POLICY)
+        (planted / 'inventory.toml').write_text(INVENTORY)
         (self.etc / 'policy.toml').write_text('schema = 2\n')  # refuses every job
+        r = subprocess.run(['sh', str(hooks / 'job-started.sh')], env={**self.env, 'CI_RUNNERS_ETC': str(planted),
+                                                                        'PATH': '/usr/bin:/bin'},
+                           capture_output=True, text=True, timeout=60, cwd=self.base)
+        # the planted policy would accept it; the host's has no such repository
+        self.assertEqual((r.returncode, r.stdout.split()[:3]), (1, ['ci-runners:', 'refused', 'repository']), r.stderr)
+        with self.assertRaisesRegex(ValueError, 'no absolute etc'):
+            setup.hook_text((ROOT / 'hooks' / 'job-started.sh').read_text(), str(fake), str(self.base), 'etc')
+        self.assertIn("\netc='/data/x y/etc'\n", setup.hook_text((ROOT / 'hooks' / 'job-started.sh').read_text(),
+                                                               str(fake), str(self.base), '/data/x y/etc'))
         trap = self.base / 'trap'  # a job may put its own dirname and readlink first in PATH
         for tool in ('dirname', 'readlink'):
             (trap / tool).parent.mkdir(exist_ok=True)
@@ -267,11 +302,11 @@ class Started(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'no release line'):
             setup.hook_text(src.replace(setup.HOOK_BASE, ''), str(fake), str(self.base))
         # a copy whose release line names no release refuses every job (fail closed)
-        (hooks / 'job-started.sh').write_text(setup.hook_text(src, str(fake), str(self.base / 'nowhere')))
+        (hooks / 'job-started.sh').write_text(setup.hook_text(src, str(fake), str(self.base / 'nowhere'), str(self.etc)))
         r = subprocess.run(['sh', str(hooks / 'job-started.sh')], env={**self.env, 'PATH': '/usr/bin:/bin'},
                            capture_output=True, text=True, timeout=60, cwd=self.base)
         self.assertEqual((r.returncode, r.stdout), (1, 'ci-runners: refused error policy=none\n'))
-        text = setup.hook_text(src, '/opt/py/bin/python3', '/data/x/ci-runners')
+        text = setup.hook_text(src, '/opt/py/bin/python3', '/data/x/ci-runners', '/data/x/ci-runners/etc')
         self.assertIn('\nbase=/data/x/ci-runners\nroot=', text)
         self.assertNotIn('@CI_', text)
 

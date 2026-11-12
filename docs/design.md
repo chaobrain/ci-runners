@@ -3347,12 +3347,12 @@ the light pool. `<role>-home` is its own label (a job asks for it to hold the ho
 19.8), `<role>-light` the one it shares with the light pool (the salvage legs', §4.5).
 The loader accepts at most two pools of class `light` on a host; where there are two,
 exactly one (the light pool) carries a `ci-` label and the other (the home pool) none,
-names its labels, one of which no other pool of the host carries, and has no `slot` or
-`audience` (`per_card` is the `gpu` class's only). Any other pair is refused with its
+names its labels, one of which no other pool of the host carries and the rest the light
+pool's (so no other pool's jobs land on it), and has no `slot` or `audience` (`per_card` is the `gpu` class's only). Any other pair is refused with its
 reason. Its runner is `<role>-home-1`. It takes no CI slot and no card, and presence
 never stops it (16.4). Readers that ask for "the pool of class `light`" (a drain of a
-class, a part's record, a runner's `CI_RUNNER_POOL_LABELS` fallback) get the light pool.
-The runners, their labels and the row's `pools` (19.4) are keyed by pool, not by class,
+class, a part's record, a runner's `CI_RUNNER_POOL_LABELS` fallback) get the light pool; a drain of the home pool by its key is refused, since it would stop
+and refuse nothing. The runners, their labels and the row's `pools` (19.4) are keyed by pool, not by class,
 so the row reports the home pool with its own labels. The `ci-light` counts are the
 light pool's only, since the home runner does not carry `ci-light`. A host with one
 light pool behaves as before: where that pool has no `ci-` label, all its runners are

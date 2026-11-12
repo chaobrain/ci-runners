@@ -4049,6 +4049,11 @@ MUTANTS = [
      "        out += [pool] * spec.get('count', 1)", [f'{TU}.Standalone.test_a_home_pool_is_one_more_runner_and_restarts_nothing']),
     (PO, "        mine = [r for r, k in zip(rs, keys, strict=True) if k == name]", "        mine = [r for r in rs if r[2] == cls]",
      [f'{TPF}.Rows.test_the_home_pool_in_the_row']),
+    (INV, "    if set(v['labels']) & others - set(lights):", "    if False:", [f'{TI}.Load.test_a_home_pool_beside_the_light_pool']),
+    (INV, "    lights = labels_of(h, capable[0]) or [capable[0], role]", "    lights = others",
+     [f'{TI}.Load.test_a_home_pool_beside_the_light_pool']),
+    ('ci_runners/drain.py', "    if name in pools and name == inventory.home_pool(host):", "    if False:",
+     [f'{TD}.State.test_a_pool_by_key_or_class']),
     (PRS, "    return r.cls == 'light' and not any(lb.startswith('ci-') for lb in r.labels)",
      "    return r.cls == 'light'", [f'{TPR}.Home']),
 ]

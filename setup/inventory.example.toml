@@ -55,7 +55,8 @@ cards = { per_card = true, class = "gpu", labels = ["3090b-gpu"] }  # runners 30
 multi = { count = 1, labels = ["3090b-multi"] }
 compile = { count = 1, labels = ["3090b-compile"] }
 # From issue #232 a host may add its home pool, a light pool without a ci- label that presence
-# never stops (design §5.1, operations §15), beside a light pool that carries ci-light:
+# never stops (design §5.1, operations §15), once the light pool above carries ci-light
+# (16.1's H1 step; while neither pool carries a ci- label the loader refuses both):
 # home = { count = 1, class = "light", labels = ["3090b-home", "3090b-light"] }
 # From RUN-10's R1 (decision 16.3) a pool may hold `slot` (16.2) and `audience` (16.7), and a
 # host `presence` (above, 16.4): accepted and checked for shape; `audience` is inert until P1

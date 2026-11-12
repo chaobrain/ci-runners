@@ -246,6 +246,8 @@ class Load(unittest.TestCase):
             f'{light}, home = {{ count = 1, class = "light", labels = ["3090b"] }}, part = 1': 'no label',
             f'{light}, home = {{ count = 1, class = "light", labels = ["3090b-gpu1"] }}, cards = {{ per_card = true, '
             'class = "gpu" }': 'no label',
+            f'{light}, home = {{ count = 1, class = "light", labels = ["hx-home", "hx-cpu"] }}, '
+            'part = { count = 1, labels = ["hx-cpu"] }': 'a pool other than the light pool',
             f'{light}, home = {{ count = 1, class = "light", labels = ["hx-home"], audience = "private" }}': 'no slot',
             f'{light}, home = {{ count = 1, class = "light", labels = ["hx-home"], slot = {{ cpus = ["0"], workers = 1, '
             'memory = "1G", speed = 1.0 } }': 'no slot',

@@ -326,7 +326,8 @@ def _capable(v: object) -> bool:
 def _check_home(role: str, h: Mapping[str, object]) -> None:
     """A host's two pools of class light (issue #232): one, the light pool, carries a
     ``ci-`` label and the other, the home pool, none; the home pool names its labels, one of
-    them its own (no other pool of the host gives it), and has no ``slot`` or ``audience``
+    them its own (no other pool of the host gives it) and the rest the light pool's, and has
+    no ``slot`` or ``audience``
     (per_card is a gpu pool's only). One light pool or none: nothing to check."""
     pools = h['pools']
     light = [p for p, v in pools.items() if _class(p, v) == HOME_CLASS]
@@ -353,6 +354,10 @@ def _check_home(role: str, h: Mapping[str, object]) -> None:
     if set(v['labels']) <= others:
         raise InventoryError(f'{where}.{home}: no label of the home pool is its own: give it one that no other '
                              'pool of the host carries (<role>-home)')
+    lights = labels_of(h, capable[0]) or [capable[0], role]
+    if set(v['labels']) & others - set(lights):  # another pool's jobs would land on it
+        raise InventoryError(f'{where}.{home}: the home pool shares a label with a pool other than the light pool: '
+                             'its labels are its own and the light pool\'s (<role>-home, <role>-light)')
 
 
 def home_pool(host: Mapping[str, object]) -> str | None:

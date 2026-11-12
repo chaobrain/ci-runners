@@ -1,0 +1,28 @@
+name: ci-runners sweep
+description: The step of the reusable workflow sweep.yml (design §4.10, decision 19 item 9), run from this action's own checkout on a hosted runner; not for consumers' own workflows.
+inputs:
+  workflow:
+    description: the workflow file whose runs to sweep, such as ci.yml
+    required: true
+  context:
+    description: the status context that workflow posts on, such as myproj/ci
+    required: true
+  minutes:
+    description: the bound on a job's wait in GitHub's queue, in minutes (5 to 1440)
+    default: '60'
+  token:
+    description: the job's token (actions write to cancel a run, statuses write to post)
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - id: sweep
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        IN_WORKFLOW: ${{ inputs.workflow }}
+        IN_CONTEXT: ${{ inputs.context }}
+        IN_MINUTES: ${{ inputs.minutes }}
+      run: |
+        # this action's own checkout, the release the workflow names (design §9); nothing of a head
+        exec sh "$GITHUB_ACTION_PATH/../../bin/ci-run" sweep "--workflow=$IN_WORKFLOW" "--context=$IN_CONTEXT" "--minutes=$IN_MINUTES"

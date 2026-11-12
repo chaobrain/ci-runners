@@ -79,7 +79,8 @@ jobs:
       state: ${{ steps.contract.outputs.state || steps.plan.outputs.state }}
       description: ${{ steps.contract.outputs.description || steps.plan.outputs.description }}
       project: ${{ steps.project.outputs.name }}
-      files: ${{ steps.files.outcome }}
+      # none (the plan named no files), else the upload's outcome: success alone hands them on
+      files: ${{ steps.plan.outputs.files == '' && 'none' || steps.files.outcome }}
     steps:
       # the registry key: the input, else the repository's name, from GITHUB_REPOSITORY (a
       # schedule's payload has no repository object)
@@ -152,7 +153,8 @@ jobs:
           plan-reason: ${{ steps.command.outputs.reason }}
           plan-only: ${{ inputs.plan-only }}
           workspace: ${{ github.workspace }}
-      # the plan's files, once, for every part (CIRUNNERS_FILES there)
+      # the plan's files, once, for every part (CIRUNNERS_FILES there): hidden entries too (the
+      # plan named the directory; flow plan refused what this upload cannot carry)
       - id: files
         if: ${{ !cancelled() && steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != '' }}
         uses: actions/upload-artifact@v4
@@ -161,6 +163,7 @@ jobs:
           path: ${{ github.workspace }}/${{ steps.plan.outputs.files }}
           retention-days: 7
           if-no-files-found: error
+          include-hidden-files: true
 
   # the claim's pending, beside the parts: only once the plan is routed (never on a head the
   # claim skipped as green), and only where nothing was posted since the claim read the
@@ -169,7 +172,8 @@ jobs:
     name: pending
     needs: plan
     if: >-
-      !cancelled() && needs.plan.outputs.routed == 'true' && needs.plan.outputs.files != 'failure' &&
+      !cancelled() && needs.plan.outputs.routed == 'true' &&
+      (needs.plan.outputs.files == 'none' || needs.plan.outputs.files == 'success') &&
       needs.plan.outputs.run == 'true'
     runs-on: [self-hosted, ci-light]
     timeout-minutes: 10
@@ -187,10 +191,11 @@ jobs:
     name: part ${{ matrix.part.id }}
     needs: plan
     # a status function of its own: a later step of the plan job that failed (an upload of
-    # the plan part's own record) skips no part once the plan is routed; a failed upload of
-    # the plan's files does, and the verdict reads the parts as lost
+    # the plan part's own record) skips no part once the plan is routed; plan files that did
+    # not upload (failed, timed out, skipped) do, and the verdict posts the plan's end
     if: >-
-      !cancelled() && needs.plan.outputs.routed == 'true' && needs.plan.outputs.files != 'failure' &&
+      !cancelled() && needs.plan.outputs.routed == 'true' &&
+      (needs.plan.outputs.files == 'none' || needs.plan.outputs.files == 'success') &&
       needs.plan.outputs.run == 'true'
     permissions:
       contents: read
@@ -209,9 +214,11 @@ jobs:
       project: ${{ needs.plan.outputs.project }}
 
   # the run's one final status: the plan's end where it ended the run (an old contract, a
-  # plan that does not load, a red plan command, a route error, nothing to run, plan only),
-  # else every part's. Not where the claim skipped a green head, nor in a cancelled run (a
-  # newer head's run posts); a plan job lost before its parts were known posts error
+  # plan that does not load, a red plan command, a route error, nothing to run, plan only,
+  # its files not uploaded after the route: no part started), else every part's. Not where
+  # the claim skipped a green head, nor in a cancelled run (a newer head's run posts); a
+  # plan job lost before its parts were known posts error, on the head the run names where
+  # the lost job's outputs are gone
   verdict:
     name: verdict
     needs: [plan, pending, parts]
@@ -231,7 +238,7 @@ jobs:
         with:
           command: status
           context: ${{ inputs.context }}
-          sha: ${{ needs.plan.outputs.sha }}
+          sha: ${{ needs.plan.outputs.sha || inputs.sha || github.event.pull_request.head.sha || github.sha }}
           state: ${{ needs.plan.outputs.state }}
           description: ${{ needs.plan.outputs.description }}
       # a plan job that ended without its end or a plan (its runner lost, a step failed)
@@ -240,11 +247,24 @@ jobs:
         with:
           command: status
           context: ${{ inputs.context }}
-          sha: ${{ needs.plan.outputs.sha }}
+          sha: ${{ needs.plan.outputs.sha || inputs.sha || github.event.pull_request.head.sha || github.sha }}
           state: error
           description: 'plan: the plan job ended without a plan (${{ needs.plan.result }}); no part ran'
+      # a plan job that ended after the route, its files not uploaded: no part started, none was lost
+      - if: >-
+          needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' &&
+          needs.plan.outputs.files != 'none' && needs.plan.outputs.files != 'success'
+        uses: chaobrain/ci-runners/actions/flow@v1
+        with:
+          command: status
+          context: ${{ inputs.context }}
+          sha: ${{ needs.plan.outputs.sha || inputs.sha || github.event.pull_request.head.sha || github.sha }}
+          state: error
+          description: 'plan: the plan''s files did not upload after the route (${{ needs.plan.outputs.files || ''lost'' }}); no part ran'
       - id: verdict
-        if: needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'
+        if: >-
+          needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' &&
+          (needs.plan.outputs.files == 'none' || needs.plan.outputs.files == 'success')
         uses: chaobrain/ci-runners/actions/verdict@v1
         with:
           context: ${{ inputs.context }}

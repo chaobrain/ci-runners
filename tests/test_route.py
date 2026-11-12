@@ -64,6 +64,9 @@ class Labels(unittest.TestCase):
         got = one(part(results='out', memory_gib=4), host(ci_cpu=R(1)))
         self.assertEqual((got['id'], got['command'], got['results'], got['memory_gib'], got['target']),
                          ('p', 'python -m pytest', 'out', 4, ''))
+        self.assertIs(one(part(history=True), host(ci_cpu=R(1)))['history'], True)  # #228, for part.yml's checkout
+        self.assertNotIn('history', one(part(), host(ci_cpu=R(1))))  # absent: one commit, as before
+        self.assertEqual(rt.load_plan({'schema': 1, 'parts': [part(history=False)]})[0]['history'], False)
 
     def test_the_timeout_is_minutes_by_the_largest_speed_plus_15(self):
         pools = [{'labels': ['ci-cpu', 'hosta-cpu'], 'memory_gib': 48, 'speed': 1.5}]
@@ -254,6 +257,8 @@ class Plan(unittest.TestCase):
                  ({'schema': 1, 'parts': [part(minutes=241)]}, 'minutes'), ({'schema': 1, 'parts': [part(minutes=0)]}, 'minutes'),
                  ({'schema': 1, 'parts': [part(minutes=True)]}, 'minutes'),
                  ({'schema': 1, 'parts': [part(memory_gib=0)]}, 'memory_gib'),
+                 ({'schema': 1, 'parts': [part(history='yes')]}, 'p: history is true or false'),
+                 ({'schema': 1, 'parts': [part(history=1)]}, 'p: history is true or false'),
                  ({'schema': 1, 'parts': [dict(part(), command=' ')]}, 'command'), ({'schema': 1, 'parts': [3]}, 'not an object'),
                  ({'schema': True, 'parts': [part()]}, 'schema True'), ({'schema': 1, 'parts': [part(5)]}, 'part 0: an id'),
                  ({'schema': 1, 'parts': [part(['x'])]}, 'part 0: an id'),

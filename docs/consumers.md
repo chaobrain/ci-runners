@@ -225,7 +225,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 |---|---|---|---|---|
 | `schema` | 整数 `1` | 是 | — | `plan schema 2: this release reads schema 1` |
 | `parts` | 0 到 256 个对象的数组（GitHub matrix 的上限）；空数组合法：没有部件作业，verdict 作业发 `success`，描述 `nothing to run` | 是 | — | `"parts" is a list of at most 256 parts` |
-| `files` | 字符串：checkout 下的相对路径（不含 `..`、不以 `/` 开头），一个目录：plan 命令写进去的文件，plan 作业上传一次（artifact `ci-plan-files`），每个部件在命令之前下载，路径在变量 `CIRUNNERS_FILES` 里；目录里不能有符号链接，最多 1000 项、64 MiB | 否 | 无（`CIRUNNERS_FILES` 为空） | `files is a relative path below the checkout, without ".."`；`files: not a directory`；`files: <路径> is a link`；`files: more than 1000 entries or 64 MiB` |
+| `files` | 字符串：checkout 下的相对路径（不含 `..`、不以 `/` 开头），一个目录：plan 命令写进去的文件，plan 作业上传一次（artifact `ci-plan-files`，连隐藏的文件和目录一起：目录本身可以是 `.ci-plan` 这样的隐藏目录；v1.18.0 之后的 release 起，v1.18.0 会漏掉隐藏的内容），每个部件在命令之前下载，路径在变量 `CIRUNNERS_FILES` 里；目录里不能有符号链接、空目录（上传只带文件）、管道之类不是文件的项、`.git` 目录（clone 的配置里可能有 plan 命令的 token，部件不能拿到），名字必须是 UTF-8，不能有 `" : < > \| * ?` 和换行（上传拒绝这些字符），最多 1000 项、64 MiB；文件的权限位不保留（可执行的脚本用 `sh <文件>` 运行） | 否 | 无（`CIRUNNERS_FILES` 为空） | `files is a relative path below the checkout, without ".."`；`files: not a directory`；`files: <路径> is a link`；`files: <路径> is an empty directory (the upload carries files)`；`files: <路径> is not a file (a pipe, a socket or a device)`；`files: <路径> is a git directory (it may hold a credential)`；`files: '<路径>' is not a UTF-8 name (the upload cannot name it)`；`files: '<路径>' has a character the upload refuses (" : < > \| * ? or a line break)`；`files: more than 1000 entries or 64 MiB` |
 | `max_parallel` | 整数，[1, 256]：本次运行同时跑的部件数，只能**降低** registry 的 `max_parallel`，不能提高 | 否 | registry 的值 | `max_parallel is an integer in [1, 256]` |
 | （顶层其他键） | — | — | — | `a plan is an object with "schema" and "parts", and optionally files, max_parallel` |
 | `parts[].id` | 字符串，`[A-Za-z0-9][A-Za-z0-9_.-]*`，最多 64 个字符，计划内唯一，不能是 `plan` | 是 | — | `<id>: an id is [A-Za-z0-9][A-Za-z0-9_.-]*, unique in the plan`；`plan: the id is reserved for the plan job`；`...: an id is at most 64 characters` |
@@ -236,10 +236,12 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 | `parts[].results` | 字符串（`CI_RESULTS_DIR` 下 JUnit XML 的 glob） | 否 | 无 | `<id>: results is a string (a glob)` |
 | `parts[].queue_minutes` | 数，(0, 240]：一次尝试在主机上等 slot 或租约的上限（`part` 的 `queue-timeout-minutes`）；到了就是 `unavailable`，按重试的五行处理（同丢失的尝试一样换一台）；作业的 `timeout-minutes` 加上它 | 否 | 15 | `<id>: queue_minutes is a number in (0, 240]` |
 | `parts[].artifacts` | 对象，最多 4 项：名字（`[A-Za-z0-9][A-Za-z0-9_.]*`，最多 32 个字符，不含 `-`，不能是 `ci`）→ `RUNNER_TEMP` 下的相对路径；每次尝试结束后（红了也传）上传为 artifact `<名字>-<id>-<尝试>`，保留 7 天，路径不存在只警告；verdict 不读它们 | 否 | 无 | `<id>: artifacts maps at most 4 names ([A-Za-z0-9][A-Za-z0-9_.]*, no "-") to relative paths below RUNNER_TEMP`；`<id>: the artifact name ci is reserved (ci-part-*, ci-plan-files)` |
+| `parts[].history` | `true` 或 `false`：`true` 时部件的 checkout 取 head 的全部历史和所有分支的远程 ref（默认分支的 `origin/<分支>` 也在），供读历史的测试用（`git rev-list`、和默认分支的 diff、旧提交的树）；用作业自己的只读 token 拉取，checkout 不保存它（`persist-credentials: false`），之后它的认证头（`http.<url>.extraheader`）若还在 checkout 的 git 配置里，这次尝试就失败，命令拿不到任何 token | 否 | `false`：只有一个提交，和以前一样 | `<id>: history is true or false` |
 | （部件的其他键 / 缺键） | — | — | — | `<id>: unknown key(s) ['gpus']`、`<id>: missing ['minutes']` |
 
-- 以上 `files`、`max_parallel`、`light`、`queue_minutes`、`artifacts` 和空的 `parts` 都是 schema 1 的可选扩展：不用它们的计划照旧。
-- 标准输出不是一个 JSON 文档：`plan: the plan command's standard output is not one JSON document (JSONDecodeError)`；超过 1 MiB：`plan: the plan is larger than 1048576 bytes`；整个部件列表（路由后）超过 500 KB（远在 GitHub 一个作业输出和一个表达式的 1 MB 之内）：`plan: the routed parts take <n> bytes, more than 500000`；`files` 的路径上有符号链接：`plan: files: <路径> goes through a link`。
+- 以上 `files`、`max_parallel`、`light`、`queue_minutes`、`artifacts`、`history` 和空的 `parts` 都是 schema 1 的可选扩展：不用它们的计划照旧。
+- `history` 从 v1.18.0 之后的 release 起才有：更早的 release 不是忽略它，而是拒绝整个计划（`<id>: unknown key(s) ['history']`），所以 `ci.yml` 钉在更早的 release 上时不要写它。全部历史会让 checkout 变慢（仓库越大越慢），只给需要它的部件写；以前的做法（plan 命令用自己的只读 token 读历史，把测试要的东西放进 `files`）照样可用。
+- 标准输出不是一个 JSON 文档：`plan: the plan command's standard output is not one JSON document (JSONDecodeError)`；超过 1 MiB：`plan: the plan is larger than 1048576 bytes`；整个部件列表（路由后）超过 500 KB（远在 GitHub 一个作业输出和一个表达式的 1 MB 之内）：`plan: the routed parts take <n> bytes, more than 500000`；`files` 的路径上有符号链接：`plan: files: <路径> goes through a link`。路由之后 `files` 没有上传成功（失败、超时或被跳过；这时没有部件启动）：`error` `plan: the plan's files did not upload after the route (<结果>); no part ran`，不会再把每个部件报成 lost。
 - **plan 命令能读到的事件信息**（环境变量，不需要 token）：`CIRUNNERS_EVENT`（事件名）、`CIRUNNERS_PR`（PR 号，非 PR 为空）、`CIRUNNERS_PR_LABELS`（PR 标签名的 JSON 数组，非 PR 为 `[]`）、`CIRUNNERS_BASE_REF`/`CIRUNNERS_BASE_SHA`（PR 的 base；push 时为默认分支和推送前的 sha）、`CIRUNNERS_HEAD_REF`/`CIRUNNERS_HEAD_SHA`（要跑的 head）。plan 命令和部件命令都**拿不到 token**。
 - `plan` 命令自己红了是 `failure`（`plan: red (...)`），`unavailable`、`lost` 等是 `error`；路由错误（某个标签没有任何主机提供、内存连 `mem-big` 的 slot 都放不下）是 `error`，描述以 `route: <标签>: part <id>: ...` 开头。这些情况一个部件也不启动，plan 作业把状态交给 verdict 作业去发（plan 作业的 token 只读）。
 - 每个部件之后带上路由的结果跑：`labels`（作业的 `runs-on`，只有能力标签）、作业的 `timeout-minutes`（`minutes` × 最慢 slot 的 `speed` + 15，再加 `queue_minutes`）、`gpus`（`gpu` 1、`gpu2` 2、其余 0）、`memory`（`memory_gib` 换成 MiB）。plan 作业的 summary 列出每个部件的 `needs`、标签、分钟数、作业上限和路由的理由（§16 of operations）。
@@ -296,13 +298,54 @@ jobs:
 | verdict（plan 作业结束运行时） | `failure` | `contract ...: merge origin/<分支>`（§8）、`plan: red (...)`、`plan: <计划的错误>` |
 | verdict（plan 作业结束运行时） | `error` | `plan: <outcome> (...)`（plan 命令 `lost`、`unavailable` 等）、`route: ...`、`plan: no plan output`、默认分支的 `contract` 读不进来、`a public repository: ci-runners runs private ones only until decision 18 C2` |
 | verdict（plan 作业结束运行时） | `success` | `nothing to run`（空的 `parts`）、`plan only: N part(s) routed, none run` |
+| `sweep.yml`（§10，取消了运行之后） | `error` | `queued past <N> min: part <id> on <labels>`、`... plan on <labels>`、`... <n> jobs, first part <id> on <labels>` |
 
 描述超过 140 个字符时截断，以 `...` 结尾。
 
-`pull_request_target`、fork 的 PR 在 plan 作业的 guard 里就跳过；**公开仓库**现在不能调用 `ci.yml`：它的 `public` 作业在 GitHub 托管的 runner 上直接失败（公开仓库的 CPU 部件走托管 runner、GPU 走隔离的池，等决定 18 的 C2 实现）；事件的 payload 里没有仓库信息时（如 `schedule`），plan 作业的 `contract` 步骤用 API 查仓库是否私有，公开的就结束运行（verdict 作业发 `error`），head 的任何东西都不运行。部件在 GitHub 的队列里一直没有 runner 接的情况，现在没有上限（GitHub 不能取消单个作业；计划中的定时 sweeper 见 issue #213），在那之前请用自己的 sweeper。一个工作流里只调用一次 `ci.yml`（定位丢失尝试的主机时按作业名找 `part <id> / first`）。运行被取消（同一个 PR 推了新 head）时不重试、不发结论，新 head 的运行会发。不要把 secret 传进来：`ci.yml` 不接收也不转发任何 secret；plan 作业的 token 只读（`contents`、`statuses`、`actions`、`pull-requests` 都是 `read`），所以调用方要给 `pull-requests: read`（GitHub 拒绝被调用的作业要的权限超过调用方给的）；跑部件的作业只有 `contents: read`，token 不进部件命令的环境，只在 `plan-token` 打开时以只读的形式进 plan 命令；checkout 不保存凭据。注意：部件命令以 CI 账户运行（design T13），它能改写同一个作业里之后的步骤用到的文件，所以同一作业里的重试决定、作业的输出并不防部件命令本身（plan 命令对 plan 作业的输出也一样）；结论以 verdict 读到的 artifact 和主机记录为准。手动取消的运行不发最终状态，它发过的 pending 留到下一次运行。
+`pull_request_target`、fork 的 PR 在 plan 作业的 guard 里就跳过；**公开仓库**现在不能调用 `ci.yml`：它的 `public` 作业在 GitHub 托管的 runner 上直接失败（公开仓库的 CPU 部件走托管 runner、GPU 走隔离的池，等决定 18 的 C2 实现）；事件的 payload 里没有仓库信息时（如 `schedule`），plan 作业的 `contract` 步骤用 API 查仓库是否私有，公开的就结束运行（verdict 作业发 `error`），head 的任何东西都不运行。部件在 GitHub 的队列里一直没有 runner 接的情况，由定时调用的 `sweep.yml` 限制（§10；GitHub 不能取消单个作业，它取消整个运行并发 `error`）；不调用它的仓库没有上限（GitHub 的 24 小时），只能靠自己的 sweeper。一个工作流里只调用一次 `ci.yml`（定位丢失尝试的主机时按作业名找 `part <id> / first`）。运行被取消（同一个 PR 推了新 head）时不重试、不发结论，新 head 的运行会发。不要把 secret 传进来：`ci.yml` 不接收也不转发任何 secret；plan 作业的 token 只读（`contents`、`statuses`、`actions`、`pull-requests` 都是 `read`），所以调用方要给 `pull-requests: read`（GitHub 拒绝被调用的作业要的权限超过调用方给的）；跑部件的作业只有 `contents: read`，token 不进部件命令的环境，只在 `plan-token` 打开时以只读的形式进 plan 命令；checkout 不保存凭据。注意：部件命令以 CI 账户运行（design T13），它能改写同一个作业里之后的步骤用到的文件，所以同一作业里的重试决定、作业的输出并不防部件命令本身（plan 命令对 plan 作业的输出也一样）；结论以 verdict 读到的 artifact 和主机记录为准。手动取消的运行不发最终状态，它发过的 pending 留到下一次运行。
 
 **自己组合的部分**（`ci.yml` 不做，design §4.8）：`ci.yml` 只管测试部件和它们的结论。
 
 - 所有部件之后再跑、读部件 artifact 的作业（合并覆盖率、bisect、报告、上传影响图）：在调用 `ci.yml` 的作业后面另加一个作业（`needs: ci`，`if: always()` 视需要），用 `actions/download-artifact` 读部件的 `artifacts`（§8）、用 `part` action 在 `ci-light` 上跑命令；它不计入 verdict。
 - 指定集群目标（`target`）、`exclude` 之类的强制选择：`ci.yml` 不提供，需要时按 §3 自己组合 `claim`、`part`、`salvage`、`verdict`，只写能力标签。
 - 自己格式的 summary：在自己的作业里写；`ci.yml` 的 summary 格式是固定的。`ci.yml` 自己用的 `actions/flow` 是它内部的步骤，不要在自己的工作流里调用。
+
+## 10. 定时 sweeper `sweep.yml`（design §4.10、决定 19.9，issue #213）
+
+部件的作业在 GitHub 的队列里一直没有 runner 接（没有带这些标签的 runner 在听，或者决定 19.9 的黑洞：一个在听却从来接不到作业的 runner），GitHub 要等 24 小时才结束它，运行的结论也跟着等。计划的 `queue_minutes`（§8）管不到这一段：它只限制 runner 接走作业**之后**在主机上等槽位或租约的时间（而且要读它，每次 sweep 对每个运行都要列一次 artifact、下载一次）。`sweep.yml` 给这一段一个上限：仓库定时调用它，它找出指定工作流里在 GitHub 队列里等了超过 `minutes` 分钟的作业，取消那个运行（GitHub 不能取消单个作业，只能取消整个运行），并在运行的 context 上发 `error`。
+
+```yaml
+name: ci-sweep
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+jobs:
+  sweep:
+    uses: chaobrain/ci-runners/.github/workflows/sweep.yml@v1
+    permissions: { actions: write, statuses: write }
+    with:
+      workflow: ci.yml
+      context: myproj/ci
+      minutes: 60
+```
+
+**输入**：`workflow`（必填，要扫的工作流文件名，即调用 `ci.yml` 的那个，如 `ci.yml`；字母、数字和 `._-`，以 `.yml` 或 `.yaml` 结尾）；`context`（必填，那个工作流发状态用的 context）；`minutes`（可选，数字，5 到 1440，默认 60：一个作业在 GitHub 队列里最多等多久）。调用方的作业要给 `actions: write`（取消运行）和 `statuses: write`（发状态），别的都不要：被调用的作业要的权限超过调用方给的，GitHub 会拒绝整个运行。
+
+**谁能触发**：只有 `schedule`，或者默认分支上的 `workflow_dispatch`（手动试一次）；别的事件、别的分支上，作业直接跳过，不报错，也不占 runner。它不 checkout、不下载 artifact，不跑任何 head 的东西；输入只经 `env:` 进 shell。
+
+**在哪跑，花多少**：所有调用方都在 GitHub 托管的 `ubuntu-latest` 上跑。原因：作业的 token 能取消运行、发状态，托管 VM 上从没跑过任何 head 的代码（`ci-light` 上跑过 plan 命令，也就是 head 的代码，以 runner 的账户运行，head 留下的进程可能读到之后作业的 token）；而且它要在我们的池子出问题时也能跑，这正是它存在的场合。公开仓库本来只能用托管 runner，这正好是。代价：每次 sweep 一个不到一分钟的托管作业，按一分钟计：每 15 分钟一次，每月约 4 × 24 × 30 = 2,880 分钟；每 30 分钟一次约 1,440 分钟。私有仓库的托管分钟算进组织的额度（公开仓库不算），建议每 15 到 30 分钟一次，`minutes` 比最长的正常排队长一些（默认 60）。cron 避开整点：GitHub 在整点排的定时运行最多，延迟也最大。
+
+**每次 sweep 做什么**：
+
+1. 列出 `workflow` 排队中（`queued`）和进行中（`in_progress`）的运行：创建在上限之前的（`created=<T`）和之后的分开列，各读一页 100 个（更多的只在日志和 summary 里报告，不再翻页），所以年轻的运行挤不掉老的；年轻的只用来看同一个 head 上有没有更新的运行，它们的作业不读。
+2. 读每个老运行最新一次尝试的作业：状态是 `queued`、创建超过 `minutes` 分钟的作业算卡住。只算 `queued`：`waiting`、`pending`、`requested` 是 environment 的审批或并发组的等待，换 runner 也不会结束。被 `max-parallel` 压着的矩阵作业显示成 `pending` 还是 `queued`，**还没有核实**：发布时由维护者先查清楚，在那之前不要定时调用它。
+3. 运行的 head：`push` 和 `pull_request` 的运行就是它的 `head_sha`（`ci.yml` 的默认 sha；这假定调用方在这两种事件上不传 `sha` 输入），否则要那个 sha 上已经有这个运行发的状态（`target_url` 是这个运行）。都不是（比如用 `ci.yml` 的 `sha` 输入手动派发另一个 commit）：不知道它测的是哪个 head，只报告，不取消（取消了，那个 head 的 `pending` 就永远留着）。
+4. 读 head 的状态（第一页 100 个，最新的在前；合并状态 `GET .../status` 不带发布者，所以不用它），只算 job token 的身份 `github-actions[bot]` 发的；这个运行在本次尝试开始（`run_started_at`）之前发的状态属于更早的尝试，当作没有。然后：同一个 head 上有这个工作流更新的运行（排队中或进行中），或者 `context` 最新的状态是**别的运行**的：只取消，不发（更新的运行拥有这个 context；verdict 作业跳过被取消的运行）；没有状态，或者是这个运行自己的 `pending`：先发 `error`，再取消；这个运行自己的 `failure`（有部件红了）或别的最终状态：只取消（红的就是最终状态）；这个运行自己之前被 sweep 发的 `error`（上次的取消没生效）：`force-cancel`，不再发。
+5. 先发后取消：sweep 在两步之间停下（到了上限、取消失败）时，`error` 已经在了，下一次 sweep 看到运行还在列表里、上面是自己的 sweep `error`，就 `force-cancel`。取消被 GitHub 回 409（运行已结束，或者取消不生效）时，接着 `force-cancel` 一次。
+
+**发的状态**：`error`，`target_url` 是被取消的运行，描述是 `queued past <N> min: part <id> on <labels>`；卡住的是 plan 作业时是 `queued past <N> min: plan on <labels>`；几个作业卡住时是 `queued past <N> min: <n> jobs, first part <id> on <labels>`（最早排队的那个）。`<labels>` 是作业的标签去掉 `self-hosted`，用 `+` 连起来。作业名和标签来自 head 的工作流文件，所以只用校验过的部分：部件 id 要像 `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`，否则写 `a job`；标签都要像 `[a-z0-9][a-z0-9-]{0,63}`，否则不写 `on <labels>`；总长不超过 140 个字符。运行被取消了，verdict 作业不再发任何状态，所以这个 `error` 就是这次运行的最终状态。自己的重新派发按描述的开头 `queued past ` 认它：它和测试红（`failure`）、`infrastructure: `、`plan: ` 开头的 `error` 都不一样，标签说明是哪个池子没有接；重新派发（或者重跑那个被取消的运行）时 claim 读到的是 `error`，会照常运行。
+
+**上限**：每次 sweep 最多 50 个请求（重试也算）、取消 10 个运行、8 分钟（作业的 `timeout-minutes` 是 10）；GitHub 回的 `X-RateLimit-Remaining` 低于 100 时也停（job token 每小时 1,000 次调用，和 `ci.yml` 自己的调用共用）。到了任一上限，已做的保留，作业以状态 1 结束（红）。只有剩下的请求够做完一整套（发状态、取消、可能的 `force-cancel`）才会动一个运行。GitHub 读不到、发状态失败时作业也是红的，那个运行不会被取消（没有 `error` 就不取消），下一次 sweep 再看。每次 sweep 在日志里每个处理过或留下的运行一行，summary 里一张表。
+
+**从哪个版本起**：`v1.18.0` 之后的第一个发布；`v1` 指向它之前，`sweep.yml@v1` 不存在，调用会失败。

@@ -11,8 +11,8 @@ network) and, per runner of the host, its *causes*:
   hosts: at or above ``max_temp_c``, or unread);
 - no free CI slot for it: the host's CI slots minus those held by processes that are not
   ours (a local run's, a pool run's) minus those our busy part runners hold or wait for,
-  shared among the idle part runners, the online ones first (16.2: no more part runners
-  online than free slots); or its slot's CPUs kept busy by processes that are not ours (one
+  shared among the idle part runners, one of each pool first, the online ones first (16.2:
+  no more part runners online than free slots); or its slot's CPUs kept busy by processes that are not ours (one
   load sample of ``LOAD_SECONDS``; the cause holds at half its CPUs and clears below a quarter);
 - the host or its pool is drained (13.1, 15.2), or the host's health gate fails (its free
   disk below ``disk_min_gib``, or the CI account's access to the shared files, 15.2);
@@ -26,7 +26,9 @@ part scope of the runner. A runner is stopped (``systemctl --user stop``) only a
 just before the stop; one that presence stopped (or that the unit's ``ExecCondition=``
 held back, ``Result=exec-condition``) is started after ``TICKS`` ticks without one. A runner
 that is not idle is never stopped; nor is the host's light runner without a ``ci-`` label
-(the ``home`` pool of §5.1, for the host's salvage legs). The runner unit's
+(the ``home`` pool of §5.1, for the host's salvage legs; until a host's light pool carries
+``ci-light``, 16.1, every light runner there is such a runner). One tick runs at a time
+(``state/presence.json.lock``). The runner unit's
 ``ExecCondition=`` runs ``ci-run presence check <runner>``, the same causes now, so that a
 restart (15.5) does not bring back a runner whose resource is still taken.
 
@@ -55,6 +57,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import fcntl
 import json
 import os
 import re
@@ -82,8 +85,11 @@ CARD_CLASSES = {'gpu', 'multi'}  # the classes whose runners lease cards: its ow
 TIMING = 'compile'  # the exclusive timing class (16.1 ci-timing)
 RUNNING = ('active', 'activating', 'reloading')
 DOWN = ('inactive', 'failed')
-#: a part's ``unavailable`` that is no infrastructure end (16.4): busy, drained, a full queue
-NOT_INFRA = ('busy', 'drained', 'project queue full', drain_mod.UNREADABLE)
+#: a part's ``unavailable`` that is no infrastructure end (16.4): busy, drained, a full queue;
+#: also a wait that ran out (the host was busy: no slot, no card, no host lock) and a request
+#: the class's row refuses (the caller's ``gpus``, ``lock`` or class, not the host)
+NOT_INFRA = ('busy', 'drained', 'project queue full', drain_mod.UNREADABLE, 'queue timeout', 'gpus ', 'lock ',
+             'this host has no compile_cpus')
 HOOK_INFRA = ('stale', 'policy', 'timeout', 'error')  # the hook's refusals that are infrastructure ends
 CLUSTER = 'slurm'  # a cluster part's unavailable is the cluster's, not the host's
 
@@ -402,6 +408,10 @@ def causes(inv: inventory.Inventory, rs: Sequence[Runner], f: Facts, units: Mapp
         free = 0 if any(r.cls == EVERY_SLOT and r.name in busy for r in rs) else max(0, n - theirs - ours)
         idle = [r for r in part if r.name not in busy and not out[r.name]]
         idle.sort(key=lambda r: units.get(r.unit, ('', ''))[0] not in RUNNING)  # stable: online first, then by order
+        # one runner of each pool first (a timing runner is not starved by idle part runners), then the rest
+        first = list({r.pool: r for r in reversed(idle)}.values())[::-1]
+        first.sort(key=idle.index)
+        idle = first + [r for r in idle if r not in first]
         for r in idle[free:]:
             out[r.name].append(f'slot: no free CI slot ({theirs} of {n} held by others, {ours} by our parts)')
     for r in rs:
@@ -432,9 +442,10 @@ def read_state(data: str) -> tuple[dict, bool]:
         return fresh_state(), True
     except (OSError, ValueError):
         return fresh_state(), False
-    if not (isinstance(st, dict) and isinstance(st.get('runners'), dict) and isinstance(st.get('counts'), dict)
-            and isinstance(st.get('infra'), dict) and isinstance(st['infra'].get('seen'), dict)):
+    if not (isinstance(st, dict) and isinstance(st.get('runners'), dict) and isinstance(st.get('counts'), dict)):
         return fresh_state(), False
+    if not (isinstance(st.get('infra'), dict) and isinstance(st['infra'].get('seen'), dict)):
+        st['infra'] = fresh_state()['infra']  # a state from before the self-drain, or a bad count: count afresh
     return st, True
 
 
@@ -521,12 +532,46 @@ def _iso(s: object) -> float | None:
         return None
 
 
+def _record_end(record: str, since: float, *, alive: Callable[[int, float], bool], active: Callable[[str], bool],
+                boot: str) -> dict | None:
+    """One part record's infrastructure end in the window after ``since``, or None (see
+    ``infra_ends``)."""
+    try:
+        t = os.stat(os.path.join(record, 'outcome.json')).st_mtime
+    except OSError:
+        t = None
+    if t is not None and t <= since:  # ended before the window: not read
+        return None
+    rec = _json(os.path.join(record, 'record.json'))
+    if rec is None:
+        return None
+    if t is not None:
+        doc = _json(os.path.join(record, 'outcome.json'))
+        if doc is None:
+            return None
+    else:  # never finished: lost once nothing of it runs
+        if os.path.exists(os.path.join(record, 'exit.json')):
+            return None
+        pid, start = int(rec.get('executor', 0)), float(rec.get('start_epoch', 0))
+        if pid > 0 and alive(pid, start) or rec.get('unit') and active(str(rec['unit'])):
+            return None
+        with os.scandir(record) as it:
+            t = max([os.stat(record).st_mtime, *(e.stat(follow_symlinks=False).st_mtime for e in it)])
+        if t <= since:
+            return None
+        doc = None
+    why = part_end(doc, rec, boot)
+    ref = '/'.join(record.split(os.sep)[-4:])
+    return {'key': f'part:{ref}', 'time': t, 'why': why, 'record': ref} if why else None
+
+
 def infra_ends(data: str, now: float, *, alive: Callable[[int, float], bool] = slots.alive,
                active: Callable[[str], bool] = lambda unit: False, boot: str = '') -> list[dict]:
     """The infrastructure ends of this host in the window before ``now``: ``{'key',
     'time', 'why'}`` each, from the part records (an ``outcome.json``'s time; a record
     that never finished, whose executor is gone, whose scope is not ``active`` and with no
-    ``exit.json``, at its newest file's time) and the hook's log lines."""
+    ``exit.json``, at its newest file's time) and the hook's log lines. A record or line
+    that cannot be read is skipped, whatever the error."""
     out = []
     since = now - INFRA_WINDOW
     root = os.path.join(data, 'ci-runners', 'state', 'parts')
@@ -543,39 +588,11 @@ def infra_ends(data: str, now: float, *, alive: Callable[[int, float], bool] = s
             for run in dirs(repo, horizon):
                 for record in dirs(run, horizon):
                     try:
-                        t = os.stat(os.path.join(record, 'outcome.json')).st_mtime
-                    except OSError:
-                        t = None
-                    if t is not None and t <= since:  # ended before the window: not read
-                        continue
-                    rec = _json(os.path.join(record, 'record.json'))
-                    if rec is None:
-                        continue
-                    ref = '/'.join(record.split(os.sep)[-4:])
-                    if t is not None:
-                        doc = _json(os.path.join(record, 'outcome.json'))
-                        if doc is None:
-                            continue
-                    else:  # never finished: lost once nothing of it runs
-                        if os.path.exists(os.path.join(record, 'exit.json')):
-                            continue
-                        try:
-                            pid, start = int(rec.get('executor', 0)), float(rec.get('start_epoch', 0))
-                        except (TypeError, ValueError):
-                            continue
-                        if pid > 0 and alive(pid, start) or rec.get('unit') and active(str(rec['unit'])):
-                            continue
-                        try:
-                            with os.scandir(record) as it:
-                                t = max([os.stat(record).st_mtime, *(e.stat(follow_symlinks=False).st_mtime for e in it)])
-                        except OSError:
-                            continue
-                        if t <= since:
-                            continue
-                        doc = None
-                    why = part_end(doc, rec, boot)
-                    if why:
-                        out.append({'key': f'part:{ref}', 'time': t, 'why': why, 'record': ref})
+                        end = _record_end(record, since, alive=alive, active=active, boot=boot)
+                    except Exception:  # noqa: BLE001 - one bad record never stops a tick
+                        end = None
+                    if end:
+                        out.append(end)
     logs = os.path.join(data, 'ci-runners', 'logs')
     days = sorted({datetime.datetime.fromtimestamp(x, datetime.timezone.utc).strftime('%Y-%m-%d') for x in (since, now)})
     for day in days:
@@ -587,10 +604,10 @@ def infra_ends(data: str, now: float, *, alive: Callable[[int, float], bool] = s
         for n, raw in enumerate(text.splitlines()):
             try:
                 line = json.loads(raw)
-            except ValueError:
+                t = _iso(line.get('time')) if isinstance(line, dict) else None
+                why = hook_end(line) if t is not None else ''
+            except Exception:  # noqa: BLE001 - one bad line never stops a tick (a deep nesting, say)
                 continue
-            t = _iso(line.get('time')) if isinstance(line, dict) else None
-            why = hook_end(line) if t is not None else ''
             if why and since < t <= now:
                 out.append({'key': f'hook:{day}:{n}', 'time': t, 'why': why, 'runner': str(line.get('runner', ''))})
     return sorted(out, key=lambda e: e['time'])
@@ -650,6 +667,24 @@ def tick(inv: inventory.Inventory, probe: Probe, *, dry_run: bool = False, now: 
     drain."""
     h = inv.host
     data = str(h['data'])
+    if dry_run:
+        return _tick(inv, probe, data, dry_run=True, now=now, out=out)
+    os.makedirs(os.path.dirname(state_path(data)), mode=0o700, exist_ok=True)
+    fd = os.open(state_path(data) + '.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:  # another tick (the timer's, or one by hand) runs: this one does nothing
+            out('presence: another tick runs; nothing done')
+            return 0
+        return _tick(inv, probe, data, dry_run=False, now=now, out=out)
+    finally:
+        os.close(fd)
+
+
+def _tick(inv: inventory.Inventory, probe: Probe, data: str, *, dry_run: bool, now: Callable[[], float],
+          out: Callable[[str], None]) -> int:
+    h = inv.host
     enabled, limit = config(h)
     rs = runners(inv)
     st, read_ok = read_state(data)
@@ -700,10 +735,12 @@ def tick(inv: inventory.Inventory, probe: Probe, *, dry_run: bool = False, now: 
                 plan.append(('start', r))
         else:  # down by someone else's hand, or between states: not presence's
             rst['stop_ticks'] = rst['start_ticks'] = 0
-    ends = infra_ends(data, t, active=lambda unit: _active(probe, unit), boot=boot_id(probe.read))
     if dry_run:
-        out(report(inv, rs, units, f, why, plan, enabled, ends=black_hole(inv, st, f, t, limit, ends=ends,
-                                                                       dry_run=True), limit=limit))
+        try:
+            ends: list[dict] | None = black_hole(inv, st, f, t, limit, ends=_ends(probe, data, t), dry_run=True)
+        except Exception:  # noqa: BLE001 - the report without the count
+            ends = None
+        out(report(inv, rs, units, f, why, plan, enabled, ends=ends, limit=limit))
         return 0
     for action, r in plan:
         rst = st['runners'][r.name]
@@ -713,23 +750,34 @@ def tick(inv: inventory.Inventory, probe: Probe, *, dry_run: bool = False, now: 
                 rst['stop_ticks'] = 0
                 log(data, {'runner': r.name, 'action': 'kept', 'cause': cause, 'why': 'a job started'}, t)
                 continue
+            rst['stopped'] = t  # on disk before the stop: a tick that dies after it still owns the runner
+            write_state(data, st)
             p = probe.systemctl('--no-block', 'stop', r.unit)
             if p is not None and p.returncode == 0:
-                rst['stopped'], rst['stop_ticks'] = t, 0
+                rst['stop_ticks'] = 0
                 log(data, {'runner': r.name, 'action': 'stop', 'cause': cause}, t)
                 _count(st, r.name, 'stop')
+            else:  # not stopped: a running unit clears the mark at the next tick anyway
+                rst['stopped'] = None
         else:
             p = probe.systemctl('--no-block', 'start', r.unit)
             if p is not None and p.returncode == 0:
                 rst['stopped'], rst['start_ticks'] = None, 0
                 log(data, {'runner': r.name, 'action': 'start', 'cause': 'no cause'}, t)
                 _count(st, r.name, 'start')
-    black_hole(inv, st, f, t, limit, ends=ends)
+    try:  # after the stops and starts, and never in their way
+        black_hole(inv, st, f, t, limit, ends=_ends(probe, data, t))
+    except Exception as e:  # noqa: BLE001 - the controller goes on; the error is logged
+        log(data, {'infra': 'not counted', 'error': f'{type(e).__name__}: {e}'}, t)
     publish_capacity(inv, rows)  # R4 (16.5): the host's own part of the capacity file, at every tick
     names = {r.name for r in rs}
     st['runners'] = {n: v for n, v in st['runners'].items() if n in names}
     write_state(data, st)
     return 0
+
+
+def _ends(probe: Probe, data: str, now: float) -> list[dict]:
+    return infra_ends(data, now, active=lambda unit: _active(probe, unit), boot=boot_id(probe.read))
 
 
 def _active(probe: Probe, unit: str) -> bool:
@@ -739,7 +787,7 @@ def _active(probe: Probe, unit: str) -> bool:
 
 def report(inv: inventory.Inventory, rs: Sequence[Runner], units: Mapping[str, tuple[str, str]], f: Facts,
            why: Mapping[str, list[str]], plan: Sequence[tuple[str, Runner]], enabled: bool, *,
-           ends: Sequence[dict], limit: int) -> str:
+           ends: Sequence[dict] | None, limit: int) -> str:
     """The dry run's text: each runner's state, causes and what a tick would do (a stop
     needs ``TICKS`` such ticks in a row). Pure."""
     acts = {r.name: a for a, r in plan}
@@ -753,8 +801,11 @@ def report(inv: inventory.Inventory, rs: Sequence[Runner], units: Mapping[str, t
         state = f'{a}{" (" + res + ")" if a in DOWN and res not in ("", "success") else ""}'
         what = acts.get(r.name, 'never stopped' if never_stopped(r) else 'keep')
         lines.append(f'  {r.name}: {state}, {idle}; {what}' + (f'; {"; ".join(why[r.name])}' if why[r.name] else ''))
-    lines.append(f'infrastructure ends in the last {INFRA_WINDOW // 60} min: {len(ends)} (the host drains at {limit})')
-    lines += [f'  {e["why"]}' for e in ends]
+    if ends is None:
+        lines.append('infrastructure ends: not counted (an error; see the tick\'s log)')
+    else:
+        lines.append(f'infrastructure ends in the last {INFRA_WINDOW // 60} min: {len(ends)} (the host drains at {limit})')
+        lines += [f'  {e["why"]}' for e in ends]
     return '\n'.join(lines)
 
 

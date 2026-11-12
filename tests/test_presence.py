@@ -114,7 +114,26 @@ class Load(unittest.TestCase):
                  '/proc/5/status': 'Cpus_allowed_list:\t0-1\n', '/proc/6/stat': '6 (y) S ' + ' '.join(['0'] * 20)}
         snap = hostload.load_snapshot(UID, read=lambda p: files.get(p, ''), listdir=lambda p: ['5', '6', 'self'],
                                       now=lambda: 3.0)
-        self.assertEqual(snap, {'t': 3.0, 'cpu': {0: 1}, 'ours': {5: (9.0, 7, frozenset({0, 1}))}})
+        self.assertEqual(snap, {'t': 3.0, 'cpu': {0: 1}, 'ours': {5: (9.0, 7, frozenset({0, 1}))}, 'units_usec': None})
+        # where our manager's cgroup can be read (v2): every unit of ours together
+        files.update({'/proc/self/cgroup': f'0::{MGR}/app.slice/ci-presence.service\n',
+                      f'/sys/fs/cgroup{MGR}/ci.slice/cpu.stat': 'usage_usec 5000000\n',
+                      f'/sys/fs/cgroup{MGR}/app.slice/ci-envrefresh.service/cpu.stat': 'usage_usec 1000000\n',
+                      f'/sys/fs/cgroup{MGR}/app.slice/other.service/cpu.stat': 'usage_usec 9000000\n'})
+        dirs = {'/proc': ['5', '6'], f'/sys/fs/cgroup{MGR}/app.slice': ['ci-envrefresh.service', 'other.service']}
+        snap = hostload.load_snapshot(UID, read=lambda p: files.get(p, ''), listdir=dirs.__getitem__, now=lambda: 3.0)
+        self.assertEqual(snap['units_usec'], 6000000.0)
+
+    def test_our_short_lived_work_is_not_foreign(self):
+        """A compiler of ours that starts and ends within the sample is in no process list;
+        the units' own CPU time caps what counts as foreign."""
+        a = {'t': 0.0, 'cpu': {0: 0, 1: 0}, 'ours': {}, 'units_usec': 0.0}
+        b = {'t': 1.0, 'cpu': {0: 100, 1: 100}, 'ours': {}, 'units_usec': 1.5e6}
+        s = hostload.load_between(a, b, 100)
+        self.assertAlmostEqual(s['foreign'], 0.5)
+        self.assertAlmostEqual(hostload.foreign_cores(s, frozenset({0, 1})), 0.5)
+        self.assertIsNone(hostload.load_between({**a, 'units_usec': None}, b, 100)['foreign'])
+        self.assertAlmostEqual(hostload.foreign_cores({**s, 'foreign': None}, frozenset({0, 1})), 2.0)
 
 
 INV = '''schema = 1
@@ -327,12 +346,13 @@ class Causes(Fixture):
     def test_a_slot_taken_by_something_that_is_not_ours(self):
         self.hold_slot(self.slot, 700, SESSION_CG)  # a local run's ci_slot.sh hold
         why = self.causes()
-        self.assertEqual((why['hz-part-1'], why['hz-part-2']), ([], []))  # the two free slots go to the first two
-        self.assertEqual(why['hz-compile-1'], ['slot: no free CI slot (1 of 3 held by others, 0 by our parts)'])
+        # the two free slots: one runner of each pool first, so the timing runner is not starved
+        self.assertEqual((why['hz-part-1'], why['hz-compile-1']), ([], []))
+        self.assertEqual(why['hz-part-2'], ['slot: no free CI slot (1 of 3 held by others, 0 by our parts)'])
         self.hold_slot(self.t / 's.2.lock', 701, '')  # a holder we cannot see: not ours
         why = self.causes()
         self.assertEqual(why['hz-part-1'], [])
-        self.assertEqual(why['hz-part-2'], ['slot: no free CI slot (2 of 3 held by others, 0 by our parts)'])
+        self.assertEqual(why['hz-compile-1'], ['slot: no free CI slot (2 of 3 held by others, 0 by our parts)'])
 
     def test_no_more_part_runners_online_than_free_slots(self):
         """16.2: our busy part runners hold their slots; the online idle ones keep theirs first."""
@@ -534,6 +554,37 @@ class Tick(Fixture):
         self.assertFalse(pathlib.Path(presence.state_path(str(self.data))).exists())
         self.assertEqual(self.log(), [])
 
+    def test_a_tick_that_dies_after_a_stop_still_owns_the_runner(self):
+        """The stop's mark is on disk before the stop, so the rollback brings the runner back."""
+        drain_mod.change(str(self.data), True, 'compile')
+        self.tick()
+        orig = self.sysrun
+
+        def dies(argv, **kw):
+            r = orig(argv, **kw)
+            if argv[2:4] == ['--no-block', 'stop']:
+                raise RuntimeError('the tick dies here')
+            return r
+        self.sysrun = dies
+        with self.assertRaises(RuntimeError):
+            self.tick()
+        self.sysrun = orig
+        self.load_inv(extra='presence = { enabled = false }')
+        self.tick()
+        self.assertEqual(self.actions('start'), ['ci-runner@hz-compile-1.service'])
+
+    def test_one_tick_at_a_time(self):
+        import fcntl
+        drain_mod.change(str(self.data), True)
+        p = pathlib.Path(presence.state_path(str(self.data)) + '.lock')
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, 'w') as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            for _ in range(3):
+                code, lines, _ = self.tick()
+            self.assertEqual((code, lines[-1]), (0, 'presence: another tick runs; nothing done'))
+        self.assertEqual(self.calls, [])
+
     def test_the_state_is_written_only_by_a_tick_that_acts(self):
         self.tick()
         st = json.loads(pathlib.Path(presence.state_path(str(self.data))).read_text())
@@ -665,7 +716,11 @@ class BlackHole(Fixture):
         return presence.infra_ends(str(self.data), self.now, boot='B1')
 
     def test_what_counts(self):
-        self.record('a', 'unavailable', 'queue timeout: no CI slot')
+        self.record('a', 'unavailable', 'low disk: 1 GiB free under the data directory')
+        self.record('o', 'unavailable', 'queue timeout: no CI slot')  # the host was busy
+        self.record('p', 'unavailable', 'gpus 2: the gpu runners take 1 card (design §4.8)')  # the caller's request
+        self.record('q', executor=os.getpid(), start=0.0)
+        (self.data / 'ci-runners/state/parts/org/repo/77-1/q-1/record.json').write_text('{"executor": 1e999}')  # garbage
         self.record('b', 'unavailable', 'busy: cpu 17 >= 14 cores for 10 min')
         self.record('c', 'unavailable', 'drained: host')
         self.record('d', 'unavailable', 'project queue full')
@@ -684,10 +739,12 @@ class BlackHole(Fixture):
         self.hook_line('actor')  # a refusal by the policy: not the host's fault
         self.hook_line('error', accepted=True)
         self.hook_line('timeout', hook='job-completed')
+        with open(next((self.data / 'ci-runners' / 'logs').glob('hook-*.log')), 'a') as f:
+            f.write('[' * 100000 + '\n')  # a line too deep to parse: skipped
         got = sorted((e['why'], e.get('record', e.get('runner'))) for e in self.ends())
         self.assertEqual(got, [('hook: policy', 'hz-part-1'), ('hook: stale', 'hz-part-1'),
                                ('lost', 'org/repo/77-1/f-1'), ('lost', 'org/repo/77-1/j-1'),
-                               ('unavailable: queue timeout: no CI slot', 'org/repo/77-1/a-1')])
+                               ('unavailable: low disk: 1 GiB free under the data directory', 'org/repo/77-1/a-1')])
 
     def test_three_ends_in_15_min_drain_the_host_and_it_stays_drained(self):
         self.record('a', 'unavailable', 'low disk: 1 GiB free')
@@ -718,6 +775,28 @@ class BlackHole(Fixture):
         self.tick()
         self.assertIsNone(drain_mod.read(str(self.data))['host'])  # the old ends do not drain it again
         self.assertEqual(len([x for x in self.log() if 'drain' in x]), 1)
+
+    def test_an_error_in_the_count_never_stops_the_controller(self):
+        drain_mod.change(str(self.data), True, 'compile')
+        orig = presence.infra_ends
+        presence.infra_ends = lambda *a, **kw: 1 / 0
+        try:
+            self.tick()
+            self.tick()
+        finally:
+            presence.infra_ends = orig
+        self.assertEqual(self.actions('stop'), ['ci-runner@hz-compile-1.service'])
+        self.assertIn('ZeroDivisionError', [x for x in self.log() if 'error' in x][0]['error'])
+
+    def test_a_state_from_before_the_count_is_read(self):
+        """The first PR's state has no count: it is kept (an unread one would start the
+        runners stopped by hand), and the count starts afresh."""
+        p = pathlib.Path(presence.state_path(str(self.data)))
+        p.parent.mkdir(parents=True)
+        p.write_text(json.dumps({'runners': {'hz-gpu0': {'stopped': 1.0}}, 'counts': {}}))
+        st, ok = presence.read_state(str(self.data))
+        self.assertTrue(ok)
+        self.assertEqual((st['runners'], st['infra']['seen']), ({'hz-gpu0': {'stopped': 1.0}}, {}))
 
     def test_the_limit_is_the_inventorys(self):
         self.load_inv(extra='presence = { enabled = true, infra_failures = 1 }')

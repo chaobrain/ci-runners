@@ -34,9 +34,9 @@ python = "/<path to a Python 3.11 or later>"    # export it as CI_RUNNERS_PYTHON
 # push_key = "ssh-ed25519 <key>"                # the snapshot push's key (decision 12.4)
 # probe_key = "ssh-ed25519 <key>"               # the other host's CI account's pool probe key (15.1, item 8);
 #                                               # a list of them, one per calling host, from 15.8
-# presence = { enabled = true, tick_seconds = 20, infra_failures = 3 }  # decision 16.4 (from R3): stop and
-#                                               # start idle runners by their resources, one host at a time;
-#                                               # enabled = false is the rollback (operations §14)
+# presence = { enabled = false, tick_seconds = 20, infra_failures = 3 }  # decision 16.4 (from R3): enabled =
+#                                               # true stops and starts idle runners by their resources, one
+#                                               # host at a time; false is the rollback (operations §14)
 # the other host's pool of each class: where a drained or busy part goes (decision 13.3)
 peer_labels = { light = ["3090a-light"], part = ["3090a-cpu"], gpu = ["3090a-gpu"], multi = ["3090a-multi"] }
 

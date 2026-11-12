@@ -967,7 +967,8 @@ def label_runners(etc: str, p: Mapping) -> dict[str, dict] | None:
 
 
 def pool_table(inv, p: Mapping, yielded: set[str] | None = None) -> list[dict]:
-    """One entry per runner pool of the inventory ``inv``'s host (decision 19.4): ``pool``,
+    """One entry per runner pool of the inventory ``inv``'s host (decision 19.4; its home
+    pool too, issue #232: its runners are told from the light pool's by their pool's key): ``pool``,
     ``class``, ``labels`` (those every runner of the pool carries, in the pool's order: a
     per-card runner's ``<role>-gpu<N>`` is not among them where the pool has two cards or
     more), ``registered``, and ``online`` and ``free`` by the probe ``p``'s names (as
@@ -983,6 +984,8 @@ def pool_table(inv, p: Mapping, yielded: set[str] | None = None) -> list[dict]:
     heard = p.get('runner_listening')
     heard = set(heard) if known and isinstance(heard, list) else None
     rs = _runners_of(inv) or []
+    from ci_runners import setup
+    keys = setup.runner_pools(inv) if rs else []  # by pool key: the home and the light pool share a class (#232)
     leased = {str(c) for c, n in (p.get('cards_leased') or {}).items() if n} if isinstance(p.get('cards_leased'), dict) \
         else set()
     held = set()
@@ -992,7 +995,7 @@ def pool_table(inv, p: Mapping, yielded: set[str] | None = None) -> list[dict]:
     out = []
     for name, v in inv.host['pools'].items():
         cls = inventory.pool_class(inv.host, name)
-        mine = [r for r in rs if r[2] == cls]
+        mine = [r for r, k in zip(rs, keys, strict=True) if k == name]
         common = [x for x in dict.fromkeys(mine[0][1]) if all(x in r[1] for r in mine[1:])] if mine else []
         e = {'pool': name, 'class': cls, 'labels': common, 'registered': len(mine),
              'online': sum(r[0] in alive for r in mine) if known else None,

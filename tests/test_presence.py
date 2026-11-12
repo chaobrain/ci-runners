@@ -1099,6 +1099,77 @@ class BlackHole(Fixture):
         self.assertIn('infrastructure ends in the last 15 min: 3 (the host drains at 3)', '\n'.join(lines))
 
 
+LIGHT = 'light = { count = 1, labels = ["ci-light", "hz-light"] }'
+HOME = 'home = { count = 1, class = "light", labels = ["hz-home", "hz-light"] }'  # issue #232
+
+
+class Home(Fixture):
+    """Issue #232: the home pool beside the light pool. Its runner is the one presence
+    never stops: drained, self-drained or with any other cause, the light pool's runner
+    stops and it stays. (A host without one: Runners, Causes and Tick above.)"""
+    record = BlackHole.record
+
+    def setUp(self):
+        super().setUp()
+        self.units['ci-runner@hz-home-1.service'] = ('active', 'success')
+
+    def load_inv(self, extra=None, part=None):
+        super().load_inv(extra, part)
+        text = INV.format(t=self.t, data=self.data, slot=self.slot, part=part or self.part,
+                          extra=self.extra if extra is None else extra)
+        self.assertIn(LIGHT, text)
+        self.inv = inventory.load(text.replace(LIGHT, f'{LIGHT}, {HOME}'))
+
+    def test_the_home_runner_is_the_one_never_stopped(self):
+        rs = presence.runners(self.inv)
+        self.assertEqual([r.name for r in rs if presence.never_stopped(r)], ['hz-home-1'])
+        self.assertEqual({r.name: r.labels for r in rs if r.cls == 'light'},
+                         {'hz-light-1': ('ci-light', 'hz-light'), 'hz-home-1': ('hz-home', 'hz-light')})
+
+    def test_drained_it_stays_and_the_light_runner_stops(self):
+        for pool in ('', 'light'):
+            with self.subTest(pool=pool):
+                drain_mod.change(str(self.data), True, pool)
+                why = self.causes()
+                self.assertEqual(why['hz-home-1'], [])
+                self.assertEqual(why['hz-light-1'], ['drained: host' if not pool else 'drained: pool light'])
+                drain_mod.change(str(self.data), False)
+        drain_mod.change(str(self.data), True)
+        for _ in range(3):
+            self.tick()
+        stopped = self.actions('stop')
+        self.assertIn('ci-runner@hz-light-1.service', stopped)
+        self.assertNotIn('ci-runner@hz-home-1.service', stopped)
+        _, lines, printed = self.tick(dry_run=True)
+        self.assertIn('  hz-home-1: active, idle; never stopped\n', '\n'.join(lines) + printed)
+
+    def test_self_drained_it_stays(self):
+        for rid in 'abc':
+            self.record(rid, 'lost')
+        for _ in range(4):
+            self.tick()
+        self.assertIsNotNone(drain_mod.read(str(self.data))['host'])  # the black hole drained the host
+        stopped = self.actions('stop')
+        self.assertIn('ci-runner@hz-light-1.service', stopped)
+        self.assertNotIn('ci-runner@hz-home-1.service', stopped)
+
+    def test_no_cause_touches_it(self):
+        self.disk = 3.0  # the host's health gate
+        self.smi[SMI_Q] = '0, 00000000:01:00.0, 90, 0\n'  # a hot card, one unread
+        for i, path in enumerate((self.slot, self.t / 's.2.lock', self.t / 's.3.lock')):
+            self.hold_slot(path, 700 + i, SESSION_CG)  # every CI slot a local run's
+        self.job('hz-compile-1')  # a timing part fences compile_cpus
+        why = self.causes()
+        self.assertEqual(why['hz-home-1'], [])
+        self.assertTrue(why['hz-light-1'] and why['hz-part-1'] and why['hz-gpu0'])
+        rs = presence.runners(self.inv)
+        home = next(r for r in rs if r.name == 'hz-home-1')
+        everything = {'key': 'h1', 'tier': 1, 'read_at': self.now, 'problems': [], 'target': '',
+                      'policy': {'repositories': 'r' * 12},
+                      'pools': [{'labels': ['hz-home', 'hz-light', 'ci-light'], 'listening': 1}]}
+        self.assertEqual(presence.tier_yield([home], {}, (2, [everything], 'r' * 12), {}, self.now), {})
+
+
 class Cli(unittest.TestCase):
     def test_usage(self):
         err = io.StringIO()

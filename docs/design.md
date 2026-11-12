@@ -3903,7 +3903,7 @@ nightly on capability labels) are its PRs, not this repository's.
   and a part's `SlotQueue` go; `v2.0.0`. *Acceptance:* the org's repositories, searched,
   name no host label; the canary is green and red as expected on `@v2.0.0`; `v1` stays
   installed until its last caller has moved.
-- **P1, the public policy** (16.7): the entry's `public_runners`, the runner audience,
+- **P1, the public policy** (16.7; *superseded by C2, never built*): the entry's `public_runners`, the runner audience,
   the protected-ref rule, the snapshot's `--public` receive. *Acceptance:* unit tests on
   the event fixtures (a fork pull request, a member's fork, `pull_request_target`, a
   bot's dispatch, a member's `workflow_dispatch`, a `schedule`, a fork's `workflow_run`,
@@ -3912,7 +3912,7 @@ nightly on capability labels) are its PRs, not this repository's.
   runner) are each refused with its reason; a same-repository pull request and a
   protected `push` of an opted-in public repository are accepted on a `public` runner
   only.
-- **P2, the public pool live** (16.7): the second account, its root-owned files, the
+- **P2, the public pool live** (16.7; *superseded by C4, never built*): the second account, its root-owned files, the
   repository-level runners, on a public copy of the canary, then one public library.
   *Acceptance:* a fork's pull request whose workflow names `[self-hosted, ci-pub-cpu]`
   and whose first step writes a marker ends in "Set up runner" with `ci-runners: refused
@@ -3920,6 +3920,42 @@ nightly on capability labels) are its PRs, not this repository's.
   file and no `ci-part-*` scope exist; the same for a member's fork,
   `pull_request_target` and a non-member's re-run; a same-repository pull request is
   green.
+
+**Decision 18: public GPU jobs on confined runners** (issue #194). It replaces P1 and P2,
+whose tests carry over. Each phase is its own issue and PR, with its tests, each failing on
+a mutant, and its evidence; host and org steps are the lead's (18.10). The launcher, the
+check, the relay and the issuer get an independent review (AGENTS.md, Review).
+
+- **C0**: this contract (decision 18). *Acceptance:* the lead approves the PR.
+- **C1, the launcher and the check, as an experiment** (18.3 to 18.5): `ci-run confine`
+  and `ci-run confine check`, wired to no runner. *Acceptance:* on a shared-account host, a
+  dedicated-account host and the reference host, the check passes confined and its control
+  run fails items 1, 3 and 4; a one-card CUDA smoke passes inside with no other card
+  visible; the card memory a new context gets after another process's job is measured; the
+  start-up cost of a confined runner is recorded; the table becomes 18.9.
+- **C2, policy, workflow and inventory** (18.7): the policy's `public_runners` and the
+  audience, GPU class only; `ci.yml`'s hosted legs for a public caller; the keys
+  `isolation` and a pool's public `audience` (accepted and ignored first, 16.3); the
+  capacity row's backend, check result and age; presence's public runner and the lease it
+  holds. *Acceptance:* P1's event fixtures, each refused or accepted as P1 said; a public
+  repository's job on a `light` or `part` runner of audience `public` refused; a public
+  plan asking for `gpu2`, `timing` or the cluster red at plan time; a withdrawn audience
+  stops the public runners within one tick.
+- **C3, the issuer** (18.6). *Acceptance,* on the canary: a queued `ci-pub-gpu` job gets
+  one runner on the first host in the order that has a free card and a fresh check; it
+  takes one job and is gone; an unused runner is removed after 5 min; a host whose check
+  failed or is stale is skipped; after a run, a scan of the host account's files finds no
+  credential of a public runner; §2's rows for 18.6 confirmed.
+- **C4, the public canary** (18.10): a public copy of the canary on `6000pro`, then on h100
+  once its check passes. *Acceptance:* P2's negative tests with `[self-hosted,
+  ci-pub-gpu]` (a fork's pull request, a member's fork, `pull_request_target`, a
+  non-member's re-run: each ends in "Set up runner" with its reason, no step run, no
+  marker); a same-repository pull request green; the check, run as a job of the canary,
+  passes; the lead reads the public logs (the machine name, the paths) and finds no site
+  detail.
+- **C5, the first public library**: the lead's policy entry and the repository's approval
+  setting for outside contributors. *Acceptance:* a week of its runs with every host's
+  check passing on its timer and no public job refused after its start.
 
 *Open point:* the design of a queued part's bound inside the reusable workflow (a part
 whose job no runner takes; today the consumer's own sweeper), closed by R6. Decided with

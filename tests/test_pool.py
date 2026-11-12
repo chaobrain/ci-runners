@@ -1723,14 +1723,18 @@ class DevSlotsPick(unittest.TestCase):
         orig, orig_say = pool.run_host, pool._say
         pool.run_host = lambda reg_, m, a, *x, wait, **k: calls.append((m.key, wait, pool.host_spec(reg_, m, a, wait)['dev']['lock'])) or 0
         pool._say = said.append
+        src = tempfile.mkdtemp()  # a checkout to stage (the mutants' copies of this tree have no .git)
+        subprocess.run(['git', 'init', '-q', src], check=True)
+        open(os.path.join(src, 'x.py'), 'w').close()
         try:
-            self.assertEqual(pool.pool_run(r, pool.RunArgs('true', ROOT, pool.Ask(cpus=2), no_wait=True), rows=rows),
+            self.assertEqual(pool.pool_run(r, pool.RunArgs('true', src, pool.Ask(cpus=2), no_wait=True), rows=rows),
                              pool.EXIT_NO_ROOM)  # its CI slots are free, its dev slots are not: no room
             self.assertEqual(calls, [])
-            self.assertEqual(pool.pool_run(r, pool.RunArgs('true', ROOT, pool.Ask(cpus=2)), rows=rows), 0)
-            self.assertEqual(pool.pool_run(r, pool.RunArgs('true', ROOT, pool.Ask(cpus=2)), only='hostb', rows=rows), 0)
+            self.assertEqual(pool.pool_run(r, pool.RunArgs('true', src, pool.Ask(cpus=2)), rows=rows), 0)
+            self.assertEqual(pool.pool_run(r, pool.RunArgs('true', src, pool.Ask(cpus=2)), only='hostb', rows=rows), 0)
         finally:
             pool.run_host, pool._say = orig, orig_say
+            shutil.rmtree(src)
         self.assertEqual(calls, [('hostb', True, '/tmp/dev.lock')] * 2)
         self.assertIn('no machine free now; waiting in line on hostb (dev queue 3)', said)
 

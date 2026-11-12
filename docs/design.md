@@ -2082,8 +2082,11 @@ amends.
        - *The opt-in* (decided 2026-11-13, amends this item and 16.7 for the hosted legs):
          the hosted legs are open to the organisation's public repositories; the opt-in is
          for the GPU pool. They touch nothing of ours, so `public.yml` admits a public caller
-         whose owner is this organisation under the event and actor rules above, with no
-         entry anywhere; a CPU-only public plan runs so. A plan with a `gpu` part from a
+         whose owner is this organisation under the event rules above (a same-repository
+         pull request, which needs write access to the repository, or a protected push) and
+         with no bot, with no entry anywhere; a CPU-only public plan runs so. Membership is
+         not checked there (a hosted runner reads no snapshot): it is the hook's, for the GPU
+         pool. A plan with a `gpu` part from a
          repository not opted in (the release's list `flow.PUBLIC_CALLERS`, beside the
          hosts' `public_runners = true`; never this repository) ends red at plan time, "not
          opted in to the public GPU pool". The gate for the cards stays the hosts' policy

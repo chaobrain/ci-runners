@@ -260,7 +260,7 @@ class Legs(unittest.TestCase):
 
             def __init__(self):
                 made.append(self)
-                self.calls = []
+                self.calls, self.seconds = [], {}
 
             def api(self, method, url, token, body=None):
                 self.calls.append((method, url, body))
@@ -280,10 +280,11 @@ class Legs(unittest.TestCase):
                 code, _, err = run(['verdict', '--context', 'p/ci', '--sha', SHA, '--parts', 'a b'], {**e.env, **PUB},
                                    Api())
             self.assertEqual(code, 1, err)  # b has no artifact: lost, no record read
-            [c] = made
-            self.assertEqual([m for m, _, _ in c.calls], ['GET', 'ZIP', 'POST'])
-            self.assertTrue(c.calls[1][1].endswith('/actions/artifacts/9/zip'))
-            posted = c.calls[2][2]
+            main, zips = made  # the listing's and the post's; the zips' worker
+            self.assertEqual([m for m, _, _ in main.calls], ['GET', 'POST'])
+            self.assertEqual([m for m, _, _ in zips.calls], ['ZIP'])
+            self.assertTrue(zips.calls[0][1].endswith('/actions/artifacts/9/zip'))
+            posted = main.calls[1][2]
             self.assertEqual(posted['state'], 'error')
             self.assertIn('b lost', posted['description'])
             with mock.patch.dict(os.environ, e.env, clear=True):

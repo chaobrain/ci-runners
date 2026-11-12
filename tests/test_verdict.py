@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -427,8 +428,9 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
                          ('error', 'infrastructure: cpu lost'))
         self.assertIn('ci-part-cpu-1: not read', self.err.getvalue())
 
-    def test_one_client_serves_every_request_when_none_is_given(self):
-        self.art('ci-part-cpu-1', {'outcome': 'pass', 'next': 'none'})
+    def test_kept_clients_serve_every_request_when_none_is_given(self):
+        for n in range(3):
+            self.art(f'ci-part-p{n}-1', {'outcome': 'pass', 'next': 'none'})
         made = []
 
         class Fake:
@@ -436,13 +438,14 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
 
             def __init__(s):
                 made.append(s)
-                s.closed = False
+                s.closed, s.seconds, s.zips = False, {'api.github.com': 0.5}, 0
 
             def api(s, *a):
                 return self.call(*a)
 
             def artifact(s, url, token, limit):
                 self.assertEqual(limit, verdict.MAX_ZIP)
+                s.zips += 1
                 return self.fetch(url, token)
 
             def close(s):
@@ -450,11 +453,38 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
         self.got, self.fetched, self.err = [], [], io.StringIO()
         with mock.patch.object(verdict.client, 'Client', Fake), mock.patch.dict(os.environ, self.env, clear=True), \
                 redirect_stderr(self.err):
-            self.assertEqual(verdict.main(['--context', 'p/ci', '--sha', SHA, '--parts', 'cpu'], self.inv), 0)
-        self.assertEqual(len(made), 1)
-        self.assertTrue(made[0].closed)
-        self.assertEqual((len(self.got), len(self.fetched), len(self.posted)), (1, 1, 1))
-        self.assertIn('2 connection(s) opened', self.err.getvalue())
+            self.assertEqual(verdict.main(['--context', 'p/ci', '--sha', SHA, '--parts', 'p0 p1 p2'], self.inv), 0)
+        self.assertGreaterEqual(len(made), 2)  # the listing's and the post's, and the zips' workers
+        self.assertTrue(all(c.closed for c in made))
+        self.assertEqual(made[0].zips, 0)
+        self.assertEqual(sum(c.zips for c in made[1:]), 3)
+        self.assertEqual((len(self.got), len(self.fetched), len(self.posted)), (1, 3, 1))
+        self.assertRegex(self.err.getvalue(), rf'{2 * len(made)} connection\(s\) over {len(made)} client\(s\); '
+                                              rf'requests by host \(summed\): api.github.com {0.5 * len(made):.1f} s')
+
+    def test_the_zips_are_fetched_at_once_and_read_in_order(self):
+        for n in range(6):
+            self.art(f'ci-part-p{n}-1', {'outcome': 'pass', 'next': 'none'})
+        self.art('ci-part-p5-2', {'outcome': 'red', 'next': 'none'})
+        inside, most, lock = [0], [0], threading.Lock()
+        fetch = self.fetch
+
+        def slow(url, token):
+            with lock:
+                inside[0] += 1
+                most[0] = max(most[0], inside[0])
+            time.sleep(0.05)
+            with lock:
+                inside[0] -= 1
+            return fetch(url, token)
+        self.fetch = slow
+        self.assertEqual(self.main('--parts', ' '.join(f'p{n}' for n in range(6))), 1)
+        self.assertEqual(most[0], min(verdict.WORKERS, 7))  # every zip at once, up to WORKERS
+        self.assertEqual(self.posted[0][3]['description'], 'red: p5 red')  # the attempts kept their places
+        with mock.patch.object(verdict, 'WORKERS', 2):
+            most[0] = 0
+            self.main('--parts', 'p0 p1 p2 p3')
+            self.assertEqual(most[0], 2)
 
     def test_green_parts_post_success(self):
         self.art('ci-part-cpu-1', {'outcome': 'pass', 'next': 'none'}, '### part `cpu`\n')

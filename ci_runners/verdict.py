@@ -29,6 +29,7 @@ runs' records are never read.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import dataclasses
 import http.client
 import io
@@ -58,6 +59,8 @@ RECORD_RUN = re.compile(r'/[0-9]+-([0-9]+)/[^/]+-[0-9]{1,2}\Z')
 MAX_FILE = 1 << 20
 #: the largest part artifact (zipped) the verdict fetches itself
 MAX_ZIP = 8 << 20
+#: the zips fetched at once, each thread over its own kept connections (issue #242)
+WORKERS = 8
 
 
 @dataclasses.dataclass(frozen=True)
@@ -227,22 +230,29 @@ def members(name: str, data: bytes) -> tuple[dict, str] | None:
 
 
 def read(ids: Iterable[str], call: Callable, fetch: Callable, base: str, repo: str, run_id: str, token: str,
-         log: Callable[[str], None]) -> dict[str, dict[int, tuple[dict, str]]]:
+         log: Callable[[str], None], workers: int = 1) -> dict[str, dict[int, tuple[dict, str]]]:
     """The parts' attempts, by part id and attempt, read through the API (issue #242): the
     run's listing, then each part artifact's newest zip (``newest``), as ``collect`` reads
     a download. An artifact whose zip cannot be fetched or read, or whose outcome is not
     valid, is left out, and is then read from this host's records, else ``lost``; an older
-    artifact of its name is never read in its place. Raises github.ApiError where the
+    artifact of its name is never read in its place. ``workers`` zips are fetched at once
+    (``fetch`` is then called from as many threads). Raises github.ApiError where the
     listing fails."""
-    out: dict[str, dict[int, tuple[dict, str]]] = {}
-    for name, aid in sorted(newest(run_artifacts(call, base, repo, run_id, token), ids).items()):
+    todo = sorted(newest(run_artifacts(call, base, repo, run_id, token), ids).items())
+
+    def one(item: tuple[str, int]) -> tuple[dict, str] | str:
+        name, aid = item
         try:
             got = members(name, fetch(f'{base}/repos/{repo}/actions/artifacts/{aid}/zip', token))
         except (OSError, ValueError, http.client.HTTPException, github.ApiError) as e:
-            log(f'{name}: not read ({e})')
-            continue
-        if got is None:
-            log(f'{name}: its outcome.json is missing or not valid')
+            return f'{name}: not read ({e})'
+        return f'{name}: its outcome.json is missing or not valid' if got is None else got
+    with concurrent.futures.ThreadPoolExecutor(max(1, min(workers, len(todo)))) as pool:
+        results = list(pool.map(one, todo))
+    out: dict[str, dict[int, tuple[dict, str]]] = {}
+    for (name, _), got in zip(todo, results):
+        if isinstance(got, str):
+            log(got)
             continue
         m = ARTIFACT.fullmatch(name)
         out.setdefault(m.group(1), {})[int(m.group(2))] = got
@@ -318,17 +328,25 @@ def main(argv: list[str], inv: inventory.Inventory | None, call: Callable | None
     p.add_argument('--wait-seconds', type=float, default=0)
     a = p.parse_args(argv)
     env = os.environ
-    own = None
-    if call is None or fetch is None:  # one kept connection per host for every request (issue #242)
-        own = client.Client()
+    own = pool = None
+    if call is None or fetch is None:  # kept connections, not one per request (issue #242)
+        own, pool = client.Client(), client.Pool()
         call = call or own.api
-        fetch = fetch or (lambda url, token: own.artifact(url, token, MAX_ZIP))
+        fetch = fetch or (lambda url, token: pool.artifact(url, token, MAX_ZIP))
+    t0 = time.monotonic()
     try:
         return _verdict(a, env, inv, call, fetch)
     finally:
         if own is not None:
-            print(f'ci-run verdict: {own.opened} connection(s) opened', file=sys.stderr)
+            spent: dict[str, float] = {}
+            for c in (own, *pool.clients):
+                for host, secs in c.seconds.items():
+                    spent[host] = spent.get(host, 0.0) + secs
+            print(f'ci-run verdict: {time.monotonic() - t0:.1f} s, {own.opened + sum(c.opened for c in pool.clients)} '
+                  f'connection(s) over {1 + len(pool.clients)} client(s); requests by host (summed): '
+                  + ', '.join(f'{h} {s:.1f} s' for h, s in sorted(spent.items())), file=sys.stderr)
             own.close()
+            pool.close()
 
 
 def _verdict(a: argparse.Namespace, env: Mapping[str, str], inv: inventory.Inventory | None, call: Callable,
@@ -358,7 +376,7 @@ def _verdict(a: argparse.Namespace, env: Mapping[str, str], inv: inventory.Inven
             raise ValueError('GITHUB_TOKEN is not set')
         try:  # each part's latest run attempt, not the artifact of the highest id (issue #169)
             found = read(ids, call, fetch, base, repo, env['GITHUB_RUN_ID'], token,
-                         lambda text: print(f'ci-run verdict: {text}', file=sys.stderr))
+                         lambda text: print(f'ci-run verdict: {text}', file=sys.stderr), WORKERS)
         except github.ApiError as e:  # nothing is known of any part: not a part's loss
             hint = '; the job needs actions: read' if 'HTTP 403' in str(e) or 'HTTP 404' in str(e) else ''
             items, v = [], Verdict('error', _cut(f'verdict: the run\'s artifacts could not be listed ({e}){hint}'))

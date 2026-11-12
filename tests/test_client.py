@@ -165,6 +165,44 @@ class Kept(unittest.TestCase):
         with self.assertRaisesRegex(github.ApiError, 'not an https URL'):
             self.client(Net()).api('GET', 'http://api.example/a', 't')
 
+    def test_a_pool_keeps_a_client_per_thread(self):
+        import threading
+        made, lock = [], threading.Lock()
+
+        class One:
+            def __init__(self):
+                with lock:
+                    made.append(self)
+                self.closed, self.urls = False, []
+
+            def artifact(self, url, token, limit):
+                self.urls.append(url)
+                return url.encode()
+
+            def close(self):
+                self.closed = True
+        pool = client.Pool(One)
+        self.assertEqual(pool.artifact('https://a/1', 't', 9), b'https://a/1')
+        self.assertEqual(pool.artifact('https://a/2', 't', 9), b'https://a/2')  # the same thread: the same client
+        t = threading.Thread(target=pool.artifact, args=('https://a/3', 't', 9))
+        t.start()
+        t.join()
+        self.assertEqual([c.urls for c in made], [['https://a/1', 'https://a/2'], ['https://a/3']])
+        self.assertEqual(pool.clients, made)
+        pool.close()
+        self.assertTrue(all(c.closed for c in made))
+        with mock.patch.object(client, 'Client', One):
+            client.Pool().artifact('https://a/4', 't', 9)  # Client by default, looked up when made
+        self.assertEqual(made[-1].urls, ['https://a/4'])
+
+    def test_each_host_s_seconds_are_summed(self):
+        net = Net(api_example=[Resp(200, b'{}'), zip_redirect()], store_example=[Resp(200, b'z')])
+        c = self.client(net)
+        with mock.patch('time.monotonic', side_effect=[0.0, 0.25, 1.0, 1.5, 2.0, 3.0]):
+            c.api('GET', 'https://api.example/a', 't')
+            c.artifact('https://api.example/z', 't', 10)
+        self.assertEqual(c.seconds, {'api.example': 0.75, 'store.example': 1.0})
+
     def test_the_proxy_tunnels_and_no_proxy_bypasses_it(self):
         c = client.Client(env={'https_proxy': 'http://127.0.0.1:3128', 'HTTPS_PROXY': 'http://other:1',
                                'no_proxy': 'localhost,mirror.example'})

@@ -10,6 +10,10 @@ artifacts, fetches each part's zip and posts its status pays each handshake once
 fetches an artifact's zip: the API answers with a redirect to the storage's signed URL, which
 gets no token; at most ``limit`` bytes are read, and a larger body is refused. A connection
 the server closed between two requests is opened again once, as a browser does.
+
+A request costs about 1 s even on a kept connection (the API's redirect, then the storage),
+so the zips of a run's parts come over a ``Pool``: a ``Client`` per thread, each with its own
+kept connections (issue #242: 12 zips took 12 s over one connection).
 """
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ import http.client
 import json
 import os
 import ssl
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -48,6 +53,7 @@ class Client:
         self._connect = connect or self._open
         self._conns: dict[tuple[str, int], http.client.HTTPConnection] = {}
         self.opened = 0  # connections opened: what the reuse saves shows here
+        self.seconds: dict[str, float] = {}  # by host: the time its requests took, summed
 
     def close(self) -> None:
         for c in self._conns.values():
@@ -84,6 +90,14 @@ class Client:
             raise _Refused(f'{u.scheme}://{u.hostname}: not an https URL')
         key = (u.hostname, u.port or 443)
         path = (u.path or '/') + (f'?{u.query}' if u.query else '')
+        t0 = time.monotonic()
+        try:
+            return self._sent(method, url, key, path, headers, body, limit)
+        finally:
+            self.seconds[key[0]] = self.seconds.get(key[0], 0.0) + time.monotonic() - t0
+
+    def _sent(self, method: str, url: str, key: tuple[str, int], path: str, headers: Mapping[str, str],
+              body: bytes | None, limit: int) -> tuple[int, Mapping[str, str], bytes]:
         for fresh in (False, True):
             c = self._conns.get(key)
             reused = c is not None
@@ -178,6 +192,28 @@ class Client:
                 raise _Status(f'storage HTTP {status}')
             return data
         return self._tried(f'GET {url}', attempt)
+
+
+class Pool:
+    """``Client.artifact`` from several threads: a ``Client`` per thread, so a kept
+    connection per host per thread."""
+
+    def __init__(self, make: Callable[[], Client] | None = None):
+        self._make = make or Client
+        self._local, self._lock = threading.local(), threading.Lock()
+        self.clients: list[Client] = []
+
+    def artifact(self, url: str, token: str, limit: int) -> bytes:
+        c = getattr(self._local, 'client', None)
+        if c is None:
+            c = self._local.client = self._make()
+            with self._lock:
+                self.clients.append(c)
+        return c.artifact(url, token, limit)
+
+    def close(self) -> None:
+        for c in self.clients:
+            c.close()
 
 
 class _Refused(Exception):

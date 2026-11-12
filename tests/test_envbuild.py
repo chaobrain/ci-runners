@@ -7,6 +7,7 @@ env when it fails."""
 from __future__ import annotations
 
 import base64
+import dataclasses
 import fcntl
 import io
 import json
@@ -114,6 +115,15 @@ class Spec(unittest.TestCase):
                     'not toml = ='):
             with self.assertRaises(SpecError):
                 envbuild.parse_spec(bad)
+
+    def test_the_contract_is_accepted_and_ignored(self):
+        """Decision 16.3 (R1): ``contract`` (16.6) loads and changes nothing a build reads."""
+        old, new = envbuild.parse_spec(GOOD), envbuild.parse_spec('contract = 3\n' + GOOD)
+        self.assertEqual(dataclasses.replace(new, text=old.text), old)
+        self.assertEqual(envbuild.parse_spec('contract = 0\n' + GOOD).python, old.python)
+        for bad in ('"3"', '-1', 'true', '1.5', '[1]'):
+            with self.assertRaisesRegex(SpecError, 'contract', msg=bad):
+                envbuild.parse_spec(f'contract = {bad}\n' + GOOD)
 
     def test_a_variant_table_gives_a_variants_install(self):
         s = envbuild.parse_spec(GOOD + VARIANTS)

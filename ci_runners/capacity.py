@@ -4,7 +4,9 @@
 account's ``etc``), mode 600, replaced by an atomic rename under ``capacity.lock`` beside
 it. ``pool status`` writes it, one machine's rows as soon as that machine answers
 (``merge``), and the account's ``ci-capacity.timer`` runs ``pool status`` every 30 s, so
-the cluster's figures and the other hosts' rows stay cached there; presence (16.4, from
+the other hosts' rows stay cached there; a cluster is asked again only once its rows are
+``capacity.cluster_seconds`` old (the registry's, 300 s by default: its login node is
+shared); presence (16.4, from
 R3) rewrites the host's own part at every tick (``pool.record_local``). Its keys:
 
 .. code-block:: json
@@ -24,9 +26,11 @@ is the raw probe of the registry's ``local`` machine, which ``ci-run pool probe`
 forced probe, 15.1 item 8) returns while it is fresh instead of probing again, so no
 ``nvidia-smi`` runs for another host's ``pool status --fast``.
 
-**The staleness rule**: a row read more than ``STALE_S`` (120 s) ago counts as down
-(``stale``): it gets the problem ``stale``, no free slot or core, ``start_now`` false and
-no free job. ``pool status --fast`` applies it to its rows, and ``load`` to what it
+**The staleness rule**: a host row read more than ``STALE_S`` (120 s) ago, a cluster
+target row more than ``CLUSTER_STALE_S`` (600 s) ago, counts as down (``stale``): it gets
+the problem ``stale``, no free slot or core, ``start_now`` false and no free job. So a
+stale cluster row says "the cluster cannot start it now", and the route keeps the part on
+its shared label. ``pool status --fast`` applies it to its rows, and ``load`` to what it
 returns.
 
 **The reader** (for the route, R5): ``load(etc)`` returns one ``Row`` per host and per
@@ -34,7 +38,9 @@ cluster target, from ``pool status --fast`` (``fast=True``, the default: the oth
 files through their forced probes, this host's slots read now, the cluster from the cached
 file) or from this account's file alone (``fast=False``, no ssh). A row is ``down`` when it
 has any problem (stale, unreachable, drained, no runner online, a cluster unreachable, ...):
-15.1's "a host with a problem gets no part". ``CapacityError`` says why nothing could be
+15.1's "a host with a problem gets no part". A stale cluster target row is ``down`` with
+``jobs_free`` 0: the cluster cannot start a part now, and the route leaves the part on its
+shared label (it never overflows on a figure that old). ``CapacityError`` says why nothing could be
 read (no registry, no file, a file of another schema). ``rows_from`` turns ``pool status
 --fast --json`` output read elsewhere into the same rows.
 
@@ -50,8 +56,11 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 
 SCHEMA = 1
-#: s after which a row counts as down (decision 16.5)
+#: s after which a host's row counts as down (decision 16.5)
 STALE_S = 120
+#: s after which a cluster target's row does: its figures are read every ``capacity.cluster_seconds``
+#: of the registry (300 by default), to spare the shared login node
+CLUSTER_STALE_S = 600
 STALE = 'stale'
 NAME = 'capacity.json'
 
@@ -134,10 +143,15 @@ def age(row: Mapping, now: float) -> float | None:
     return max(0.0, now - at) if type(at) in (int, float) else None
 
 
+def stale_s(row: Mapping) -> int:
+    """A row's bound: ``CLUSTER_STALE_S`` for a cluster target's, ``STALE_S`` for a host's."""
+    return CLUSTER_STALE_S if row.get('access') == 'slurm' else STALE_S
+
+
 def is_stale(row: Mapping, now: float) -> bool:
-    """The staleness rule: read more than ``STALE_S`` ago, or at no known time."""
+    """The staleness rule: read more than ``stale_s`` ago, or at no known time."""
     a = age(row, now)
-    return a is None or a > STALE_S
+    return a is None or a > stale_s(row)
 
 
 def mark(row: Mapping, now: float) -> dict:

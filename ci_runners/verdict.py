@@ -10,6 +10,15 @@ retry that did not start (attempt 3, issue #161), whatever the attempt before it
 in ``next``. A part with neither artifact nor record is ``lost``. The verdict is then
 posted as the ``context`` status of ``S``, and the parts' summaries go to the job summary.
 
+A run's artifacts outlive its run attempts, and ``actions/download-artifact`` keeps, of
+the artifacts that share a name, the one of the highest id, which need not be the newest:
+after a "Re-run failed jobs", a part's first attempt left one ``ci-part-<id>-1`` per run
+attempt, and the earlier run attempt's red one won (issue #169). So before it reads them,
+the verdict lists the run's artifacts with its token (``actions: read``) and, for each name
+whose newest artifact is not the one downloaded, fetches the newest (``latest``): each part
+counts its latest run attempt only. Without ``actions: read`` it says so and reads what was
+downloaded, as before.
+
 ``decide`` is pure. Only an infrastructure end the retry did not cure is ``error``; a
 ``red`` part fails the head whatever the others did (D6).
 
@@ -25,11 +34,15 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import http.client
+import io
 import json
 import os
 import re
 import sys
 import time
+import urllib.request
+import zipfile
 from collections.abc import Callable, Iterable, Mapping
 
 from ci_runners import github, inventory, part
@@ -48,6 +61,8 @@ ARTIFACT = re.compile(r'ci-part-([A-Za-z0-9][A-Za-z0-9_.-]{0,63})-([0-9]{1,2})\Z
 #: a record's run attempt: ``…/<run id>-<run attempt>/<id>-<n>`` at the end of ``record``
 RECORD_RUN = re.compile(r'/[0-9]+-([0-9]+)/[^/]+-[0-9]{1,2}\Z')
 MAX_FILE = 1 << 20
+#: the largest part artifact (zipped) the verdict fetches itself
+MAX_ZIP = 8 << 20
 
 
 @dataclasses.dataclass(frozen=True)
@@ -144,6 +159,99 @@ def current(attempts: Mapping[int, tuple[dict, str]]) -> dict[int, tuple[dict, s
     return {n: a for n, a in attempts.items() if n == 1 or run_attempt(a[0]) >= first}
 
 
+def stale(listing: Iterable[Mapping]) -> dict[str, int]:
+    """``{name: id}`` of the part artifacts whose newest artifact of that name in the run
+    is not the one ``actions/download-artifact`` took. A name is made once per run attempt,
+    so its newest artifact (by ``created_at``) is its latest run attempt's; download-artifact
+    takes the highest id, and ids do not follow creation (issue #169: run attempt 2's
+    ``ci-part-gpu-3-1`` had the lower id, and run attempt 1's red one was read). Expired
+    artifacts and other names are left out. Pure."""
+    by_name: dict[str, list[Mapping]] = {}
+    for a in listing:
+        if (isinstance(a, Mapping) and isinstance(a.get('name'), str) and ARTIFACT.fullmatch(a['name'])
+                and type(a.get('id')) is int and isinstance(a.get('created_at'), str) and not a.get('expired')):
+            by_name.setdefault(a['name'], []).append(a)
+    out = {}
+    for name, arts in by_name.items():
+        newest = max(arts, key=lambda a: (a['created_at'], a['id']))
+        if newest['id'] != max(a['id'] for a in arts):
+            out[name] = newest['id']
+    return out
+
+
+def run_artifacts(call: Callable, base: str, repo: str, run_id: str, token: str) -> list:
+    """The run's artifacts as the API lists them, up to ``github.PAGES`` pages."""
+    out: list = []
+    for page in range(1, github.PAGES + 1):
+        got = call('GET', f'{base}/repos/{repo}/actions/runs/{run_id}/artifacts?per_page={github.PAGE}&page={page}',
+                   token)
+        arts = got.get('artifacts') if isinstance(got, dict) else None
+        if not isinstance(arts, list):
+            raise github.ApiError('GET artifacts: not a list')
+        out += arts
+        if len(arts) < github.PAGE:
+            break
+    return out
+
+
+def fetch_zip(url: str, token: str, opener: Callable | None = None) -> bytes:
+    """An artifact's zip: the API answers with a redirect to the storage's signed URL,
+    which gets no token (an unredirected header). At most MAX_ZIP bytes."""
+    req = urllib.request.Request(url, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'ci-runners',
+                                               'X-GitHub-Api-Version': '2022-11-28'})
+    req.add_unredirected_header('Authorization', f'Bearer {token}')
+    with (opener or urllib.request.urlopen)(req, timeout=github.CALL_BOUND) as r:
+        data = r.read(MAX_ZIP + 1)
+    if len(data) > MAX_ZIP:
+        raise ValueError(f'{url.split("?")[0]}: larger than {MAX_ZIP} bytes')
+    return data
+
+
+def unpack(root: str, name: str, data: bytes) -> None:
+    """``outcome.json`` and ``summary.md`` of an artifact's zip ``data`` into ``root/name``,
+    in place of what was there; nothing else of the zip is read. Both are read whole
+    before anything is replaced, so a zip that cannot be read (raises ValueError) leaves
+    the directory as it was."""
+    got: dict[str, bytes] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for member in ('outcome.json', 'summary.md'):
+                try:
+                    info = z.getinfo(member)
+                except KeyError:
+                    continue
+                if info.file_size <= MAX_FILE:
+                    got[member] = z.read(info)
+    except Exception as e:  # a bad zip, CRC, compression method, encryption: zipfile, zlib, ...
+        raise ValueError(f'{name}: the zip cannot be read ({type(e).__name__})') from None
+    d = os.path.join(root, name)
+    if os.path.islink(d):
+        os.unlink(d)
+    os.makedirs(d, exist_ok=True)
+    for member in ('outcome.json', 'summary.md'):
+        path = os.path.join(d, member)
+        if os.path.lexists(path):
+            os.unlink(path)
+        if member in got:
+            with open(path, 'xb') as f:
+                f.write(got[member])
+
+
+def latest(root: str, call: Callable, fetch: Callable, base: str, repo: str, run_id: str, token: str) -> list[str]:
+    """Replace each downloaded part artifact that is not its name's newest in the run by
+    the newest (``stale``); the names replaced. Raises github.ApiError, OSError or
+    ValueError, and then leaves the rest as downloaded."""
+    done = []
+    for name, aid in sorted(stale(run_artifacts(call, base, repo, run_id, token)).items()):
+        try:
+            data = fetch(f'{base}/repos/{repo}/actions/artifacts/{aid}/zip', token)
+        except (OSError, http.client.HTTPException) as e:  # urllib's errors, a short read
+            raise github.ApiError(f'GET artifact {aid}: {type(e).__name__}') from None
+        unpack(root, name, data)
+        done.append(name)
+    return done
+
+
 def _read(path: str) -> str | None:
     try:
         if os.path.islink(path):
@@ -204,7 +312,8 @@ def summary_md(v: Verdict, context: str, items: list[End]) -> str:
     return head + '\n'.join(parts)
 
 
-def main(argv: list[str], inv: inventory.Inventory, call: Callable | None = None) -> int:
+def main(argv: list[str], inv: inventory.Inventory, call: Callable | None = None,
+         fetch: Callable | None = None) -> int:
     p = argparse.ArgumentParser(prog='ci-run verdict')
     p.add_argument('--context', required=True)
     p.add_argument('--sha', required=True)
@@ -229,13 +338,22 @@ def main(argv: list[str], inv: inventory.Inventory, call: Callable | None = None
             except part.Refused:
                 return None
 
-        items = ends(ids, collect(a.artifacts), salvage)
-        v = decide(items)
         base = env.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
         target = f'{env.get("GITHUB_SERVER_URL", "https://github.com")}/{repo}/actions/runs/{env.get("GITHUB_RUN_ID", "")}'
         token = env.get('GITHUB_TOKEN', '')
         if not token:
             raise ValueError('GITHUB_TOKEN is not set')
+        try:  # each part's latest run attempt, not the artifact of the highest id (issue #169)
+            for name in latest(a.artifacts, call or github.api, fetch or fetch_zip, base, repo,
+                               env['GITHUB_RUN_ID'], token):
+                print(f'ci-run verdict: {name}: the latest run attempt\'s artifact, not the downloaded one',
+                      file=sys.stderr)
+        except (OSError, ValueError, github.ApiError) as e:
+            hint = '; give the job actions: read' if 'HTTP 403' in str(e) or 'HTTP 404' in str(e) else ''
+            print(f'ci-run verdict: the run\'s artifacts could not be listed or fetched ({e}): a part re-run in '
+                  f'this run attempt may be read from an earlier one{hint}', file=sys.stderr)
+        items = ends(ids, collect(a.artifacts), salvage)
+        v = decide(items)
         (call or github.api)('POST', f'{base}/repos/{repo}/statuses/{a.sha}', token,
                              {'state': v.state, 'context': a.context, 'description': v.description,
                               'target_url': target})

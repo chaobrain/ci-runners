@@ -1555,7 +1555,7 @@ class CIAccount(unittest.TestCase):
         with unittest.mock.patch.object(pool, 'status', status), unittest.mock.patch('sys.stdout', io.StringIO()):
             self.assertEqual(pool.main(['status', '--json'], self.etc), 0)
         self.assertEqual(seen.pop('etc'), self.etc)  # the keys and the site config beside the registry
-        self.assertEqual(list(seen), ['on_rows'])  # the capacity file's writer (16.5)
+        self.assertEqual(sorted(seen), ['cached', 'on_rows'])  # the capacity file's writer and its rows (16.5)
 
     def test_the_forced_command_takes_no_argument_and_reads_no_stdin(self):
         self.local_lock()

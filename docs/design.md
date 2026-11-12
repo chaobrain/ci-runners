@@ -2191,10 +2191,15 @@ hosts, a coverage job). These rules are the consumer's:
    all `pass`, success; else error. A run's artifacts outlive its GitHub re-runs, so an
    attempt made in an earlier run attempt than the part's first attempt is not read
    (`v1.5.2`, issue #64): the run attempt is the outcome's `run-attempt`, else the one its
-   `record` names. It merges the parts' summaries into the job summary and fails unless
-   the state is success.
-6. **Permissions:** `contents: read`, plus `statuses: write` for claim and verdict. A job
-   that reads another run's artifacts adds `actions: read`.
+   `record` names. Of the artifacts that share a name, one per run attempt that made it,
+   the newest counts: `actions/download-artifact` keeps the one of the highest id, which
+   need not be the newest, so the verdict lists the run's artifacts and fetches the newest
+   of each part's name where another was downloaded, and a re-run of failed jobs can turn
+   a run green (R1, issue #169); without `actions: read` it reads what was downloaded. It
+   merges the parts' summaries into the job summary and fails unless the state is success.
+6. **Permissions:** `contents: read`, plus `statuses: write` for claim and verdict, and
+   `actions: read` for verdict (rule 5). A job that reads another run's artifacts adds
+   `actions: read`.
 
 The consumer's own jobs (`light` commands, a coverage job as a `part`) run in its env
 like any part. Its test selection, its summary format and its merge gate stay its own
@@ -2481,7 +2486,7 @@ refreshed from a546b92f (T17):
 | `ci-runner@.service`, `ci-tunnel.service`, `ci-reaper.timer` | as on h100; from `v1.5` the runner's unit also has `After=ci-hooks.service` and an `ExecStartPre=` that checks both hook copies are executable files (13.5); from 15.5 `Wants=` (not `Requires=`) `ci-hooks.service`, a first `ExecStartPre=` that it is active, and `StartLimitIntervalSec=0` |
 | `ci-hooks.service` (`v1.5`) | oneshot, `RemainAfterExit=yes`: `ci-run hooks copy` into the private `/tmp` (13.5); enabled; started before the runners, and reloaded (`ExecReload=`, the same copy) by `apply` when a hook changes; from 15.5 `Restart=on-failure` after 30 s, `StartLimitIntervalSec=0` |
 | `ci-hostload.{service,timer}` (`v1.5`) | every 60 s, `ci-run hostload sample`: one line of the load record (decision 13.2); `Nice=10`, bounded at 30 s |
-| `ci-capacity.{service,timer}` (R4) | every 30 s on the wall clock, `ci-run pool status`: the capacity file (16.5); skipped where the account has no `etc/pool.toml`; `Nice=10`, bounded at 150 s |
+| `ci-capacity.{service,timer}` (R4) | every 30 s on the wall clock, `ci-run pool status`: the capacity file (16.5), a cluster's figures every `capacity.cluster_seconds` (300 s); skipped where the account has no `etc/pool.toml`; `Nice=10`, bounded at 150 s |
 | `ci-envrefresh.{service,timer}` | every 30 min, `ci-run env refresh` for each project whose registry sets `refresh` (decision 12.11) |
 | slices | `ci.slice` `MemoryMax` (inventory; proposed 120G of 188 GiB on 3090b, 80G of 125 GiB on 3090a) and `ci-<project>.slice` |
 | unit names | as on h100; on a dedicated account `plan.sh` still refuses a `ci-` unit that no apply wrote |

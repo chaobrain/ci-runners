@@ -70,6 +70,7 @@ schema = 1
 python = "3.12"                                   # 环境的 Python 版本（conda）
 requirements = ["requirements-dev.txt"]           # pip -r，按顺序；仓库内的路径，-r/-c 引用的文件会一并读取
 install = ["pytest-xdist"]                        # 额外的依赖说明符：不能带选项、URL 或路径
+# contract = 1                                    # 可选（决定 16.6）：一个整数，从 R1 起接受、不起作用，见下文
 [conda]                                           # 可选：pip 装不了的包（例如 NEST）
 channels = ["conda-forge"]                        # 按顺序；构建时带 --override-channels
 packages = ["nest-simulator=3.10"]                # conda match spec：不能带选项、URL、路径或 channel 前缀
@@ -84,6 +85,8 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 ```
 
 `conda` 表（design §4.9，决定 12.10）是可选的，不写时与以前完全一样。`packages` 和 `python` 在同一次 `conda create` 里一起求解，之后才跑 pip 的各步（`requirements`、`install`、upstream）。`python` 由 `python` 键决定，`packages` 里不能再写 `python`，同一个包也不能写两次。表里有未知的键、`channels` 里是 URL 或路径、`packages` 里有选项或 URL，整个规格都会被拒绝，什么都不会构建。例如需要 Python 3.13 加 conda-forge 的 `nest-simulator=3.10`，就写 `python = "3.13"` 加上面的 `[conda]` 表。
+
+`contract`（design §4.9，决定 16.6）是一个非负整数：可复用工作流上线后，plan 作业会拿 head 的值和默认分支的比，比默认分支小或缺失的 head 直接红，提示 merge origin/main。在那之前它只被接受、不起作用（R1，决定 16.3）；`v1` 指向接受它的版本之前不要写，否则更旧的主机层会拒绝整个规格。
 
 `variant` 表（design §4.9，决定 14.9）只给 `slurm` 类用：集群站点配置里每个目标有一个环境变体（例如 `cpu`、`cuda12`、`cuda13`），`ci-run slurm env` 为规格里写了的每个变体单独建一个环境，用它的 `install` 替换基础的 `install`（`requirements`、upstream 都不变）；规格里没写的变体用基础环境。变体还可以有一个 `conda` 表（`packages`，需要时加 `channels`，检查规则和基础的一样）：它的包加在基础的 `conda` 包后面，在同一次 `conda create` 里一起求解；它的 channel（默认没有）排在基础的后面。变体不能再写基础已经写了的包或 channel。表里只能有 `install` 和 `conda`，有其他键整个规格都会被拒绝。3090 主机上的 `ci-run env build` 只读基础部分，有没有这个表结果都一样。所以要按变体换的包（例如 jax 的 CUDA 插件、和变体 CUDA 版本一致的 nvcc）放在变体里，不要放进 `requirements` 文件或基础部分。
 
@@ -112,7 +115,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
    ```
 
    对每个 artifact 不全、并且在这台主机上的最新记录属于本次 run 和这次 attempt 的部件，`salvage` 会把记录里的结果作为 `ci-part-<id>-<attempt>` 上传，并带上 `salvaged: true`。不在这台主机上跑的部件不处理；还在跑的部件最多等 `wait-seconds`，超时就是 `lost`。一个 salvage 作业最多上传 16 个部件。
-6. **权限**：`contents: read`，claim 和 verdict 还要 `statuses: write`。要读别的 run 的 artifact 时再加 `actions: read`。
+6. **权限**：`contents: read`，claim 和 verdict 还要 `statuses: write`，verdict 另要 `actions: read`：它列出本 run 的 artifact，每个部件只读最新一次 run attempt 的，这样“Re-run failed jobs”能让 run 变绿（issue #169）；没有这个权限时照旧读下载到的 artifact。要读别的 run 的 artifact 时再加 `actions: read`。
 7. `concurrency` 必须写成块格式。行内映射 `{group: ...${{ }}...}` 里含表达式时，YAML 会解析失败，GitHub 会直接拒绝整个文件。`tests/test_workflow.py` 会检查本文档里的示例。
 
 各 action 的输入见 `actions/<name>/action.yml`，引用 `@v1`。不要钉某个发布 tag（如 `@v1.4.1`）：主机升级后，inventory 里新加的键（v1.5 的 `peer_labels`、`busy`）会让更旧的 action 在那台主机上全部失败（design §9，`v1.5.0` notes 第 6 条）。brainspike 的 `ci.yml` 是一个完整的例子。

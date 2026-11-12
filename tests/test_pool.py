@@ -1570,10 +1570,6 @@ class CIAccount(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 DEV = '\ndev_slots = { lock = "/tmp/dev.lock", cpus = ["8-11", "12-15"], memory_gib = 16 }\n'
 INV_DEV = '''schema = 1
 this = "hz"
@@ -1618,6 +1614,8 @@ class DevSlotsRegistry(unittest.TestCase):
                 ('\ndev_slots = { lock = "/tmp/dev.lock", cpus = ["8-x"], memory_gib = 4 }\n', 'not a cpuset'),
                 ('\ndev_slots = { lock = "/tmp/dev.lock", cpus = ["11-8"], memory_gib = 4 }\n', 'not a cpuset'),
                 ('\ndev_slots = { lock = "/tmp/x.lock", cpus = ["8-11"], memory_gib = 4 }\n', "CI slots'"),
+                ('\ndev_slots = { lock = "/tmp/./x.lock", queue = "/tmp/dev.queue", cpus = ["8-11"], memory_gib = 4 }\n',
+                 "CI slots'"),
                 ('\ndev_slots = { lock = "/tmp/dev.lock", queue = "/tmp/x.queue", cpus = ["8-11"], memory_gib = 4 }\n',
                  "CI slots'"),
                 ('\ndev_slots = { lock = "tmp/dev.lock", cpus = ["8-11"], memory_gib = 4 }\n', 'absolute'),
@@ -1653,6 +1651,23 @@ class DevSlotsRegistry(unittest.TestCase):
             INV_DEV.format(t='/tmp/t', compile='8-9').replace('cpus = "0-7"\n', ''))),
             ["dev slot 1 (CPUs 3) meets the inventory's pools.part.slot.cpus[0] (CPUs [3])"])
 
+    def test_a_pool_whose_parts_are_pinned_to_nothing_meets_every_dev_slot(self):
+        from ci_runners import inventory
+        base = INV_DEV.format(t='/tmp/t', compile='8-9')
+        gpu = base.replace('light = { count = 1 }', 'light = { count = 1 }, gpu = { count = 1 }')
+        self.assertEqual(pool.ci_unpinned(inventory.load(gpu)), [])  # the host's cpus pin its parts
+        bare = inventory.load(gpu.replace('cpus = "0-7"\n', ''))
+        self.assertEqual(pool.ci_unpinned(bare), ['gpu'])  # light runs no part; part has its slots
+        self.assertEqual(pool.dev_overlaps(['12-15'], bare),
+                         ["pool gpu's parts are pinned to no cpuset (no slot.cpus, no host cpus): they may run on a "
+                          "dev slot's CPUs"])
+        comp = inventory.load(base.replace('light = { count = 1 }', 'light = { count = 1 }, compile = { count = 1 }'))
+        self.assertEqual(pool.ci_unpinned(comp), [])  # compile_cpus pins it
+        self.assertEqual(pool.ci_unpinned(inventory.load(
+            base.replace('compile_cpus = "8-9"\n', '').replace('light = { count = 1 }',
+                                                                'light = { count = 1 }, compile = { count = 1 }'))),
+            ['compile'])  # a compile part is not pinned by the host's cpus
+
     def test_the_host_spec_names_the_dev_slots_for_a_cpu_run_only(self):
         r = reg_dev()
         a = pool.RunArgs('true', '/x', pool.Ask(cpus=4, memory_gib=8))
@@ -1679,9 +1694,14 @@ class DevSlotsPick(unittest.TestCase):
         r = reg_dev()
         rows = [row('hostb', access='local', dev_slots=2, dev_free=2, dev_queue=0)]
         _, _, skipped = pool.pick(rows, pool.Ask(cpus=5, memory_gib=8), r)
-        self.assertEqual(skipped, ['hostb: 4 cores a dev slot, 5 asked'])
+        self.assertEqual(skipped, ['hostb: 4 cores the smallest dev slot, 5 asked'])
         _, _, skipped = pool.pick(rows, pool.Ask(cpus=4, memory_gib=17), r)
         self.assertEqual(skipped, ['hostb: 16 GiB a dev slot, 17 asked'])
+        uneven = reg_dev(DEV.replace('"12-15"', '"12-13"'))  # the run may get the smaller one
+        _, _, skipped = pool.pick(rows, pool.Ask(cpus=3, memory_gib=8), uneven)
+        self.assertEqual(skipped, ['hostb: 2 cores the smallest dev slot, 3 asked'])
+        now, _, _ = pool.pick(rows, pool.Ask(cpus=2, memory_gib=8), uneven)
+        self.assertEqual([x['key'] for x in now], ['hostb'])
 
     def test_waiting_in_line_by_the_dev_queue(self):
         r = reg_dev()
@@ -1691,6 +1711,28 @@ class DevSlotsPick(unittest.TestCase):
                                                                                  dev_free=0, dev_queue=1, queue=9)]
         _, later, _ = pool.pick(rows, pool.Ask(cpus=2, memory_gib=4), r)
         self.assertEqual([x['key'] for x in later], ['hostb', 'hosta'])
+        rows = [row('hosta', dev_slots=2, dev_free=1, dev_queue=0, cpus_free=16),
+                row('hostb', access='local', dev_slots=2, dev_free=2, dev_queue=0, cpus_free=0)]
+        now, _, _ = pool.pick(rows, pool.Ask(cpus=2, memory_gib=4), r)
+        self.assertEqual([x['key'] for x in now], ['hostb', 'hosta'])  # by the free dev slots, not the CI cores
+
+    def test_a_pool_run_on_a_dev_host_waits_by_its_dev_queue(self):
+        r = reg_dev()
+        rows = [row('hostb', access='local', slots_free=2, cpus_free=16, queue=7, dev_slots=2, dev_free=0, dev_queue=3)]
+        calls, said = [], []
+        orig, orig_say = pool.run_host, pool._say
+        pool.run_host = lambda reg_, m, a, *x, wait, **k: calls.append((m.key, wait, pool.host_spec(reg_, m, a, wait)['dev']['lock'])) or 0
+        pool._say = said.append
+        try:
+            self.assertEqual(pool.pool_run(r, pool.RunArgs('true', ROOT, pool.Ask(cpus=2), no_wait=True), rows=rows),
+                             pool.EXIT_NO_ROOM)  # its CI slots are free, its dev slots are not: no room
+            self.assertEqual(calls, [])
+            self.assertEqual(pool.pool_run(r, pool.RunArgs('true', ROOT, pool.Ask(cpus=2)), rows=rows), 0)
+            self.assertEqual(pool.pool_run(r, pool.RunArgs('true', ROOT, pool.Ask(cpus=2)), only='hostb', rows=rows), 0)
+        finally:
+            pool.run_host, pool._say = orig, orig_say
+        self.assertEqual(calls, [('hostb', True, '/tmp/dev.lock')] * 2)
+        self.assertIn('no machine free now; waiting in line on hostb (dev queue 3)', said)
 
     def test_the_row_and_the_table_show_the_dev_slots(self):
         m = reg_dev().machines['hostb']
@@ -1706,10 +1748,11 @@ class DevSlotsPick(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             ci, dev = os.path.join(d, 's.lock'), os.path.join(d, 'dev.lock')
             open(ci, 'w').close()
-            os.makedirs(os.path.join(d, 'dev.queue'))
-            open(os.path.join(d, 'dev.queue', '000000000001.ticket'), 'w').close()
+            q = slots.SlotQueue(dev, 2, None, 0.1, default_project='proj')
+            q.take_ticket('proj', 'pool run')  # a ticket as a waiting run writes it
+            open(os.path.join(d, 'dev.queue', '000000000009.wait'), 'w').close()
             got = pool.probe(ci, 1, '', dev_lock=dev, dev_count=2)
-            self.assertEqual((got['slots_free'], got['dev_free'], got['dev_queue']), (1, 2, 1))  # missing: free
+            self.assertEqual((got['slots_free'], got['dev_free'], got['dev_queue']), (1, 2, 2))  # missing: free
             fd = os.open(os.path.join(d, 'dev.2.lock'), os.O_CREAT | os.O_WRONLY)
             fcntl.flock(fd, fcntl.LOCK_EX)
             try:
@@ -1746,6 +1789,8 @@ class DevSlotsClaim(unittest.TestCase):
         open(self.lock, 'w').close()
         self.dev = os.path.join(self.d, 'dev.lock')
         self.inv = os.path.join(self.d, 'inventory.toml')
+        with open(self.inv, 'w') as f:  # CI's cpusets leave CPU 0 to the dev slot
+            f.write(INV_DEV.format(t=self.d, compile='8-9').replace('"0-7"', '"1-7"').replace('"0-3"', '"1-3"'))
 
     def tearDown(self):
         subprocess.run(['rm', '-rf', self.d])
@@ -1781,7 +1826,7 @@ class DevSlotsClaim(unittest.TestCase):
         self.assertRegex(out, r'Cpus_allowed_list:\s*0\n')  # pinned to its dev slot's cpuset
         self.assertEqual(during_ci['slots_free'], 0)  # the part's alone: the run took none and waited for none
         self.assertEqual(during_dev['dev_free'], 0)  # its own
-        self.assertEqual([n for n in queue if n.endswith('.ticket')], [])
+        self.assertEqual([n for n in queue if n.endswith(('.ticket', '.wait'))], [])  # nor waited in its line
 
     def test_dev_slots_full_wait_and_never_fall_back_to_a_ci_slot(self):
         marker = os.path.join(self.d, 'ran')
@@ -1813,8 +1858,30 @@ class DevSlotsClaim(unittest.TestCase):
             f.write('not an inventory')
         r, _ = self.remote(self.dev_spec(f'touch {marker}', cpus=('0',)))
         out, err = self.finish(r)
-        self.assertEqual(r.returncode, 0, err)  # unreadable: no check (16.8: where it is readable)
+        self.assertEqual(r.returncode, pool.NOT_STARTED, err)  # named, and not an inventory: refused
+        self.assertIn(f'refused: the inventory named cannot be read: {self.inv}', err)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_the_default_inventory_is_checked_where_it_reads_and_said_where_not(self):
+        marker = os.path.join(self.d, 'ran')
+        etc = os.path.join(self.d, 'etc')
+        os.makedirs(etc)
+        env = dict(os.environ, CI_RUNNERS_ETC=etc)
+        spec = self.dev_spec(f'touch {marker}', cpus=('2-3',))
+        spec['dev']['inventory'] = ''
+        r, _ = self.remote(spec, env=env)
+        out, err = self.finish(r)
+        self.assertEqual(r.returncode, 0, err)  # none there (another account's host side): run, and said
+        self.assertIn(f"dev slots: overlap with the CI slots not checked: {os.path.join(etc, 'inventory.toml')}", err)
         self.assertTrue(os.path.exists(marker))
+        os.remove(marker)
+        with open(os.path.join(etc, 'inventory.toml'), 'w') as f:
+            f.write(INV_DEV.format(t=self.d, compile='8-9'))
+        r, _ = self.remote(spec, env=env)
+        out, err = self.finish(r)
+        self.assertEqual(r.returncode, pool.NOT_STARTED, err)
+        self.assertIn("refused: dev slot 1 (CPUs 2-3) meets the inventory's cpus", err)
+        self.assertFalse(os.path.exists(marker))
 
     def test_a_run_above_the_dev_slots_memory_is_refused(self):
         marker = os.path.join(self.d, 'ran')
@@ -1829,3 +1896,7 @@ class DevSlotsClaim(unittest.TestCase):
         out, err = self.finish(r)
         self.assertEqual(r.returncode, 0, err)
         self.assertIn('holding CI slot 1 of 1', err)
+
+
+if __name__ == '__main__':
+    unittest.main()

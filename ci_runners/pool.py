@@ -135,12 +135,17 @@ own, outside every CI slot: ``cpus``, one cpuset per dev slot (disjoint, below t
 files (``lock``, ``<stem>.<i>.lock`` from the second, created when taken; ``queue``, default
 ``<stem>.queue``), which may not be the CI slots' files. On such a host a CPU run takes a dev
 slot (in line, as a CI slot) and never a CI slot, runs pinned to its cpuset (``taskset``), and
-its row shows ``dev_slots``, ``dev_free`` and ``dev_queue``; a GPU run takes the cards' leases
-as before. Before it takes one, the host side reads the host's inventory (``inventory``, default
-``$CI_RUNNERS_ETC/inventory.toml`` or ``~/data/ci-runners/etc/inventory.toml`` there) where it is
-readable, and refuses the run (NOT_STARTED) if a dev slot's cpuset meets a CI slot's (a pool's
-``slot.cpus``), the parts' ``cpus`` or ``compile_cpus``. A host without ``dev_slots`` keeps the
-claim below. An older release refuses the key (``unknown keys``): it goes into a registry only
+its row shows ``dev_slots``, ``dev_free`` and ``dev_queue`` (its tickets, waiting or not); a run
+that asks more cores than the smallest dev slot holds is skipped there, since it may get any of
+them; a GPU run takes the cards' leases as before. Before it takes one, the host side reads the
+host's inventory (``inventory``, default ``$CI_RUNNERS_ETC/inventory.toml`` or
+``~/data/ci-runners/etc/inventory.toml`` of the account it runs as) and refuses the run
+(NOT_STARTED) if a dev slot's cpuset meets a CI slot's (a pool's ``slot.cpus``), the parts'
+``cpus`` or ``compile_cpus``, or if a pool's parts are pinned to no cpuset at all (``ci_unpinned``);
+an ``inventory`` named that cannot be read or loaded is a refusal too, while a default one that
+cannot (a pool account's host side, which is not the CI account) skips the check and says so:
+name the CI account's inventory where the pool account may read it. A host without
+``dev_slots`` keeps the claim below. An older release refuses the key (``unknown keys``): it goes into a registry only
 once every host that reads that registry has this release and ``v1`` points at it.
 
 **The claim**: a host's capacity is a slot of its CI slot queue, the same ``SlotQueue``
@@ -445,7 +450,8 @@ def _dev_slots(t: Mapping, where: str, cpus: int, memory_gib: int, slots: Slots)
     ci = slots_mod.slot_paths(slots.lock, slots.count)
     ci_queue = slots.queue or (slots.lock[:-len('.lock')] if slots.lock.endswith('.lock') else slots.lock) + '.queue'
     dev_queue = dev.queue or (dev.lock[:-len('.lock')] if dev.lock.endswith('.lock') else dev.lock) + '.queue'
-    if set(ci) & set(slots_mod.slot_paths(dev.lock, len(sets))) or os.path.normpath(ci_queue) == os.path.normpath(dev_queue):
+    norm = lambda paths: {os.path.normpath(x) for x in paths}  # noqa: E731
+    if norm(ci) & norm(slots_mod.slot_paths(dev.lock, len(sets))) or os.path.normpath(ci_queue) == os.path.normpath(dev_queue):
         raise RegistryError(f'{w}: its lock files or queue are the CI slots\' (a dev slot is never a CI slot)')
     return dev
 
@@ -468,10 +474,32 @@ def ci_cpusets(inv) -> list[tuple[str, frozenset[int]]]:
     return out
 
 
-def dev_overlaps(dev_cpus: Sequence[str], inv) -> list[str]:
-    """Each dev slot that meets a cpuset CI pins its parts to (``ci_cpusets``): why, per
-    pair; empty where none does. Pure."""
+#: the runner classes whose parts run on the host itself (a light job is no part; slurm's run
+#: on a cluster)
+PART_CLASSES = ('part', 'gpu', 'multi', 'compile', 'nightly')
+
+
+def ci_unpinned(inv) -> list[str]:
+    """The pools of the inventory's own host whose parts are pinned to no cpuset (part.py's
+    pin: the runner's ``slot.cpus``, else ``compile_cpus`` for compile parts, else ``cpus``):
+    they may run on every CPU, a dev slot's too. Pure."""
+    from ci_runners import inventory
+    h = inv.host
     out = []
+    for name, v in (h.get('pools') or {}).items():
+        cls = inventory.pool_class(h, name)
+        if cls not in PART_CLASSES or (isinstance(v, dict) and (v.get('slot') or {}).get('cpus')):
+            continue
+        if not cpus_of(str(h.get('compile_cpus' if cls == 'compile' else 'cpus') or '')):
+            out.append(name)
+    return out
+
+
+def dev_overlaps(dev_cpus: Sequence[str], inv) -> list[str]:
+    """Each dev slot that meets a cpuset CI pins its parts to (``ci_cpusets``), and each pool
+    whose parts are pinned to none (``ci_unpinned``): why; empty where none is. Pure."""
+    out = [f'pool {name}\'s parts are pinned to no cpuset (no slot.cpus, no host cpus): they may run on a dev slot\'s CPUs'
+           for name in ci_unpinned(inv)]
     ci = ci_cpusets(inv)
     for i, x in enumerate(dev_cpus):
         mine = cpus_of(x) or frozenset()
@@ -828,7 +856,7 @@ def probe(lock: str, count: int, queue: str, drain: str = '', leases: str = '', 
         dpaths = [dev_lock] + [f'{dstem}.{i}.lock' for i in range(2, dev_count + 1)]
         out['dev_free'] = sum(1 for p in dpaths if not flocked(p))
         try:
-            out['dev_queue'] = sum(1 for n in os.listdir(dev_queue or dstem + '.queue') if n.endswith('.ticket'))
+            out['dev_queue'] = sum(1 for n in os.listdir(dev_queue or dstem + '.queue') if n.endswith(('.ticket', '.wait')))
         except OSError:
             out['dev_queue'] = 0
     with open('/proc/loadavg') as f:
@@ -1635,9 +1663,9 @@ def fits(row: Mapping, ask: Ask, m: Machine, need_mib: int) -> str:
         if ask.memory_gib > m.memory_gib:
             return f'{m.memory_gib} GiB, {ask.memory_gib} asked'
         if m.dev_slots and not ask.cards:  # 16.8: a CPU run takes a dev slot here, never a CI slot
-            most = max(len(cpus_of(x) or ()) for x in m.dev_slots.cpus)
-            if ask.cpus > most:
-                return f'{most} cores a dev slot, {ask.cpus} asked'
+            least = min(len(cpus_of(x) or ()) for x in m.dev_slots.cpus)  # the run may get any of them
+            if ask.cpus > least:
+                return f'{least} cores the smallest dev slot, {ask.cpus} asked'
             if ask.memory_gib > m.dev_slots.memory_gib:
                 return f'{m.dev_slots.memory_gib} GiB a dev slot, {ask.memory_gib} asked'
     return ''
@@ -1688,7 +1716,8 @@ def pick(rows: Sequence[Mapping], ask: Ask, reg: Registry, *, here_ok: bool = Fa
             later.append(dict(r))
         else:
             skipped.append(f'{key}: cannot start it now')
-    now.sort(key=lambda r: (r['billed'], r['price'] if r['billed'] else 0, -r['cpus_free']))
+    now.sort(key=lambda r: (r['billed'], r['price'] if r['billed'] else 0,
+                            -r['dev_free'] if r.get('dev_slots') and not ask.cards else -r['cpus_free']))
     later.sort(key=lambda r: (r['dev_queue'], -r['dev_slots']) if r.get('dev_slots') and not ask.cards
                else (r['queue'], -r['slots']))
     return now, later, skipped
@@ -2126,14 +2155,20 @@ def remote(argv: Sequence[str], stdin=None) -> int:
 
 def dev_refusal(dev: Mapping) -> str:
     """Why the host side refuses its dev slots (16.8): one meets a cpuset CI pins its parts
-    to, in the host's inventory (``dev['inventory']``, else this account's
-    ``<etc>/inventory.toml``) where that is readable and loads; '' otherwise."""
+    to, or a pool's parts are pinned to none, in the host's inventory (``dev['inventory']``,
+    else this account's ``<etc>/inventory.toml``); a named inventory that cannot be read or
+    loaded is a refusal too. Where the default one cannot, the check is skipped and said."""
     from ci_runners import cli, inventory
-    path = dev.get('inventory') or os.path.join(cli.etc_dir(), 'inventory.toml')
+    named = dev.get('inventory') or ''
+    path = named or os.path.join(cli.etc_dir(), 'inventory.toml')
     try:
         with open(path, encoding='utf-8') as f:
-            inv = inventory.load(f.read(1 << 20))
-    except (OSError, ValueError):
+            inv = inventory.load(f.read())
+    except (OSError, ValueError) as e:
+        why = f'{path}: {e.strerror if isinstance(e, OSError) and e.strerror else e}'
+        if named:
+            return f'the inventory named cannot be read: {why}'
+        _say(f'dev slots: overlap with the CI slots not checked: {why}')
         return ''
     bad = dev_overlaps(dev['cpus'], inv)
     return '; '.join(bad[:3]) + ' (a dev slot is outside every CI slot)' if bad else ''
@@ -2394,7 +2429,8 @@ def pool_run(reg: Registry, a: RunArgs, *, only: str = '', here_ok: bool = False
     if later and not a.no_wait:
         r = later[0]
         m = reg.machines[r['key']]
-        _say(f'no machine free now; waiting in line on {r["key"]} (queue {r["queue"]})')
+        dq = bool(r.get('dev_slots')) and not a.ask.cards
+        _say(f'no machine free now; waiting in line on {r["key"]} ({"dev queue" if dq else "queue"} {r["dev_queue" if dq else "queue"]})')
         rc = run_host(reg, m, a, files, run, popen, wait=True)
         return EXIT_NO_ROOM if rc == NOT_STARTED else rc
     _say('no machine can start it now' + (f' (tried {", ".join(tried)})' if tried else '')

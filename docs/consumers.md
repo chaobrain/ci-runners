@@ -165,6 +165,16 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 - 部件只在所有主机都没有空闲 slot、而集群现在就能起它时才去 `ci-slurm`；集群起不了就留在共享标签上排队。没有任何主机提供的标签（带它的主机都掉线或 drained）在计划时就报错，不会排队等 24 小时。
 - 不认识的 `needs`、多余的键、重复的 id 都会让 plan 作业失败并给出原因。
 - **优先主机**（design 决定 19，R5b 起；运维给主机定了 `tier`、打开 presence 后生效）：所有测试先在 h100 上跑。计划里不写主机，部件只带能力标签；后面层级的主机在 h100 还有空闲 runner 时把自己的空闲 runner 停着，所以作业先到 h100；h100 满了，其他主机的 runner 大约一分钟内上线接剩下的部件。计划不能指定或改变这个顺序。故意写某台主机自己标签的作业（例如 nightly 要在参考主机上测秒数）要先在那台主机的 `home` 标签上跑 `ci-run presence hold --minutes N`，结束时 `--release`；仓库在那台主机的 policy 条目里要有 `nightly` 类（design 19.8）。一个 run 的作业共用一个保持：只在 run 的最后一个作业里 `--release`。
+- **主机的 `home` 标签从哪里来**（design §5.1，2026-11-13 随 issue #232 定）：每台主机除了 light 池，还可以有一个 home 池：一个 runner（`<role>-home-1`），不带 `ci-` 标签，presence 从不停它（drain 和自动 drain 时也不停），只有从它上面的作业能 `presence hold` 这台主机。它的标签是 `<role>-home`（只有它有）和 `<role>-light`（和 light 池共用，salvage 用）。不要自己拼标签，从 `ci-run pool status --json` 读：在某台主机的那一行（`role` 是它的角色）的 `pools` 里，找 `class` 是 `light`、`labels` 里没有 `ci-` 开头标签的那一项；它的标签里，这一行其他池都不带的那一个，就是这台主机的 home 标签。找不到（这一行没有 `pools`：主机的 release 太旧，或者这一行来自维护者自己登录发出的探测；或者没有这样的池、或者不止一个）就说明这台主机没有 home runner，不能在那里保持，作业不要写它的主机标签。例子（只列出用到的字段；这里 home 标签是 `3090b-home`）：
+
+  ```json
+  [{"key": "3090b", "role": "3090b", "problems": [],
+    "pools": [{"pool": "light", "class": "light", "labels": ["ci-light", "3090b-light"], "registered": 6, "online": 6, "free": 5},
+              {"pool": "home", "class": "light", "labels": ["3090b-home", "3090b-light"], "registered": 1, "online": 1, "free": 1},
+              {"pool": "part", "class": "part", "labels": ["ci-cpu", "3090b-cpu"], "registered": 3, "online": 3, "free": 3}]}]
+  ```
+
+  home runner 不带 `ci-light`，所以 `ci-light` 的空闲数（路由读的）不算它。
 
 ## 5. 看结果与常见问题
 

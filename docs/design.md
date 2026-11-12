@@ -1551,7 +1551,10 @@ Each item names what it supersedes or amends.
        broken light runner takes every claim and plan; each host keeps one more light
        runner, in a pool of its own that carries its host label and not `ci-light`,
        which presence never stops, for the host's salvage legs (§4.5). Nothing undrains
-       by itself (15.2 item 4).
+       by itself (15.2 item 4). *Amended 2026-11-13 (decided with issue #232):* that pool
+       is the inventory's home pool (§5.1), labelled `<role>-home` and `<role>-light`. A
+       drain, the self-drain and every other cause (cards, slots, health, timing, the
+       tier of 19.2) stop the light pool's runners and never the home runner.
 
        *The backstop.* Presence narrows the race between a pickup and a change of the
        resource; it cannot close it. A job can be assigned between a tick and the
@@ -2522,7 +2525,9 @@ The order is therefore made where the runners are, by presence, and no plan name
          removes it; there are at most 32 entries.
        - *Who may set it.* The maintainer, as the CI account, from a shell. Or a job
          running on that host's `home` runner (a light runner without a `ci-` label,
-         which never stops). The job's repository must have an entry in that host's
+         which never stops; *amended 2026-11-13, decided with issue #232:* the home
+         pool of §5.1, whose own label `<role>-home` the job names, found from the
+         host's row as §5.1 says). The job's repository must have an entry in that host's
          policy that is not paused, whose `id` matches the job's, and whose `classes`
          include `nightly` (12.14's opt-in class, which the nightly already needs). Any
          other caller is refused, with its reason. A job can hold only the host it runs
@@ -2579,7 +2584,10 @@ The order is therefore made where the runners are, by presence, and no plan name
          4. `tier` on h100. Tier 1 yields to no host, so this changes nothing by itself.
          5. `tier` on a later-tier host (`6000pro` 2, 3090a 3, 3090b 4), only after
             every consumer that names that host's labels (the list above) either sets
-            the hold or has moved to capability labels. brainspike's placement names
+            the hold or has moved to capability labels. The hold needs the host's home
+            pool (§5.1; *added 2026-11-13, decided with issue #232*): it goes on each
+            host after that host has a release that loads it and `v1` points at one
+            (operations §15). brainspike's placement names
             `6000pro` as well as the 3090 hosts, and a canary branch names it too, so
             the new host waits like the 3090 hosts.
          6. Each host's `[repositories]` entries made equal where `pool status` warns,
@@ -2856,7 +2864,9 @@ and one without it has none. `v1.5` adds, both optional: `peer_labels` (a table 
 runner class to the labels of the other host's pool of that class, 13.3) and `busy` (a
 table of `window_minutes`, `cpu_cores`, `memory_gib`, `gpu_mib` and `lock_minutes`, each
 optional with the defaults of 13.2); and removes `watchdog_log` and `watchdog_notice`
-(13.4), which no host sets. Decision 15.1 (step 2) adds, optional: `files.lease_dir` (the
+(13.4), which no host sets. Issue #232 (2026-11-13) lets a host have two pools of class
+`light`, its light pool and its home pool (§5.1); an older loader refuses the second.
+Decision 15.1 (step 2) adds, optional: `files.lease_dir` (the
 GPU leases' directory, shared with the pool runs of other accounts; with
 `local_accounts` a plain name in `/tmp`, made by the root step as the slot queue). Without
 it the leases stay under `state/leases`. The first path's keys (`ssh`, `trusted`, `remote`,
@@ -3332,20 +3342,20 @@ only after the label's numerics check passed there (16.1).
 | host | pool (class) | instances | capability labels | host labels | runs |
 |---|---|---|---|---|---|
 | 3090b | `light` | 6 | `ci-light` | `3090b-light`, `3090-light` | claim, plan, verdict; short consumer commands |
-| 3090b | `home` (`light`) | 1 | — | `3090b-light` | the host's salvage legs; never stopped by presence (16.4) |
+| 3090b | `home` (`light`) | 1 | — | `3090b-home`, `3090b-light` | the host's salvage legs and its holds (19.8); never stopped by presence (16.4) |
 | 3090b | `gpu` | 2 | `ci-gpu` | `3090b-gpu`, `3090b-gpu<N>` | one-card parts on card N |
 | 3090b | `multi` | 1 | `ci-gpu2` | `3090b-multi` | two-card parts, after the P2P self-test (12.6) |
 | 3090b | `compile` | 1 | `ci-timing` | `3090b-compile` | exclusive timing parts on `compile_cpus` (12.7) |
 | 3090b | `slurm` | 8 | `ci-slurm` | `3090b-slurm`, `3090-slurm` | cluster parts: one batch job each, no CI slot or card of the host (14.3) |
 | 3090a | `light` | 6 | `ci-light` | `3090a-light`, `3090-light` | as on 3090b |
-| 3090a | `home` (`light`) | 1 | — | `3090a-light` | as on 3090b |
+| 3090a | `home` (`light`) | 1 | — | `3090a-home`, `3090a-light` | as on 3090b |
 | 3090a | `part` | 2 | `ci-cpu` | `3090a-cpu` | CPU parts, one slot each |
 | 3090a | `gpu` | 2 | `ci-gpu` | `3090a-gpu`, `3090a-gpu<N>` | one-card parts on card N |
 | 3090a | `multi` | 1 | `ci-gpu2` | `3090a-multi` | two-card parts, after the P2P self-test |
 | 3090a | `nightly` | 1 | — | `3090a-nightly` | a consumer's nightly, up to 600 min, holding the host (12.8), until 16.10 |
 | 3090a | `slurm` | 8 | `ci-slurm` | `3090a-slurm`, `3090-slurm` | as on 3090b |
 | h100 | `light` | 8 | `ci-light` | `h100-light` | as on 3090b (15.8) |
-| h100 | `home` (`light`) | 1 | — | `h100-light` | as on 3090b |
+| h100 | `home` (`light`) | 1 | — | `h100-home`, `h100-light` | as on 3090b |
 | h100 | `part` | 8 | `ci-cpu`, `mem-big` | `h100-cpu` | CPU parts, 8 slots of 20 threads (16.9) |
 | h100 | `gpu` | 5 | `ci-gpu` | `h100-gpu`, `h100-gpu<N>` | one-card parts on card N; no `multi` until a P2P self-test passes (15.8) |
 | the new host (16.9) | `light`, `home`, `part`, `gpu` | sized at its plan from the parts' measured peaks: about 96 threads and its 4 cards | `ci-light`, `ci-cpu`, `ci-gpu`; `ci-gpu2` after a P2P self-test | its role's | as on h100; a dedicated CI account |
@@ -3356,6 +3366,25 @@ online only the runners that can start a job (16.4), so no runner waits for a sl
 3090 hosts' CPU slots are the slot count of brainspike's `ci_slot.sh` (12.9). **The light
 pools** (15.8) take no CI slot; every light runner but the `home` one carries `ci-light`;
 `3090-light` goes with `v2`.
+**The home pool, as built** (2026-11-13, decided with issue #232). A pool's labels are
+those of all its runners, so the home runner is a pool of its own: the inventory entry
+`home = { count = 1, class = "light", labels = ["<role>-home", "<role>-light"] }` beside
+the light pool. `<role>-home` is its own label (a job asks for it to hold the host,
+19.8), `<role>-light` the one it shares with the light pool (the salvage legs', §4.5).
+The loader accepts at most two pools of class `light` on a host; where there are two,
+exactly one (the light pool) carries a `ci-` label and the other (the home pool) none,
+names its labels, one of which no other pool of the host carries and the rest the light
+pool's (so no other pool's jobs land on it), and has no `slot` or `audience` (`per_card` is the `gpu` class's only). Any other pair is refused with its
+reason. Its runner is `<role>-home-1`. It takes no CI slot and no card, and presence
+never stops it (16.4). Readers that ask for "the pool of class `light`" (a drain of a
+class, a part's record, a runner's `CI_RUNNER_POOL_LABELS` fallback) get the light pool; a drain of the home pool by its key is refused, since it would stop
+and refuse nothing. The runners, their labels and the row's `pools` (19.4) are keyed by pool, not by class,
+so the row reports the home pool with its own labels. The `ci-light` counts are the
+light pool's only, since the home runner does not carry `ci-light`. A host with one
+light pool behaves as before: where that pool has no `ci-` label, all its runners are
+home runners. A consumer finds a host's home label in `pool status --json`: the host
+row's pool of class `light` with no `ci-` label, and of its labels the one that no other
+pool of that row carries (consumers §4).
 **The `slurm` pools** (lead, 2026-11-11): 8 runners per 3090 host, up from 2, and the
 site config's `max_parts` (cluster parts per driver host) 8, up from 4, so that a runner
 never waits for a driver slot. With 2 per host, at most 4 cluster parts ran at once: a

@@ -111,8 +111,10 @@ def _text(description: str) -> str:
     return one if len(one) <= 140 else one[:137] + '...'
 
 
-def _bot(etc: str) -> str:
+def _bot(etc: str, env: Mapping[str, str]) -> str:
     """The runners' identity (the policy's ``bot``, decision 15.9): only its statuses count."""
+    if is_public(env):  # a hosted runner has no policy: the job token's identity (18.7)
+        return policy.Policy(frozenset(), {}).bot
     with open(os.path.join(etc, 'policy.toml'), 'rb') as f:
         return policy.load(f.read(1 << 20)).bot
 
@@ -129,7 +131,7 @@ def _statuses(env: Mapping[str, str], call: Callable, context: str, sha: str, bo
 def run_claim(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc: str) -> int:
     """The claim's decision (§4.1) with a read-only token: ``run``, ``reason``, and ``seen``,
     the time of the newest status of the runners it read (0: none), for ``pending``."""
-    bot = policy.Policy(frozenset(), {}).bot if is_public(env) else _bot(etc)  # a hosted runner has no policy
+    bot = _bot(etc, env)
     mine = _statuses(env, call, a.context, a.sha, bot)
     c = claim.decide(mine, bot=bot)
     seen = max((st.time for st in mine), default=0.0)
@@ -146,14 +148,14 @@ def run_pending(a: argparse.Namespace, env: Mapping[str, str], call: Callable, e
         seen = float(a.seen)
     except ValueError:
         raise FlowError('--seen is not a time') from None
-    newer = [st for st in _statuses(env, call, a.context, a.sha, _bot(etc)) if st.time > seen]
+    newer = [st for st in _statuses(env, call, a.context, a.sha, _bot(etc, env)) if st.time > seen]
     if newer:
         print(f'ci-run flow pending: not posted: {newer[0].state} posted since the claim', file=sys.stderr)
         _out(env, posted='false')
         return 0
     post(env, call, context=a.context, sha=a.sha, state='pending', description=a.description)
     # a red attempt posted between the read and the post: put it back on top
-    final = [st for st in _statuses(env, call, a.context, a.sha, _bot(etc)) if st.time > seen and st.state != 'pending']
+    final = [st for st in _statuses(env, call, a.context, a.sha, _bot(etc, env)) if st.time > seen and st.state != 'pending']
     if final:
         top = max(final, key=lambda st: st.time)
         print(f'ci-run flow pending: {top.state} posted meanwhile: posted again over the pending', file=sys.stderr)

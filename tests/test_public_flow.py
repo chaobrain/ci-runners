@@ -208,6 +208,11 @@ class Legs(unittest.TestCase):
             e = Env(d)
             code, _, err = run(['claim', '--context', 'p/ci', '--sha', SHA], {**e.env, **PUB}, Statuses(), etc=d)
             self.assertEqual((code, e.outputs()['run']), (0, 'false'), err)  # green by the job token's identity
+            api = Statuses()
+            code, _, err = run(['pending', '--context', 'p/ci', '--sha', SHA, '--seen', '0'], {**e.env, **PUB}, api, etc=d)
+            self.assertEqual((code, e.outputs()['posted']), (0, 'false'), err)  # the pending, by the same identity
+            code, _, err = run(['pending', '--context', 'p/ci', '--sha', SHA, '--seen', '0'], e.env, Statuses(), etc=d)
+            self.assertEqual(code, 2)  # a private caller's reads the policy's bot, as before
             code, _, _ = run(['claim', '--context', 'p/ci', '--sha', SHA], e.env, Api(), etc=d)
             self.assertEqual(code, 2)  # a private caller's claim reads the policy's bot, as before
 

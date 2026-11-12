@@ -3763,7 +3763,7 @@ MUTANTS = [
      [f'{TFL}.Plan.test_a_plan_that_does_not_load_is_red_with_its_reason']),
     (FLW, "GPUS = {'gpu': 1, 'gpu2': 2}", "GPUS = {'gpu': 1, 'gpu2': 1}", [f'{TFL}.Plan.test_the_matrix_carries_what_part_yml_reads']),
     (FLW, "math.ceil(p[\"memory_gib\"] * 1024)", "int(p[\"memory_gib\"])", [f'{TFL}.Plan.test_the_matrix_carries_what_part_yml_reads']),
-    (FLW, "    out['salvage_wait'] = int(p['timeout_minutes']) * 60", "    out['salvage_wait'] = 0",
+    (FLW, "    out['salvage_wait'] = out['timeout_minutes'] * 60", "    out['salvage_wait'] = 0",
      [f'{TFL}.Plan.test_the_matrix_carries_what_part_yml_reads']),
     (FLW, "    if a.plan_outcome and a.plan_outcome != 'pass':", "    if False:",
      [f'{TFL}.Plan.test_the_plan_commands_own_end']),
@@ -3799,6 +3799,18 @@ MUTANTS = [
      [f'{TFL}.Plan.test_the_registry_max_parallel']),
     # R6, after the rulings: a reserved artifact name
     (FLW, "        elif arts and 'ci' in arts:", "        elif False:", [f'{TFL}.Plan.test_bad_options_are_named']),
+    # the second review: the queue in the job's bound, a public repository, a link on the
+    # files' path, the registry's top-level keys from a light host
+    (FLW, "    out['timeout_minutes'] = int(p['timeout_minutes']) + math.ceil(q)", "    pass",
+     [f'{TFL}.Plan.test_the_plan_options_and_part_keys_beyond_the_first_text']),
+    (FLW, "'timeout_minutes': int(r['timeout_minutes']) + q,", "'timeout_minutes': int(r['timeout_minutes']),",
+     [f'{TFL}.Retry.test_fallback_routes_again', f'{TFL}.Retry.test_any_row_on_the_parts_labels_naming_the_first_record']),
+    (FLW, "        if not private:", "        if False:",
+     [f'{TFL}.Contract.test_a_public_repository_is_refused_before_anything_of_its_head_runs']),
+    (FLW, "    if os.path.realpath(root) != os.path.join(os.path.realpath(workspace), rel.rstrip('/')):", "    if False:",
+     [f'{TFL}.Plan.test_the_files_the_plan_hands_on']),
+    (FLW, "    for role in ([this] if this else []) + sorted(hosts):", "    for role in [this]:",
+     [f'{TFL}.Plan.test_the_registry_entry_of_this_host']),
 ]
 
 

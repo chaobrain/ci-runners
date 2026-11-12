@@ -49,9 +49,12 @@ MAX_ID = 64
 MAX_COMMAND = 32 << 10
 MAX_MEMORY_GIB = 4096
 #: the matrix as one job output, under GitHub's 1 MB per job
-MAX_MATRIX = 900_000
+MAX_MATRIX = 500_000  # well under GitHub's 1 MB per output and per evaluated expression
 #: a part's own artifacts (``part.yml`` has one upload step per index)
 MAX_ARTIFACTS = 4
+#: an attempt's wait on its host for a slot or a lease where the plan sets no
+#: ``queue_minutes``; the job's bound takes it on top of the route's
+QUEUE_MINUTES = 15
 ARTIFACT_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.]{0,31}')  # no '-': <name>-<id>-<attempt> stays unique
 SAFE_PATH = re.compile(r'[A-Za-z0-9._/-]+')
 #: the plan's ``files``: what the plan job uploads once for every part
@@ -109,13 +112,19 @@ def contents(env: Mapping[str, str], call: Callable, path: str, ref: str) -> str
     return base64.b64decode(got['content']).decode('utf-8', 'replace')
 
 
-def default_branch(env: Mapping[str, str], call: Callable) -> str:
+#: a public caller's legs (hosted CPU, the confined GPU pool) come with decision 18's C2
+PUBLIC = 'a public repository: ci-runners runs private ones only until decision 18 C2'
+
+
+def repository(env: Mapping[str, str], call: Callable) -> tuple[str, bool]:
+    """The repository's default branch and whether it is private (an event without a
+    ``repository`` in its payload, such as ``schedule``, names neither)."""
     base, repo, token = _env(env)
     got = call('GET', f'{base}/repos/{repo}', token)
     name = got.get('default_branch') if isinstance(got, dict) else None
     if not isinstance(name, str) or not name:
         raise github.ApiError(f'GET {repo}: no default branch')
-    return name
+    return name, got.get('private') is not False
 
 
 # ------------------------------------------------------------------ the contract (16.6)
@@ -155,8 +164,11 @@ def check_contract(default: str | None, head: str | None, branch: str) -> tuple[
 
 def run_contract(a: argparse.Namespace, env: Mapping[str, str], call: Callable) -> int:
     try:
-        branch = a.default_branch or default_branch(env, call)
+        branch, private = repository(env, call)
+        branch = a.default_branch or branch
         state, text = check_contract(contents(env, call, SPEC, branch), contents(env, call, SPEC, a.sha), branch)
+        if not private:  # nothing of a public head runs here (the workflow's own guard misses some events)
+            state, text = 'error', PUBLIC
     except github.ApiError as e:
         state, text = 'error', f'contract: {SPEC} not read ({e})'
     print(f'ci-run flow contract: {state}: {text}', file=sys.stderr)
@@ -215,9 +227,13 @@ def load(doc: object) -> tuple[list[dict], dict]:
     return parts, opts
 
 
-def check_files(root: str) -> str:
-    """Why the plan's ``files`` directory cannot be handed to the parts, or ''."""
-    if os.path.islink(root) or not os.path.isdir(root):
+def check_files(workspace: str, rel: str) -> str:
+    """Why the plan's ``files`` directory ``rel`` below ``workspace`` cannot be handed to
+    the parts, or ''. No link on its path or inside it."""
+    root = os.path.join(workspace, rel)
+    if os.path.realpath(root) != os.path.join(os.path.realpath(workspace), rel.rstrip('/')):
+        return f'files: {rel} goes through a link'
+    if not os.path.isdir(root):
         return 'files: not a directory'
     total = count = 0
     for d, dirs, names in os.walk(root):
@@ -241,11 +257,13 @@ def entry(p: Mapping, files: bool = False) -> dict:
     out['gpus'] = GPUS.get(p['needs'], 0)
     out['memory'] = f'{math.ceil(p["memory_gib"] * 1024)}M' if p.get('memory_gib') is not None else ''
     out['results'] = p.get('results', '')
-    out['queue'] = f'{p["queue_minutes"]:g}' if p.get('queue_minutes') is not None else ''
+    q = p['queue_minutes'] if p.get('queue_minutes') is not None else QUEUE_MINUTES
+    out['queue'] = f'{q:g}'
+    out['timeout_minutes'] = int(p['timeout_minutes']) + math.ceil(q)  # the wait for a slot, then the run
     out['artifacts'] = [{'name': k, 'path': v} for k, v in sorted((p.get('artifacts') or {}).items())]
     out['files'] = files
-    out['salvage_minutes'] = int(p['timeout_minutes']) + SALVAGE_GRACE
-    out['salvage_wait'] = int(p['timeout_minutes']) * 60
+    out['salvage_minutes'] = out['timeout_minutes'] + SALVAGE_GRACE
+    out['salvage_wait'] = out['timeout_minutes'] * 60
     return out
 
 
@@ -270,12 +288,28 @@ def _rows(rows_file: str, etc: str) -> tuple[list | None, str]:
 
 
 def _project(etc: str, name: str) -> registry.Project | None:
-    """This host's registry entry of ``name``, or None where it has none that loads."""
+    """The registry entry of ``name`` for its top-level keys (``max_parallel``,
+    ``retries``): as this host sees it, else as the first host of its ``[hosts]`` that
+    loads (a light runner's host need not run the project); None where none loads."""
     try:
         from ci_runners import cli
-        return registry.load_file(etc, name, cli.load_inventory().this)
+        this = cli.load_inventory().this
     except (OSError, ValueError, KeyError):
+        this = ''
+    if not registry.NAME.fullmatch(name):
         return None
+    try:
+        with open(os.path.join(etc, 'projects', f'{name}.toml'), 'rb') as f:
+            doc = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    hosts = doc.get('hosts') if isinstance(doc.get('hosts'), dict) else {}
+    for role in ([this] if this else []) + sorted(hosts):
+        try:
+            return registry.parse(doc, role, name)
+        except registry.RegistryError:
+            continue
+    return None
 
 
 def run_plan(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc: str) -> int:
@@ -303,7 +337,7 @@ def run_plan(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc:
             doc = DEFAULT_PLAN
         parts, opts = load(doc)
         if opts['files']:
-            why = check_files(os.path.join(a.workspace or env.get('GITHUB_WORKSPACE', '.'), opts['files']))
+            why = check_files(a.workspace or env.get('GITHUB_WORKSPACE', '.'), opts['files'])
             if why:
                 raise rt.PlanError(why)
     except OSError as e:
@@ -375,10 +409,11 @@ def decide(part: Mapping, doc: Mapping | None, role: str, rows: Sequence | None,
     first = _first(doc, role)
     if retries < 1:
         return None
-    r = rt.retry(part, first, rows, unread)
+    q = math.ceil(float(part.get('queue') or 0))  # the route's bound without the queue, and the queue on top
+    r = rt.retry({**part, 'timeout_minutes': int(part['timeout_minutes']) - q}, first, rows, unread)
     if not r['retry']:
         return None
-    return {'labels': r['labels'], 'timeout_minutes': r['timeout_minutes'], 'target': r['target'],
+    return {'labels': r['labels'], 'timeout_minutes': int(r['timeout_minutes']) + q, 'target': r['target'],
             'resume': 'true' if r['resume'] else 'false', 'attempt_of': attempt_of(first, part['id'], env),
             # more memory: the bigger slot's own cap, not the plan's that the first attempt hit
             'memory': '' if r['row'] == 'more-memory' else str(part.get('memory') or ''),

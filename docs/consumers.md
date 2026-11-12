@@ -224,15 +224,15 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 | `parts[].minutes` | 数，(0, 240]（`light` 为 (0, 15]）：参考主机上的时长 | 是 | — | `<id>: minutes is a number in (0, 240]`；`<id>: minutes is a number in (0, 15] for needs light` |
 | `parts[].memory_gib` | 正数（GiB），最多 4096 | 否 | registry 的 `memory` | `<id>: memory_gib is a positive number`；`<id>: memory_gib is at most 4096` |
 | `parts[].results` | 字符串（`CI_RESULTS_DIR` 下 JUnit XML 的 glob） | 否 | 无 | `<id>: results is a string (a glob)` |
-| `parts[].queue_minutes` | 数，(0, 240]：一次尝试在主机上等 slot 或租约的上限（`part` 的 `queue-timeout-minutes`）；到了就是 `unavailable`，按重试的五行处理（同丢失的尝试一样换一台） | 否 | 60 | `<id>: queue_minutes is a number in (0, 240]` |
+| `parts[].queue_minutes` | 数，(0, 240]：一次尝试在主机上等 slot 或租约的上限（`part` 的 `queue-timeout-minutes`）；到了就是 `unavailable`，按重试的五行处理（同丢失的尝试一样换一台）；作业的 `timeout-minutes` 加上它 | 否 | 15 | `<id>: queue_minutes is a number in (0, 240]` |
 | `parts[].artifacts` | 对象，最多 4 项：名字（`[A-Za-z0-9][A-Za-z0-9_.]*`，最多 32 个字符，不含 `-`，不能是 `ci`）→ `RUNNER_TEMP` 下的相对路径；每次尝试结束后（红了也传）上传为 artifact `<名字>-<id>-<尝试>`，保留 7 天，路径不存在只警告；verdict 不读它们 | 否 | 无 | `<id>: artifacts maps at most 4 names ([A-Za-z0-9][A-Za-z0-9_.]*, no "-") to relative paths below RUNNER_TEMP`；`<id>: the artifact name ci is reserved (ci-part-*, ci-plan-files)` |
 | （部件的其他键 / 缺键） | — | — | — | `<id>: unknown key(s) ['gpus']`、`<id>: missing ['minutes']` |
 
 - 以上 `files`、`max_parallel`、`light`、`queue_minutes`、`artifacts` 和空的 `parts` 都是 schema 1 的可选扩展：不用它们的计划照旧。
-- 标准输出不是一个 JSON 文档：`plan: the plan command's standard output is not one JSON document (JSONDecodeError)`；超过 1 MiB：`plan: the plan is larger than 1048576 bytes`；整个部件列表（路由后）超过 900 KB（一个作业输出的上限之内）：`plan: the routed parts take <n> bytes, more than 900000`。
+- 标准输出不是一个 JSON 文档：`plan: the plan command's standard output is not one JSON document (JSONDecodeError)`；超过 1 MiB：`plan: the plan is larger than 1048576 bytes`；整个部件列表（路由后）超过 500 KB（远在 GitHub 一个作业输出和一个表达式的 1 MB 之内）：`plan: the routed parts take <n> bytes, more than 500000`；`files` 的路径上有符号链接：`plan: files: <路径> goes through a link`。
 - **plan 命令能读到的事件信息**（环境变量，不需要 token）：`CIRUNNERS_EVENT`（事件名）、`CIRUNNERS_PR`（PR 号，非 PR 为空）、`CIRUNNERS_PR_LABELS`（PR 标签名的 JSON 数组，非 PR 为 `[]`）、`CIRUNNERS_BASE_REF`/`CIRUNNERS_BASE_SHA`（PR 的 base；push 时为默认分支和推送前的 sha）、`CIRUNNERS_HEAD_REF`/`CIRUNNERS_HEAD_SHA`（要跑的 head）。plan 命令和部件命令都**拿不到 token**。
 - `plan` 命令自己红了是 `failure`（`plan: red (...)`），`unavailable`、`lost` 等是 `error`；路由错误（某个标签没有任何主机提供、内存连 `mem-big` 的 slot 都放不下）是 `error`，描述以 `route: <标签>: part <id>: ...` 开头。这些情况都由 plan 作业自己发状态，一个部件也不启动，verdict 不运行。
-- 每个部件之后带上路由的结果跑：`labels`（作业的 `runs-on`，只有能力标签）、作业的 `timeout-minutes`（`minutes` × 最慢 slot 的 `speed` + 15）、`gpus`（`gpu` 1、`gpu2` 2、其余 0）、`memory`（`memory_gib` 换成 MiB）。plan 作业的 summary 列出每个部件的 `needs`、标签、分钟数、作业上限和路由的理由（§16 of operations）。
+- 每个部件之后带上路由的结果跑：`labels`（作业的 `runs-on`，只有能力标签）、作业的 `timeout-minutes`（`minutes` × 最慢 slot 的 `speed` + 15，再加 `queue_minutes`）、`gpus`（`gpu` 1、`gpu2` 2、其余 0）、`memory`（`memory_gib` 换成 MiB）。plan 作业的 summary 列出每个部件的 `needs`、标签、分钟数、作业上限和路由的理由（§16 of operations）。
 - 一次运行同时最多跑 registry 的 `max_parallel` 个部件（默认 16，1 到 256；design §7 第 1 条），由维护者写在 registry 条目里；计划的 `max_parallel` 只能把它调低。
 
 **`contract`**（决定 16.6）：默认分支的 `.github/ci-runners.toml` 可以写 `contract = N`（非负整数）。plan 作业在运行 head 的任何东西之前，用作业的 token 读默认分支和 head 的这个文件，比较两个值：

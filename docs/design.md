@@ -3081,7 +3081,7 @@ not load is a red plan job with the reason:
 | `parts[].minutes` | yes | the part's time on the reference host, at most 240; its bounds scale by speed (16.2) |
 | `parts[].memory_gib` | no | the part's memory cap; the registry's default otherwise; above the label's largest slot, the route adds `mem-big` |
 | `parts[].results` | no | as `part`'s `results` |
-| `parts[].queue_minutes` | no | (0, 240], default 60: an attempt's wait on its host for a slot or a lease (`part`'s `queue-timeout-minutes`); past it the attempt is `unavailable` and the retry's rows apply as for a lost one |
+| `parts[].queue_minutes` | no | (0, 240], default 15: an attempt's wait on its host for a slot or a lease (`part`'s `queue-timeout-minutes`), added to the job's bound; past it the attempt is `unavailable` and the retry's rows apply as for a lost one |
 | `parts[].artifacts` | no | at most 4 names (`[A-Za-z0-9][A-Za-z0-9_.]*`, no `-`, not `ci`) to paths below `RUNNER_TEMP`, uploaded after each attempt as `<name>-<id>-<attempt>`; the verdict does not read them |
 
 An unknown key is refused. Without `plan`, the plan is `{"schema": 1, "parts": [{"id":
@@ -3093,8 +3093,8 @@ plan that does not load and a red plan command post `failure`; a plan command's 
 end (§4.4) and a route error (16.5) post `error`. The checks and the route are `ci-run
 flow plan` (`ci_runners/flow.py`); the consumers' guide lists every key's error text. A
 run starts at most the registry's `max_parallel` parts at once (1 to 256, default 16;
-§7 rule 1). `memory_gib` is at most 4096, and the routed matrix at most 900 KB (one job
-output). `files`, `max_parallel`, `light`, `queue_minutes`, `artifacts` and the empty list
+§7 rule 1). `memory_gib` is at most 4096, and the routed matrix at most 500 KB (one job
+output and one expression, each under GitHub's 1 MB). `files`, `max_parallel`, `light`, `queue_minutes`, `artifacts` and the empty list
 are additions to schema 1: a plan without them reads as before.
 
 The plan command reads the event's facts as variables, with no token: `CIRUNNERS_EVENT`,

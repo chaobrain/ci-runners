@@ -23,8 +23,9 @@ REPO = 'chaobrain/myproj'
 class Api:
     """A fake ``github.api``: ``files`` maps a ref to the spec's text (absent: 404)."""
 
-    def __init__(self, files=None, jobs=None, fail=''):
+    def __init__(self, files=None, jobs=None, fail='', private=True):
         self.files, self.jobs, self.fail, self.calls = files or {}, jobs or [], fail, []
+        self.private = private
 
     def __call__(self, method, url, token, body=None):
         self.calls.append((method, url, body))
@@ -36,7 +37,7 @@ class Api:
                 raise github.ApiError(f'{method} {url}: HTTP 404')
             return {'encoding': 'base64', 'content': base64.b64encode(self.files[ref].encode()).decode()}
         if url.endswith(f'/repos/{REPO}'):
-            return {'default_branch': 'main'}
+            return {'default_branch': 'main', 'private': self.private}
         if '/jobs?' in url:
             return {'jobs': self.jobs}
         return {}
@@ -100,8 +101,9 @@ class Contract(unittest.TestCase):
             self.assertEqual((p['state'], p['context']), ('failure', 'myproj/ci'))
             self.assertIn('merge origin/main', p['description'])
             self.assertEqual(e.outputs(), {'ok': 'false', 'posted': 'true'})
-            self.assertIn('/contents/.github/ci-runners.toml?ref=main', api.calls[0][1])
-            self.assertIn(f'?ref={SHA}', api.calls[1][1])
+            self.assertTrue(api.calls[0][1].endswith(f'/repos/{REPO}'))  # private or not
+            self.assertIn('/contents/.github/ci-runners.toml?ref=main', api.calls[1][1])
+            self.assertIn(f'?ref={SHA}', api.calls[2][1])
 
     def test_a_head_that_keeps_up_posts_nothing(self):
         with tempfile.TemporaryDirectory() as d:
@@ -112,6 +114,15 @@ class Contract(unittest.TestCase):
             self.assertEqual(api.posted(), [])
             self.assertEqual(e.outputs(), {'ok': 'true'})
             self.assertTrue(api.calls[0][1].endswith(f'/repos/{REPO}'))  # no default branch given: read
+
+    def test_a_public_repository_is_refused_before_anything_of_its_head_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            api = Api({'main': 'contract = 2\n', SHA: 'contract = 2\n'}, private=False)
+            code, _, _ = run(['contract', '--context', 'myproj/ci', '--sha', SHA], e.env, api)
+            self.assertEqual(code, 1)
+            self.assertEqual([(p['state'], p['description']) for p in api.posted()], [('error', flow.PUBLIC)])
+            self.assertEqual(e.outputs(), {'ok': 'false', 'posted': 'true'})
 
     def test_absent_on_the_head_where_the_default_branch_sets_one(self):
         with tempfile.TemporaryDirectory() as d:
@@ -167,9 +178,9 @@ class Plan(unittest.TestCase):
         code, out, _, _, _ = self.plan(doc, project=registry.Project('myproj', REPO, 'myproj/ci', max_parallel=3))
         self.assertEqual(code, 0)
         a, b, _ = json.loads(out['parts'])
-        self.assertEqual((a['gpus'], a['memory'], a['results'], a['timeout_minutes']), (0, '1536M', '*.xml', 25))
+        self.assertEqual((a['gpus'], a['memory'], a['results'], a['timeout_minutes']), (0, '1536M', '*.xml', 25 + 15))
         self.assertEqual((b['gpus'], b['memory'], b['results'], b['labels']), (1, '', '', ['self-hosted', 'ci-gpu']))
-        self.assertEqual((a['salvage_minutes'], a['salvage_wait']), (35, 1500))
+        self.assertEqual((a['salvage_minutes'], a['salvage_wait']), (50, 2400))
         self.assertEqual(flow.entry({**b, 'needs': 'gpu2'})['gpus'], 2)
         self.assertEqual((out['ids'], out['max_parallel']), ('a b ' + 'c' * 64, '3'))
         self.assertNotIn('\n', out['parts'])
@@ -205,7 +216,9 @@ class Plan(unittest.TestCase):
                                        project=registry.Project('myproj', REPO, 'myproj/ci', max_parallel=8))
         self.assertEqual(code, 0)
         a, b = json.loads(out['parts'])
-        self.assertEqual((a['labels'], a['queue'], b['queue']), (['self-hosted', 'ci-light'], '5', ''))
+        self.assertEqual((a['labels'], a['queue'], b['queue']), (['self-hosted', 'ci-light'], '5', '15'))
+        # the job's bound waits the queue, then runs: minutes x speed 1 + 15, plus the queue
+        self.assertEqual((a['timeout_minutes'], b['timeout_minutes']), (30 + 5, 25 + 15))
         self.assertEqual(a['artifacts'], [{'name': 'impact', 'path': 'bs/imp'}, {'name': 'rows', 'path': 'bs/out'}])
         self.assertEqual((b['artifacts'], a['files']), ([], False))
         self.assertEqual(out['max_parallel'], '2')  # the plan lowers the registry's cap
@@ -234,13 +247,16 @@ class Plan(unittest.TestCase):
             os.makedirs(os.path.join(ws, 'out', 'sub'))
             with open(os.path.join(ws, 'out', 'sub', 'sel.txt'), 'w') as f:
                 f.write('x')
-            self.assertEqual(flow.check_files(os.path.join(ws, 'out')), '')
-            self.assertEqual(flow.check_files(os.path.join(ws, 'none')), 'files: not a directory')
+            self.assertEqual(flow.check_files(ws, 'out'), '')
+            self.assertEqual(flow.check_files(ws, 'out/'), '')
+            self.assertEqual(flow.check_files(ws, 'none'), 'files: not a directory')
             os.symlink('/etc/passwd', os.path.join(ws, 'out', 'sub', 'l'))
-            self.assertEqual(flow.check_files(os.path.join(ws, 'out')), 'files: sub/l is a link')
+            self.assertEqual(flow.check_files(ws, 'out'), 'files: sub/l is a link')
             os.unlink(os.path.join(ws, 'out', 'sub', 'l'))
+            os.symlink(os.path.join(ws, 'out'), os.path.join(ws, 'via'))  # a link on the path, not in the tree
+            self.assertEqual(flow.check_files(ws, 'via/sub'), 'files: via/sub goes through a link')
             with mock.patch.object(flow, 'MAX_FILES_BYTES', 0):
-                self.assertIn('more than', flow.check_files(os.path.join(ws, 'out')))
+                self.assertIn('more than', flow.check_files(ws, 'out'))
             code, out, _, _, _ = self.plan({'schema': 1, 'parts': [part('a')], 'files': 'out'}, '--workspace', ws)
             self.assertEqual((code, out['files'], json.loads(out['parts'])[0]['files']), (0, 'out', True))
             code, _, posted, _, _ = self.plan({'schema': 1, 'parts': [part('a')], 'files': 'none'}, '--workspace', ws)
@@ -311,10 +327,16 @@ class Plan(unittest.TestCase):
                         '[hosts.hosta]\nmemory_max = "8G"\n')
             with mock.patch.object(cli, 'load_inventory', return_value=mock.Mock(this='hosta')):
                 self.assertEqual(flow._project(etc, 'myproj').max_parallel, 5)
+            # a light runner's host that does not run the project reads the same top-level keys
             with mock.patch.object(cli, 'load_inventory', return_value=mock.Mock(this='hostb')):
-                self.assertIsNone(flow._project(etc, 'myproj'))  # no entry for this host: the default
+                self.assertEqual(flow._project(etc, 'myproj').max_parallel, 5)
             with mock.patch.object(cli, 'load_inventory', side_effect=OSError):
-                self.assertIsNone(flow._project(etc, 'myproj'))
+                self.assertEqual(flow._project(etc, 'myproj').max_parallel, 5)
+            self.assertIsNone(flow._project(etc, 'other'))
+            self.assertIsNone(flow._project(etc, '../x'))
+            with open(os.path.join(etc, 'projects', 'myproj.toml'), 'a') as f:
+                f.write('bad = 1\n')
+            self.assertIsNone(flow._project(etc, 'myproj'))  # an entry that does not load: the defaults
 
 
 ENV = {'GITHUB_REPOSITORY': REPO, 'GITHUB_RUN_ID': '77', 'GITHUB_RUN_ATTEMPT': '2'}
@@ -342,7 +364,7 @@ class Retry(unittest.TestCase):
         r = self.decide(self.out('stopped', 'retry'))
         self.assertEqual((r['row'], r['labels'], r['attempt_of'], r['resume']),
                          ('any', ['self-hosted', 'ci-cpu'], 'hosta:chaobrain/myproj/77-1/p-1', 'false'))
-        self.assertEqual(r['timeout_minutes'], 25)
+        self.assertEqual(r['timeout_minutes'], 25 + 15)  # the queue on top of the route's bound
 
     def test_lost_without_outputs_is_retried_once_as_attempt_2(self):
         r = self.decide(None, role='hostb')
@@ -389,6 +411,7 @@ class Retry(unittest.TestCase):
     def test_fallback_routes_again(self):
         r = self.decide(self.out('unavailable', 'fallback', reason='busy: x'), cap=rows(host(ci_cpu=R(1))))
         self.assertEqual((r['row'], r['labels']), ('fallback', ['self-hosted', 'ci-cpu']))
+        self.assertEqual(r['timeout_minutes'], 25 + 15)  # routed again, the queue on top as for the first
 
     def test_the_first_outcome_of_this_run_attempt_among_the_files(self):
         """The salvage leg reads its own upload, else the artifact it downloaded (an upload that

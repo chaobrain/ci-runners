@@ -4017,6 +4017,17 @@ Rules:
      nothing, and each account with a registry wrote its capacity file within a minute.
   4. **The canary** (`canary-3090-v1160`): green on every part (claim, cpu, gpu, multi-a, multi-b, compile, slow,
      oom, salvage, verdict; no retry); the red head was red on compile, cpu, gpu, multi-a and multi-b.
+- **`v1.17.0`** (minor, stamped 2026-11-12; decision 19, RUN-10 R5b, #201, #202; brainspike's coordinator under the
+  lead's delegation of 2026-11-12): a host entry's optional `tier` in a pool registry and presence's `tier` cause
+  (19.1, 19.2), read only where a registry has the key; the hold (`ci-run presence hold`, 19.8); the host rows'
+  `role`, `pools` (with `listening` and `yielded`), `policy`, `tier`, `hold_until` and the health gate (19.4); the
+  policy-drift warning of `pool status` (19.6); the route's room counts yielded runners and its retry rows read the
+  tiers; `part`'s outputs `pool-labels` and `cool-card` (19.5); a slot's `speed` must be finite (19.7). No action's
+  input, label or outcome kind changes; the two outputs are new and every key it reads is optional. Also in the tag,
+  unused by any host path: decision 18's text and the sandbox prototypes (#195, #197, #204). Its notes:
+  1. **Order.** No setup file changes, so no host's plan changes and the egress proxy keeps running (the egress
+     host's hook link moves first, as for every release). A loader older than this release refuses `tier`, so no
+     registry gains the key before `v1` points here on every host (19.9 step 1).
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

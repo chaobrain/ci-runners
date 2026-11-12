@@ -4155,8 +4155,8 @@ Rules:
      salvage, verdict; no retry) on a second head, after a first whose parts all passed but whose two artifact uploads
      from one host were reset on the way to the egress proxy (a network fault the release does not touch); the red
      head was red on compile, cpu, gpu, multi-a and multi-b.
-- **`v1.18.0`** (minor, stamped 2026-11-12; decision 16.6, RUN-10 R6, #211, #212, #214; brainspike's coordinator under the
-  lead's delegation of 2026-11-12): the reusable workflows `ci.yml` and `part.yml` (`workflow_call` only), the composite
+- **`v1.18.0`** (minor, stamped 2026-11-12; decision 16.6, RUN-10 R6, #211, #212, #214, #216; brainspike's coordinator under
+  the lead's delegation of 2026-11-12; `v1` moved to it after the 3090 canary at `@v1.18.0`, green and red, 2026-11-12): the reusable workflows `ci.yml` and `part.yml` (`workflow_call` only), the composite
   action `flow` and `ci-run flow`, the plan JSON's optional keys (`files`, `max_parallel`; a part's `queue_minutes`,
   `artifacts`; `needs: light`), the registry's optional `max_parallel`, and `ci_runners/stamp.py`, which stamps the two
   workflows' references with the release (operations §5). The verdict reads only this run attempt's records when an
@@ -4164,6 +4164,16 @@ Rules:
   changes. Its notes:
   1. **Order.** No setup file changes, so no host's plan changes and the egress proxy keeps running (the egress host's
      hook link moves first). No registry sets `max_parallel`: the default (16) holds.
+  2. **The stamp's own checks.** Two tests read main's state as written (`actions/RELEASE` at `hook`, the snippets of
+     the workflows' `@v1`), so a stamp PR's tree failed them: `tests/test_reusable.py` and `tests/mutants.py` now stamp a
+     copy back to `hook` first (#214, #216).
+  3. **The rollout.** Every host's plan was all `keep` (the new host's but for its four GPU runners, left disabled on
+     purpose): an install moved only `releases/hook`, nothing was applied and no runner restarted; the egress proxy kept
+     running.
+  4. **The canary** (`canary-3090-v1180`): green on every part (claim, cpu, gpu, multi-a, multi-b, compile, slow, oom,
+     salvage, verdict; no retry); the red head was red on compile, cpu, gpu, multi-a and multi-b. After the move, a
+     canary calling `ci.yml@v1` (`canary-r6-v1`) was green: its plan, the three parts (the oom part on its retry) and
+     the verdict.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

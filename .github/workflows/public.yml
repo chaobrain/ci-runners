@@ -200,8 +200,8 @@ jobs:
       always() && !cancelled() && needs.plan.result != 'skipped' && needs.plan.outputs.run != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # the run's artifacts (list, zips) and the head's status, nothing of its code (issue #242)
     permissions:
-      contents: read
       statuses: write
       actions: read
     outputs:
@@ -225,13 +225,8 @@ jobs:
           sha: ${{ needs.plan.outputs.sha }}
           state: error
           description: 'plan: the plan job ended without a plan (${{ needs.plan.result }}); no part ran'
-      # the parts' artifacts; a public part has no record on any host to salvage (18.7)
-      - if: needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          pattern: ci-part-*
-          path: ${{ runner.temp }}/ci-verdict
+      # reads the parts' artifacts through the API itself (issue #242); a public part has no
+      # record on any host to salvage (18.7)
       - id: verdict
         if: needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'
         uses: chaobrain/ci-runners/actions/flow@v1.19.0
@@ -240,4 +235,3 @@ jobs:
           context: ${{ inputs.context }}
           sha: ${{ needs.plan.outputs.sha || inputs.sha || github.event.pull_request.head.sha || github.sha }}
           parts: ${{ needs.plan.outputs.ids }}
-          artifacts: ${{ runner.temp }}/ci-verdict

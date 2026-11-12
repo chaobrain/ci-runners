@@ -47,7 +47,7 @@ PERMISSIONS = {
                'plan': {'contents': 'read', 'statuses': 'read', 'actions': 'read', 'pull-requests': 'read'},
                'pending': {'statuses': 'write'},
                'parts': {'contents': 'read', 'statuses': 'write', 'actions': 'read'},
-               'verdict': {'contents': 'read', 'statuses': 'write', 'actions': 'read'}},
+               'verdict': {'statuses': 'write', 'actions': 'read'}},
     # no job that runs head code holds a write permission: the red job posts
     'part.yml': {'first': {'contents': 'read'},
                  'locate': {'contents': 'read', 'actions': 'read'},
@@ -59,7 +59,7 @@ PERMISSIONS = {
                    'plan': {'contents': 'read', 'statuses': 'read', 'actions': 'read', 'pull-requests': 'read'},
                    'pending': {'statuses': 'write'},
                    'parts': {'contents': 'read', 'statuses': 'write', 'actions': 'read'},
-                   'verdict': {'contents': 'read', 'statuses': 'write', 'actions': 'read'}},
+                   'verdict': {'statuses': 'write', 'actions': 'read'}},
     'public-part.yml': {'first': {'contents': 'read'}, 'lost': {'contents': 'read'}, 'retry': {'contents': 'read'},
                         'red': {'statuses': 'write'}},
     'sweep.yml': {'sweep': {'actions': 'write', 'statuses': 'write'}},
@@ -245,12 +245,28 @@ class Structure(unittest.TestCase):
         jobs = load('part.yml')['jobs']
         self.assertEqual(jobs['first']['name'], 'first')
         self.assertEqual(jobs['first']['outputs']['uploaded'],
-                         "${{ steps.part.outcome == 'success' || steps.again.outcome == 'success' }}")
+                         "${{ steps.part.outcome == 'success' || steps.part.outputs.uploaded == 'success' || "
+                         "steps.again.outcome == 'success' }}")
         self.assertIn("needs.first.outputs.uploaded != 'true'", jobs['locate']['if'])
         self.assertIn("needs.locate.outputs.labels != ''", jobs['salvage']['if'])
         self.assertEqual(jobs['retry']['needs'], ['first', 'locate', 'salvage'])
         for j in ('locate', 'salvage', 'retry'):
             self.assertIn('!cancelled()', jobs[j]['if'], j)  # a cancelled run retries nothing (§4.8 rule 4)
+
+    def test_an_attempt_uploads_its_outcome_again_only_where_its_own_upload_failed(self):
+        jobs = load('part.yml')['jobs']
+        for jid in ('first', 'retry'):
+            [again] = [st for st in jobs[jid]['steps'] if st.get('uses', '').startswith('actions/upload-artifact@')
+                       and 'ci-part-' in st['with']['name']]
+            self.assertEqual(again['if'], "always() && steps.part.outcome == 'failure' && steps.part.outputs.outcome != '' "
+                                          "&& steps.part.outputs.uploaded != 'success'", jid)
+            self.assertIs(again['with']['overwrite'], True, jid)
+
+    def test_no_verdict_downloads_the_parts_artifacts(self):
+        for name in ('ci.yml', 'public.yml'):
+            job = load(name)['jobs']['verdict']
+            self.assertFalse([st for st in job['steps'] if 'download-artifact' in st.get('uses', '')], name)
+            self.assertEqual(job['permissions'], {'statuses': 'write', 'actions': 'read'}, name)
 
     def test_every_attempt_posts_its_red_at_once_from_a_job_without_head_code(self):
         jobs = load('part.yml')['jobs']

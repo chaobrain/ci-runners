@@ -49,20 +49,28 @@ ISSUE_169 = [
 ]
 
 
-class Latest(unittest.TestCase):
-    """Issue #169: each part's latest run attempt, whatever the artifacts' ids."""
+class Read(unittest.TestCase):
+    """Issue #242: the parts' artifacts read through the API, no download; issue #169: each
+    part's latest run attempt, whatever the artifacts' ids."""
 
-    def test_the_newest_of_a_name_where_download_artifact_took_another(self):
-        self.assertEqual(verdict.stale(ISSUE_169), {'ci-part-gpu-3-1': 13886519664})
+    def test_the_newest_of_each_name_of_the_parts_asked(self):
+        self.assertEqual(verdict.newest(ISSUE_169, ['gpu-3']), {'ci-part-gpu-3-1': 13886519664})
+        self.assertEqual(verdict.newest(ISSUE_169, ['cpu']), {})  # another part's: not read
         ordered = [{**a, 'id': 1 if a['created_at'] < '2026-11-11T19:30' else 2} for a in ISSUE_169]
-        self.assertEqual(verdict.stale([a for a in ordered if a['name'].startswith('ci-part')]), {})  # it took the newest
-        self.assertEqual(verdict.stale([ISSUE_169[2]]), {})  # one of a name
+        self.assertEqual(verdict.newest(ordered, ['gpu-3']), {'ci-part-gpu-3-1': 2})
+        self.assertEqual(verdict.newest([ISSUE_169[2]], ['gpu-3']), {'ci-part-gpu-3-1': 13887086600})
         expired = [ISSUE_169[2], {**ISSUE_169[5], 'expired': True}]
-        self.assertEqual(verdict.stale(expired), {})
+        self.assertEqual(verdict.newest(expired, ['gpu-3']), {'ci-part-gpu-3-1': 13887086600})
         same = [ISSUE_169[2], {**ISSUE_169[5], 'created_at': ISSUE_169[2]['created_at']}]  # a tie: the higher id
-        self.assertEqual(verdict.stale(same), {})
-        junk = [ISSUE_169[2], {**ISSUE_169[5], 'id': '1'}, {'name': 'ci-part-x-1'}, 'x', {**ISSUE_169[5], 'name': 3}]
-        self.assertEqual(verdict.stale(junk), {})
+        self.assertEqual(verdict.newest(same, ['gpu-3']), {'ci-part-gpu-3-1': 13887086600})
+        junk = [ISSUE_169[2], {**ISSUE_169[5], 'id': '1'}, {'name': 'ci-part-gpu-3-1'}, 'x', {**ISSUE_169[5], 'name': 3},
+                {**ISSUE_169[5], 'id': True}, {**ISSUE_169[5], 'created_at': None},
+                {**ISSUE_169[5], 'name': 'ci-part-gpu-3-0'}, {**ISSUE_169[5], 'name': 'ci-part-gpu-3-123'}]
+        self.assertEqual(verdict.newest(junk, ['gpu-3']), {'ci-part-gpu-3-1': 13887086600})
+        two = [{**ISSUE_169[2], 'name': 'ci-part-gpu-3-2'}, ISSUE_169[5], {**ISSUE_169[2], 'name': 'ci-part-cpu-1'}]
+        self.assertEqual(verdict.newest(two, ['gpu-3', 'cpu']), {'ci-part-gpu-3-1': 13886519664,
+                                                                 'ci-part-gpu-3-2': 13887086600,
+                                                                 'ci-part-cpu-1': 13887086600})
 
     def test_the_listing_reads_every_page(self):
         pages = [{'artifacts': [{}] * 100}, {'artifacts': [{}] * 3}]
@@ -77,68 +85,82 @@ class Latest(unittest.TestCase):
         with self.assertRaises(verdict.github.ApiError):
             verdict.run_artifacts(lambda *a: {'message': 'x'}, 'https://api', 'o/r', '7', 't')
 
-    def test_the_zip_s_token_does_not_follow_the_redirect(self):
-        seen = []
+    def test_members_reads_the_outcome_and_the_summary_only_in_memory(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch('os.getcwd', return_value=d):
+            got = verdict.members('n', zipped({'outcome.json': '{"outcome": "pass"}', '../evil': 'x',
+                                                'sub/outcome.json': 'x', 'summary.md': 's'}))
+            self.assertEqual(got, ({'outcome': 'pass'}, 's'))
+            self.assertEqual(os.listdir(d), [])  # nothing written
+        self.assertEqual(verdict.members('n', zipped({'outcome.json': '{"outcome": "red"}'})), ({'outcome': 'red'}, ''))
+        for bad in ({}, {'outcome.json': '[1]'}, {'outcome.json': '{"outcome": "maybe"}'}, {'outcome.json': '{'},
+                    {'sub/outcome.json': '{"outcome": "pass"}'}):
+            self.assertIsNone(verdict.members('n', zipped(bad)), bad)
+        self.assertIsNone(verdict.members('n', zipped({'outcome.json': b'{"outcome": "pass", "r": "\xff"}'})))
+        self.assertEqual(verdict.members('n', zipped({'outcome.json': '{"outcome": "pass"}', 'summary.md': b'\xff'})),
+                         ({'outcome': 'pass'}, ''))  # a summary that is not UTF-8 is left out
+        with mock.patch.object(verdict, 'MAX_FILE', 25):  # an oversized member is left out
+            self.assertIsNone(verdict.members('n', zipped({'outcome.json': '{"outcome": "pass", "x": "yy"}'})))
+            self.assertEqual(verdict.members('n', zipped({'outcome.json': '{"outcome": "pass"}', 'summary.md': 's' * 26})),
+                             ({'outcome': 'pass'}, ''))
+        with self.assertRaisesRegex(ValueError, 'cannot be read'):
+            verdict.members('n', b'not a zip')
+        bad = bytearray(zipped({'outcome.json': '{"outcome": "pass"}'}))  # its CRC
+        bad[bad.index(b'{"outcome"') + 2] ^= 1
+        with self.assertRaisesRegex(ValueError, 'cannot be read'):
+            verdict.members('n', bytes(bad))
+        buf = io.BytesIO()  # a broken deflate stream: zlib's own error, not zipfile's
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr('outcome.json', '{"outcome": "pass"}' * 50)
+        broken = bytearray(buf.getvalue())
+        broken[30 + len('outcome.json')] = 0xff  # the first byte of the data: an invalid block type
+        with self.assertRaisesRegex(ValueError, 'cannot be read'):
+            verdict.members('n', bytes(broken))
 
-        class R(io.BytesIO):
-            def __enter__(self):
-                return self
+    def test_read_fetches_each_newest_once_and_leaves_out_what_it_cannot_read(self):
+        listing = ISSUE_169 + [{'id': 5, 'name': 'ci-part-cpu-1', 'created_at': '2026-11-11T19:03:00Z'},
+                               {'id': 6, 'name': 'ci-part-cpu-2', 'created_at': '2026-11-11T19:04:00Z'},
+                               {'id': 7, 'name': 'ci-part-io-1', 'created_at': '2026-11-11T19:05:00Z'},
+                               {'id': 8, 'name': 'ci-part-other-1', 'created_at': '2026-11-11T19:05:00Z'}]
+        zips = {13886519664: zipped({'outcome.json': '{"outcome": "pass", "run-attempt": 2}', 'summary.md': 'g'}),
+                5: zipped({'outcome.json': '{"outcome": "oom", "next": "retry"}'}), 6: b'not a zip'}
+        fetched, logged = [], []
 
-            def __exit__(self, *a):
-                return False
+        def fetch(url, token):
+            fetched.append(url)
+            aid = int(url.split('/')[-2])
+            if aid == 7:
+                raise verdict.github.ApiError('GET .../zip: HTTP 410')
+            return zips[aid]
+        got = verdict.read(['cpu', 'gpu-3', 'io'], lambda *a: {'artifacts': listing}, fetch, 'https://api', 'o/r', '7',
+                           't', logged.append)
+        self.assertEqual(got, {'gpu-3': {1: ({'outcome': 'pass', 'run-attempt': 2}, 'g')},
+                               'cpu': {1: ({'outcome': 'oom', 'next': 'retry'}, '')}})
+        self.assertEqual(sorted(fetched), [f'https://api/repos/o/r/actions/artifacts/{n}/zip'
+                                           for n in (13886519664, 5, 6, 7)])  # the older gpu-3-1 never
+        self.assertEqual(len(logged), 2)
+        self.assertIn('ci-part-cpu-2: not read (ci-part-cpu-2: the zip cannot be read (BadZipFile))', logged)
+        self.assertIn('ci-part-io-1: not read (GET .../zip: HTTP 410)', logged)
+        for e in (OSError('x'), http.client.IncompleteRead(b''), ValueError('larger')):
+            def failing(url, token, e=e):
+                raise e
+            self.assertEqual(verdict.read(['cpu'], lambda *a: {'artifacts': listing}, failing, 'https://api', 'o/r',
+                                          '7', 't', logged.append), {})
+        zips[5] = zipped({'outcome.json': '{"outcome": "maybe"}'})
+        self.assertEqual(verdict.read(['cpu'], lambda *a: {'artifacts': listing[:7]}, fetch, 'https://api', 'o/r', '7',
+                                      't', logged.append), {})
+        self.assertIn('ci-part-cpu-1: its outcome.json is missing or not valid', logged)
+        with self.assertRaises(verdict.github.ApiError):
+            verdict.read(['cpu'], lambda *a: {'x': 1}, fetch, 'https://api', 'o/r', '7', 't', logged.append)
 
-        def opener(req, timeout):
-            seen.append(req)
-            return R(b'zipdata')
-        self.assertEqual(verdict.fetch_zip('https://api/x/zip', 'tok', opener), b'zipdata')
-        self.assertEqual(seen[0].unredirected_hdrs, {'Authorization': 'Bearer tok'})  # not sent to the storage
-        self.assertNotIn('Authorization', seen[0].headers)
-        with mock.patch.object(verdict, 'MAX_ZIP', 3), self.assertRaisesRegex(ValueError, 'larger'):
-            verdict.fetch_zip('https://api/x/zip', 'tok', opener)
-
-    def test_unpack_replaces_the_outcome_and_the_summary_only(self):
-        with tempfile.TemporaryDirectory() as d:
-            root = pathlib.Path(d)
-            art(root, 'ci-part-a-1', {'outcome': 'red'}, 'old summary')
-            verdict.unpack(d, 'ci-part-a-1', zipped({'outcome.json': '{"outcome": "pass"}', '../evil': 'x',
-                                                     'sub/outcome.json': 'x'}))
-            self.assertEqual(sorted(p.name for p in (root / 'ci-part-a-1').iterdir()), ['outcome.json'])
-            self.assertFalse((root / 'evil').exists())
-            verdict.unpack(d, 'ci-part-b-1', zipped({'outcome.json': '{"outcome": "pass"}', 'summary.md': 's'}))
-            self.assertEqual(verdict.collect(d)['b'][1], ({'outcome': 'pass'}, 's'))
-            with mock.patch.object(verdict, 'MAX_FILE', 3):  # an oversized member is left out
-                verdict.unpack(d, 'ci-part-c-1', zipped({'outcome.json': '{"outcome": "pass"}'}))
-            self.assertFalse((root / 'ci-part-c-1' / 'outcome.json').exists())
-            with self.assertRaises(ValueError):
-                verdict.latest(d, lambda *a: {'artifacts': ISSUE_169}, lambda url, tok: b'not a zip', 'https://api',
-                               'o/r', '7', 't')
-            # a zip that fails while it is read (here its CRC) leaves the downloaded files as they were
-            art(root, 'ci-part-gpu-3-1', {'outcome': 'red'}, 'red')
-            bad = bytearray(zipped({'outcome.json': '{"outcome": "pass"}'}))
-            at = bad.index(b'{"outcome"')
-            bad[at + 2] ^= 1
-            with self.assertRaisesRegex(ValueError, 'cannot be read'):
-                verdict.latest(d, lambda *a: {'artifacts': ISSUE_169}, lambda url, tok: bytes(bad), 'https://api',
-                               'o/r', '7', 't')
-            self.assertEqual(verdict.collect(d)['gpu-3'][1], ({'outcome': 'red'}, 'red'))
-            buf = io.BytesIO()  # a broken deflate stream: zlib's own error, not zipfile's
-            with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
-                z.writestr('outcome.json', '{"outcome": "pass"}' * 50)
-            broken = bytearray(buf.getvalue())
-            broken[30 + len('outcome.json')] = 0xff  # the first byte of the data: an invalid block type
-            with self.assertRaisesRegex(ValueError, 'cannot be read'):
-                verdict.unpack(d, 'ci-part-gpu-3-1', bytes(broken))
-            self.assertEqual(verdict.collect(d)['gpu-3'][1], ({'outcome': 'red'}, 'red'))
-
-            def short(url, tok):
-                raise http.client.IncompleteRead(b'')
-            with self.assertRaises(verdict.github.ApiError):
-                verdict.latest(d, lambda *a: {'artifacts': ISSUE_169}, short, 'https://api', 'o/r', '7', 't')
-            os.rename(root / 'ci-part-gpu-3-1', root / 'elsewhere')  # a planted link in its place is replaced
-            os.symlink(root / 'elsewhere', root / 'ci-part-gpu-3-1')
-            verdict.unpack(d, 'ci-part-gpu-3-1', zipped({'outcome.json': '{"outcome": "pass"}'}))
-            self.assertFalse((root / 'ci-part-gpu-3-1').is_symlink())
-            self.assertEqual((root / 'elsewhere' / 'summary.md').read_text(), 'red')
+    def test_an_earlier_run_attempts_retry_does_not_outrank_a_re_run_first_attempt(self):
+        listing = [{'id': 1, 'name': 'ci-part-cpu-1', 'created_at': '2026-11-11T19:00:00Z'},
+                   {'id': 2, 'name': 'ci-part-cpu-2', 'created_at': '2026-11-11T19:10:00Z'},
+                   {'id': 3, 'name': 'ci-part-cpu-1', 'created_at': '2026-11-11T19:20:00Z'}]
+        zips = {2: zipped({'outcome.json': '{"outcome": "red", "run-attempt": 1}'}),
+                3: zipped({'outcome.json': '{"outcome": "pass", "run-attempt": 2}'})}
+        got = verdict.read(['cpu'], lambda *a: {'artifacts': listing}, lambda url, t: zips[int(url.split('/')[-2])],
+                           'https://api', 'o/r', '7', 't', print)
+        self.assertEqual(got, {'cpu': {1: ({'outcome': 'pass', 'run-attempt': 2}, '')}})
 
 
 class Decide(unittest.TestCase):
@@ -308,8 +330,7 @@ class Main(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         t = pathlib.Path(self.tmp.name)
-        self.arts = t / 'arts'
-        self.arts.mkdir()
+        self.listing, self.zips = [], {}  # the run's artifacts, as the API lists them, and their zips
         self.summary, self.output = t / 'summary', t / 'output'
         self.inv = inventory.load(f'''schema = 1
 this = "hb"
@@ -332,8 +353,13 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
     def tearDown(self):
         self.tmp.cleanup()
 
-    listing: list | Exception = []  # the run's artifacts, as the API lists them
-    zips: dict = {}  # artifact id -> its zip
+    def art(self, name, outcome, summary='', created='2026-11-11T19:00:00Z'):
+        aid = 1000 + len(self.zips)
+        self.listing.append({'id': aid, 'name': name, 'created_at': created, 'expired': False})
+        members = {'outcome.json': outcome if isinstance(outcome, str) else json.dumps(outcome)}
+        if summary:
+            members['summary.md'] = summary
+        self.zips[aid] = zipped(members)
 
     def call(self, method, url, token, body=None):
         if method == 'GET':
@@ -346,48 +372,93 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
 
     def fetch(self, url, token):
         self.fetched.append((url, token))
-        return self.zips[int(url.split('/')[-2])]
+        aid = int(url.split('/')[-2])
+        if aid not in self.zips:
+            raise verdict.github.ApiError(f'GET {url}: HTTP 410')
+        return self.zips[aid]
 
     def main(self, *args, env=None):
         self.got, self.fetched, self.err = [], [], io.StringIO()
         with mock.patch.dict(os.environ, env or self.env, clear=True), redirect_stderr(self.err):
-            return verdict.main(['--context', 'p/ci', '--sha', SHA, '--artifacts', str(self.arts), *args], self.inv,
+            return verdict.main(['--context', 'p/ci', '--sha', SHA, *args], self.inv,
                                 call=self.call, fetch=self.fetch)
 
     def test_a_part_re_run_in_a_later_run_attempt_counts(self):
         # issue #169, run 43082337585: attempt 1's gpu-3 red; "Re-run failed jobs" re-ran it,
         # and it passed. Run attempt 2's ci-part-gpu-3-1 has the lower id, so download-artifact
         # (the highest id of a name) gave the verdict run attempt 1's red one
-        art(self.arts, 'ci-part-gpu-3-1', {'outcome': 'red', 'next': 'none', 'run-attempt': 1}, 'red summary')
-        art(self.arts, 'ci-part-cpu-1', {'outcome': 'pass', 'next': 'none', 'run-attempt': 1})
         self.listing = ISSUE_169 + [{'id': 5, 'name': 'ci-part-cpu-1', 'created_at': '2026-11-11T19:03:00Z'}]
         self.zips = {13886519664: zipped({'outcome.json': json.dumps({'outcome': 'pass', 'next': 'none',
-                                                                       'run-attempt': 2})})}
+                                                                       'run-attempt': 2})}),
+                     13887086600: zipped({'outcome.json': json.dumps({'outcome': 'red', 'next': 'none',
+                                                                       'run-attempt': 1}), 'summary.md': 'red'}),
+                     5: zipped({'outcome.json': json.dumps({'outcome': 'pass', 'next': 'none', 'run-attempt': 1})})}
         env = {**self.env, 'GITHUB_RUN_ID': '43082337585', 'GITHUB_RUN_ATTEMPT': '2'}
         self.assertEqual(self.main('--parts', 'cpu gpu-3', env=env), 0)
         self.assertEqual(self.posted[0][3]['state'], 'success')
         self.assertEqual(self.got, ['https://api.github.com/repos/org/repo/actions/runs/43082337585/artifacts'
                                     '?per_page=100&page=1'])
-        self.assertEqual(self.fetched, [('https://api.github.com/repos/org/repo/actions/artifacts/13886519664/zip',
-                                         'tok')])
-        self.assertFalse((self.arts / 'ci-part-gpu-3-1' / 'summary.md').exists())  # the old attempt's is gone
-        self.assertIn('ci-part-gpu-3-1: the latest run attempt', self.err.getvalue())
+        self.assertEqual(self.fetched, [('https://api.github.com/repos/org/repo/actions/artifacts/5/zip', 'tok'),
+                                        ('https://api.github.com/repos/org/repo/actions/artifacts/13886519664/zip',
+                                         'tok')])  # each part's newest, once; run attempt 1's red never
+        self.assertNotIn('red', self.summary.read_text())
 
-    def test_without_actions_read_the_downloaded_artifacts_decide(self):
-        art(self.arts, 'ci-part-gpu-3-1', {'outcome': 'red', 'next': 'none', 'run-attempt': 1})
+    def test_a_listing_that_fails_posts_error_and_names_it(self):
+        self.art('ci-part-gpu-3-1', {'outcome': 'pass', 'next': 'none'})
         self.listing = verdict.github.ApiError('GET .../artifacts: HTTP 403')
-        self.assertEqual(self.main('--parts', 'gpu-3'), 1)  # as before: the downloaded red decides
-        self.assertEqual(self.posted[0][3]['state'], 'failure')
-        self.assertIn('give the job actions: read', self.err.getvalue())
-        self.assertEqual(self.fetched, [])
-        self.listing = []  # one artifact a name: nothing fetched
         self.assertEqual(self.main('--parts', 'gpu-3'), 1)
+        [(_, _, _, body)] = self.posted
+        self.assertEqual(body['state'], 'error')  # never a part's loss, never success
+        self.assertEqual(body['description'], "verdict: the run's artifacts could not be listed "
+                                              "(GET .../artifacts: HTTP 403); the job needs actions: read")
         self.assertEqual(self.fetched, [])
-        self.assertNotIn('actions: read', self.err.getvalue())
+        self.assertEqual(self.output.read_text(), 'state=error\n')
+        self.listing = verdict.github.ApiError('GET ' + 'x' * 200 + ': HTTP 502')
+        self.assertEqual(self.main('--parts', 'gpu-3'), 1)
+        self.assertEqual(len(self.posted[1][3]['description']), verdict.STATUS_MAX)  # GitHub's bound
+        self.assertNotIn('actions: read', self.posted[1][3]['description'])
+
+    def test_an_artifact_that_cannot_be_fetched_is_lost_not_read_from_an_older_one(self):
+        self.art('ci-part-cpu-1', {'outcome': 'pass', 'next': 'none'}, created='2026-11-11T19:00:00Z')
+        self.art('ci-part-cpu-1', {'outcome': 'red', 'next': 'none'}, created='2026-11-11T19:10:00Z')
+        del self.zips[1001]  # the newest: its fetch fails
+        self.assertEqual(self.main('--parts', 'cpu'), 1)
+        self.assertEqual((self.posted[0][3]['state'], self.posted[0][3]['description']),
+                         ('error', 'infrastructure: cpu lost'))
+        self.assertIn('ci-part-cpu-1: not read', self.err.getvalue())
+
+    def test_one_client_serves_every_request_when_none_is_given(self):
+        self.art('ci-part-cpu-1', {'outcome': 'pass', 'next': 'none'})
+        made = []
+
+        class Fake:
+            opened = 2
+
+            def __init__(s):
+                made.append(s)
+                s.closed = False
+
+            def api(s, *a):
+                return self.call(*a)
+
+            def artifact(s, url, token, limit):
+                self.assertEqual(limit, verdict.MAX_ZIP)
+                return self.fetch(url, token)
+
+            def close(s):
+                s.closed = True
+        self.got, self.fetched, self.err = [], [], io.StringIO()
+        with mock.patch.object(verdict.client, 'Client', Fake), mock.patch.dict(os.environ, self.env, clear=True), \
+                redirect_stderr(self.err):
+            self.assertEqual(verdict.main(['--context', 'p/ci', '--sha', SHA, '--parts', 'cpu'], self.inv), 0)
+        self.assertEqual(len(made), 1)
+        self.assertTrue(made[0].closed)
+        self.assertEqual((len(self.got), len(self.fetched), len(self.posted)), (1, 1, 1))
+        self.assertIn('2 connection(s) opened', self.err.getvalue())
 
     def test_green_parts_post_success(self):
-        art(self.arts, 'ci-part-cpu-1', {'outcome': 'pass', 'next': 'none'}, '### part `cpu`\n')
-        art(self.arts, 'ci-part-gpu-1', {'outcome': 'pass', 'next': 'none'}, '### part `gpu`\n')
+        self.art('ci-part-cpu-1', {'outcome': 'pass', 'next': 'none'}, '### part `cpu`\n')
+        self.art('ci-part-gpu-1', {'outcome': 'pass', 'next': 'none'}, '### part `gpu`\n')
         self.assertEqual(self.main('--parts', 'cpu gpu'), 0)
         [(method, url, token, body)] = self.posted
         self.assertEqual((method, url, token), ('POST', f'https://api.github.com/repos/org/repo/statuses/{SHA}', 'tok'))
@@ -397,7 +468,7 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
         self.assertEqual(self.output.read_text(), 'state=success\n')
 
     def test_a_part_without_artifact_or_record_is_lost(self):
-        art(self.arts, 'ci-part-cpu-1', {'outcome': 'pass', 'next': 'none'})
+        self.art('ci-part-cpu-1', {'outcome': 'pass', 'next': 'none'})
         self.assertEqual(self.main('--parts', 'cpu gpu'), 1)
         self.assertEqual(self.posted[0][3]['state'], 'error')
         self.assertIn('gpu lost', self.posted[0][3]['description'])
@@ -405,8 +476,8 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
     def test_the_fallback_attempt_recorded_here_decides(self):
         # issue #161: artifacts stop at attempt 2 (unavailable, next none); attempt 3, the
         # consumer's fallback, ran on this host and left only its record
-        art(self.arts, 'ci-part-cpu-1', {'outcome': 'oom', 'next': 'retry'})
-        art(self.arts, 'ci-part-cpu-2', {'outcome': 'unavailable', 'reason': 'pending past the bound',
+        self.art('ci-part-cpu-1', {'outcome': 'oom', 'next': 'retry'})
+        self.art('ci-part-cpu-2', {'outcome': 'unavailable', 'reason': 'pending past the bound',
                                          'next': 'none'})
         d = pathlib.Path(self.tmp.name) / 'data/ci-runners/state/parts/org/repo/77-1/cpu-3'
         d.mkdir(parents=True)
@@ -418,7 +489,7 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
         self.assertEqual(self.posted[0][3]['state'], 'success')
 
     def test_a_red_part_posts_failure(self):
-        art(self.arts, 'ci-part-cpu-1', {'outcome': 'red', 'next': 'none'})
+        self.art('ci-part-cpu-1', {'outcome': 'red', 'next': 'none'})
         self.assertEqual(self.main('--parts', 'cpu'), 1)
         self.assertEqual(self.posted[0][3]['state'], 'failure')
 

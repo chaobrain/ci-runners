@@ -58,9 +58,6 @@ inputs:
   parts:
     description: the ids of the parts the run started, space-separated (verdict)
     default: ''
-  artifacts:
-    description: the directory the parts' artifacts were downloaded into (verdict)
-    default: ''
   token:
     description: the job's token (statuses read to claim, write to post; contents read for the contract; actions read to locate)
     default: ${{ github.token }}
@@ -133,7 +130,6 @@ runs:
         IN_STATE: ${{ inputs.state }}
         IN_DESCRIPTION: ${{ inputs.description }}
         IN_PARTS: ${{ inputs.parts }}
-        IN_ARTIFACTS: ${{ inputs.artifacts }}
       run: |
         case "$IN_COMMAND" in claim|contract|plan|pending|retry|locate|status|admit|verdict) ;; *) echo "::error::ci-runners flow: unknown command '$IN_COMMAND'"; exit 2;; esac
         args=()
@@ -155,6 +151,5 @@ runs:
         [ -z "$IN_STATE" ] || args+=("--state=$IN_STATE")
         [ -z "$IN_DESCRIPTION" ] || args+=("--description=$IN_DESCRIPTION")
         [ "$IN_COMMAND" != verdict ] || args+=("--parts=$IN_PARTS")
-        [ -z "$IN_ARTIFACTS" ] || args+=("--artifacts=$IN_ARTIFACTS")
         # this action's own checkout, the release the workflow names (design §9), not the host's
         exec sh "$GITHUB_ACTION_PATH/../../bin/ci-run" flow "$IN_COMMAND" "${args[@]}"

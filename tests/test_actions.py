@@ -76,6 +76,19 @@ class Actions(unittest.TestCase):
                           (ROOT / 'actions' / name / 'action.yml').read_text().replace('\n        ', ' '))
 
 
+    def test_the_verdict_downloads_nothing_and_a_red_part_uploads_once(self):
+        """Issue #242: the verdict reads the parts' artifacts through the API itself; the part
+        action says whether its own upload succeeded, so a red part's step (which fails with
+        its upload done) is not uploaded a second time."""
+        from tests import yamlsub
+        doc = yamlsub.load((ROOT / 'actions' / 'verdict' / 'action.yml').read_text())
+        self.assertEqual([st.get('uses') for st in doc['runs']['steps']], [None])
+        part = yamlsub.load((ROOT / 'actions' / 'part' / 'action.yml').read_text())
+        self.assertEqual(part['outputs']['uploaded']['value'], '${{ steps.upload.outcome }}')
+        [up] = [st for st in part['runs']['steps'] if st.get('uses', '').startswith('actions/upload-artifact@')]
+        self.assertEqual(up['id'], 'upload')
+
+
 class Salvage(unittest.TestCase):
     def test_one_upload_per_salvaged_part_up_to_the_bound(self):
         """Design §4.5: salvage uploads each part as ``ci-part-<id>-<attempt>``. A composite

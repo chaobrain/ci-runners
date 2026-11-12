@@ -899,8 +899,10 @@ class Action(unittest.TestCase):
             text = f.read()
         block = text.split('\noutputs:\n', 1)[1].split('\nruns:', 1)[0] + '\n'
         names = re.findall(r'^  ([a-z-]+):\n', block, re.M)
-        self.assertEqual(set(names), set(part.OUTPUTS))
-        for n in names:
+        # and the action's own: whether its upload of the outcome succeeded (#242)
+        self.assertEqual(set(names), set(part.OUTPUTS) | {'uploaded'})
+        self.assertIn('    value: ${{ steps.upload.outcome }}\n', block)
+        for n in set(names) - {'uploaded'}:
             self.assertIn(f'    value: ${{{{ steps.part.outputs.{n} }}}}\n', block)
 
 

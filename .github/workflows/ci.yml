@@ -232,8 +232,8 @@ jobs:
       always() && !cancelled() && needs.plan.result != 'skipped' && needs.plan.outputs.run != 'false'
     runs-on: [self-hosted, ci-light]
     timeout-minutes: 20
+    # the run's artifacts (list, zips) and the head's status, nothing of its code (issue #242)
     permissions:
-      contents: read
       statuses: write
       actions: read
     outputs:

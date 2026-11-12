@@ -2993,9 +2993,13 @@ the GPU leases for the part's life; the command does not inherit them.
 | `pool-labels`, `cool-card` | the labels of the pool the part ran on (a JSON array), and a card of this host that passes the health gate for a thermal retry, or empty (19.5): what `route.retry` reads for the `same-host` and `cool-card` rows |
 | `record` | `<host role>:<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>`, the part record below the host's `state/parts/` |
 | `summary` | path to a Markdown block: host, cards, peak temperature per card, waits, events |
+| `uploaded` | the outcome of the action's upload of `outcome.json` below: `success` where it uploaded (#242) |
 
 The step exits 1 only for `red` (D6). It also uploads these outputs as `outcome.json`, in
-an artifact named `ci-part-<id>-<attempt>`, which the verdict reads. From `v1.5.2` that
+an artifact named `ci-part-<id>-<attempt>`, which the verdict reads. A red part's action
+fails with that upload done, so the reusable workflow uploads the file a second time
+(`part.yml`'s `again`, one per attempt) only where `uploaded` is not `success` (#242;
+until then every red attempt uploaded it twice, 7-8 s before its red status). From `v1.5.2` that
 file also holds `run-attempt`, the run attempt the part ran in (its record's, or
 `GITHUB_RUN_ATTEMPT` where the part has no record, as when the release is not installed);
 it is no step output.
@@ -3122,14 +3126,23 @@ hosts, a coverage job). These rules are the consumer's:
    all `pass`, success; else error. A run's artifacts outlive its GitHub re-runs, so an
    attempt made in an earlier run attempt than the part's first attempt is not read
    (`v1.5.2`, issue #64): the run attempt is the outcome's `run-attempt`, else the one its
-   `record` names. Of the artifacts that share a name, one per run attempt that made it,
-   the newest counts: `actions/download-artifact` keeps the one of the highest id, which
-   need not be the newest, so the verdict lists the run's artifacts and fetches the newest
-   of each part's name where another was downloaded, and a re-run of failed jobs can turn
-   a run green (R1, issue #169); without `actions: read` it reads what was downloaded. It
-   merges the parts' summaries into the job summary and fails unless the state is success.
-6. **Permissions:** `contents: read`, plus `statuses: write` for claim and verdict, and
-   `actions: read` for verdict (rule 5). A job that reads another run's artifacts adds
+   `record` names. The verdict reads the artifacts itself through the API, with no
+   `actions/download-artifact` (#242): it lists the run's artifacts and fetches each
+   expected part's zips over one kept connection per host (the API, the artifact
+   storage, through `https_proxy`), and reads `outcome.json` and `summary.md` in memory,
+   with the bounds and checks a download had (8 MiB a zip, 1 MiB a file, a JSON object with
+   a known outcome, UTF-8; 30 s a call, 3 tries). Of the artifacts that share a name, one
+   per run attempt that made it, the newest counts (by `created_at`), so a re-run of
+   failed jobs can turn a run green (R1, issue #169); `download-artifact` kept the one of
+   the highest id, which need not be the newest. An artifact whose zip cannot be fetched or
+   read is not there: its part is read from this host's records, else `lost`, and an older
+   artifact of its name is never read in its place. A listing that fails posts `error`
+   and names it (`actions: read` where GitHub refused it); until #242 the verdict read what
+   was downloaded then. It merges the parts' summaries into the job summary and fails
+   unless the state is success. (#242 measured `download-artifact` at 4-5 s a verdict,
+   and once 174 s where it lingered after its download, #163.)
+6. **Permissions:** `contents: read`, plus `statuses: write` for claim, and for the
+   verdict `statuses: write` and `actions: read` only (rule 5; it reads no code, #242). A job that reads another run's artifacts adds
    `actions: read`.
 
 The consumer's own jobs (`light` commands, a coverage job as a `part`) run in its env

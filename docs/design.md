@@ -1720,6 +1720,78 @@ Each item names what it supersedes or amends.
        and the part records. `pool run` takes *dev slots* of its own (the registry's
        `dev_slots`: cpusets and a memory cap outside every CI slot), so development
        never takes a CI slot; a host whose registry names none keeps 15.1's claim.
+
+       *Built in R7 (#220): the dev slots.* A host entry of the registry may name
+       `dev_slots = { lock = "/abs/dev.lock", cpus = ["0-15", "16-31"], memory_gib = 64 }`
+       (and `queue`, `inventory`): one cpuset per dev slot, disjoint and below the entry's
+       `cpus`; `memory_gib`, the most a run there may ask (at most the entry's); lock files
+       `lock`, `<stem>.<i>.lock` from the second (created when taken) and the queue
+       `<stem>.queue`, none of them the CI slots'. A cluster entry or a status-only one
+       (`probe = "forced"`) cannot name them. On such a host a CPU pool run takes a dev slot,
+       in line as for a CI slot (`--no-wait`: exit 75), runs pinned to its cpuset
+       (`taskset`), and never takes, waits for or tickets a CI slot; a GPU run takes the
+       cards' leases as before; a run asking more cores than the smallest dev slot is skipped
+       there. Before it takes one, the host side reads the host's inventory (`inventory`,
+       else `$CI_RUNNERS_ETC/inventory.toml` of the account it runs as) and refuses the run
+       if a dev slot meets a cpuset CI pins parts to (a pool's `slot.cpus`, 16.2, the host's
+       `cpus` or `compile_cpus`) or a pool of part, gpu, multi, compile or nightly runners
+       pins its parts to none. An `inventory` named that cannot be read or loaded refuses the
+       run; the default one, where it cannot (the pool account is not the CI account), skips
+       the check and says so, so a registry names the CI account's inventory where the pool
+       account may read it. A host row gains `dev_slots`, `dev_free` and `dev_queue` (every
+       ticket, waiting or not); its CI figures stay the CI slots', so
+       the route and presence read nothing new, and presence sees no hold of a CI slot by a
+       pool run there. A host without `dev_slots` keeps 15.1's claim. *Rollout:* a release
+       before this one refuses the key (`unknown keys`), so `pool status`, the route and
+       presence's capacity file of an older release would fail on a registry that has it;
+       the key goes into a registry only after every host that reads that registry has the
+       release and `v1` points at it (as `tier`, 19.9).
+
+       *Built in R7 (#219): the report.* `ci-run stats [--repo R ...] [--since T | --run ID
+       ...] [--records DIR ...] [--no-artifacts] [--json]` (`ci_runners/stats.py`), on any
+       account with a login that reads the repositories (`GH_TOKEN=$(gh auth token) ci-run
+       stats ...`; the tool reads, stores and refreshes no token itself, as 15.6). The
+       repositories default to the project registry's. Each number and its timestamps (the
+       jobs API with `filter=all`, so every run attempt's jobs):
+       - *queue delay* of a job a runner took: `started_at` − `created_at`; *run time*:
+         `completed_at` − `started_at`; per label (the job's `labels` but `self-hosted`,
+         joined by `+`) and per repository, and for the part attempts (`first`, `retry`,
+         `fallback`) apart. A job with no `started_at` or no runner (cancelled in the queue,
+         still queued) is *unstarted* and in no delay; a skipped job is in nothing;
+       - *wall time* of a completed run: the latest `completed_at` of its jobs that were not
+         skipped − the run's `created_at`;
+       - *verdict delay*: the `completed_at` of the run's `verdict` job (it posts the final
+         status as its last step), of the latest run attempt that has one, − the head's push:
+         the repository's activity entry (`GET /repos/{r}/activity`) whose `after` is the head
+         sha on the run's branch, at most 10 min before the run's `created_at` (or a minute
+         after), on a `push`, `pull_request` or `merge_group` run; else the run's `created_at`
+         (a dispatch, a schedule, a push not found, an activity the login may not read). The
+         report counts which;
+       - a *re-run* is measured within its latest attempt: the wall from the run's
+         `run_started_at`, and the verdict delay too where the re-run repeated the `verdict`
+         job (one that it did not repeat keeps its own attempt's origin), since the wait for a
+         person to re-run it is not CI's.
+
+       Counts, p50, p90 and max: the value at index round(p × (n − 1)) of the sorted values. A
+       job's kind is the last ` / ` segment of its name: the reusable workflow's `part <id> /
+       first|locate|salvage|retry|red`, `plan`, `pending`, `verdict`; a composing workflow's
+       `part <id> / first|where|salvage|retry|fallback`, or a flat `<part>` with
+       `<part>-retry`. *Retries per row*: each retry or fallback attempt a runner took, by the
+       hint's row (`route.row_of`; the route may still move a retry, 16.5) of its first
+       attempt's outcome, read from the host's part record
+       (`--records`), else from the run's artifact `ci-part-<id>-1`; without either, a first
+       attempt whose host had to be found (a `locate`, `where` or `salvage` job ran) or that
+       was cancelled is `any`, a `fallback` job is `fallback`, the rest `unknown`. *Refusals
+       after a start*: the outcomes read that are `unavailable`, by the reason's head (from the
+       API the retried parts' first attempts; from `--records` every attempt on that host).
+       *Presence* (16.4, 19): from `--records DIR`, a host's data directory: its
+       `presence-<date>.log` lines in the window, stops by cause, starts by the cause of the
+       runner's previous stop, `kept`, holds, infrastructure ends and self-drains; a host's
+       logs and records are read where the caller can read them (its own account), never
+       fetched. *API use*, each call 30 s and 3 tries, on GitHub's API host only, at most
+       `--max-requests` (2,000) calls or the report is refused, never shortened: for one repository with R runs, P pushes and
+       N retried parts in K runs, about ceil(R/100) + R + ceil(P/100) + K + 2N requests (a day of the
+       canary's 44 runs on 2026-11-12: 77). GitHub's run search gives at most 1,000 runs: a window with more is refused.
     9. **Shares** (amends 15.8 item 2 and §5.1). Shared hosts give most of their
        capacity to CI: h100 8 CPU slots of 20 threads (160 of its 176) and its 5 cards;
        3090a 2 CPU slots, its cards and its nightly. 3090b becomes the development and

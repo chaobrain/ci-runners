@@ -1528,6 +1528,8 @@ Each item names what it supersedes or amends.
        - the host or its pool is drained (13.1, 15.2), or the host's health gate fails;
        - an exclusive timing part runs or waits for its CPUs: the part runners whose
          CPUs it fences stop.
+       - *Amended by 19.2:* on a host with a tier, a host of an earlier tier has an idle,
+         listening runner of the runner's capability labels (read by the tick only).
 
        *Idle* is read without a token: no `Runner.Worker` process below the runner's
        root (the scan `pool.runners_alive` makes) and no part scope of the runner
@@ -1584,7 +1586,9 @@ Each item names what it supersedes or amends.
          since a job queued on a label without a runner waits 24 h (§2); a runner that
          presence holds back for a passing cause (a card in use, a taken slot, a timing
          run) still serves its label. A queued part's own bound stays with the
-         consumer's sweeper for now (§10, RUN-10's open point).
+         consumer's sweeper for now (§10, RUN-10's open point). *Amended by
+         19:* presence holds a later tier's idle runners offline while an earlier tier has
+         idle ones (19.2), and the route counts them as room (19.3); it names no host.
        - *Retries are the five rows of `outcome.hint`* and nothing else:
 
          | row (`where`) | outcomes | the retry's labels |
@@ -2231,6 +2235,279 @@ amends.
   | (g) Landlock and seccomp alone, without namespaces | on 5.15 files only (ABI 1): no network rules (ABI 4, kernel 6.7), no signal or abstract-socket scoping (ABI 6, 6.12); every process visible, and the account's processes' `/proc/<pid>/environ` readable (Yama limits attaching only); pathname Unix sockets and the user's D-Bus reachable (a connect is no file access); the job keeps the account's uid and may signal any of its processes | Landlock in the kernel | (b) and (c) fail | light; kept as a second fence inside the namespaces |
   | (h) public GPU jobs on `6000pro` only | `account` | root on that host (we have it) | ruling 2: h100's cards stay closed to public repositories, and no host without root ever joins | the lightest now; it is C4's first step anyway |
 
+## Lead decision (proposed, 2026-11-12): the preferred host first, by presence (decision 19, issue #200)
+
+Proposed with RUN-10's R5b (issue #200); this text is approved with its PR. The lead ruled on
+2026-11-12 that all tests of every repository that uses the pool run on h100 first: the
+pool's large host (176 threads, 5 cards) sat nearly idle while parts waited elsewhere, and
+the other free hosts, then the cluster, are overflow. GitHub gives a job to any idle online
+runner that has all of its labels, in no order we can set (16.1, §2), so the order has to
+come from which runners are online. Building R5 also found what the route cannot yet read
+(its PR's "Needs the lead"), and on 2026-11-12 two hosts that had joined the pool lacked a
+repository entry that the older hosts' policies carried: the merge bot's jobs were refused
+there in "Set up runner" (reason `bot`), whole runs were lost, and nothing reported the
+difference.
+
+A first version of this decision named a preferred host's label at plan time, with a
+spill to the shared labels after 60 s. A batch of eight concurrent runs measured the same
+day shows why that fails under a burst: each plan placed its two or three CPU parts on host
+labels from its own reading of the capacity, so 20 parts herded onto the five part runners
+of the two first-choice hosts (queue p50 1.6 min, p90 16.4 min) while 13 runners on the
+other free hosts took none. Plans in the same minute do not see each other's parts, so a
+host label chosen at plan time moves the herd rather than spreading it (16's option (c)).
+The order is therefore made where the runners are, by presence, and no plan names a host.
+
+19. **The preferred host first, and what the route reads.**
+    1. **The tier** (amends 16.4). A host's entry in a pool registry (`pool.toml`,
+       `[machine.<key>]`, access `local` or `ssh`) may set `tier`, an integer from 1 to 99;
+       tier 1 comes first, and a host of an earlier tier (a smaller number) before one of a
+       later tier. A cluster entry refuses the key. A host without a tier neither yields nor
+       is yielded to (today's behaviour), and hosts of one tier do not yield to each other.
+       The maintainer sets it, the same values in every CI account's registry (each host's
+       presence reads its own account's) and in their own (`pool status` shows it,
+       operations §11). No consumer sets or overrides it: a plan names needs, never hosts
+       (16.1, §4.10's keys). The values for the lead's ruling: h100 `1`, the new host of
+       16.9 (`6000pro`) `2` (18.1's ruling 2 gives the public pool the same order), 3090a
+       `3`, 3090b `4` (its timing runner never yields, 19.2).
+    2. **A later tier yields** (a new cause of 16.4, read by the tick only). An idle runner
+       of class `part`, `gpu` or `multi` on a host with a tier, with no other cause and with
+       capability labels (its `ci-` labels and `mem-big`), has the cause `tier` while a host
+       of an earlier tier *offers* them: that host's row, read in this tick through its
+       forced probe (as `pool status --fast`: connected within 2 s, answered within 1.5 s,
+       from the capacity file that the host's own presence rewrites at each tick, 16.5), is
+       up (no problem: not stale, drained, unreachable, without a runner online, failing its
+       health gate or its policy, 19.4, 19.6), was read within 45 s, has the same repository
+       entries as this host's policy (19.6), and reports a pool (19.4) whose labels include
+       all of the runner's capability labels with at least one *listening* runner: online,
+       idle (no worker), no lease held on its cards (our own parts' too), and its listener
+       holding an established TCP connection (its socket inodes against its network
+       namespace's established ones in `/proc`, IPv4 and IPv6). The row's age is judged by
+       this host's clock after the probes. Light, timing, cluster-driver and the `home`
+       runners never yield (16.9: one host times the compile gates). A card is a slot: a
+       card's runner yields to a host with a listening runner of `ci-gpu`, a two-card runner
+       to one of `ci-gpu2`; a card held by someone else is not listening there, since its
+       host's presence stops its runner.
+       - *Down and up.* A runner with the cause stops as for any cause (two idle ticks,
+         the look just before the stop). One that presence stopped for this cause alone
+         starts at the first tick without a cause, not after two: up at once. A runner
+         that presence started is not yielded for 300 s (the dwell), so a burst's
+         overflow runners stay for its next parts and a flickering count above makes no
+         flapping: a runner that presence starts stops at most 12 times an hour (a start
+         by hand or by 15.5's recovery is not under the dwell).
+       - *What does not yield* (an unproven fact counts as false): a hold on this host
+         (19.8); no registry or no tier here; every earlier tier's probe failed, late, older
+         than 45 s, of an older release (no `listening`), with a problem or with other
+         repository entries; or a earlier tier with no listening runner of the labels. Then
+         the runners that yielded start at that tick, so a host whose own capacity file is
+         stale or unreadable loses nothing: its tick reads the other rows itself, and its
+         own row being stale only takes it out of the route as any stale host (16.5).
+         `ExecCondition=` does not read the cause (no network in a unit's start): a restart
+         brings the runner back and the next ticks yield it again. With presence off,
+         nothing yields.
+       - *The reaction time,* from the moment the last listening runner of a tier is
+         taken: its host's tick rewrites its row within 20 s, the next tick of a lower
+         tier's host reads it within 20 s and starts its yielded runners, and a runner
+         takes a queued job once it has started and polled (to be measured in R5b's drill,
+         about 10 to 15 s): at most about 55 s, about 30 s on average. Every later tier
+         whose earlier tiers have no listening runner starts at that same tick, so a burst
+         that fills h100 brings up `6000pro` and 3090a together, not one tier per
+         reaction; the order holds at rest and for the next parts. No floor of runners
+         that stay online is needed for that bound, and a floor would let a later tier
+         take jobs while the preferred host idles.
+    3. **The route counts yielded runners as room** (amends 16.5's overflow; the route
+       still names no host). A host row's pools report `yielded`, the runners presence
+       holds offline for this cause alone, and the route counts a label's free runners
+       plus its yielded ones, so a burst's parts past the preferred host's room stay on the
+       shared labels, which the yielded runners take once they start, rather than going
+       to the cluster. A plan routed from any reading names only capability labels, so N
+       plans of one minute all queue on `ci-cpu` (say), GitHub hands them to h100's idle
+       runners (the only tiered ones online), and the rest wait for one reaction time.
+       The cluster target order stays 16.5's (price, then key). *Retries:* a `cool-card`
+       or `same-host` retry names its host's labels; where that host has a tier and an up
+       host of an earlier tier serves the part's capability label (it may be yielding), the
+       retry takes the thermal row's other branch (`fallback`) or `any`, so it never
+       waits on a yielding host.
+    4. **What the rows gain** (each additive; the capacity file stays schema 1).
+       - A host row: `role` (the inventory's `this`); `pools`, one per runner pool of the
+         host's inventory: `pool`, `class`, `labels` (those every runner of the pool
+         carries, so not a card's `<role>-gpu<N>`), `registered`, `online` and `free` (as
+         `label_runners`, per pool), `listening` and `yielded` (19.2, 19.3), and where the
+         pool has a `slot` table its `memory_gib`, `speed` and `workers`. They replace
+         R5's `slot_pools`, which nothing wrote: `mem-big`, the memory error and the
+         timeout's speed (16.2) are now decided from every host that reports its pools.
+         Also `tier` (19.1, from the reading registry); `policy` (19.6); and the host's
+         health gate (the data directory's free space below `disk_min_gib`, the CI
+         account's access to the shared files, 15.2) as the problem `health: …`, which
+         takes the host out as any problem does (15.1). The CI account's own probe reads
+         them (the local machine's and a forced probe's); a probe that a maintainer's
+         login sends reads no inventory or policy of the CI account, and its row has none
+         of them.
+       - A cluster target row: `memory_gib` and `max_minutes` (the registry's), and
+         `partition` as an opaque key, the first 12 hex digits of the SHA-256 of the
+         machine's key and the partition's name, equal for targets that share a partition
+         (so they share its jobs, 16.5); the name stays in the registry (§3.3).
+       - *Schema.* An older reader keeps a row's unknown fields and ignores them
+         (`capacity.read` keeps every key; `host_row` reads the probe's keys by name), and
+         a newer caller that reads an older host's probe finds none: that host reports no
+         pools, offers nothing to a later tier and is not compared (19.6). The new counts
+         are in `pools`, never in `label_runners`, whose entries an older reader checks
+         key by key. So no schema 2. The one non-additive change is the registry key: an
+         older loader refuses an unknown key, so `pool status`, the route and presence's
+         capacity file of an older release fail on a registry that has `tier`. The key
+         goes in only after every host has the release and `v1` points at it (operations
+         §5's second lesson); until then nothing yields and a mixed fleet behaves as 16.
+    5. **The part action's outputs** (amends §4.3, additive): `pool-labels`, the JSON
+       array of the labels of the pool the part ran on (its record's `pool_labels`), and
+       `cool-card`, a card of this host that passes the health gate for a thermal retry,
+       or empty. `gpus` stays the cards the part held, which the `cool-card` row avoids.
+       The reusable workflow passes them to `route.retry` (16.5); until then the
+       `cool-card` row falls back and `same-host` becomes `any`.
+    6. **A drifted hook policy shows.** The CI account's probe reads its `etc/policy.toml`
+       and reports `policy`: `file`, the first 12 hex digits of the file's SHA-256 (the
+       hook's `policy=`, §6.3), and `repositories`, those of its `[repositories]` entries
+       as loaded (each name with its keys, in a canonical JSON), or `error` where the
+       policy does not load, which is also the problem `policy: does not load` (the hook
+       then refuses every job, a black hole). Among the host rows that report
+       `repositories`, the value most of them hold is the norm (on a tie there is none);
+       each other host gets the warning `policy: repository entries differ from <n>
+       other host(s)` in `warnings` and `policy_drift: true`. `pool status` prints the
+       warnings with the problems, marked `warn:`. A warning is not a problem: the host
+       stays up and its runners still take shared-label jobs. No host yields to one whose
+       repository entries differ from its own (19.2): those jobs it would refuse. The file
+       digest is shown and not compared (the actors and comments may differ). Operations
+       §2's new-host steps copy the `[repositories]` entries from a host in service and
+       check that `pool status` shows no warning before the runners are registered.
+    7. **Smaller.**
+       - The inventory loader refuses a slot's `speed` that is not a finite positive number
+         (TOML has `inf` and `nan`; `inf` made every scaled timeout infinite).
+       - *Noted, not solved:* a workflow's or job's `env:` reaches the executor's own
+         environment, so a job can set `CI_RUNNER_SLOT` and take another slot's cpuset and
+         memory. On the private pools a job's code can do as much anyway as the account
+         (T13); on the public pool decision 18 covers it (the confined runner, 18.3).
+    8. **A hold: host-label jobs on a later tier** (amends 19.2). Some jobs name a host's own
+       labels on purpose, and would wait while that host yields. These are the uses found on
+       2026-11-12:
+       - brainspike's nightly (`nightly.yml`): its test parts run on the 3090 hosts' own
+         part, card, two-card and timing labels (`runs-on: [self-hosted, matrix.part.label]`,
+         from `scripts/ci_core.py`'s `NIGHT_ROUTES`), and its bisect leg runs on the
+         bisect labels of the plan (a 3090 host's part or card label). The night's seconds
+         on those hosts are the impact map's reference seconds, and the lead's ruling keeps
+         the nightly's test parts there.
+       - brainspike's PR and main tiers (`ci.yml`, `main.yml`, `ci-part.yml`): until R6
+         moves them to capability labels, each part, its retry and its fallback run on the
+         host labels that `scripts/ci_core.py`'s placement gives. These are the host
+         labels of h100, `6000pro`, 3090a and 3090b, and `3090-multi` (both 3090 hosts'
+         two-card runners). The main tier's bisect leg runs as the nightly's does.
+       - brainspike's salvage legs, on `<host>-light`. These are `home` runners, which
+         never yield.
+       - brainspike's cache warm-up (`cache-warm.yml`), which runs on the cluster-driver
+         label `3090-slurm` (decision 13.2), and the canary's cluster legs (on
+         `3090a-slurm`). Cluster-driver runners never yield, so neither is affected.
+       - the canary branches of ci-canary: `canary-3090.yml` (each job on a 3090 host's
+         light, part, card, two-card or timing label), `canary-6000pro.yml`,
+         `canary-h100.yml` (h100's part and per-card labels), and the slot and leak checks
+         (on `<host>-light`).
+       - a maintainer's drill or diagnosis on one host.
+
+       None of these is gated by a token or by GitHub's queue (15.6). The mechanism is a
+       *hold*: a time-bounded marker on a host under which none of its runners takes the
+       cause `tier`.
+       - *The command.* `ci-run presence hold --minutes N` (1 to 720, so one night at
+         most) sets or extends the caller's hold to now + N. `ci-run presence hold
+         --release` ends the caller's own hold, and `ci-run presence hold` prints the
+         holds. The marker is `state/hold.json`, written atomically, with one entry per
+         holder: its key, its `until`, who set it and when. A job's key is its
+         repository, run id and attempt; the maintainer's key is `maintainer`. So one
+         run's release never ends another's hold. The host is held while any entry is
+         unexpired. An expired entry counts for nothing, and the next write
+         removes it; there are at most 32 entries.
+       - *Who may set it.* The maintainer, as the CI account, from a shell. Or a job
+         running on that host's `home` runner (a light runner without a `ci-` label,
+         which never stops). The job's repository must have an entry in that host's
+         policy that is not paused, whose `id` matches the job's, and whose `classes`
+         include `nightly` (12.14's opt-in class, which the nightly already needs). Any
+         other caller is refused, with its reason. A job can hold only the host it runs
+         on.
+       - *What it does.* While a hold is active, `tier_yield` gives no runner of the host
+         the cause. A yielded runner then starts at the next tick, as for any cause that
+         ended. The other causes (cards, slots, drain, health, timing) are unchanged.
+         The held host still offers later tiers only what its listening runners offer.
+       - *What it shows.* The host's row reports `hold_until` (the latest `until`) and
+         `holds` (how many). `pool status` prints `hold until <UTC time>` beside the
+         problems, and `ci-run presence --dry-run` names it.
+       - *Its cost.* While held, the host's runners are online and take shared-label jobs
+         too, even while an earlier tier idles. That is today's behaviour, bounded to the
+         hold.
+       - *If a job that set a hold is cancelled or lost,* its entry lasts only until its
+         `until`. Nothing else is left behind.
+       - *What each consumer does* (their change, made in their own repositories later):
+         - the nightly: its first job, on each held host's `home` label, holds that host
+           for the night's bound. Its last job (`if: always()`) releases it.
+         - a bisect leg: it is inside its run's hold. A main tier's bisect, or a PR or
+           main-tier part on a host label before R6, holds its host for its job's bound
+           from that host's `home` label, then releases it.
+         - the cache warm-up: nothing (it runs on the cluster driver).
+         - the canary: it holds each host it names for its bound, first, and releases it
+           at its end. ci-canary's policy entry must then carry `nightly`.
+         - a maintainer: for a drill or a diagnosis on one host, `ci-run presence hold
+           --minutes 60` as the CI account there, then `--release`.
+    9. **Costs, and the rollout.**
+       - *Costs.* Presence must be on for every tiered host. Today it is off everywhere
+         and its live drill (R3's 50 flips) is still owed, so the drill comes first.
+         - *Starts and stops.* At rest the later tiers' part and card runners are offline,
+           which lowers the long polls through the egress proxy (17). A burst starts them
+           within one tick (a few dozen sessions, far under 17's cap of 1024), and the
+           dwell bounds the stops.
+         - *Reaction time.* The first overflow parts of a burst wait one reaction time.
+         - *A black hole.* An earlier tier's runner that is listening yet takes no job
+           keeps the later tiers yielding. A listener without a connection is caught, and
+           a hook that refuses drains its host after three refusals (16.4's black hole).
+           One that GitHub never serves is not caught until a maintainer drains it. This
+           is an open point; R6's bound of a queued part is the backstop.
+         - *Host labels.* A job on a later tier's own host label waits while that host
+           yields, unless the host is held (19.8).
+       - *The rollout* (the host steps are the lead's).
+         1. The release (R5b). It changes no behaviour until the steps below. It is
+            installed everywhere and `v1` is moved to it.
+         2. The capability labels on the runners (`ci-cpu`, `ci-gpu`, `ci-gpu2`, beside
+            today's host and peer labels: 16.1's H1 step, by each host's inventory and
+            `ci-run setup`). A pool without a capability label neither yields nor
+            offers: its runners have no labels to yield on, and no later runner's labels
+            fall within it.
+         3. The drill, then presence on per host.
+         4. `tier` on h100. Tier 1 yields to no host, so this changes nothing by itself.
+         5. `tier` on a later-tier host (`6000pro` 2, 3090a 3, 3090b 4), only after
+            every consumer that names that host's labels (the list above) either sets
+            the hold or has moved to capability labels. brainspike's placement names
+            `6000pro` as well as the 3090 hosts, and a canary branch names it too, so
+            the new host waits like the 3090 hosts.
+         6. Each host's `[repositories]` entries made equal where `pool status` warns,
+            and the `nightly` class in the entries of the repositories that hold.
+- *Options weighed.* (a) A preferred host's label at plan time with a spill to the shared
+  labels (this decision's first version): plans of one minute herd onto the same host, as
+  measured; the spill needs a watching light job per part (a burst floods the light pool)
+  and a concurrency cancel that is not confirmed, and the wait is up to 70 s anyway.
+  (b) A host label without a spill: the herd waits for the named host. (c) Routing each
+  part just before its attempt, from a light job: one more pickup per part, and parts of
+  one minute still read the same free runners. (d) A soft hint: GitHub's labels have none
+  (§2). (e) Single-job runners issued on demand, as 18.6 does for the public pool: the
+  org's runners would need a token that administers them on the issuer (15.6 keeps such a
+  token off every host). (f) A floor of runners that stay online on the later tiers: one
+  reaction time less for a burst's first overflow parts, but GitHub would hand those
+  runners jobs while h100 idles. (g) The tick reading the other rows from its own account's
+  capacity file (no network in the tick): up to 30 s older (its timer), so about 85 s at
+  worst. For the jobs that name a later tier's host labels (19.8): (h) A pool of
+  runners with host labels only, for the nightly, which never yields. It would share
+  the host's CI slots with the part pool, so the night's reference seconds would be
+  measured under oversubscription, or the part pool would shrink by day. (i) A time
+  window in the registry (no yielding at night): a daytime dispatch of the nightly, a
+  canary or a drill falls outside it, and a late schedule (GitHub fires them hours late)
+  runs past it. (j) A reference capability label on the 3090 runners: those runners would
+  then never yield, and they would take `ci-cpu` jobs while h100 idles, which is the ruling
+  this decision exists for. (k) Moving every host-label job to capability labels: the
+  nightly's reference seconds need those very hosts. The hold names a host, for a bounded
+  time, gated by the host's own policy, and needs no token.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -2321,6 +2598,7 @@ back to this contract.
 | A caller pinned to `ci.yml@v1.N.0` runs `part.yml` and the actions at `@v1.N.0` once the stamp rewrote their refs (as measured for `h100-test.yml`, §9). | 16.6, §9 | R6 |
 | The job token with `actions: read` lists only its own repository's runs and jobs; the org's runner list needs `admin:org` (15.6). So the route reads capacity from the hosts, never from GitHub's queue. | 16.5 | R5 |
 | A job queued on labels that no online runner has waits (up to 24 h) instead of failing at once. | 16.5 (the plan-time error) | R5 |
+| A runner that comes online is handed a job already queued on its labels at its first poll, within seconds. | 19.2 (the reaction time) | R5b (the drill) |
 | A runner stopped while idle goes offline and takes no job; a job assigned to it just before the stop is queued again or ends without outputs (`lost` or `stopped`), and never runs twice. | 16.4 | R3 (the 50 flips) |
 | The pre-job hook sees `GITHUB_REF_PROTECTED` with the other default variables, for every event, on a repository-level runner of a public repository too. | 16.7, 18.7 | C2, C4 (were P1, P2) |
 | A fork's pull request to a public repository that names `ci-pub-gpu` is assigned to a repository runner and fails in "Set up runner" on the hook's refusal, before any step. | 16.7, 18.7 | C4 (the live negative test; was P2) |
@@ -2583,6 +2861,7 @@ the GPU leases for the part's life; the command does not inherit them.
 | `retry-on` | label array for the retry: a cool card's `<host>-gpu<M>`, the other host's pool of the class for a drained or busy part (decision 13.3), else the pool's own labels or the registry's `fallback`. The reusable workflow does not read it: it retries by the five rows of 16.5; the other host's pool goes with `v2` |
 | `resume` | whether the retry should resume |
 | `host`, `gpus`, `queue-seconds`, `run-seconds` | for the summary |
+| `pool-labels`, `cool-card` | the labels of the pool the part ran on (a JSON array), and a card of this host that passes the health gate for a thermal retry, or empty (19.5): what `route.retry` reads for the `same-host` and `cool-card` rows |
 | `record` | `<host role>:<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>`, the part record below the host's `state/parts/` |
 | `summary` | path to a Markdown block: host, cards, peak temperature per card, waits, events |
 
@@ -4025,6 +4304,21 @@ nightly on capability labels) are its PRs, not this repository's.
   the recorded plans of the first consumer's last 14 days, no part is routed to a host
   label, a part goes to the cluster only when no host had a free slot of its label, and
   a label with no host serving it fails the plan.
+- **R5b, a preferred host** (19, issue #200): the registry's `tier`; presence's `tier`
+  cause, its dwell and its up-at-once start; the hold (`ci-run presence hold`); the probe's
+  `listening` and `yielded`; the route's room and its retries on a yielding host; the rows'
+  `role`, `pools`, `tier`, `policy`, health gate and the targets' bounds; the part action's
+  `pool-labels` and `cool-card`; `pool status`'s policy warnings; the slot `speed` check.
+  *Acceptance:* unit tests for every rule, each failing on a mutant; a simulated burst (N
+  plans routed from one capacity reading, GitHub's assignment in the order least favourable
+  to h100, each host's ticks at their own phase) in which every plan names only capability
+  labels, h100's idle runners take parts before any other host's, no part waits more than 60
+  s while a runner of its labels idles or is yielded, no part goes to the cluster while a
+  host has room, and nothing yields where the earlier tier's row is stale, unread, has a
+  problem or is not listening, and a held later tier yields nothing and takes its host-label
+  parts at once; a hold is refused to a job whose repository's entry lacks `nightly` or that
+  runs on no `home` runner, and ends by itself; on the hosts, after the release, a drill
+  that measures the reaction time.
 - **R6, the reusable workflow** (16.6): `ci.yml` and `part.yml`; the contract check; the
   stamp's rewrite of their refs. *Acceptance,* on the canary at `@v1.N.0`: a run takes 3
   pickups on its critical path; a runner killed during a part leads to its salvage and a

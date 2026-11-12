@@ -249,7 +249,8 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         text = setup.build(str(self.etc)).text()
         for want in (f'write  {units}/ci-envrefresh.service', f'write  {units}/ci-envrefresh.timer',
                      'not enabled now: ci-envrefresh.timer',
-                     'run    systemctl --user enable --now ci-reaper.timer ci-envrefresh.timer ci-hostload.timer\n'):
+                     'run    systemctl --user enable --now ci-reaper.timer ci-envrefresh.timer ci-hostload.timer '
+                     'ci-capacity.timer\n'):
             self.assertIn(want, text)
         self.assertEqual(self.apply(first), 1)  # an approved plan that is not this one is refused
         self.assertFalse((units / 'ci-envrefresh.timer').exists())

@@ -335,3 +335,24 @@ brainspike 的 nightly 靠 GitHub 的 `schedule` 触发，merge gate 的事件�
   3. 先在 user manager 下演练一次：`systemd-run --user --wait --pipe <release>/setup/workstation/runner-watch.sh --report-only <state 文件的绝对路径> <wrapper> <org> <host>...`，它只打印每台主机的结论和会开、会关的 issue，什么都不写；
   4. `systemctl --user daemon-reload && systemctl --user enable --now ci-runner-watch.timer`，再用 `systemctl --user list-timers ci-runner-watch.timer` 确认下一次触发的时间。
 - 前提：同 §12。
+
+## 14. 槽位：给部件池定 `slot` 表（design 16.2，RUN-10 的 R2 起）
+
+一个部件 runner 就是一个槽位。`part` 或 `gpu` 池在 inventory 里加一张 `slot` 表，每个 runner 一个 cpuset；setup 把 runner 在表里的序号（从 0 起）写进它的 `.env`，即 `CI_RUNNER_SLOT=<i>`。部件在这样的 runner 上绑到 `cpus[i]`，内存上限是 `memory`（不超过 registry 的上限，部件自己的 `memory` 更小时用它），命令拿到 `CI_WORKERS`、`CI_SPEED` 和（设了时）`CI_ISA`，内层超时是 `timeout-minutes` × `speed`。
+
+```toml
+part  = { count = 2, labels = ["<host>-cpu"], slot = { cpus = ["4-9", "10-15"], workers = 6, memory = "48G", speed = 1.3, isa = "x86-64-v3" } }
+cards = { per_card = true, class = "gpu", labels = ["<host>-gpu"], slot = { cpus = ["16-19", "20-23"], workers = 4, memory = "40G", speed = 1.3 } }
+```
+
+怎么定：
+
+- **`cpus`**：每个 runner 一个 cpuset，互不重叠（loader 会拒绝重叠和个数不对的表）；per-card 池按 `gpus` 的顺序每张卡一个，尽量放在卡所在的 NUMA 节点上。留出 `compile_cpus`（计时部件独占）和给本地工作、light runner 用的 CPU。cpuset 必须是 runner 进程本来就能用的 CPU，否则部件以 `unavailable`（`slot: ... are not all CPUs this runner may use`）结束。
+- **`workers`**：一个部件该起几个 worker。通常等于 cpuset 的 CPU 数；内存紧时减少。
+- **`memory`**：`memory` × 池里的 runner 数，加上其他池的，要放得进主机内存（cgroup v1 主机上 `ci.slice` 不生效，总量就靠它们，§7）。需要大内存的部件走 `mem-big`（至少 128 GiB 的槽位，16.1）。
+- **`speed`**：同一个测试在这个槽位上每个 worker 比参考主机慢几倍，参考主机是 1.0。用同一批测试在两边各跑一次、按 worker 的实际时间比算；宁大勿小，太小会让慢主机上的部件撞超时。作业的 `timeout-minutes` 要按标签里最大的 `speed` 算（16.5）。
+- **`isa`**（可选）：这个槽位上部件可以用的最高指令集级别，比如有 AVX-512 的主机限到 `x86-64-v3`，让结果和同标签的其他主机一致。执行器只把它作为 `CI_ISA` 交给命令，由命令去限制自己的数值库。
+
+和 CI 槽位文件的关系（直到 `v2`）：CPU 部件和 `compile` 部件照旧先从主机的槽位文件（inventory `slots` 和 `files`，3090 主机上是 brainspike 的，本地的 `ci_slot.sh` 也从这里拿）拿一个 CI 槽位，拿不到就排队，直到 `queue-timeout-minutes` 后 `unavailable`。槽位文件只决定“同时能跑几个”，不带 CPU；cpuset 只看 `slot` 表。所以部件拿到的槽位文件编号和它的 `CI_RUNNER_SLOT` 不必相同。GPU 部件拿的是卡的租约，不拿 CI 槽位。把 `slots` 保持为不少于部件 runner 数，本地工作和池子运行占用的槽位才会让部件排队，而不是让槽位空着；R3 的 presence 会停掉槽位被别人占着的 runner（16.4）。
+
+上线和回退：先确认 `v1` 已经指向接受 `slot` 的版本（R1，16.3）和会读它的版本（R2），再在 inventory 加表、跑 setup 的 plan 和 apply，让各 runner 的 `.env` 带上 `CI_RUNNER_SLOT`。只有表、`.env` 里还没有 `CI_RUNNER_SLOT` 的 runner 照旧运行；`.env` 里的序号超出表的范围、表被删掉、或 per-card 池的序号和 `CI_RUNNER_CARD` 对不上，部件都以 `unavailable`（`slot: ...`）结束，不会悄悄退回旧的绑核方式。回退就是删掉表再 apply 一次。部件记录（`record.json`）的 `runner_slot` 记下序号、cpuset、`workers`、`memory`、`speed`、`isa` 和放大后的超时分钟数。

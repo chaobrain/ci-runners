@@ -133,10 +133,23 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 命令还能读到这些环境变量：
 
 - `CI_PROJECT`、`CI_PART_DIR`、`CI_RUNNERS_HOST`；
+- 在有槽位的 runner 上（design 16.2，从 RUN-10 的 R2 起；见下面的“槽位”）：`CI_WORKERS`、`CI_SPEED`，以及槽位设了 `isa` 时的 `CI_ISA`；
 - registry 里的 `variables`；
 - runner 的 `https_proxy`、`http_proxy`、`no_proxy`。主机访问外网要经过 egress，所以 pip、git、下载数据集都会自动走代理；只能访问 egress 允许清单上的域名（见 [operations.md](operations.md) §6）。
 
 内存上限来自 registry 的 `memory`。超出就是 `oom`，不算 `red`。
+
+**槽位**（design 16.2，从 RUN-10 的 R2 起）。一个部件 runner 就是一个槽位：固定的一组 CPU 和一个内存上限。部件跑在这样的 runner 上时：
+
+- 进程绑到槽位的 cpuset，`CI_CPUS` 就是它；
+- 内存上限是槽位的 `memory`；部件自己的 `memory` 更小时用它，但永远不超过 registry 的上限；
+- 内层超时是部件的 `timeout-minutes` × 槽位的 `speed`（参考主机上是 1.0）：慢的主机按比例多给时间，`timeout-minutes` 照旧写在参考主机上需要的分钟数；
+- 命令多拿到三个变量，作业自己设的同名变量不会传进来：
+  - `CI_WORKERS`：该起几个 worker 进程，例如 `pytest -n "${CI_WORKERS:-auto}"`。慢的主机给的 worker 更多；不要自己按 CPU 个数另算。
+  - `CI_SPEED`：这个槽位上一个测试比参考主机慢几倍。命令自己的单个测试超时乘上它，例如 `pytest --timeout "$(awk -v s="${CI_SPEED:-1}" 'BEGIN { print int(60 * s + 0.5) }')"`；计时类断言也一样。
+  - `CI_ISA`（只在槽位设了 `isa` 时有）：命令可以用的最高指令集级别，例如 `x86-64-v3`（AVX2）。执行器不强制它：命令要把它传给自己的数值库（比如 XLA 的 `--xla_cpu_max_isa`、oneDNN 的 `ONEDNN_MAX_CPU_ISA`），这样同一个标签下各主机的结果才能逐位相同。
+
+没有槽位的 runner 不设这三个变量，其它一切照旧，所以命令要给它们默认值（`${CI_WORKERS:-…}`、`CI_SPEED` 缺省按 1）。
 
 ## 5. 看结果与常见问题
 

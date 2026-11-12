@@ -13,6 +13,12 @@ Where the user manager has no memory controller (cgroup v1, design decision 11.1
 sums the scope's processes' ``RssAnon`` every ``CAP_POLL`` s and kills them over the
 cap. ``OOMPolicy`` is passed on systemd 253 and later only (``OOM_POLICY_SYSTEMD``).
 
+On a runner with a slot (decision 16.2: its pool's ``slot`` table and ``CI_RUNNER_SLOT`` in
+its ``.env``) the part is pinned to the slot's cpuset, capped at its memory, its command gets
+``CI_WORKERS``, ``CI_SPEED`` and ``CI_ISA``, and its inner timeout is its minutes times the
+slot's ``speed`` (``runner_slot``); a CPU part still takes a CI slot from the slot files,
+which admit it but give it no CPUs. A runner without a slot runs as before.
+
 A part's record is ``state/parts/<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>/``:
 ``record.json`` (inputs, start), ``exit.json`` (the supervisor's) and ``outcome.json``
 (the outputs). The step exits 1 only for ``red``; 2 for an input the registry refuses.
@@ -265,14 +271,87 @@ def command_argv(command: str, *, cpus: str = '', nice: int = 10) -> list[str]:
     return argv + ['bash', '-c', command]
 
 
+#: a runner's ``CI_RUNNER_SLOT`` as setup writes it: an index into its pool's ``slot.cpus``
+SLOT_INDEX = re.compile(r'0|[1-9][0-9]{0,4}')
+
+
+@dataclasses.dataclass(frozen=True)
+class RunnerSlot:
+    """The slot of a part runner (decision 16.2): slot ``index`` of its pool's ``slot``
+    table, with that table's values for it."""
+    index: int
+    cpus: str  # the slot's cpuset, ``slot.cpus[index]``
+    workers: int
+    memory: str
+    speed: float
+    isa: str = ''  # empty: the slot sets none
+
+    def env(self) -> dict[str, str]:
+        """The command's variables of the slot (design §4.3): ``CI_WORKERS``, ``CI_SPEED``
+        and, where the slot sets ``isa``, ``CI_ISA``."""
+        out = {'CI_WORKERS': str(self.workers), 'CI_SPEED': str(self.speed)}
+        if self.isa:
+            out['CI_ISA'] = self.isa
+        return out
+
+    def record(self) -> dict[str, object]:
+        """What the part record keeps of the slot (``ci-run stats`` reads it, 16.8)."""
+        out: dict[str, object] = {'index': self.index, 'cpus': self.cpus, 'workers': self.workers,
+                                  'memory': self.memory, 'speed': self.speed}
+        if self.isa:
+            out['isa'] = self.isa
+        return out
+
+
+def runner_slot(host: Mapping[str, object], cls: str, env: Mapping[str, str]) -> tuple[RunnerSlot | None, str]:
+    """The slot of the runner whose job environment is ``env`` and whose class is ``cls``
+    (decision 16.2), as ``(slot, '')``; ``(None, '')`` where the runner has none (no
+    ``CI_RUNNER_SLOT``: it runs as before, whether or not its pool has a ``slot`` table);
+    ``(None, why)`` where ``CI_RUNNER_SLOT`` and the inventory disagree: malformed, its pool
+    without a ``slot`` table, out of the table's range, or on a per-card pool another
+    card's slot than ``CI_RUNNER_CARD``'s. Never a fallback to the runner without a slot.
+    Pure."""
+    raw = env.get('CI_RUNNER_SLOT', '')
+    if raw == '':
+        return None, ''
+    if not SLOT_INDEX.fullmatch(raw):
+        return None, f'CI_RUNNER_SLOT {raw!r} is no slot index'
+    pool = inventory.pool_of(host, cls)
+    spec = host['pools'][pool] if pool else None
+    table = spec.get('slot') if isinstance(spec, dict) else None
+    if not table:
+        return None, f'CI_RUNNER_SLOT={raw}, but the {cls} pool here has no slot table'
+    i, cpus = int(raw), table['cpus']
+    if i >= len(cpus):
+        return None, f'CI_RUNNER_SLOT={raw} is out of range: the {cls} pool has {len(cpus)} slots'
+    if spec.get('per_card'):  # one slot per card, in the order of the host's gpus (setup)
+        card = str(host['gpus'][i]) if i < len(host['gpus']) else ''
+        if env.get('CI_RUNNER_CARD', '') != card:
+            return None, f'CI_RUNNER_SLOT={raw} is the slot of card {card or "none"}, not of CI_RUNNER_CARD\'s'
+    return RunnerSlot(i, cpus[i], int(table['workers']), str(table['memory']), float(table['speed']),
+                      str(table.get('isa', ''))), ''
+
+
+def slot_cpus(slot: RunnerSlot) -> set[int]:
+    """The CPUs of a slot's cpuset. Pure."""
+    return {c for lo, hi in inventory.cpu_ranges(slot.cpus) or () for c in range(lo, hi + 1)}
+
+
+def slot_memory(slot: RunnerSlot, asked: str, memory_max: str) -> str:
+    """A slotted part's memory cap (decision 16.2): its slot's ``memory``, or the part's own
+    ``memory`` where it asks for less, and never above the registry's maximum. Pure."""
+    return min([slot.memory, memory_max, *([asked] if asked else [])], key=registry.memory_bytes)
+
+
 def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, part_dir: str, results: str,
              cards: Sequence[int], cpus: str, files: Mapping[str, str], slot: str, resume: bool,
-             held: str = '') -> dict[str, str]:
+             held: str = '', runner: RunnerSlot | None = None) -> dict[str, str]:
     """The command's environment (design §4.3): the job's without our ``CI_*`` names,
     then the project's variables, then ours, which nothing overrides. On a host with the
     host lock its path (``CI_HOST_LOCK``, and ``LOCAL_CI_HOST_LOCK`` for brainspike's
     ``host_lock.sh``), and ``held``, the mode the part holds it in (``s`` or ``x``), as
-    the protocol's cover ``BRAINSPIKE_HOST_LOCK`` (decision 12.9). Pure."""
+    the protocol's cover ``BRAINSPIKE_HOST_LOCK`` (decision 12.9). On a runner with a slot
+    (``runner``, decision 16.2) also the slot's variables (``RunnerSlot.env``). Pure."""
     env = {k: v for k, v in base.items() if not k.startswith('CI_') and k not in STEP_FILES
            and k not in (locks.ENV, 'LOCAL_CI_HOST_LOCK')}
     env.update(project.variables)
@@ -285,6 +364,8 @@ def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, p
         'CI_CPUS': cpus, 'CI_SLOT_LOCK': files['slot_lock'],
         'CI_SLOT_QUEUE': files['slot_queue'], 'CI_SLOT_HELD': slot, 'CI_RESUME': '1' if resume else '0',
     })
+    if runner is not None:
+        env.update(runner.env())
     if files.get('host_lock'):
         env['CI_HOST_LOCK'] = env['LOCAL_CI_HOST_LOCK'] = files['host_lock']
         if held:
@@ -905,6 +986,7 @@ class Executor:
         self.proc: subprocess.Popen | None = None
         self.unit = ''
         self.record = ''
+        self.slot: RunnerSlot | None = None  # the runner's slot (decision 16.2), read by the gate
 
     def caps_memory(self) -> bool:
         """Whether the supervisor enforces the memory cap: where systemd would not."""
@@ -973,13 +1055,20 @@ class Executor:
     def gate(self, a: Inputs, cls: str, lock: str) -> str:
         """Why a part cannot start on this host before anything is taken, or empty: its
         ``gpus`` or ``lock`` outside its class's row (design §4.8), or a ``compile`` part on
-        a host without ``compile_cpus``."""
+        a host without ``compile_cpus``, or a ``CI_RUNNER_SLOT`` the inventory does not give
+        this runner (``runner_slot``) or whose CPUs the runner may not use. It keeps the
+        runner's slot in ``slot``."""
         h = self.inv.host
         why = class_refusal(cls, gpus=a.gpus, lock=lock, cards=len(h['gpus']), host_lock=bool(h['files'].get('host_lock')))
         if why:
             return why
         if cls == 'compile' and not h.get('compile_cpus'):
             return 'this host has no compile_cpus for compile parts'
+        self.slot, why = runner_slot(h, cls, self.env)
+        if why:
+            return f'slot: {why}'
+        if self.slot is not None and not slot_cpus(self.slot) <= os.sched_getaffinity(0):
+            return f'slot: slot {self.slot.index}\'s cpus {self.slot.cpus} are not all CPUs this runner may use'
         return ''
 
     def shared_state(self, record: str) -> str:
@@ -1158,6 +1247,10 @@ class Executor:
             why = self.gate(a, cls, lock)
             if why:
                 return self._end(record, rec, a, unavailable=why)
+            if self.slot is not None:  # its pin, cap and timeout below are the slot's (16.2)
+                memory = slot_memory(self.slot, a.memory, proj.memory_max)
+                rec['runner_slot'] = {**self.slot.record(), 'memory': memory,
+                                      'timeout_minutes': a.timeout_minutes * self.slot.speed}
             why = self.shared_state(record)  # decision 15.2: a miss drains the host
             if why == SHARED_UNKNOWN:
                 return self._end(record, rec, a, unavailable=why)
@@ -1277,6 +1370,8 @@ class Executor:
                 rec['lock_wait_seconds'] = round(hold.waited)
             rec.update(queue_seconds=round(time.monotonic() - t0), cards=cards, slot=slot_path, run_epoch=time.time())
             pin = str((h.get('compile_cpus') if cls == 'compile' else h.get('cpus')) or '')  # design §5.5 item 4
+            if self.slot is not None:  # the runner's slot, before the host's (16.2); its CI slot has no CPUs
+                pin = self.slot.cpus
             cpus = pin or cpu_list(os.sched_getaffinity(0))  # a list, as the inventory's
             build, env_fd = envuse.hold(proj.env) if proj.env else ('', None)  # the link, resolved once
             if build:
@@ -1284,15 +1379,17 @@ class Executor:
             env = part_env(self.env, role=self.inv.this, project=dataclasses.replace(proj, env=build), part_dir=work,
                            results=results, cards=cards,
                            cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume,
-                           held=hold.mode if hold else '')
+                           held=hold.mode if hold else '', runner=self.slot)
             inner = command_argv(a.command, cpus=pin, nice=0 if cls == 'compile' else 10)
             cap = registry.memory_bytes(memory) if self.caps_memory() else 0
             p2p = self.p2p if cls in P2P_CLASSES else []
+            # the inner timeout: the plan's minutes, times the slot's speed on a runner with one (16.2)
+            timeout = a.timeout_minutes * 60 if self.slot is None else a.timeout_minutes * 60 * self.slot.speed
             sup = [sys.executable, '-I', '-c', 'import json, sys; sys.path.insert(0, sys.argv.pop(1)); '
                    'from ci_runners.part import supervise; '
                    'sys.exit(supervise(sys.argv[1], float(sys.argv[2]), sys.argv[5:], int(sys.argv[3]), '
                    'json.loads(sys.argv[4])))',
-                   self.release, record, str(a.timeout_minutes * 60), str(cap), json.dumps(p2p), *inner]
+                   self.release, record, str(timeout), str(cap), json.dumps(p2p), *inner]
             run_id = f'{os.path.basename(os.path.dirname(record))}-{attempt}'
             self.unit = unit_name(self.env.get('RUNNER_NAME', ''), a.id, run_id) if self.scope else ''
             rec['unit'] = self.unit

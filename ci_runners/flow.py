@@ -302,7 +302,7 @@ def run_verdict(a: argparse.Namespace) -> int:
     from ci_runners import verdict
     if not is_public(os.environ):
         raise FlowError('verdict is a public caller\'s (ci.yml\'s own is actions/verdict)')
-    return verdict.main(['--context', a.context, '--sha', a.sha, '--parts', a.parts, '--artifacts', a.artifacts], None)
+    return verdict.main(['--context', a.context, '--sha', a.sha, '--parts', a.parts], None)
 
 
 def repository(env: Mapping[str, str], call: Callable) -> tuple[str, bool]:
@@ -797,7 +797,6 @@ def parser() -> argparse.ArgumentParser:
     v.add_argument('--context', required=True)
     v.add_argument('--sha', required=True)
     v.add_argument('--parts', default='')
-    v.add_argument('--artifacts', required=True)
     s = sub.add_parser('status')
     s.add_argument('--context', required=True)
     s.add_argument('--sha', required=True)

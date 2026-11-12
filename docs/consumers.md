@@ -115,7 +115,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
    ```
 
    对每个 artifact 不全、并且在这台主机上的最新记录属于本次 run 和这次 attempt 的部件，`salvage` 会把记录里的结果作为 `ci-part-<id>-<attempt>` 上传，并带上 `salvaged: true`。不在这台主机上跑的部件不处理；还在跑的部件最多等 `wait-seconds`，超时就是 `lost`。一个 salvage 作业最多上传 16 个部件。
-6. **权限**：`contents: read`，claim 和 verdict 还要 `statuses: write`，verdict 另要 `actions: read`：它列出本 run 的 artifact，每个部件只读最新一次 run attempt 的，这样“Re-run failed jobs”能让 run 变绿（issue #169）；没有这个权限时照旧读下载到的 artifact。要读别的 run 的 artifact 时再加 `actions: read`。
+6. **权限**：`contents: read`，claim 还要 `statuses: write`；verdict 只要 `statuses: write` 和 `actions: read`：它自己通过 API 列出本 run 的 artifact 并读取（不再用 `actions/download-artifact`，#242），每个部件只读最新一次 run attempt 的，这样“Re-run failed jobs”能让 run 变绿（issue #169）。从 `v1.19.0` 之后的版本起，没有 `actions: read` 的 verdict 不再退回去读下载到的 artifact，而是发 `error`，描述写明缺这个权限。要读别的 run 的 artifact 时再加 `actions: read`。
 7. `concurrency` 必须写成块格式。行内映射 `{group: ...${{ }}...}` 里含表达式时，YAML 会解析失败，GitHub 会直接拒绝整个文件。`tests/test_workflow.py` 会检查本文档里的示例。
 
 各 action 的输入见 `actions/<name>/action.yml`，引用 `@v1`。不要钉某个发布 tag（如 `@v1.4.1`）：主机升级后，inventory 里新加的键（v1.5 的 `peer_labels`、`busy`）会让更旧的 action 在那台主机上全部失败（design §9，`v1.5.0` notes 第 6 条）。brainspike 的 `ci.yml` 是一个完整的例子。
@@ -297,6 +297,7 @@ plan 命令作为部件 `plan` 运行（有主机记录），但**从 v1.19.0 �
 | verdict | `success` | `passed: <id>, <id>, ...`，超过 140 个字符时 `passed: all N parts` |
 | verdict | `failure`（测试红：有部件最后一次尝试是 `red`） | `red: <id> red, ...` |
 | verdict | `error`（基础设施：没有红，但有部件最后是 `lost`、`unavailable`、`oom`、`thermal`、`reboot`、`stopped`） | `infrastructure: <id> <outcome>, ...` |
+| verdict | `error`（列不出本 run 的 artifact，#242） | `verdict: the run's artifacts could not be listed (...)`，GitHub 拒绝时加 `; the job needs actions: read` |
 | verdict（plan 作业结束运行时） | `failure` | `contract ...: merge origin/<分支>`（§8）、`plan: red (...)`、`plan: <计划的错误>` |
 | verdict（plan 作业结束运行时） | `error` | `plan: <outcome> (...)`（plan 命令 `lost`、`unavailable` 等）、`route: ...`、`plan: no plan output`、默认分支的 `contract` 读不进来、`a public repository: its run is public.yml's, on hosted runners (decision 18.7)`（公开仓库的运行落到了私有仓库的那一套作业）、`a private repository: its run is ci.yml's own, not public.yml's` |
 | verdict（plan 作业结束运行时） | `success` | `nothing to run`（空的 `parts`）、`plan only: N part(s) routed, none run` |

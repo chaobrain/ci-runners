@@ -50,7 +50,7 @@ class Actions(unittest.TestCase):
         text = (ROOT / 'actions' / 'part' / 'action.yml').read_text()
         self.assertIn("  upload:\n    description: \"false: no outcome artifact", text)
         self.assertTrue(text.split('  upload:\n', 1)[1].split('\noutputs:', 1)[0].endswith("    default: 'true'"))
-        self.assertIn("    - if: always() && steps.part.outputs.outcome != '' && inputs.upload != 'false'\n"
+        self.assertIn("    - id: upload\n      if: always() && steps.part.outputs.outcome != '' && inputs.upload != 'false'\n"
                       "      uses: actions/upload-artifact@v4\n", text)
 
     def test_no_flow_mappings(self):
@@ -83,6 +83,19 @@ class Actions(unittest.TestCase):
         for name in ACTIONS:
             self.assertIn('"$GITHUB_ACTION_PATH/../lib/ci-run.sh" ' + name,
                           (ROOT / 'actions' / name / 'action.yml').read_text().replace('\n        ', ' '))
+
+
+    def test_the_verdict_downloads_nothing_and_a_red_part_uploads_once(self):
+        """Issue #242: the verdict reads the parts' artifacts through the API itself; the part
+        action says whether its own upload succeeded, so a red part's step (which fails with
+        its upload done) is not uploaded a second time."""
+        from tests import yamlsub
+        doc = yamlsub.load((ROOT / 'actions' / 'verdict' / 'action.yml').read_text())
+        self.assertEqual([st.get('uses') for st in doc['runs']['steps']], [None])
+        part = yamlsub.load((ROOT / 'actions' / 'part' / 'action.yml').read_text())
+        self.assertEqual(part['outputs']['uploaded']['value'], '${{ steps.upload.outcome }}')
+        [up] = [st for st in part['runs']['steps'] if st.get('uses', '').startswith('actions/upload-artifact@')]
+        self.assertEqual(up['id'], 'upload')
 
 
 class Salvage(unittest.TestCase):

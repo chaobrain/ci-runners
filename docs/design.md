@@ -3601,6 +3601,20 @@ Rules:
      jobs were pushed onto `compile_cpus` and the compile gates read load (6 of 8 bench runs red on timing only).
      `v1` went back to `v1.14.1` after its canary again (a compile part waits for a CPU part's shared hold), 3090b's
      `cpus` to every CPU and its units without `CPUAffinity`; `main` reverts #170, so decision 15.10 is gone.
+- **`v1.16.0`** (minor, stamped 2026-11-12; decisions 16.2–16.5 and 17, RUN-10 R1–R5, #173, #179, #181, #183,
+  #186–#189, #192; brainspike's coordinator under the lead's delegation of 2026-11-12): the back-out of 15.10 (no
+  `CPUAffinity` in the units); the new inventory keys accepted and ignored, `CI_RUNNER_SLOT`, the verdict reads a
+  part's latest attempt (R1); the capacity file, `pool status --fast` and `ci-capacity.{service,timer}` (R4); a part
+  runner is one slot where its pool has a `slot` table (R2); presence and the black-hole self-drain, inert unless a
+  host's inventory has a `presence` table (R3); `ci-run route` (R5); the egress proxy's connection cap an option,
+  1024 by default, its unit with `LimitNOFILE=4096` and `MemoryMax=1G` (17). No action's input or output, label or
+  outcome kind changes; every key it adds is optional. Its notes:
+  1. **Order.** The egress host first (17): the new release's unit file, then one restart of the proxy at a moment
+     with no job running, which cuts every tunnel once.
+  2. **Setup.** A host's plan drops the `CPUAffinity=` lines that the hooks at `v1.15.0` still wrote, adds the
+     presence check to the runner unit and `ci-presence.{service,timer}` (inert: no inventory has a `presence`
+     table), and `ci-capacity.{service,timer}` (skipped where the account has no registry). `v1.14.1`'s host layer
+     reads every host file this plan writes, so the apply can come before the move of `v1`.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

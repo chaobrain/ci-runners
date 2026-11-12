@@ -2269,7 +2269,8 @@ runner" (reason `bot`), whole runs were lost, and nothing reported the differenc
        one of those labels and a host label, with its free runners known. A pool's *host
        label* is its label equal to the host's role or starting with `<role>-` (§5.1's
        naming, which the `cool-card` row already relies on). Its *room* is its free runners
-       less the parts this plan already placed in it. In plan order, a part goes to the
+       less the parts this plan already placed in it; a part that does not need `mem-big`
+       tries a host's pools without it first. In plan order, a part goes to the
        first host in the order that offers its labels with room: its labels are
        `[self-hosted, ci-<need>, (mem-big,) <host label>]`, so the capability labels keep
        it in its equal-verdict class and a host label that several of the host's pools
@@ -2374,8 +2375,9 @@ runner" (reason `bot`), whole runs were lost, and nothing reported the differenc
          environment, so a job can set `CI_RUNNER_SLOT` and take another slot's cpuset and
          memory. On the private pools a job's code can do as much anyway as the account
          (T13); on the public pool decision 18 covers it (the confined runner, 18.3).
-    8. **Rollout.** One minor release (R5b); the route's output changes only with
-       `--prefer`, the part action gains two outputs, every row field is optional. After it
+    8. **Rollout.** One minor release (R5b); the route names a host label only with
+       `--prefer` (its new output fields are additive), the part action gains two outputs,
+       every row field is optional. After it
        is installed everywhere and `v1` points at it, the host steps (the lead's): `prefer`
        in each CI account's registry and the maintainer's; each host's `[repositories]`
        entries made equal where `pool status` warns. R6 passes `--prefer` once its canary

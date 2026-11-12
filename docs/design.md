@@ -1721,6 +1721,32 @@ Each item names what it supersedes or amends.
        `dev_slots`: cpusets and a memory cap outside every CI slot), so development
        never takes a CI slot; a host whose registry names none keeps 15.1's claim.
 
+       *Built in R7 (#220): the dev slots.* A host entry of the registry may name
+       `dev_slots = { lock = "/abs/dev.lock", cpus = ["0-15", "16-31"], memory_gib = 64 }`
+       (and `queue`, `inventory`): one cpuset per dev slot, disjoint and below the entry's
+       `cpus`; `memory_gib`, the most a run there may ask (at most the entry's); lock files
+       `lock`, `<stem>.<i>.lock` from the second (created when taken) and the queue
+       `<stem>.queue`, none of them the CI slots'. A cluster entry or a status-only one
+       (`probe = "forced"`) cannot name them. On such a host a CPU pool run takes a dev slot,
+       in line as for a CI slot (`--no-wait`: exit 75), runs pinned to its cpuset
+       (`taskset`), and never takes, waits for or tickets a CI slot; a GPU run takes the
+       cards' leases as before; a run asking more cores than the smallest dev slot is skipped
+       there. Before it takes one, the host side reads the host's inventory (`inventory`,
+       else `$CI_RUNNERS_ETC/inventory.toml` of the account it runs as) and refuses the run
+       if a dev slot meets a cpuset CI pins parts to (a pool's `slot.cpus`, 16.2, the host's
+       `cpus` or `compile_cpus`) or a pool of part, gpu, multi, compile or nightly runners
+       pins its parts to none. An `inventory` named that cannot be read or loaded refuses the
+       run; the default one, where it cannot (the pool account is not the CI account), skips
+       the check and says so, so a registry names the CI account's inventory where the pool
+       account may read it. A host row gains `dev_slots`, `dev_free` and `dev_queue` (every
+       ticket, waiting or not); its CI figures stay the CI slots', so
+       the route and presence read nothing new, and presence sees no hold of a CI slot by a
+       pool run there. A host without `dev_slots` keeps 15.1's claim. *Rollout:* a release
+       before this one refuses the key (`unknown keys`), so `pool status`, the route and
+       presence's capacity file of an older release would fail on a registry that has it;
+       the key goes into a registry only after every host that reads that registry has the
+       release and `v1` points at it (as `tier`, 19.9).
+
        *Built in R7 (#219): the report.* `ci-run stats [--repo R ...] [--since T | --run ID
        ...] [--records DIR ...] [--no-artifacts] [--json]` (`ci_runners/stats.py`), on any
        account with a login that reads the repositories (`GH_TOKEN=$(gh auth token) ci-run

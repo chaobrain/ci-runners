@@ -256,6 +256,10 @@ class Slots(SlotHost):
         self.assertEqual(float(got['argv'][at(got['argv'], 2)]), 300.0)  # 2 min x 2.5
         self.assertEqual(rec['inputs']['timeout_minutes'], 2)  # the plan's minutes, as given
         self.assertEqual(rec['runner_slot']['timeout_minutes'], 5.0)
+        self.inv = inventory.load(self.slotted.replace('speed = 2.5', 'speed = 1.1'))
+        _, rec, _ = self.spawned(self.runner('part', '0'), timeout_minutes=7.0, id='round')
+        self.assertEqual(rec['runner_slot']['timeout_minutes'], 7.7)  # not 7 x 1.1, 7.700000000000001
+        self.inv = inventory.load(self.slotted)
         # for real: 0.03 min is 1.8 s, and 4.5 s at speed 2.5; a 3-s command passes only on the slot
         _, out = self.go(self.runner('part', '0'), command='sleep 3', timeout_minutes=0.03, id='slow')
         self.assertEqual(out['outcome'], 'pass', out['reason'])
@@ -279,6 +283,11 @@ class Slots(SlotHost):
                  (self.slotted, 'part', '', 'x', "CI_RUNNER_SLOT 'x' is no slot index"),
                  (self.base, 'part', '', '0', 'CI_RUNNER_SLOT=0, but the part pool here has no slot table'),
                  (self.slotted, 'light', '', '0', 'CI_RUNNER_SLOT=0, but the light pool here has no slot table'),
+                 (self.slotted.replace('light = 1', 'light = { count = 1, slot = { cpus = ["0"], workers = 1, '
+                                       'memory = "1G", speed = 1 } }'), 'light', '', '0',
+                  'a light runner is no slot: slots are for part and gpu runners'),
+                 (self.slotted.replace('speed = 2.5', 'speed = inf'), 'part', '', '0',
+                  "the slot table's speed is not finite"),
                  (self.slotted, 'gpu', '0', '1', "CI_RUNNER_SLOT=1 is the slot of card 1, not of CI_RUNNER_CARD's"),
                  (self.slotted.replace('["0", "1"]', '["0", "4000"]'), 'part', '', '1',
                   "slot 1's cpus 4000 are not all CPUs this runner may use")]

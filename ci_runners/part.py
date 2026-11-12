@@ -31,6 +31,7 @@ import dataclasses
 import datetime
 import fcntl
 import json
+import math
 import os
 import re
 import shutil
@@ -273,6 +274,10 @@ def command_argv(command: str, *, cpus: str = '', nice: int = 10) -> list[str]:
 
 #: a runner's ``CI_RUNNER_SLOT`` as setup writes it: an index into its pool's ``slot.cpus``
 SLOT_INDEX = re.compile(r'0|[1-9][0-9]{0,4}')
+#: the classes whose runners are slots (decision 16.2: a ``part`` or ``gpu`` pool). A slot on
+#: another class is refused: ``compile`` keeps its fenced ``compile_cpus`` (12.7), ``nightly``
+#: holds every slot (12.8), ``multi`` two cards, ``light`` no CI slot, ``slurm`` the cluster's
+SLOT_RUNNER_CLASSES = ('part', 'gpu')
 
 
 @dataclasses.dataclass(frozen=True)
@@ -321,6 +326,10 @@ def runner_slot(host: Mapping[str, object], cls: str, env: Mapping[str, str]) ->
     table = spec.get('slot') if isinstance(spec, dict) else None
     if not table:
         return None, f'CI_RUNNER_SLOT={raw}, but the {cls} pool here has no slot table'
+    if cls not in SLOT_RUNNER_CLASSES:
+        return None, f'a {cls} runner is no slot: slots are for {" and ".join(SLOT_RUNNER_CLASSES)} runners'
+    if not math.isfinite(float(table['speed'])):
+        return None, 'the slot table\'s speed is not finite'
     i, cpus = int(raw), table['cpus']
     if i >= len(cpus):
         return None, f'CI_RUNNER_SLOT={raw} is out of range: the {cls} pool has {len(cpus)} slots'
@@ -1250,7 +1259,7 @@ class Executor:
             if self.slot is not None:  # its pin, cap and timeout below are the slot's (16.2)
                 memory = slot_memory(self.slot, a.memory, proj.memory_max)
                 rec['runner_slot'] = {**self.slot.record(), 'memory': memory,
-                                      'timeout_minutes': a.timeout_minutes * self.slot.speed}
+                                      'timeout_minutes': round(a.timeout_minutes * self.slot.speed, 3)}
             why = self.shared_state(record)  # decision 15.2: a miss drains the host
             if why == SHARED_UNKNOWN:
                 return self._end(record, rec, a, unavailable=why)

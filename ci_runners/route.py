@@ -271,11 +271,12 @@ class _Facts:
 
     def preferred(self, labels: Sequence[str]) -> tuple[object, dict, str, int] | None:
         """The first host in the order that offers ``labels`` with room (19.2): ``(row,
-        pool, host label, room)``, or None."""
+        pool, host label, room)``, or None. A part that does not need ``mem-big`` tries a
+        host's pools without it first, so that it leaves the big slots to the parts that do."""
         for r in self.order:
             if r.age is None or r.age > PREFER_FRESH_S or r.row.get('policy_drift'):
                 continue
-            for p in _pools(r) or []:
+            for p in sorted(_pools(r) or [], key=lambda p: MEM_BIG not in labels and MEM_BIG in p['labels']):
                 hl = _host_label(r, p)
                 if not hl or not set(labels) <= p['labels'] or p['free'] is None:
                     continue

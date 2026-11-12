@@ -83,6 +83,10 @@ class Prefer(unittest.TestCase):
                          ('hosta', ['self-hosted', 'ci-cpu'], rt.SPILL_S))
         self.assertIn('prefer hosta: 2 free of hosta-cpu', got['why'])
         self.assertEqual(rt.SPILL_S, 60)
+        fast = cpu('hosta', 2, memory_gib=48, speed=1.0)
+        slow = cpu('hostb', 3, memory_gib=48, speed=2.0)
+        got = routed([part_(minutes=10)], host('hosta', fast, prefer=1), host('hostb', slow))[0]
+        self.assertEqual((got['host'], got['timeout_minutes']), ('hosta', 35))  # the shared labels' largest speed: both legs
 
     def test_without_the_flag_no_host_label(self):
         got = routed([part_()], host('hosta', cpu('hosta', 2), prefer=1), prefer=False)[0]
@@ -119,6 +123,7 @@ class Prefer(unittest.TestCase):
                 got = routed([part_()], host('hosta', cpu('hosta'), prefer=1, **kw), other, *norm)[0]
                 self.assertEqual(got['host'], want)
         for why, p in {'free unknown': cpu('hosta', None, registered=2), 'no free': cpu('hosta', 0),
+                       'free true': cpu('hosta', True, registered=2), 'free negative': cpu('hosta', -1, registered=2),
                        'no capability': P('part', ['hosta-cpu'], 1), 'no host label': P('part', ['ci-cpu', 'x-cpu'], 1)}.items():
             with self.subTest(why):
                 self.assertEqual(routed([part_()], host('hosta', p, prefer=1), other)[0]['host'], '')
@@ -136,6 +141,8 @@ class Prefer(unittest.TestCase):
         self.assertEqual(routed([part_()], r)[0]['labels'], ['self-hosted', 'ci-cpu', 'h1-cpu'])
         r = host('k', P('part', ['ci-cpu', 'ci-cpu2'], 1), role='ci', prefer=1)  # a role named like the shared ones
         self.assertEqual(routed([part_()], r)[0]['host'], '')
+        r = host('k', P('part', ['ci-cpu', 'mem-big'], 1), role='mem', prefer=1)
+        self.assertEqual(routed([part_()], r)[0]['host'], '')
 
     def test_the_needs_it_covers(self):
         pools = (cpu('hosta'), P('cards', ['hosta-gpu', 'ci-gpu'], 2, cls='gpu'), P('compile', ['hosta-compile', 'ci-timing'], 1))
@@ -146,6 +153,13 @@ class Prefer(unittest.TestCase):
                           ['self-hosted', 'ci-timing'], ['self-hosted', 'ci-gpu2']])  # timing never; gpu2 not offered
         rs = (host('hosta', *pools, P('multi', ['hosta-multi', 'ci-gpu2'], 1), prefer=1),)
         self.assertEqual(routed([part_('m', 'gpu2')], *rs)[0]['labels'], ['self-hosted', 'ci-gpu2', 'hosta-multi'])
+
+    def test_a_plain_part_leaves_the_big_pool_to_the_parts_that_need_it(self):
+        big = P('big', ['hosta-big', 'ci-cpu', 'mem-big'], 1, memory_gib=256, speed=1.0)
+        small = cpu('hosta', 1, memory_gib=48, speed=1.0)
+        got = routed([part_('a'), part_('b', memory_gib=100)], host('hosta', big, small, prefer=1),
+                     host('hostb', cpu('hostb', 2, memory_gib=48, speed=1.0)))
+        self.assertEqual([g['labels'][-1] for g in got], ['hosta-cpu', 'hosta-big'])
 
     def test_a_mem_big_part_needs_a_pool_with_both(self):
         small = cpu('hosta', 3, memory_gib=48, speed=1.0)
@@ -249,8 +263,9 @@ class PolicyDigest(unittest.TestCase):
 
 class Drift(unittest.TestCase):
     def test_the_norm_is_what_most_hosts_hold(self):
-        rs = [host('a', rep='x'), host('b', rep='x'), host('c', rep='y'), host('d'), target()]
-        self.assertEqual(capacity.policy_drift(rs), {'c': 2})
+        broken = [dict(host(k), policy={'error': 'does not load'}) for k in ('e', 'f', 'g')]
+        rs = [host('a', rep='x'), host('b', rep='x'), host('c', rep='y'), host('d'), target(), *broken]
+        self.assertEqual(capacity.policy_drift(rs), {'c': 2})  # a policy that does not load is a problem, not a digest
         self.assertEqual(capacity.policy_drift(rs[:2]), {})
         self.assertEqual(capacity.policy_drift([host('a', rep='x'), host('b', rep='y')]), {'a': 1, 'b': 1})  # a tie
         self.assertEqual(capacity.policy_drift([host('a', rep='x'), host('b', rep='x'), host('c', rep='y'),

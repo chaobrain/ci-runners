@@ -479,7 +479,7 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
             return fetch(url, token)
         self.fetch = slow
         self.assertEqual(self.main('--parts', ' '.join(f'p{n}' for n in range(6))), 1)
-        self.assertEqual(most[0], min(verdict.WORKERS, 7))  # every zip at once, up to WORKERS
+        self.assertEqual(most[0], 7)  # every zip at once: WORKERS is 8
         self.assertEqual(self.posted[0][3]['description'], 'red: p5 red')  # the attempts kept their places
         with mock.patch.object(verdict, 'WORKERS', 2):
             most[0] = 0

@@ -1805,8 +1805,9 @@ there, and more hosts without root are expected to join. And a public repository
 runs free on GitHub-hosted runners, so only its GPU jobs need our machines. Decision 18
 replaces 16.7's account rule by a property that a check proves on each host, and confines
 each public GPU job so that the property holds without root. C1's prototype (issue #196)
-measured it on three hosts; the text below says what was measured (18.9) and marks the
-points it left for the lead (*Open for the lead*). Each item names what it supersedes or
+measured it on three hosts; the text below says what was measured (18.9), and the lead
+decided the three points it left open on 2026-11-12 (items 4, 8 and 10: *Decided*). Each
+item names what it supersedes or
 amends.
 
 18. **Public GPU jobs on confined single-job runners.**
@@ -1836,7 +1837,7 @@ amends.
        |---|---|---|---|
        | `microvm` | a kernel of its own: a VM per job, where the KVM device opens | none: a card needs VFIO passthrough, which needs root and takes the card from the host | not for this pool |
        | `account` | an account for public jobs alone (16.7's second account, never the host's private CI account), whose host layer is root's: (a), (b) and "signal or trace" by uid and file modes; "see" only with the account's own mount namespace and `ProtectProc=invisible` (12.16), since without them every account reads every command line in `/proc`. Needs root once | the account in the GPU group | yes, with the check (item 5) |
-       | `ns-subuid` | the confined single-job runner (item 3), its job as a subordinate uid: (a) by a mount namespace that holds nothing of the account and a uid that owns nothing of it; (b) by read-only mounts and a runner that lives for one job; (c) by a PID namespace and the uid. Needs unprivileged user namespaces with capabilities inside, a subordinate range and the set-uid id-map helpers: given on the shared-account host (Ubuntu 22.04); on Ubuntu 24.04 (the dedicated-account host and the reference host, measured) the default AppArmor setting gives an unprivileged user namespace no capabilities and the helpers are not installed, so there it needs root once: an AppArmor profile that allows user namespaces for the launcher, and the helpers' package | the leased card only (item 4), in one of two group modes | yes, with the check |
+       | `ns-subuid` | the confined single-job runner (item 3), its job as a subordinate uid: (a) by a mount namespace that holds nothing of the account and a uid that owns nothing of it; (b) by read-only mounts and a runner that lives for one job; (c) by a PID namespace and the uid. Needs unprivileged user namespaces with capabilities inside, a subordinate range and the set-uid id-map helpers: given on the shared-account host (Ubuntu 22.04); on Ubuntu 24.04 (the dedicated-account host and the reference host, measured) the default AppArmor setting gives an unprivileged user namespace no capabilities and the helpers are not installed, so there it needs root once: an AppArmor profile that allows user namespaces for the launcher, and the helpers' package | the leased card only (item 4), with the GPU group alone (mode (a)) | yes, with the check and mode (a) |
        | `ns-uid` | the same namespaces, the job keeping the account's own uid | as `ns-subuid` | **no** (below) |
        | `none` | — | — | no |
 
@@ -1947,10 +1948,13 @@ amends.
            group-readable files; the uid barrier still covers its owner-only files (the
            keys, the runner credentials).
 
-         The capacity row says which mode a host is in (item 7). *Open for the lead:* which
-         mode the public audience requires, for the canary and for the first real public
-         repository. Recommendation: (a) before the first real public repository; (b)
-         acceptable for the canary.
+         *Decided* (the lead, 2026-11-12): **the public audience requires mode (a)**; the
+         lead asks each shared-account host's administrator for the `/etc/subgid` line. A
+         host whose job would keep the account's other groups (mode (b)) records `kept` in
+         its capacity row (item 7) and does not get the public audience: there is no interim
+         exception, and the canary starts on the dedicated-account host anyway (item 10).
+         The check's identity item fails when the job's kernel groups hold anything but the
+         GPU group (item 5, check 8).
        - *What the control node shows* (a residual, measured). Inside, the vendor's tool
          lists the leased card only, with its total memory use and utilisation (which
          include other processes' use of that card), and lists no process: our own marker
@@ -1996,8 +2000,9 @@ amends.
           nested user namespace reads `ENOSPC`: the namespace limits are 0 inside);
        7. no other card can be opened, by any path, and the leased one can (a CUDA context
           and a kernel run on it);
-       8. the job's uid and gid are a subordinate pair, its groups are those of the host's
-          mode (item 4), and a widened CPU affinity is refused or reset;
+       8. the job's kernel uid and gid are a subordinate pair and its kernel groups are the
+          GPU group alone (mode (a), item 4): any other group fails the item; and a widened
+          CPU affinity is refused or reset;
        9. a fresh allocation on the card reads none of a previous process's data (item 4).
 
        *A control run* of the same check without the confinement, as the account, must fail
@@ -2022,7 +2027,7 @@ amends.
        with the one permission the call needs (administration, write), never `admin:org`.
        Every 15 s it reads each opted-in repository's queued jobs that name `ci-pub-gpu`.
        For each one that no idle public runner serves, it takes the first host in its order
-       (h100, then `6000pro`, then the others; ruling 2) whose capacity row offers the
+       (h100, then `6000pro`; ruling 2 and item 10) whose capacity row offers the
        public audience and a free card, issues a configuration named
        `<host>-pub-gpu<N>-<seq>` with the labels `ci-pub-gpu` and `<host>-pub-gpu`, and hands
        it to that host over ssh with a forced command (a key line marked like the probe's,
@@ -2088,9 +2093,9 @@ amends.
          read or change its tree. Co-users of h100's shared account can therefore read a
          public runner's configuration in flight, its job's token while it runs and its
          results (T6), as they can a private job's; only a separate kernel uid for the
-         namespace's owner, which needs root, would close it. *Open for the lead:* is this
-         acceptable for the public audience? Recommendation: accept; a public job carries
-         no secret, and co-users can already do the same to private jobs.
+         namespace's owner, which needs root, would close it. *Accepted* by the lead on
+         2026-11-12: a public job carries no secret, and co-users can do the same to
+         private jobs today.
     9. **Evidence** (C1, issue #196, 2026-11-12). The prototype launcher and check ran on a
        shared-account host (Ubuntu 22.04, kernel 5.15, cgroup v1), a dedicated-account host
        and the reference host (both Ubuntu 24.04), on an idle card named by its device
@@ -2157,13 +2162,19 @@ amends.
         for a public caller and the inventory (`isolation`, `audience`, the opt-in); C3 the
         off-host issuer; C4 a public canary repository on `6000pro`, then on h100 once its
         check passes there; C5 the first real public repository. Ruling 2's order is the
-        issuer's in production; the canary starts on the host whose isolation needs no new
-        code. `6000pro` runs on `account` (Ubuntu 24.04: `ns-subuid` would need root's
-        AppArmor profile and the helpers' package, item 2). *Open for the lead:* whether it
-        also confines its public jobs (`ns-subuid` inside the public account, item 7 of
-        *Considered*). Recommendation: yes, once the production launcher exists. The host
-        and org steps are the lead's: each host's subordinate range, its `/etc/subgid` line
-        for the GPU group where mode (a) is required (item 4), and
+        issuer's in production; the canary starts on the dedicated-account host, where root
+        is ours. *Decided* (the lead, 2026-11-12): **the dedicated-account host confines
+        too.** Once the production launcher exists, every Ubuntu 24.04 host that offers the
+        public audience gets from root what `ns-subuid` needs there (an AppArmor profile
+        that allows user namespaces for the launcher, and the id-map helpers' package, item
+        2), so a public job runs the same way on every host: on `6000pro` its dedicated
+        account plus the confinement. *Which hosts offer the public audience:* h100 first,
+        then `6000pro`. The current plan (proposed to the lead, not yet confirmed) is that
+        the two 3090 hosts do not: 3090b is the reference host, which holds the issuer
+        (item 6) and times the compile gates, and 3090a's two cards serve the nightly's
+        two-card parts. The host and org steps are the lead's: each host's subordinate
+        range, the `/etc/subgid` line for the GPU group on a shared-account host (mode (a),
+        item 4), root's profile and package on the Ubuntu 24.04 hosts, each host's
         forced key line (on h100 a line in the shared account's `authorized_keys`, as 15.8
         item 4), the issuer's token, the canary repository, each repository's opt-in and its
         approval setting for outside contributors.
@@ -2212,7 +2223,7 @@ amends.
   | option | protects | needs from the host | what breaks | weight |
   |---|---|---|---|---|
   | (a) one more unprivileged account from the host's administrator | (a), (b), signal and trace by uid; not "see" without root's `ProtectProc=invisible` or our namespaces | an account in the GPU group, with linger | nothing; combined with `ns-subuid` (7 above) it gives all three | one request per host; not possible on h100 now (15.8) |
-  | (b) only a subordinate range | `ns-subuid`: all three, with the check | one line each in `/etc/subuid` and `/etc/subgid`; `newuidmap`, `newgidmap`; unprivileged user namespaces | nothing; h100 already has it | the smallest request; **chosen** |
+  | (b) only a subordinate range | `ns-subuid`: all three, with the check | one line each in `/etc/subuid` and `/etc/subgid`, and one more in `/etc/subgid` for the GPU group's gid (18.4, mode (a)); `newuidmap`, `newgidmap`; unprivileged user namespaces with capabilities (on Ubuntu 24.04 root's AppArmor profile) | nothing; h100 has the range, and lacks the GPU group's line | the smallest request; **chosen** |
   | (c) world-accessible GPU nodes | spares the GPU-group step | a driver option changed by the administrator | every local user of the host gets every card | rejected: it weakens the host for its other users to save us one map |
   | (d) rootless podman with the vendor's toolkit | as `ns-subuid` once configured | podman; the toolkit with `no-cgroups` on cgroup v1; storage in the account's home | the GPU group only with every group of the account (`keep-groups`), as our launcher without mode (a)'s line; its network outbound by default; much to override | heavy: images, configuration, two upstreams; kept as the fallback (8 above) |
   | (e) a shipped bubblewrap | `ns-uid` only, unless joined to a namespace made by `newuidmap` | a static binary in our subtree | the subordinate uid needs a helper of ours anyway | light, well-reviewed code; not alone |
@@ -2867,7 +2878,7 @@ only after the label's numerics check passed there (16.1).
 | h100 | `part` | 8 | `ci-cpu`, `mem-big` | `h100-cpu` | CPU parts, 8 slots of 20 threads (16.9) |
 | h100 | `gpu` | 5 | `ci-gpu` | `h100-gpu`, `h100-gpu<N>` | one-card parts on card N; no `multi` until a P2P self-test passes (15.8) |
 | the new host (16.9) | `light`, `home`, `part`, `gpu` | sized at its plan from the parts' measured peaks: about 96 threads and its 4 cards | `ci-light`, `ci-cpu`, `ci-gpu`; `ci-gpu2` after a P2P self-test | its role's | as on h100; a dedicated CI account |
-| h100, then the new host (`6000pro`), then any host whose check passes (18) | `pub-gpu` (`gpu`, per card), audience `public` | 0 static; the issuer starts single-job runners on demand, at most one per free card (18.6) | `ci-pub-gpu` | `<host>-pub-gpu` | an opted-in public repository's GPU parts only, confined (18.3); registered at repository level |
+| h100, then the new host (`6000pro`) (18.10; the 3090 hosts not, as planned) | `pub-gpu` (`gpu`, per card), audience `public` | 0 static; the issuer starts single-job runners on demand, at most one per free card (18.6) | `ci-pub-gpu` | `<host>-pub-gpu` | an opted-in public repository's GPU parts only, confined (18.3); registered at repository level |
 
 A pool's size is its slots (or cards): one runner is one slot (16.2), and presence keeps
 online only the runners that can start a job (16.4), so no runner waits for a slot. The
@@ -3091,7 +3102,7 @@ On 3090b and 3090a the executor of §4.3 adds:
 |---|---|---|---|---|
 | h100 | the shared account, runners on it (decision 11.3) | everything a co-user of the account can reach, and they can reach everything of ours: the runner credentials, the hook, the policy, each job's `GITHUB_TOKEN` while the job runs, the checkout of a private repository, the results and the statuses we post | private repositories only, of org members only (decision 11.1, 11.2); `GITHUB_TOKEN` with `contents: read`, plus `statuses: write` only in claim and verdict; per-job directories, deleted after the job; no other credential there but the tunnel key, which opens only allowlisted HTTPS (T15); `NoNewPrivileges` | a dedicated account (decision 11.7) |
 | 3090b, 3090a | a dedicated CI account per host, runners on it (decision 12.2) | the CI account's files: the runner credentials, the hook, the policy, the envs, each job's `GITHUB_TOKEN` while it runs, the checkout of a private repository, the shared lock and slot files (a job can hold them and stall local runs); nothing of the local accounts (T18), no sudo, no GitHub credential | private repositories only, of org members only; `NoNewPrivileges`; the account's own mount namespace (decision 12.16); `GITHUB_TOKEN` as on h100; per-job directories; the tunnel key opens only allowlisted HTTPS; the push key only `--receive` | a root-owned host layer with system units (§5.3, T13) |
-| a public GPU job on any host whose check passes, h100 first (18, from C4; supersedes 16.7's second account) | a subordinate uid in its own user, mount, PID, IPC, network and UTS namespaces (`ns-subuid`), or a dedicated account (`account`); one runner for one job, registered on its opted-in public repository | its own tree, its job's `GITHUB_TOKEN` while it runs, its repository's env and the system read-only, its leased card, the egress proxy's allowlist through one relay; what the control node and the global files of `/proc` and `/sys` show (18.8); not the account's files or keys, not the hooks, the policy or the snapshot (read-only), not any other process, card or socket | the conformance check before the audience and on a timer (18.5); the hook's rules of 16.7, GPU class only; single-job configurations issued off the host (18.6); `no_new_privs`, no capability; the tree deleted after the job | a kernel and driver kept current (18.8) |
+| a public GPU job on a host whose check passes: h100, then `6000pro` (18, from C4; supersedes 16.7's second account) | a subordinate uid in its own user, mount, PID, IPC, network and UTS namespaces (`ns-subuid`), or a dedicated account (`account`); one runner for one job, registered on its opted-in public repository | its own tree, its job's `GITHUB_TOKEN` while it runs, its repository's env and the system read-only, its leased card, the egress proxy's allowlist through one relay; what the control node and the global files of `/proc` and `/sys` show (18.8); not the account's files or keys, not the hooks, the policy or the snapshot (read-only), not any other process, card or socket | the conformance check before the audience and on a timer (18.5); the hook's rules of 16.7, GPU class only; single-job configurations issued off the host (18.6); `no_new_privs`, no capability; the tree deleted after the job | a kernel and driver kept current (18.8) |
 | egress host | a dynamic user of `ci-egress.service` | nothing of a job's: it sees only the names a job connects to | hardened system unit; root-owned release and allowlist | — |
 | workstation | the maintainer | nothing: no job runs there | the push reads the login at each run and stores nothing | — |
 | 3090b, the maintainer's account (15.3, 15.6) | the maintainer | nothing: no job runs as the maintainer, and the CI account reaches nothing of the local accounts (T18) | the backstop and the runner watch read the login at each run and store it nowhere; the watch keeps its counts | — |

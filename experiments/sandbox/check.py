@@ -64,8 +64,9 @@ EXPECTED = {
     'G2': "no other card's node exists; opening one fails",
     'G3': "record what nvidia-smi shows of other cards and of processes outside (a marker of ours holds 64 MiB on the card)",
     'G4': "record whether a fresh allocation reads the previous process's pattern",
+    'R1': 'record whether a process of the account outside can trace the job (the reverse direction)',
 }
-INFO_ITEMS = {'G3', 'G4'}          # recorded, not pass/fail
+INFO_ITEMS = {'G3', 'G4', 'R1'}          # recorded, not pass/fail
 FUNCTIONAL_ITEMS = {'G1', 'N3'}    # must work in every variant, control included
 
 MARKER_CODE = (
@@ -512,6 +513,17 @@ def _card_uuid(card: int) -> str:
     raise SystemExit(f'check: no card with device minor {card}')
 
 
+def _seize_from_outside(pid: int) -> dict:
+    """PTRACE_SEIZE ``pid`` from a fresh process of the account (not an ancestor of it)."""
+    code = ('import ctypes, errno, sys\n'
+            'libc = ctypes.CDLL(None, use_errno=True)\n'
+            'libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]\n'
+            'r = libc.ptrace(0x4206, int(sys.argv[1]), None, None)\n'
+            'print("ok" if r == 0 else errno.errorcode.get(ctypes.get_errno(), "?"))\n')
+    r = subprocess.run([sys.executable, '-c', code, str(pid)], capture_output=True, text=True)
+    return {'r': r.stdout.strip() or r.stderr.strip()[-80:]}
+
+
 def _env_python(env: str) -> str:
     return os.path.join(os.path.realpath(env), 'bin', 'python')
 
@@ -578,6 +590,8 @@ def suite(a) -> int:
                 with open(ready) as f:
                     inner_pid = int(f.read().strip() or 0)
                 outer['ids'] = _kernel_ids(proc.pid, inner_pid)
+                if outer['ids']:
+                    outer['reverse'] = _seize_from_outside(outer['ids']['pid_outside'])
                 break
             time.sleep(0.1)
         open(os.path.join(policy, 'ids.ack'), 'w').close()
@@ -603,6 +617,10 @@ def suite(a) -> int:
             inside_ids = r['observed']
             r['observed'] = {'inside': inside_ids, 'kernel': ids}
             r['held'] = bool(ids) and ids['uid'][1] != os.getuid()
+    if 'reverse' in outer:
+        results.append({'id': 'R1', 'expected': EXPECTED['R1'], 'held': None,
+                        'observed': 'attached' if outer['reverse'].get('r') == 'ok'
+                        else f'failed ({outer["reverse"].get("r")})'})
     if hits:
         for r in results:
             if r['id'] == 'N1':

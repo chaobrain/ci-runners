@@ -1,5 +1,5 @@
-"""The reusable workflows ``ci.yml`` and ``part.yml`` (decision 16.6, design §4.10) and the
-release stamp of their references (§9): their structure, read with the stdlib subset
+"""The reusable workflows ``ci.yml`` and ``part.yml`` (decision 16.6, design §4.10), ``sweep.yml``
+(§4.10, decision 19 item 9) and the release stamp of their references (§9): their structure, read with the stdlib subset
 reader (``tests/yamlsub.py``)."""
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from tests import yamlsub
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WF = ROOT / '.github' / 'workflows'
-REUSABLE = ('ci.yml', 'part.yml')
+REUSABLE = ('ci.yml', 'part.yml', 'sweep.yml')
 #: the capability labels a job may name literally (16.1)
 CAPABILITY = {'self-hosted', 'ci-light'}
 #: every runs-on that is computed: the plan's route, the salvage leg's host, the retry's row
@@ -28,6 +28,8 @@ COMPUTED = {
         'retry': '${{ fromJSON(needs.first.outputs.retry || needs.salvage.outputs.retry || '
                  'needs.locate.outputs.retry).labels }}',
     },
+    # hosted, for every caller: its token cancels runs and posts, and nothing of a head ever ran there
+    'sweep.yml': {'sweep': 'ubuntu-latest'},
 }
 #: each job's permissions, the least it needs (§4.8 rule 6)
 PERMISSIONS = {
@@ -43,6 +45,7 @@ PERMISSIONS = {
                  'salvage': {'contents': 'read'},
                  'retry': {'contents': 'read'},
                  'red': {'statuses': 'write'}},
+    'sweep.yml': {'sweep': {'actions': 'write', 'statuses': 'write'}},
 }
 
 
@@ -190,8 +193,9 @@ class Structure(unittest.TestCase):
             for k, v in {**call.get('inputs', {}), **call.get('outputs', {})}.items():
                 self.assertTrue(v.get('description'), f'{name}: {k}')
             for k, v in call.get('inputs', {}).items():
-                self.assertEqual(v.get('type'), 'boolean' if k in ('plan-only', 'plan-token') else 'string',
-                                 f'{name}: {k}')
+                want = {'plan-only': 'boolean', 'plan-token': 'boolean'}.get(k, 'number' if (name, k) == (
+                    'sweep.yml', 'minutes') else 'string')
+                self.assertEqual(v.get('type'), want, f'{name}: {k}')
         self.assertEqual(set(load('ci.yml')['on']['workflow_call']['inputs']),
                          {'context', 'plan', 'project', 'sha', 'plan-only', 'plan-token'})
         for k in ('plan-only', 'plan-token'):
@@ -292,6 +296,9 @@ class Structure(unittest.TestCase):
         self.assertEqual(plan['if'], "always() && steps.contract.outcome == 'success'")
         up = [st for st in sts if st.get('uses', '').startswith('actions/upload-artifact@')]
         self.assertEqual([u['with']['name'] for u in up], ['ci-plan-files'])
+        # #227: hidden entries too (a `.ci-plan` directory, a `.name` inside); flow plan refused
+        # what the upload cannot carry, and an upload that finds nothing fails the plan's files
+        self.assertEqual((up[0]['with']['include-hidden-files'], up[0]['with']['if-no-files-found']), (True, 'error'))
         self.assertIn("steps.plan.outputs.routed == 'true'", up[0]['if'])
         self.assertTrue(up[0]['if'].startswith('${{ !cancelled() && '))  # a failed plan part's upload skips it not
         env = [st for st in sts if st.get('id') == 'command'][0]['env']
@@ -306,9 +313,10 @@ class Structure(unittest.TestCase):
         self.assertTrue(cond.startswith('!cancelled() && '))  # a status function: no implicit success()
         self.assertIn("needs.plan.outputs.routed == 'true'", cond)
         self.assertIn("needs.plan.outputs.run == 'true'", cond)
-        self.assertIn("needs.plan.outputs.files != 'failure'", cond)
+        # #227: only files uploaded (or none named) hand on; failed, timed out or skipped do not
+        self.assertIn("(needs.plan.outputs.files == 'none' || needs.plan.outputs.files == 'success')", cond)
         plan = load('ci.yml')['jobs']['plan']
-        self.assertEqual(plan['outputs']['files'], '${{ steps.files.outcome }}')
+        self.assertEqual(plan['outputs']['files'], "${{ steps.plan.outputs.files == '' && 'none' || steps.files.outcome }}")
         self.assertEqual(plan['steps'][0]['id'], 'project')  # before anything reads it
         text = (WF / 'ci.yml').read_text()
         self.assertNotIn('github.event.repository.name', text)  # absent on a schedule
@@ -355,11 +363,24 @@ class Structure(unittest.TestCase):
         self.assertEqual(pend['steps'][0]['with']['seen'], "${{ needs.plan.outputs.seen || '0.0' }}")
         v = jobs['verdict']
         self.assertEqual(v['needs'], ['plan', 'pending', 'parts'])  # no pending after the final status
-        post, lost, verd = v['steps']
-        self.assertEqual((post['if'], lost['if'], verd['if']),
+        post, lost, files, verd = v['steps']
+        self.assertEqual((post['if'], lost['if'], files['if'], verd['if']),
                          ("needs.plan.outputs.state != ''", "needs.plan.outputs.state == '' && needs.plan.outputs.routed != 'true'",
-                          "needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'"))
+                          "needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' && "
+                          "needs.plan.outputs.files != 'none' && needs.plan.outputs.files != 'success'",
+                          "needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true' && "
+                          "(needs.plan.outputs.files == 'none' || needs.plan.outputs.files == 'success')"))
+        # a plan job whose runner was lost has no outputs: its sha too, so each post names the run's own head
+        for st in (post, lost, files):
+            self.assertEqual(st['with']['sha'], '${{ needs.plan.outputs.sha || inputs.sha || github.event.pull_request.head.sha || github.sha }}', st['if'])
         self.assertEqual(lost['with']['state'], 'error')
+        # #227: a plan job that ended after the route (its files not uploaded) is the plan's end,
+        # never every part read as lost: the verdict action does not run, no part started
+        self.assertEqual((files['with']['command'], files['with']['state']), ('status', 'error'))
+        self.assertEqual(files['with']['description'],
+                         "plan: the plan's files did not upload after the route (${{ needs.plan.outputs.files || 'lost' }}); no part ran")
+        self.assertEqual(v['outputs']['state'], "${{ needs.plan.outputs.state || (needs.plan.outputs.routed == 'true' && "
+                                                "steps.verdict.outputs.state) || 'error' }}")
         self.assertEqual((post['with']['command'], post['with']['state']), ('status', '${{ needs.plan.outputs.state }}'))
         self.assertEqual(jobs['plan']['outputs']['state'], '${{ steps.contract.outputs.state || steps.plan.outputs.state }}')
         # who posts: pending, a red attempt (part.yml) and the verdict job; nothing else
@@ -384,6 +405,53 @@ class Flow(unittest.TestCase):
         flags = set(re.findall(r"add_argument\('(--[a-z-]+)'", (ROOT / 'ci_runners' / 'flow.py').read_text()))
         self.assertLessEqual(passed, flags)
         self.assertIn('exec sh "$GITHUB_ACTION_PATH/../../bin/ci-run" flow "$IN_COMMAND"', text)
+
+
+class Sweep(unittest.TestCase):
+    """``sweep.yml`` (§4.10, decision 19 item 9): one job on a hosted runner, started by a
+    schedule or a dispatch on the default branch only, that runs no head code."""
+
+    def test_one_hosted_job_with_exactly_its_two_writes(self):
+        doc = load('sweep.yml')
+        self.assertEqual(list(doc['on']), ['workflow_call'])
+        self.assertEqual(list(doc['jobs']), ['sweep'])
+        job = doc['jobs']['sweep']
+        self.assertEqual(job['runs-on'], 'ubuntu-latest')
+        self.assertEqual(job['permissions'], {'actions': 'write', 'statuses': 'write'})
+        self.assertNotIn('permissions', doc)
+        self.assertLessEqual(job['timeout-minutes'], 10)
+        self.assertEqual(set(doc['on']['workflow_call']['inputs']), {'workflow', 'context', 'minutes'})
+        self.assertEqual(doc['on']['workflow_call']['inputs']['minutes']['default'], 60)
+
+    def test_only_a_schedule_or_a_dispatch_on_the_default_branch_runs_it(self):
+        cond = ' '.join(load('sweep.yml')['jobs']['sweep']['if'].split())
+        self.assertEqual(cond, "github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && "
+                               "github.ref == format('refs/heads/{0}', github.event.repository.default_branch))")
+
+    def test_no_head_code_no_artifact_and_no_expression_in_a_script(self):
+        steps_ = load('sweep.yml')['jobs']['sweep']['steps']
+        self.assertEqual([st.get('uses') for st in steps_], ['chaobrain/ci-runners/actions/sweep@' + (
+            'v1' if (ROOT / 'actions' / 'RELEASE').read_text().strip() == 'hook'
+            else (ROOT / 'actions' / 'RELEASE').read_text().strip())])
+        text = (WF / 'sweep.yml').read_text() + (ROOT / 'actions' / 'sweep' / 'action.yml').read_text()
+        for bad in ('actions/checkout', 'download-artifact', 'upload-artifact', 'secrets'):
+            self.assertNotIn(bad, text)
+        action = yamlsub.load((ROOT / 'actions' / 'sweep' / 'action.yml').read_text())
+        self.assertEqual(len(action['runs']['steps']), 1)
+        self.assertNotIn('${{', action['runs']['steps'][0]['run'])
+        self.assertTrue(set(action['runs']['steps'][0]['env']) >= {'GITHUB_TOKEN', 'IN_WORKFLOW', 'IN_CONTEXT', 'IN_MINUTES'})
+
+    def test_each_input_reaches_its_flag_from_the_actions_checkout(self):
+        text = (ROOT / 'actions' / 'sweep' / 'action.yml').read_text()
+        ins = action_inputs('sweep') - {'token'}
+        self.assertEqual(set(load('sweep.yml')['jobs']['sweep']['steps'][0]['with']), ins)
+        pairs = set(re.findall(r'"(--[a-z-]+)=\$IN_([A-Z_]+)"', text))
+        self.assertEqual(pairs, {(f'--{i}', i.upper()) for i in ins})
+        self.assertLessEqual({f for f, _ in pairs},
+                             set(re.findall(r"add_argument\('(--[a-z-]+)'", (ROOT / 'ci_runners' / 'sweep.py').read_text())))
+        self.assertIn('exec sh "$GITHUB_ACTION_PATH/../../bin/ci-run" sweep "--workflow=$IN_WORKFLOW"', text)
+        self.assertIn('GITHUB_TOKEN: ${{ inputs.token }}', text)
+        self.assertEqual(yamlsub.load(text)['inputs']['token']['default'], '${{ github.token }}')
 
 
 class Stamp(unittest.TestCase):
@@ -417,9 +485,10 @@ class Stamp(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             after = self.files(t)
             changed = {k for k in before if before[k] != after[k]}
-            self.assertEqual(changed, {'actions/RELEASE', '.github/workflows/ci.yml', '.github/workflows/part.yml'})
+            self.assertEqual(changed, {'actions/RELEASE', *stamp.WORKFLOWS})
+            self.assertEqual(set(stamp.WORKFLOWS), {f'.github/workflows/{n}' for n in REUSABLE})
             self.assertEqual(after['actions/RELEASE'], 'v1.17.0\n')
-            for rel in ('.github/workflows/ci.yml', '.github/workflows/part.yml'):
+            for rel in stamp.WORKFLOWS:
                 old, new = before[rel].splitlines(), after[rel].splitlines()
                 self.assertEqual(len(old), len(new))
                 for a, b in zip(old, new):
@@ -440,7 +509,7 @@ class Stamp(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             t = self.tree(d)
             self.assertEqual(sorted(stamp.stamp(t, 'hook', 'r6-proof')),
-                             ['.github/workflows/ci.yml', '.github/workflows/part.yml'])
+                             ['.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml'])
             self.assertEqual((t / 'actions' / 'RELEASE').read_text().strip(), 'hook')
             self.assertEqual({r for _, r in stamp.refs((t / '.github/workflows/part.yml').read_text())}, {'r6-proof'})
 

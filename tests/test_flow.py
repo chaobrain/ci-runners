@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -266,6 +267,54 @@ class Plan(unittest.TestCase):
             self.assertEqual((code, out['files'], json.loads(out['parts'])[0]['files']), (0, 'out', True))
             code, _, posted, _, _ = self.plan({'schema': 1, 'parts': [part('a')], 'files': 'none'}, '--workspace', ws)
             self.assertEqual((code, posted[0]['description']), (2, 'plan: files: not a directory'))
+
+    def test_hidden_files_are_handed_on_and_what_the_upload_cannot_carry_is_refused(self):
+        """#227: the upload carries hidden entries (ci.yml's include-hidden-files), so a hidden
+        directory and a hidden file inside a plain one are a plan's files like any other;
+        what the upload cannot carry is the plan's failure, not every part lost."""
+        with tempfile.TemporaryDirectory() as ws:
+            os.makedirs(os.path.join(ws, '.ci-plan', '.cache'))
+            with open(os.path.join(ws, '.ci-plan', '.cache', 'sel.txt'), 'w') as f:
+                f.write('x')
+            os.makedirs(os.path.join(ws, 'plain'))
+            with open(os.path.join(ws, 'plain', '.hidden'), 'w') as f:
+                f.write('x')
+            self.assertEqual(flow.check_files(ws, '.ci-plan'), '')
+            self.assertEqual(flow.check_files(ws, 'plain'), '')
+            code, out, _, _, _ = self.plan({'schema': 1, 'parts': [part('a')], 'files': '.ci-plan'}, '--workspace', ws)
+            self.assertEqual((code, out['files'], json.loads(out['parts'])[0]['files']), (0, '.ci-plan', True))
+            with mock.patch.object(flow, 'MAX_FILES', 1):  # hidden entries count toward the bounds
+                self.assertIn('more than', flow.check_files(ws, '.ci-plan'))
+            for bad in ('a:b', 'a?b', 'a|b', 'a*b', 'a"b', 'a<b', 'a>b', 'a\nb'):
+                p = os.path.join(ws, 'plain', bad)
+                with open(p, 'w') as f:
+                    f.write('x')
+                self.assertEqual(flow.check_files(ws, 'plain'),
+                                 f'files: {bad!r} has a character the upload refuses (" : < > | * ? or a line break)', bad)
+                os.remove(p)
+            os.makedirs(os.path.join(ws, 'plain', 'sub', 'none'))
+            self.assertEqual(flow.check_files(ws, 'plain'),
+                             'files: sub/none is an empty directory (the upload carries files)')
+            os.rmdir(os.path.join(ws, 'plain', 'sub', 'none'))
+            os.rmdir(os.path.join(ws, 'plain', 'sub'))
+            os.makedirs(os.path.join(ws, 'plain', 'clone', '.git'))  # a clone may hold the plan's token
+            with open(os.path.join(ws, 'plain', 'clone', '.git', 'config'), 'w') as f:
+                f.write('x')
+            self.assertEqual(flow.check_files(ws, 'plain'), 'files: clone/.git is a git directory (it may hold a credential)')
+            shutil.rmtree(os.path.join(ws, 'plain', 'clone'))
+            bad = os.path.join(os.fsencode(ws), b'plain', b'\xff')
+            with open(bad, 'w') as f:
+                f.write('x')
+            self.assertEqual(flow.check_files(ws, 'plain'),
+                             "files: '\\udcff' is not a UTF-8 name (the upload cannot name it)")
+            os.remove(bad)
+            os.makedirs(os.path.join(ws, 'empty'))
+            self.assertEqual(flow.check_files(ws, 'empty'), 'files: empty is an empty directory (the upload carries files)')
+            os.mkfifo(os.path.join(ws, 'plain', 'pipe'))
+            self.assertEqual(flow.check_files(ws, 'plain'), 'files: pipe is not a file (a pipe, a socket or a device)')
+            code, _, posted, _, _ = self.plan({'schema': 1, 'parts': [part('a')], 'files': 'empty'}, '--workspace', ws)
+            self.assertEqual((code, posted[0]['state'], posted[0]['description']),
+                             (2, 'failure', 'plan: files: empty is an empty directory (the upload carries files)'))
 
     def test_nothing_to_run_is_green_and_plan_only_runs_no_part(self):
         code, out, posted, _, _ = self.plan({'schema': 1, 'parts': []})

@@ -53,7 +53,7 @@ jobs:
       statuses: write
       actions: read
       pull-requests: read
-    uses: chaobrain/ci-runners/.github/workflows/public.yml@v1.18.0
+    uses: chaobrain/ci-runners/.github/workflows/public.yml@v1
     with:
       context: ${{ inputs.context }}
       plan: ${{ inputs.plan }}

@@ -4474,6 +4474,14 @@ Rules:
      unpacked beside the releases: an idle stop ended the session at once (GitHub showed the runner offline within
      seconds, no SIGKILL of the listener, the unit's result `success`) and the restart listened without a session
      conflict; a stop during a canary part killed the runner as before and the part's real result was salvaged.
+  3. **The rollout.** Each host's runner directories matched `ci-run runners` before its install; the egress host's hook
+     link moved first and the proxy kept running. Every host's plan changed only `ci-runner@.service` (its `ExecStop=`
+     line): the apply's `daemon-reload` gave the line to every runner unit, running or stopped, and restarted nothing.
+     After each install an idle runner's stop left GitHub's list within seconds and its restart listened without a
+     session conflict; a later tier's yield (8 runners at one tick) showed all of them offline within 5 s, and the parts
+     of a canary pushed right then queued 3 s.
+  4. **The canaries.** On every host and class at `@v1.20.0` (the hosts' own labels; a later tier's host under a
+     maintainer's hold), green and red as the RED file says, before `v1` moved on 2026-11-13; then at `@v1`.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

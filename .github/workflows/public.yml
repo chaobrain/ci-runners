@@ -47,7 +47,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: chaobrain/ci-runners/actions/flow@v1.20.0
+      - uses: chaobrain/ci-runners/actions/flow@v1
         env:
           CIRUNNERS_PUBLIC: 'true'
         with:
@@ -89,7 +89,7 @@ jobs:
       # read with the job token: one step (a step costs about 1 s of log upload), before
       # anything of the head runs; an older head ends the run here, and no part starts (16.6)
       - id: start
-        uses: chaobrain/ci-runners/actions/flow@v1.20.0
+        uses: chaobrain/ci-runners/actions/flow@v1
         with:
           command: start
           context: ${{ inputs.context }}
@@ -122,7 +122,7 @@ jobs:
         run: mkdir -p "$RUNNER_TEMP/ci-runners-plan" && eval "$CIRUNNERS_PLAN" > "$RUNNER_TEMP/ci-runners-plan/plan.json"
       - id: plan
         if: always() && steps.start.outputs.ok == 'true'
-        uses: chaobrain/ci-runners/actions/flow@v1.20.0
+        uses: chaobrain/ci-runners/actions/flow@v1
         with:
           command: plan
           context: ${{ inputs.context }}
@@ -153,7 +153,7 @@ jobs:
     permissions:
       statuses: write
     steps:
-      - uses: chaobrain/ci-runners/actions/flow@v1.20.0
+      - uses: chaobrain/ci-runners/actions/flow@v1
         env:
           CIRUNNERS_PUBLIC: 'true'
         with:
@@ -177,7 +177,7 @@ jobs:
       max-parallel: ${{ fromJSON(needs.plan.outputs.max_parallel) }}
       matrix:
         part: ${{ fromJSON(needs.plan.outputs.parts) }}
-    uses: chaobrain/ci-runners/.github/workflows/public-part.yml@v1.20.0
+    uses: chaobrain/ci-runners/.github/workflows/public-part.yml@v1
     with:
       part: ${{ toJSON(matrix.part) }}
       context: ${{ inputs.context }}
@@ -201,7 +201,7 @@ jobs:
       CIRUNNERS_PUBLIC: 'true'
     steps:
       - if: needs.plan.outputs.state != ''
-        uses: chaobrain/ci-runners/actions/flow@v1.20.0
+        uses: chaobrain/ci-runners/actions/flow@v1
         with:
           command: status
           context: ${{ inputs.context }}
@@ -209,7 +209,7 @@ jobs:
           state: ${{ needs.plan.outputs.state }}
           description: ${{ needs.plan.outputs.description }}
       - if: needs.plan.outputs.state == '' && needs.plan.outputs.routed != 'true'
-        uses: chaobrain/ci-runners/actions/flow@v1.20.0
+        uses: chaobrain/ci-runners/actions/flow@v1
         with:
           command: status
           context: ${{ inputs.context }}
@@ -220,7 +220,7 @@ jobs:
       # record on any host to salvage (18.7)
       - id: verdict
         if: needs.plan.outputs.state == '' && needs.plan.outputs.routed == 'true'
-        uses: chaobrain/ci-runners/actions/flow@v1.20.0
+        uses: chaobrain/ci-runners/actions/flow@v1
         with:
           command: verdict
           context: ${{ inputs.context }}

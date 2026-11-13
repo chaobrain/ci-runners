@@ -21,9 +21,17 @@ The contract is [docs/design.md](docs/design.md); onboarding is
    and their result. A change that touches a host also carries its dry-run plan
    (`setup/plan.sh`) and the live check on that host. Tests are stdlib Python with
    fixtures; each new test is shown to fail on a mutant of the line it guards.
-5. **Review.** Changes to the hook, the policy, the egress proxy and its allowlist,
-   the org snapshot or the setup scripts get an independent review; for the rest
-   the maintainer reads the diff.
+5. **Review.** The coordinator (the maintainer who briefed and coordinates the work)
+   reviews every change before it merges; no separate reviewer is assigned, and someone
+   working alone reviews their own diff the same way before it merges. With the final
+   head the author hands over the PR, the acceptance it built to, its test evidence, its
+   mutant table with the test that kills each, and what it could not check. Changes to
+   the hook, the policy, the egress proxy and its allowlist, the org snapshot, the setup
+   scripts, and the public pool's launcher, check, relay and issuer are read whole, the
+   tests rerun and about five mutants on the key lines run against the tests that should
+   kill them; a changed workflow file is read whole; for the rest the coordinator reads
+   the diff. Findings go back as a ranked list (file, failure scenario, the mutant or
+   probe that shows it).
 
 ## Rules
 

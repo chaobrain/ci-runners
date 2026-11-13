@@ -4911,6 +4911,13 @@ MUTANTS = [
      ['tests.test_workflow.OwnCheck.test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all']),
     ('.github/workflows/test.yml', '[ "$TESTS" = success ] && [ "$MUTANTS" = success ]', '[ "$TESTS" = success ]',
      ['tests.test_workflow.OwnCheck.test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all']),
+    ('ci_runners/envreconcile.py', 'applied.text == spec.text', 'applied.text != spec.text',
+     ['tests.test_envreconcile.Reconcile.test_enrollment_and_spec_changes_are_idempotent']),
+    (ENB, "if r.returncode != 0:\n                        raise SpecError(f'step failed",
+     "if False:\n                        raise SpecError(f'step failed",
+     ['tests.test_envreconcile.Reconcile.test_failed_build_keeps_active_environment_and_retries']),
+    (ENB, "or info['id'] != repository_id", "",
+     ['tests.test_envreconcile.Reconcile.test_stale_snapshot_and_replaced_repository_are_refused']),
     # #245: the plan's files through the API, refused on the way down as on the way up
     (FLW, "        if (not name or name.startswith('/') or '\\\\' in name or any(p in ('', '.', '..') for p in parts)",
      "        if (not name or name.startswith('/') or any(p in ('', '.', '..') for p in parts)", [f'{TFE}.Unpack.test_a_name_outside_the_files_is_refused']),

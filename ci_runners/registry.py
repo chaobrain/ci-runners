@@ -38,7 +38,7 @@ VAR = re.compile(r'[A-Z_][A-Z0-9_]{0,63}')
 RESERVED = re.compile(r'(CI_|GITHUB_|ACTIONS_|RUNNER_|LD_|PYTHON).*|CUDA_VISIBLE_DEVICES|CUDA_DEVICE_ORDER|PATH|'
                       r'BASH_ENV|ENV|HOME|USER|SHELL|IFS')
 TOP = {'name', 'repository', 'context', 'retries', 'gpu_mem_mib', 'memory', 'max_waiting', 'refresh', 'fallback', 'hosts',
-       'max_parallel'}
+       'max_parallel', 'repository_id'}
 #: ``max_parallel``'s default and bound (16.6; GitHub's matrix holds at most 256 legs)
 MAX_PARALLEL, MAX_PARALLEL_BOUND = 16, 256
 HOST = {'memory_max', 'env', 'max_slots', 'variables'}
@@ -64,6 +64,7 @@ class Project:
     max_slots: int = 1  # this host's
     variables: Mapping[str, str] = dataclasses.field(default_factory=dict)  # this host's
     max_parallel: int = MAX_PARALLEL  # read by the reusable workflow's plan job only
+    repository_id: int | None = None
 
 
 def _bytes(m: str) -> int:
@@ -100,6 +101,9 @@ def parse(doc: Mapping[str, object], role: str, stem: str = '') -> Project:
     gpu_mem = _int('gpu_mem_mib', doc.get('gpu_mem_mib', 0), 0, 1 << 20)
     max_waiting = _int('max_waiting', doc.get('max_waiting', 1), 1, 64)
     max_parallel = _int('max_parallel', doc.get('max_parallel', MAX_PARALLEL), 1, MAX_PARALLEL_BOUND)
+    repository_id = doc.get('repository_id')
+    if 'repository_id' in doc:
+        _int('repository_id', repository_id, 1, (1 << 63) - 1)
     refresh = doc.get('refresh', False)
     if type(refresh) is not bool:
         raise RegistryError('refresh must be true or false')
@@ -136,7 +140,7 @@ def parse(doc: Mapping[str, object], role: str, stem: str = '') -> Project:
             raise RegistryError(f'hosts.{role}.variables.{k} must be a one-line string')
     return Project(name, repo.lower(), context, retries, gpu_mem, memory, max_waiting, refresh,
                    {k: tuple(v) for k, v in fallback.items()}, memory_max, env, max_slots, dict(variables),
-                   max_parallel)
+                   max_parallel, repository_id)
 
 
 def load_file(etc: str, name: str, role: str) -> Project:

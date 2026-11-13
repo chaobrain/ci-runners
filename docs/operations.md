@@ -141,6 +141,20 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 - `apply` 在启用 runner 之前 `enable --now ci-hooks.service`；hook 变了就 `reload`（重新复制）。不要 `restart` 或 `stop` 它：因为 `Requires=`，restart 会把每个 runner 一起重启，stop 会把每个 runner 一起停掉（正在跑的作业也会被杀）。
 - 只能在 CI 账户的 user manager 里（systemd 单元）运行：`sudo -u` 进来的 shell 不在那个命名空间，看到的是主机的 `/tmp`，`ci-run hooks copy` 在那里写的副本 runner 看不到。
 
+### 私有仓库自动登记与环境重建
+
+目标主机由负责人启用。先在主机的 `etc/envreconcile.toml` 配置新项目的
+`memory_max`。已有手工登记的项目可以在 `[manual]` 下把小写的
+`"owner/repo"` 映射到项目名，条目的环境路径需要指向标准的 `envs/<project>`。
+在获准的维护任务里定期运行 `ci-run env reconcile`，使用与 `env build`
+相同的代理和 Conda 设置。用 `--dry-run` 预览本轮构建。构建任务只在具备
+安全凭据交付方式的主机启用，每次运行临时注入最小范围的 Contents: read
+凭据。共享账户无法隔离凭据时，继续使用现有的 `--kept` 流程。
+
+每轮读取新鲜的组织快照，检查私有仓库默认分支上的规格。新项目首次构建或
+TOML 更新时重建，失败则保留旧环境并在下轮重试。已有手工登记的环境变量
+覆盖 TOML 的同名变量。仓库 ID 变化时需维护者检查原登记。
+
 ## 5. 发布流程
 
 一次发布的六步（design §9）：

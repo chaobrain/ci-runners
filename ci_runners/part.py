@@ -1049,6 +1049,10 @@ class Executor:
             raise Refused(f'project {a.project}: {e}') from None
         if self.env.get('GITHUB_REPOSITORY', '').lower() != proj.repository:
             raise Refused(f'project {a.project} belongs to another repository')
+        if proj.repository_id is not None and self.env.get('GITHUB_REPOSITORY_ID') != str(proj.repository_id):
+            raise Refused(f'project {a.project} belongs to another repository ID')
+        if proj.repository_id is not None and not os.path.isdir(proj.env):
+            raise Refused(f'project {a.project} has no built environment yet')
         cls = self.env.get('CI_RUNNER_CLASS', '')
         if not cls:
             raise Refused('CI_RUNNER_CLASS is not set: not one of our runners')
@@ -1410,7 +1414,14 @@ class Executor:
             build, env_fd = envuse.hold(proj.env) if proj.env else ('', None)  # the link, resolved once
             if build:
                 rec['env_build'] = os.path.basename(build)  # the one env this part runs in (design 12.11)
-            env = part_env(self.env, role=self.inv.this, project=dataclasses.replace(proj, env=build), part_dir=work,
+            variables = proj.variables
+            if build:
+                from ci_runners import envbuild
+                if envbuild.applies_variables(build):
+                    _, spec, _, _ = envbuild.kept(build, proj.repository)
+                    variables = {**spec.variables, **variables}
+            env = part_env(self.env, role=self.inv.this,
+                           project=dataclasses.replace(proj, env=build, variables=variables), part_dir=work,
                            results=results, cards=cards,
                            cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume,
                            held=hold.mode if hold else '', runner=self.slot)

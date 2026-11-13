@@ -67,8 +67,10 @@ from __future__ import annotations
 import argparse
 import base64
 import dataclasses
+import contextlib
 import datetime
 import fcntl
+import hashlib
 import json
 import os
 import posixpath
@@ -109,6 +111,10 @@ CONSTRAINT = re.compile(r'\s*(?:-c|--constraint)[\s=]+(\S+)')
 
 class SpecError(ValueError):
     """The env spec, or a file it names, is malformed: nothing is built."""
+
+
+class MissingSpec(SpecError):
+    pass
 
 
 @dataclasses.dataclass(frozen=True)
@@ -354,10 +360,15 @@ def registry_snippet(role: str, link: str, spec: Spec) -> str:
 # ------------------------------------------------------------------ I/O
 
 
-def fetch(call: Callable, token: str, repo: str, base: str = 'https://api.github.com') -> tuple[str, Spec, dict[str, str]]:
+def fetch(call: Callable, token: str, repo: str, base: str = 'https://api.github.com', *,
+          repository_id: int | None = None) -> tuple[str, Spec, dict[str, str]]:
     """The default branch's head, its spec and its requirement files (``-r`` and ``-c``
     followed, at most ``MAX_FILES``). Every read names that one commit."""
     info = call('GET', f'{base}/repos/{repo}', token)
+    if repository_id is not None and (
+            not isinstance(info, dict) or type(info.get('id')) is not int or info['id'] != repository_id
+            or str(info.get('full_name', '')).lower() != repo or info.get('private') is not True):
+        raise SpecError(f'{repo}: repository identity or visibility changed')
     branch = info.get('default_branch') if isinstance(info, dict) else None
     if not isinstance(branch, str) or not branch:
         raise SpecError(f'{repo}: no default branch')
@@ -378,7 +389,12 @@ def fetch(call: Callable, token: str, repo: str, base: str = 'https://api.github
         except UnicodeDecodeError:
             raise SpecError(f'{path}: not UTF-8') from None
 
-    spec = parse_spec(read(SPEC))
+    try:
+        spec = parse_spec(read(SPEC))
+    except github.ApiError as e:
+        if repository_id is not None and e.cause == 'HTTP 404':
+            raise MissingSpec(f'{repo}: no {SPEC} on its default branch') from None
+        raise
     files: dict[str, str] = {}
     todo = list(spec.requirements)
     while todo:
@@ -455,7 +471,8 @@ def _lock(envs: str, project: str):
 
 
 def _build(proj: registry.Project, spec: Spec, files: dict[str, str], sha: str, *, role: str, token: str, envs: str,
-           conda: str, memory: str, run: Callable, dry_run: bool = False) -> int:
+           conda: str, memory: str, run: Callable, dry_run: bool = False, locked: bool = False,
+           previous: str | None = None, apply_variables: bool = False) -> int:
     """Build the env of ``proj`` from ``spec`` and its requirement ``files`` (at ``sha`` of
     the repository), then move the link. The old env stays unless every step passed."""
     stamp = _stamp()
@@ -477,22 +494,25 @@ def _build(proj: registry.Project, spec: Spec, files: dict[str, str], sha: str, 
         if os.path.lexists(link) and not os.path.islink(link):
             raise SpecError(f'{link} exists and is not a link: move it away first')
         os.makedirs(envs, mode=0o700, exist_ok=True)
-        lock = _lock(envs, proj.name)
-        try:
+        with contextlib.nullcontext() if locked else _lock(envs, proj.name):
+            if previous is not None and os.path.realpath(link) != previous:
+                raise Busy(proj.name)
             if os.path.lexists(d):  # a failed build removes its directory: never one that is not its own
                 raise SpecError(f'{d} exists: another build of this second; try again')
             genv = _git_env(token)
             commits = {}
+            build_env = {k: v for k, v in os.environ.items() if k != 'GH_TOKEN'} if 'GH_TOKEN' in os.environ else None
             try:
                 for c in cmds:
-                    r = run(c, env=genv if c[0] == 'git' else None)
+                    r = run(c, env=genv if c[0] == 'git' else build_env)
                     if r.returncode != 0:
                         raise SpecError(f'step failed ({r.returncode}): {" ".join(c[:12])}')
                 for u in spec.upstream:
                     commits[u.name] = _commit(run, os.path.join(d, 'src', u.name), genv)
                 with open(os.path.join(d, 'ci-env.json'), 'w', encoding='utf-8') as f:
                     json.dump({'repository': proj.repository, 'sha': sha, 'stamp': stamp, 'spec': spec.text,
-                               'files': files,
+                               'files': files, 'spec_digest': hashlib.sha256(spec.text.encode()).hexdigest(),
+                               'apply_variables': apply_variables,
                                'upstream': [{**dataclasses.asdict(u), 'commit': commits[u.name]} for u in spec.upstream]},
                               f, indent=1)
             except BaseException:
@@ -503,14 +523,21 @@ def _build(proj: registry.Project, spec: Spec, files: dict[str, str], sha: str, 
             os.replace(tmp, link)  # the one switch
             for old in prune(os.listdir(envs), proj.name):
                 envuse.remove_unused(os.path.join(envs, old))  # not one a live part holds
-        finally:
-            lock.close()
     print(f'ci-run env build: {link} -> {os.path.basename(d)}; the registry entry needs:', file=sys.stderr)
     print(registry_snippet(role, link, spec), end='')
     return 0
 
 
 # ------------------------------------------------------------------ refresh
+
+
+def applies_variables(build: str) -> bool:
+    try:
+        with open(os.path.join(build, 'ci-env.json'), encoding='utf-8') as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return isinstance(record, dict) and record.get('apply_variables') is True
 
 
 def kept(link: str, repository: str) -> tuple[str, Spec, dict[str, str], dict[str, str]]:
@@ -610,7 +637,8 @@ def refresh(proj: registry.Project, *, role: str, envs: str, conda: str, memory:
     link = os.path.join(envs, proj.name)
     if not os.path.islink(link):
         raise SpecError(f'{link}: no env to refresh: run env build')
-    sha, spec, files, old = kept(link, proj.repository)
+    previous = os.path.realpath(link)
+    sha, spec, files, old = kept(previous, proj.repository)
     if not spec.upstream:
         return 'no upstream to follow'
     env = _git_env()
@@ -618,14 +646,15 @@ def refresh(proj: registry.Project, *, role: str, envs: str, conda: str, memory:
     if not moved:
         return 'up to date'
     print(f'ci-run env refresh: {proj.name}: moved: {", ".join(sorted(moved))}', file=sys.stderr)
-    _build(proj, spec, files, sha, role=role, token='', envs=envs, conda=conda, memory=memory, run=run)
+    _build(proj, spec, files, sha, role=role, token='', envs=envs, conda=conda, memory=memory, run=run,
+           previous=previous, apply_variables=applies_variables(previous))
     return 'rebuilt'
 
 
 def main(argv: list[str], inv: inventory.Inventory, etc: str, call: Callable | None = None,
          run: Callable = subprocess.run) -> int:
     p = argparse.ArgumentParser(prog='ci-run env')
-    p.add_argument('verb', choices=('build', 'refresh'))
+    p.add_argument('verb', choices=('build', 'refresh', 'reconcile'))
     p.add_argument('project', nargs='?')
     p.add_argument('--all', action='store_true', help='refresh: every project whose registry entry sets refresh = true')
     p.add_argument('--conda', default=os.environ.get('CI_RUNNERS_CONDA') or 'conda',
@@ -640,11 +669,18 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, call: Callable | N
     if a.verb == 'build' and (not a.project or a.all):
         p.error('build takes a project')
     envs = os.path.join(inv.host['data'], 'ci-runners', 'envs')
+    if a.verb == 'reconcile':
+        if a.project or a.all or a.kept is not None:
+            p.error('reconcile takes no project, --all or --kept')
+        from ci_runners import envreconcile
+        return envreconcile.main(inv, etc, envs, a, call or github.api, run)
     if a.verb == 'refresh':
         return _refresh_cli(a, inv, etc, envs, run)
     try:
         proj = registry.load_file(etc, a.project, inv.this)
         registry.memory_bytes(a.memory)
+        link = os.path.join(envs, proj.name)
+        previous = os.path.realpath(link)
         if a.kept is not None:  # no token at all: the record was read with one on another host (decision 15.8)
             if os.environ.get('GH_TOKEN', '').strip():  # every build step would inherit it
                 raise SpecError('--kept holds no token: unset GH_TOKEN for this build')
@@ -652,9 +688,10 @@ def main(argv: list[str], inv: inventory.Inventory, etc: str, call: Callable | N
             sha, spec, files = read_kept(a.kept, proj.repository)
         else:
             token = _token(etc)
-            sha, spec, files = fetch(call or github.api, token, proj.repository)
+            sha, spec, files = fetch(call or github.api, token, proj.repository, repository_id=proj.repository_id)
         return _build(proj, spec, files, sha, role=inv.this, token=token, envs=envs, conda=a.conda, memory=a.memory,
-                      run=run, dry_run=a.dry_run)
+                      run=run, dry_run=a.dry_run, previous=previous,
+                      apply_variables=applies_variables(previous))
     except Busy as e:
         print(f'ci-run env build: another build or refresh of {e} is running', file=sys.stderr)
         return 2

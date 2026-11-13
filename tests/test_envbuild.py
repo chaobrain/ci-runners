@@ -485,7 +485,7 @@ class Main(Base):
         gits = [env for cmd, env in self.ran if cmd[0] == 'git']
         self.assertEqual(len(gits), 2)  # the clone, and the commit it is at
         self.assertNotIn('SECRET-TKN-9', ' '.join(c for cmd, _ in self.ran for c in cmd))  # never in an argv
-        self.assertTrue(all(env is None for cmd, env in self.ran if cmd[0] != 'git'))  # only git sees the token
+        self.assertTrue(all('GH_TOKEN' not in (env or {}) for cmd, env in self.ran if cmd[0] != 'git'))  # only git sees the token
         self.assertTrue(all(cmd[0] == 'systemd-run' for cmd, _ in self.ran if cmd[0] != 'git'))
 
     def test_a_failed_step_leaves_the_link_alone(self):

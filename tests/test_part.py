@@ -16,7 +16,7 @@ import threading
 import unittest
 import unittest.mock
 
-from ci_runners import envuse, inventory, part, registry, slots
+from ci_runners import envuse, inventory, outcome, part, registry, slots
 from tests.p2p_fake import zeros_release
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -326,6 +326,59 @@ class Execute(Host):
             time.sleep(0.05)
         code, out = part.salvage(self.inv, 'hb:org/repo/77-1/long-1', self.env)
         self.assertEqual((out['outcome'], (rec / 'work' / 'done').exists()), ('pass', True))
+
+
+    def waiting(self, rid):
+        """An executor in a child process, waiting for the CI slot this test holds; its record."""
+        code = (f'import sys, json; sys.path.insert(0, {str(ROOT)!r}); from ci_runners import inventory, part; '
+                f'inv = inventory.load(open({str(self.tmp.name + "/inv.toml")!r}).read()); '
+                f'ex = part.Executor(inv, {str(self.etc)!r}, json.loads(sys.argv[1]), release={str(ROOT)!r}, '
+                f'scope=False, poll=0.1); '
+                f'ex.execute(part.Inputs(project="p", id={rid!r}, timeout_minutes=1, queue_timeout_minutes=1, '
+                f'command="touch \\"$CI_PART_DIR/ran\\""))')
+        pathlib.Path(self.tmp.name, 'inv.toml').write_text(self.inv_text)
+        child = subprocess.Popen([sys.executable, '-I', '-c', code, json.dumps(self.env)], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+        self.addCleanup(lambda: (child.poll() is None and child.kill(), child.wait()))
+        rec = self.data / f'ci-runners/state/parts/org/repo/77-1/{rid}-1'
+        queue = pathlib.Path(self.tmp.name, 'locks', 's.queue')
+        for _ in range(200):
+            if (rec / 'record.json').exists() and queue.is_dir() and any(queue.iterdir()):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail('the executor did not queue')
+        return child, rec
+
+    def test_a_cancel_while_waiting_ends_stopped_and_marks_the_record(self):
+        """Issue #257: the runner's signal at a cancel, sent to the step's process (the
+        executor, which the part action execs), ends a waiting part ``stopped`` with the
+        cancel mark, before anything ran; a part killed outright leaves neither."""
+        fd = os.open(self.slot, os.O_WRONLY)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # another part holds the host's one CI slot
+        child, rec = self.waiting('cancelled')
+        os.kill(child.pid, signal.SIGINT)  # the process only, as the runner sends it
+        self.assertEqual(child.wait(timeout=20), 0)
+        self.assertEqual(json.loads((rec / 'outcome.json').read_text())['outcome'], 'stopped')
+        self.assertEqual(json.loads((rec / outcome.CANCELLED).read_text())['by'], f'signal {signal.SIGINT}')
+        self.assertFalse((rec / 'work' / 'ran').exists())
+        child, rec = self.waiting('killed')
+        os.kill(child.pid, signal.SIGKILL)  # no signal it can see: nothing marks it, presence counts it
+        child.wait(timeout=20)
+        self.assertEqual(sorted(p.name for p in rec.iterdir()), ['record.json', 'work'])
+
+    def test_the_signal_marks_the_record_before_anything_else(self):
+        ex = part.Executor(self.inv, str(self.etc), self.env, release=str(ROOT), scope=False)
+        ex.record = self.tmp.name
+        ex._on_signal(signal.SIGTERM, None)
+        self.assertTrue(ex.stopped)
+        doc = json.loads(pathlib.Path(self.tmp.name, outcome.CANCELLED).read_text())
+        self.assertEqual(doc['by'], f'signal {signal.SIGTERM}')
+        ex.proc = object()  # once the command runs: it exits, the mark kept as it was
+        with self.assertRaises(SystemExit):
+            ex._on_signal(signal.SIGINT, None)
+        self.assertEqual(json.loads(pathlib.Path(self.tmp.name, outcome.CANCELLED).read_text()), doc)
 
 
 SMI_MEMORY = '0, 24576, 576\n1, 24576, 576\n'

@@ -1590,9 +1590,21 @@ Each item names what it supersedes or amends.
        itself: `presence.infra_failures` (default 3) such ends within 15 min drain it as
        15.2's miss does (`drained: infra`, each end logged on the host). They are a
        part's `unavailable` other than busy, drained or a full queue; a `lost` part on a
-       host that stayed up; and a hook refusal `stale`, `runner` (a runner directory the
-       inventory does not know: a stale one would take a label's jobs and refuse each),
-       `policy`, `inventory`, `timeout` or `error`.
+       host that stayed up, unless its job was cancelled; and a hook refusal `stale`,
+       `runner` (a runner directory the inventory does not know: a stale one would take a
+       label's jobs and refuse each), `policy`, `inventory`, `timeout` or `error`.
+       *Amended 2026-11-13 (issue #257): a cancelled part never counts.* A run cancelled
+       while its parts wait or run (a newer push, a duplicate night, a person, GitHub's
+       own cancel of a job) is everyday, not the host's fault. Such a part ends `stopped`
+       (the executor saw the runner's signal: the part action execs the executor, so the
+       signal reaches it and not a shell between them), or, where the executor was killed
+       before it wrote its outcome, `lost` with the record's cancel mark
+       (`cancelled.json`): the executor writes it at the signal, and the job-completed
+       hook writes it for every part of its job whose executor outlived the job (the job
+       ended under it: a cancel), and stops one still waiting so that it ends `stopped`
+       and starts no command. Neither counts. A `lost` part without the mark (its executor
+       died while its job went on, a runner killed mid-job) still counts. The rule is one
+       function, `presence.part_end`.
        Light runners count, and presence stops them on a drain like the others, since a
        broken light runner takes every claim and plan; each host keeps one more light
        runner, in a pool of its own that carries its host label and not `ci-light`,
@@ -3795,7 +3807,8 @@ a private runner's name the view still holds meets a policy without a private re
 It prints one line, `ci-runners: accepted|refused <reason code>`, followed by the
 policy's hash, and logs details on the host only. The job-completed hook stops the
 job's scopes, releases its leases and slots, and removes its work directory (120 s
-bound).
+bound). First it marks each part of its job whose executor outlived the job as
+cancelled, and stops one still waiting (16.4, issue #257).
 
 ### 6.4 Threats and mitigations
 

@@ -10,6 +10,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -429,6 +430,86 @@ class Started(unittest.TestCase):
         text = setup.hook_text(src, '/opt/py/bin/python3', '/data/x/ci-runners', '/data/x/ci-runners/etc')
         self.assertIn('\nbase=/data/x/ci-runners\nroot=', text)
         self.assertNotIn('@CI_', text)
+
+
+class Completed(unittest.TestCase):
+    """Issue #257: job-completed marks the parts whose executor outlived the job (a cancel
+    the step did not pass on), and stops one still waiting, before it stops the scopes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = pathlib.Path(self.tmp.name)  # <data>/ci-runners
+        self.etc = self.base / 'etc'
+        self.etc.mkdir()
+        self.env = {'CI_RUNNERS_ETC': str(self.etc), 'RUNNER_NAME': 'r-gpu0', 'GITHUB_RUN_ID': '77',
+                    'GITHUB_REPOSITORY': 'Org/Repo'}
+
+    def child(self):
+        p = subprocess.Popen(['sleep', '60'])
+        self.addCleanup(lambda: (p.poll() is None and p.kill(), p.wait()))
+        return p
+
+    def record(self, rid, pid, *, runner='r-gpu0', run='77-1', start=None, **extra):
+        d = self.base / 'state' / 'parts' / 'org' / 'repo' / run / f'{rid}-1'
+        d.mkdir(parents=True)
+        (d / 'record.json').write_text(json.dumps({'runner': runner, 'executor': pid,
+                                                   'start_epoch': time.time() if start is None else start, **extra}))
+        return d
+
+    def test_the_parts_it_marks_and_stops(self):
+        from ci_runners import outcome
+        waiting, running, other, done, again = self.child(), self.child(), self.child(), self.child(), self.child()
+        w = self.record('wait', waiting.pid)
+        r = self.record('run', running.pid, run_epoch=time.time())  # its command runs: its scope is stopped
+        o = self.record('other', other.pid, runner='r-gpu1')  # another runner's job
+        f = self.record('done', done.pid)
+        (f / 'outcome.json').write_text('{}')  # it ended before its job did
+        a = self.record('again', again.pid, run='77-2')  # a later run attempt, by this runner: this job's
+        n = self.record('next', again.pid, run='78-1')  # another run
+        gone = subprocess.Popen(['true'])
+        gone.wait()
+        g = self.record('gone', gone.pid)  # its executor died while the job ran: the host's end, not a cancel
+        reused = self.record('reused', other.pid, runner='r-gpu0', run='77-3', start=time.time() - 3600)  # a pid reused
+        got = hook.cancel_parts(self.env)
+        self.assertEqual(sorted(got), ['77-1/run-1', '77-1/wait-1', '77-2/again-1'])
+        for d in (w, r, a):
+            self.assertEqual(json.loads((d / outcome.CANCELLED).read_text())['by'], 'job-completed')
+        for d in (o, f, n, g, reused):
+            self.assertFalse((d / outcome.CANCELLED).exists(), d)
+        self.assertEqual(waiting.wait(timeout=10), -15)  # still waiting: it ends stopped, and runs nothing
+        self.assertEqual(again.wait(timeout=10), -15)
+        self.assertIsNone(running.poll())  # left to its scope
+        self.assertIsNone(other.poll())
+        self.assertEqual(hook.cancel_parts(self.env), ['77-1/run-1'])  # marked once; the stopped ones are gone
+
+    def test_a_job_without_its_names_marks_nothing(self):
+        p = self.child()
+        self.record('wait', p.pid)
+        for k in ('RUNNER_NAME', 'GITHUB_RUN_ID', 'GITHUB_REPOSITORY'):
+            self.assertEqual(hook.cancel_parts({**self.env, k: ''}), [], k)
+        self.assertEqual(hook.cancel_parts({**self.env, 'GITHUB_RUN_ID': '7'}), [])  # not a prefix match
+        self.assertIsNone(p.poll())
+
+    def test_completed_marks_before_it_stops_the_scopes(self):
+        from ci_runners import outcome
+        p = self.child()
+        w = self.record('wait', p.pid)
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, (w / outcome.CANCELLED).exists()))
+            return subprocess.CompletedProcess(argv, 0, 'ci-part-r-gpu0-x-77-1-1.scope loaded active running x\n', '')
+        with unittest.mock.patch.object(hook.subprocess, 'run', run):
+            self.assertEqual(hook.completed(self.env), 0)
+        self.assertEqual([marked for _, marked in calls], [True, True])
+        self.assertEqual(calls[1][0][:3], ['systemctl', '--user', 'stop'])
+        [line] = [json.loads(x) for x in next((self.base / 'logs').glob('hook-*.log')).read_text().splitlines()]
+        self.assertEqual((line['cancelled'], line['stopped']), (['77-1/wait-1'], ['ci-part-r-gpu0-x-77-1-1.scope']))
+        with unittest.mock.patch.object(hook, 'cancel_parts', side_effect=OSError('x')), \
+                unittest.mock.patch.object(hook.subprocess, 'run', run):
+            self.assertEqual(hook.completed(self.env), 0)  # the scopes are stopped all the same
+        self.assertEqual(len(calls), 4)
 
 if __name__ == '__main__':
     unittest.main()

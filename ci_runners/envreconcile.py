@@ -111,11 +111,14 @@ def main(inv, etc, envs, args, call, run):
         return 2
 
     result = 0
+    unmanaged = set()
     for path in sorted(projects.glob('*.toml')):
         try:
             project = registry.load_file(etc, path.stem, inv.this)
         except registry.RegistryError:
             continue
+        if project.repository_id is None and project.repository not in manual:
+            unmanaged.add(project.repository)
         if project.repository_id is not None and snapshot.repos.get(project.repository) != project.repository_id:
             print(f'ci-run env reconcile: {project.name}: repository missing or ID changed; review required',
                   file=sys.stderr)
@@ -123,7 +126,8 @@ def main(inv, etc, envs, args, call, run):
 
     for repo, rid in sorted(snapshot.repos.items()):
         allowed = effective.repos.get(repo)
-        if allowed is None or allowed.paused or allowed.visibility != 'private' or allowed.id != rid:
+        if (repo in unmanaged or allowed is None or allowed.paused or allowed.visibility != 'private'
+                or allowed.id != rid):
             continue
         try:
             _reconcile(repo, rid, projects=projects, manual=manual, memory_max=memory_max, inv=inv, envs=envs,

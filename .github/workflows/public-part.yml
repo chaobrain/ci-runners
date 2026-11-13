@@ -52,7 +52,7 @@ jobs:
           path: ${{ runner.temp }}/ci-runners-files
       - id: hosted
         if: fromJSON(inputs.part).gpus == 0
-        uses: chaobrain/ci-runners/actions/hosted@v1
+        uses: chaobrain/ci-runners/actions/hosted@v1.20.0
         env:
           CIRUNNERS_FILES: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}
         with:
@@ -62,7 +62,7 @@ jobs:
           results: ${{ fromJSON(inputs.part).results }}
       - id: part
         if: fromJSON(inputs.part).gpus > 0
-        uses: chaobrain/ci-runners/actions/part@v1
+        uses: chaobrain/ci-runners/actions/part@v1.20.0
         env:
           CIRUNNERS_FILES: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}
         with:
@@ -104,7 +104,7 @@ jobs:
           if-no-files-found: warn
       - id: retry
         if: always() && (steps.hosted.outputs.outcome || steps.part.outputs.outcome) != ''
-        uses: chaobrain/ci-runners/actions/flow@v1
+        uses: chaobrain/ci-runners/actions/flow@v1.20.0
         env:
           CIRUNNERS_PUBLIC: 'true'
         with:
@@ -126,7 +126,7 @@ jobs:
       retry: ${{ steps.retry.outputs.retry }}
     steps:
       - id: retry
-        uses: chaobrain/ci-runners/actions/flow@v1
+        uses: chaobrain/ci-runners/actions/flow@v1.20.0
         env:
           CIRUNNERS_PUBLIC: 'true'
         with:
@@ -162,7 +162,7 @@ jobs:
           path: ${{ runner.temp }}/ci-runners-files
       - id: hosted
         if: fromJSON(inputs.part).gpus == 0
-        uses: chaobrain/ci-runners/actions/hosted@v1
+        uses: chaobrain/ci-runners/actions/hosted@v1.20.0
         env:
           CIRUNNERS_FILES: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}
         with:
@@ -174,7 +174,7 @@ jobs:
           attempt-of: ${{ fromJSON(env.RETRY).attempt_of }}
       - id: part
         if: fromJSON(inputs.part).gpus > 0
-        uses: chaobrain/ci-runners/actions/part@v1
+        uses: chaobrain/ci-runners/actions/part@v1.20.0
         env:
           CIRUNNERS_FILES: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}
         with:
@@ -227,7 +227,7 @@ jobs:
     permissions:
       statuses: write
     steps:
-      - uses: chaobrain/ci-runners/actions/flow@v1
+      - uses: chaobrain/ci-runners/actions/flow@v1.20.0
         env:
           CIRUNNERS_PUBLIC: 'true'
         with:

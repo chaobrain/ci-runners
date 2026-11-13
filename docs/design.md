@@ -4460,6 +4460,20 @@ Rules:
   4. **The canaries.** On h100 and 6000pro (`canary-<host>-v1190`: claim, a CPU part, a one-card part, salvage, verdict
      on the host's labels) and the 3090 hosts (`canary-3090-v1190`, with a one-card part on each 3090 host): green on every
      part, and the red heads red on every part the RED file reds. `v1` moved to it on 2026-11-13.
+- **`v1.20.0`** (minor, stamped 2026-11-13; 16.4's stop, #239, #241, #242, #244-#246, #248, #253, #255, #256; brainspike's
+  coordinator under the lead's delegation of 2026-11-13): the plan job uploads no artifact of its own and decides the retry
+  only where an end asks (#241); the verdict reads the parts' outcomes through the API (#244); a part reads the plan's
+  files through the API, `download-artifact` only where the API refuses (#246, #253); one start step in the plan job and
+  the checkout's check in the part's files step (#248); the runner unit's `ExecStop=` ends an idle runner's session at
+  GitHub (16.4's stop, #256). No action's input or output changes. Its notes:
+  1. **`actions: read`.** `ci.yml`'s verdict and `part.yml`'s first and retry jobs ask for `actions: read`, so a caller's
+     calling job must grant it (a reusable job cannot ask for more than its caller grants: the run fails at its start);
+     a composed `verdict` job needs it too (without it the verdict is `error`). Before `v1` moved, every caller of
+     `ci.yml@v1` and every composed verdict in the organisation was checked to grant it.
+  2. **The stop before the tag.** Operations §15's trial ran on one idle part runner of a tier-1 host with this commit
+     unpacked beside the releases: an idle stop ended the session at once (GitHub showed the runner offline within
+     seconds, no SIGKILL of the listener, the unit's result `success`) and the restart listened without a session
+     conflict; a stop during a canary part killed the runner as before and the part's real result was salvaged.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

@@ -4519,6 +4519,25 @@ Rules:
      of a canary pushed right then queued 3 s.
   4. **The canaries.** On every host and class at `@v1.20.0` (the hosts' own labels; a later tier's host under a
      maintainer's hold), green and red as the RED file says, before `v1` moved on 2026-11-13; then at `@v1`.
+- **`v1.21.0`** (minor, stamped 2026-11-13; 16.4's black holes, §7 rule 2, §4.8 rule 5, §5.2, #257, #260, #261, #262-#265;
+  brainspike's coordinator under the lead's delegation of 2026-11-13): a cancelled part never counts toward the
+  self-drain (the part step `exec`s the executor, the executor and the job-completed hook mark the record
+  `cancelled.json`, #262); the project queue cap holds only on a pool with more runners than slots (#265); status
+  descriptions put the cause first and are never cut inside a URL, the verdict's listing error reads `verdict:
+  artifacts not listed: <cause>` (#264); `plan` and `pool status` list the runners the inventory leaves idle, and
+  `register.sh` also refuses while a part scope or `ci-presence.timer` is active (#263). No action's input or output,
+  label or outcome kind changes. Its notes:
+  1. **What changes for an operator.** Before `register.sh`, stop `ci-presence.timer` as well as the runners and wait
+     until no `ci-part-*` scope of the account is active (operations §15). A consumer that matched the old listing
+     error's text (`could not be listed`) matches `artifacts not listed`; the description's prefix `verdict: ` is
+     unchanged.
+  2. **Order and the cancel's proof.** No unit or hook file a host's plan writes changes, so a plan adds at most the
+     warn lines of the runners the inventory leaves idle. The install moves `releases/hook`, so the job-completed hook
+     of the new release runs on that host from then on, while a part at `@v1` still runs the old release's executor
+     (its step without `exec`); the hook only marks and stops parts whose executor outlived their job. A trial
+     unpacked beside the releases reaches neither the part step nor the hook, so the cancel's proof (16.4) runs on
+     the installed release of one host, with a canary at `@v1.21.0`, before the other hosts install it and before
+     `v1` moves.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

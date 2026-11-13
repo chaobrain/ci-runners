@@ -397,7 +397,11 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
             # presence's check (decision 16.4): only its exit 77 skips the start
             f"ExecCondition=/bin/sh -c 'CI_RUNNERS_ETC={self.etc} CI_RUNNERS_PYTHON={setup.python_of(inventory.load((self.etc / 'inventory.toml').read_text()))} "
             f"{d}/ci-runners/releases/hook/bin/ci-run presence check \"$$1\"; test $$? -ne 77' presence %i",
-            f'ExecStart={d}/actions-runner/%i/run.sh', 'NoNewPrivileges=yes', 'KillMode=mixed', 'KillSignal=SIGTERM',
+            f'ExecStart={d}/actions-runner/%i/run.sh',
+            # the stop ends an idle runner's session first; its exit is ignored, and the stop goes on as before
+            f"ExecStop=-/bin/sh -c 'CI_RUNNERS_ETC={self.etc} CI_RUNNERS_PYTHON={setup.python_of(inventory.load((self.etc / 'inventory.toml').read_text()))} "
+            f"timeout 50 {d}/ci-runners/releases/hook/bin/ci-run presence interrupt \"$$1\"' presence %i",
+            'NoNewPrivileges=yes', 'KillMode=mixed', 'KillSignal=SIGTERM',
             'TimeoutStopSec=5min', 'Restart=always', 'RestartSec=30', 'Slice=ci.slice', '', '[Install]',
             'WantedBy=default.target'])
         reaper = (self.home / '.config' / 'systemd' / 'user' / 'ci-reaper.service').read_text()

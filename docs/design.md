@@ -1542,6 +1542,50 @@ Each item names what it supersedes or amends.
        read from the process's `name=systemd` line). One host runs everything under a
        shared account (11.3, 15.8), where 13.2 reads nothing and fails open.
 
+       *The stop* (amended 2026-11-13, issue #255). The runner unit runs the runner
+       app's `run.sh` with `KillMode=mixed`. On a stop, SIGTERM reaches `run.sh` alone:
+       bash dies at once, and systemd SIGKILLs `run-helper.sh` and `Runner.Listener`.
+       A SIGKILLed listener never deletes its session, so GitHub kept a stopped runner
+       online for 46-91 s and handed it queued jobs (parts queued 78-79 s instead of
+       2-3 s), and a start within that window met "A session for this runner already
+       exists". In runner 2.338.2 the listener ends its session only on its own
+       shutdown path: on SIGINT it cancels a running job, deletes its session (bounded
+       at 30 s), and returns 0. `run-helper.sh` then exits 0, and `run.sh` says "Exiting
+       runner..." and exits 0, with no relaunch. (Should the deletion fail, the listener
+       returns 2 and `run-helper.sh` waits 5 s before a relaunch; the stop's SIGTERM to
+       `run.sh` comes first, and the session is left as before.) So the unit's `ExecStop=` runs `ci-run
+       presence interrupt <runner>` from `releases/hook` (under `timeout 50`; systemd
+       ignores its exit, `-`). Then the stop goes on as before: SIGTERM to `run.sh`,
+       SIGKILL to what is left.
+       - *Idle*, read as presence reads it (no `Runner.Worker` of the runner; a part
+         scope without a worker is no job): SIGINT goes to this runner's own listener,
+         found by its path below the runner's root and checked against its start time,
+         and the step waits up to 40 s for it to end. The main process ends by itself
+         during the step, the unit ends inactive (not failed), and GitHub shows the
+         runner offline as soon as its session is deleted.
+       - *Busy*, `/proc` unreadable, the inventory unread, an error, or an older release
+         without the command: nothing is sent, and the stop is byte for byte the one
+         before this amendment. The listener and the worker are SIGKILLed, the part's
+         scope runs on (§4.3), the job ends without outputs, and the salvage leg reads
+         the part's real outcome (§4.5). An interrupt of a busy runner would instead
+         have the worker cancel the job, and the job-completed hook would stop the
+         part's scope: the command would be killed and run again, or end `error` on its
+         second attempt.
+       - *The race.* A job the listener takes in the milliseconds between the step's
+         look and its interrupt is cancelled before its command starts (the executor
+         ends `stopped`, or the job ends without outputs and counts as `lost`), and it
+         is retried once by 16.5. Before this amendment, the same job was SIGKILLed
+         with its listener (`lost`, retried once). A job assigned to the ghost session
+         was re-queued after about 75 s. After the interrupt, the listener takes no new
+         message.
+       - *Presence* stops with `systemctl --user --no-block stop`, one call per runner,
+         and does not wait. A stop that takes 1-2 s, or 40 s, does not lengthen a tick.
+         While a unit is `deactivating`, a tick leaves it alone (between states: no
+         count either way), and the next tick that finds it `inactive` counts it as
+         stopped by presence. `TimeoutStopSec=5min` still ends a stop that hangs.
+       - *Rollback*: remove the `ExecStop=` line (a release's plan, or a drop-in with an
+         empty `ExecStop=`), then `daemon-reload`. Stops are then as before.
+
        *Black holes.* A host whose jobs keep ending for infrastructure reasons drains
        itself: `presence.infra_failures` (default 3) such ends within 15 min drain it as
        15.2's miss does (`drained: infra`, each end logged on the host). They are a
@@ -1560,7 +1604,7 @@ Each item names what it supersedes or amends.
 
        *The backstop.* Presence narrows the race between a pickup and a change of the
        resource; it cannot close it. A job can be assigned between a tick and the
-       runner's stop, and the resource can change between a tick and the job's start. So
+       runner's stop (the stop's race above), and the resource can change between a tick and the job's start. So
        the executor's refusals stay (§4.3's gate: the drain, busy, the health gate, the
        leases), and a refused, `stopped` or `lost` part is retried by the five rows of
        16.5. Stops, starts and refusals after a start are counted (16.8).
@@ -3546,7 +3590,7 @@ cgroup v1 with systemd 249 (11.11).
 | directories | §3.2 under our subtree; `etc/` mode 700 |
 | runner app | the pinned release, checked by sha256, into 9 runner directories (§5.1); 22 from 15.8 |
 | `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON` (for the launcher and the units; the hooks have the interpreter written into them by setup, so a job's environment never chooses it); `CI_RUNNER_POOL_LABELS`, the pool's own labels, for a retry's `retry-on`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card; `https_proxy` and `http_proxy` at the tunnel's local port, and `no_proxy` (inventory `tunnel.direct`: localhost and the package mirror that answers directly, decision 11.10) |
-| `ci-runner@.service` (template) | `ExecStart=<data>/actions-runner/%i/run.sh`; `After=`/`Wants=ci-tunnel.service`; `NoNewPrivileges=yes`; `KillMode=mixed`; `Restart=always`, `RestartSec=30`; `Slice=ci.slice`; enabled per instance |
+| `ci-runner@.service` (template) | `ExecStart=<data>/actions-runner/%i/run.sh`; `ExecStop=` the idle runner's interrupt (16.4's stop); `After=`/`Wants=ci-tunnel.service`; `NoNewPrivileges=yes`; `KillMode=mixed`; `Restart=always`, `RestartSec=30`; `Slice=ci.slice`; enabled per instance |
 | `ci-tunnel.service` | `ssh -F etc/tunnel/ssh_config -N -L 127.0.0.1:<http port>:127.0.0.1:<egress port>` to the egress account (decision 11.10): batch mode, the egress host's key pinned in `etc/tunnel/known_hosts`, `ExitOnForwardFailure`, keep-alive every 30 s (a dead link ends after 90 s); `Restart=always` after 10 s |
 | `etc/tunnel/` | the key pair, `ssh_config` and `known_hosts`, placed by the lead before the plan; `plan.sh` refuses without them, with the key or the directory readable by others, with a link in place of a file, or with an `ssh_config` that sets anything but `Host egress`, its `HostName`, `User` and `Port` (the unit fixes every other option, among them the key, the pinned host key with no global or DNS source, and no agent, gateway port or local command). A changed tunnel table changes the tunnel's unit, and the plan then restarts it. The runner app is fetched only once the tunnel's port answers (ssh binds it after authenticating). |
 | `ci-orgsync.{service,timer}` | not on h100 (decision 11.9): the workstation pushes the snapshot |

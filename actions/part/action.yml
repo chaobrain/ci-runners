@@ -108,8 +108,10 @@ runs:
         IN_ATTEMPT_OF: ${{ inputs.attempt-of }}
         IN_LOCK: ${{ inputs.lock }}
         IN_TARGET: ${{ inputs.target }}
+      # exec: the executor is the step's process, so the runner's signal at a cancel reaches it
+      # (a shell between them would take it and orphan the executor, issue #257)
       run: >-
-        "$GITHUB_ACTION_PATH/../lib/ci-run.sh" part --project "$IN_PROJECT" --id "$IN_ID" --command "$IN_COMMAND"
+        exec "$GITHUB_ACTION_PATH/../lib/ci-run.sh" part --project "$IN_PROJECT" --id "$IN_ID" --command "$IN_COMMAND"
         --timeout-minutes "$IN_TIMEOUT" --gpus "$IN_GPUS" --gpu-mem-mib "$IN_GPU_MEM" --memory "$IN_MEMORY"
         --queue-timeout-minutes "$IN_QUEUE" --results "$IN_RESULTS"
         --resume "$IN_RESUME" --attempt-of "$IN_ATTEMPT_OF" --lock "$IN_LOCK" --target "$IN_TARGET"

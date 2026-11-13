@@ -85,6 +85,44 @@ class Actions(unittest.TestCase):
                           (ROOT / 'actions' / name / 'action.yml').read_text().replace('\n        ', ' '))
 
 
+    def test_the_part_step_is_the_executor(self):
+        """Issue #257: the runner signals the step's process at a cancel, not its children; the
+        part step execs the launcher (which execs ``ci-run``), so the executor gets the signal
+        and ends a waiting part ``stopped`` instead of being orphaned and killed as ``lost``.
+        Run as the runner runs a step: its script in a file, under bash -eo pipefail."""
+        import os
+        import signal
+        import sys
+        import time
+        from tests import yamlsub
+        doc = yamlsub.load((ROOT / 'actions' / 'part' / 'action.yml').read_text())
+        [step] = [st for st in doc['runs']['steps'] if st.get('id') == 'part']
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d)
+            (t / 'action').mkdir()
+            (t / 'lib').mkdir()
+            fake = t / 'lib' / 'ci-run.sh'  # the executor: its pid, then the signal it gets
+            fake.write_text(f'#!{sys.executable}\nimport os, signal, sys, time\n'
+                            f'signal.signal(signal.SIGINT, lambda n, f: (open({str(t / "got")!r}, "w").write(str(n)), '
+                            f'sys.exit(0)))\nopen({str(t / "pid")!r}, "w").write(str(os.getpid()))\ntime.sleep(30)\n')
+            fake.chmod(0o755)
+            (t / 'step.sh').write_text(step['run'] + '\n')
+            env = {'PATH': '/usr/bin:/bin', 'GITHUB_ACTION_PATH': str(t / 'action')}
+            sh = subprocess.Popen(['bash', '--noprofile', '--norc', '-eo', 'pipefail', str(t / 'step.sh')], env=env)
+            try:
+                for _ in range(200):
+                    if (t / 'pid').exists() and (t / 'pid').read_text():
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(int((t / 'pid').read_text()), sh.pid)  # no shell between the runner and it
+                os.kill(sh.pid, signal.SIGINT)  # the step's process only, as the runner sends it
+                self.assertEqual(sh.wait(timeout=20), 0)
+                self.assertEqual((t / 'got').read_text(), str(int(signal.SIGINT)))
+            finally:
+                if sh.poll() is None:
+                    sh.kill()
+                    sh.wait()
+
     def test_the_verdict_downloads_nothing_and_a_red_part_uploads_once(self):
         """Issue #242: the verdict reads the parts' artifacts through the API itself; the part
         action says whether its own upload succeeded, so a red part's step (which fails with

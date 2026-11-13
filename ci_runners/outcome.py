@@ -3,10 +3,15 @@
 ``classify`` is a pure function of the evidence the executor gathers after a part: the
 exit status, the scope's OOM kills, the boot ids and the early thermal stop. ``hint``
 maps an outcome to ``next``. Infrastructure ends are never reported as test failures.
+``mark_cancelled`` writes the one piece of evidence a part's record keeps outside its
+outcome: that its job was cancelled (``CANCELLED``, issue #257).
 """
 from __future__ import annotations
 
 import dataclasses
+import json
+import os
+import time
 
 #: every outcome (design §4.4); CLASSIFIED are the ones ``classify`` returns, in
 #: precedence order, highest first; ``lost`` comes from a record that never finished
@@ -21,6 +26,25 @@ NEXT = ('none', 'retry', 'fallback')
 
 
 # ------------------------------------------------------------------ the evidence
+
+#: the mark of a part whose job was cancelled (issue #257), in its record: written by the
+#: executor at the runner's signal and by the job-completed hook for a part whose executor
+#: outlived its job; a ``lost`` record that carries it is no infrastructure end (presence)
+CANCELLED = 'cancelled.json'
+
+
+def mark_cancelled(record: str, by: str) -> bool:
+    """Write the cancel mark into ``record`` once (never through a link); whether this call
+    wrote it. A mark that cannot be written is skipped: it is evidence, not a step."""
+    try:
+        fd = os.open(os.path.join(record, CANCELLED), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                     | os.O_CLOEXEC, 0o600)
+    except OSError:  # marked already, or no record: nothing to add
+        return False
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump({'by': by, 'time': time.time()}, f)
+    return True
+
 
 def bus_key(bus: str) -> str:
     """A card's PCI bus number as a short lower-case hex string, from ``nvidia-smi``'s

@@ -19,6 +19,7 @@ from unittest import mock
 
 from ci_runners import drain as drain_mod
 from ci_runners import hostload, inventory, pool, presence, setup
+from ci_runners import outcome as outcome_mod
 from tests.test_part import Host
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -1191,13 +1192,16 @@ def _iso(t):
 
 
 class BlackHole(Fixture):
-    def record(self, rid, outcome=None, reason='', cls='part', boot='B1', age=60, executor=None, start=0.0):
+    def record(self, rid, outcome=None, reason='', cls='part', boot='B1', age=60, executor=None, start=0.0,
+               cancelled=False):
         d = self.data / 'ci-runners' / 'state' / 'parts' / 'org' / 'repo' / '77-1' / f'{rid}-1'
         d.mkdir(parents=True)
         (d / 'record.json').write_text(json.dumps({'class': cls, 'boot_start': boot, 'executor': executor or os.getpid(),
                                                    'start_epoch': start}))
         if outcome:
             (d / 'outcome.json').write_text(json.dumps({'outcome': outcome, 'reason': reason}))
+        if cancelled:
+            self.assertTrue(outcome_mod.mark_cancelled(str(d), 'job-completed'))
         t = self.now - age
         for p in [*d.iterdir(), d]:
             os.utime(p, (t, t))
@@ -1243,6 +1247,34 @@ class BlackHole(Fixture):
         self.assertEqual(got, [('hook: policy', 'hz-part-1'), ('hook: runner', 'hz-part-1'), ('hook: stale', 'hz-part-1'),
                                ('lost', 'org/repo/77-1/f-1'), ('lost', 'org/repo/77-1/j-1'),
                                ('unavailable: low disk: 1 GiB free under the data directory', 'org/repo/77-1/a-1')])
+
+    def test_a_cancelled_part_never_counts(self):
+        """Issue #257: a run cancelled while its parts wait (a newer push, a duplicate night,
+        a person) drains no healthy host. Its parts end ``stopped``, or, where the executor
+        was killed before it wrote its outcome, ``lost`` with the cancel mark: neither counts.
+        The same ``lost`` without the mark still does."""
+        self.record('a', executor=os.getpid(), start=0.0, cancelled=True)  # waited for a card, killed
+        self.record('b', executor=os.getpid(), start=0.0, cancelled=True)
+        self.record('c', 'stopped', 'cancelled')  # the executor saw the signal itself
+        self.record('d', 'lost', 'the part ended without an exit status', cancelled=True)
+        self.assertEqual(self.ends(), [])
+        self.tick()
+        self.tick()
+        self.assertIsNone(drain_mod.read(str(self.data))['host'])  # four cancelled parts: nothing drained
+        self.assertEqual([x for x in self.log() if 'infra' in x or 'drain' in x], [])
+        self.record('e', executor=os.getpid(), start=0.0)  # nothing cancelled it: the host's
+        self.assertEqual([(e['why'], e['record']) for e in self.ends()], [('lost', 'org/repo/77-1/e-1')])
+
+    def test_the_counting_rule(self):
+        rec = {'class': 'part', 'boot_start': 'B1'}
+        self.assertEqual(presence.part_end(None, rec, 'B1'), 'lost')
+        self.assertEqual(presence.part_end(None, rec, 'B1', cancelled=True), '')
+        self.assertEqual(presence.part_end({'outcome': 'stopped', 'reason': 'cancelled'}, rec, 'B1'), '')
+        self.assertEqual(presence.part_end({'outcome': 'lost'}, rec, 'B1', cancelled=True), '')
+        self.assertEqual(presence.part_end(None, rec, 'B2'), '')  # rebooted
+        # a host's own refusal still counts in a cancelled job: the mark speaks of the job, not the host
+        self.assertEqual(presence.part_end({'outcome': 'unavailable', 'reason': 'low disk: 1 GiB free'}, rec, 'B1',
+                                           cancelled=True), 'unavailable: low disk: 1 GiB free')
 
     def test_three_ends_in_15_min_drain_the_host_and_it_stays_drained(self):
         self.record('a', 'unavailable', 'low disk: 1 GiB free')

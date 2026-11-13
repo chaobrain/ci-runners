@@ -36,8 +36,11 @@ jobs:
     name: first
     runs-on: ${{ fromJSON(inputs.part).labels }}
     timeout-minutes: ${{ fromJSON(inputs.part).timeout_minutes }}
+    # actions: read lists the run's artifacts for the plan's files (#245); the step that
+    # reads them holds the token, the command never does
     permissions:
       contents: read
+      actions: read
     outputs:
       outcome: ${{ steps.part.outputs.outcome }}
       # its outcome reached an artifact: the part step's own upload, or the second try below
@@ -61,8 +64,16 @@ jobs:
             echo "::error::the checkout kept its authorization header in its git config"
             exit 1
           fi
-      # the plan's files (its key files), for the command as CIRUNNERS_FILES
-      - if: fromJSON(inputs.part).files
+      # the plan's files (its key files), for the command as CIRUNNERS_FILES: through the API
+      # (#245), with the job's token in this step's env alone (the action's default input), never
+      # the command's; download-artifact only where the API refuses (no actions: read)
+      - id: files
+        if: fromJSON(inputs.part).files
+        uses: chaobrain/ci-runners/actions/flow@v1.19.0
+        with:
+          command: fetch
+          dest: ${{ runner.temp }}/ci-runners-files
+      - if: fromJSON(inputs.part).files && steps.files.outputs.fallback == 'true'
         uses: actions/download-artifact@v4
         with:
           name: ci-plan-files
@@ -101,6 +112,7 @@ jobs:
         uses: chaobrain/ci-runners/actions/flow@v1
         with:
           command: retry
+          token: ''  # no token: only the files' step holds one (#245)
           part: ${{ inputs.part }}
           project: ${{ inputs.project }}
           outcome-file: ${{ runner.temp }}/ci-runners/${{ fromJSON(inputs.part).id }}/outcome.json
@@ -201,8 +213,11 @@ jobs:
       (needs.first.outputs.retry || needs.salvage.outputs.retry || needs.locate.outputs.retry || 'none') != 'none'
     runs-on: ${{ fromJSON(needs.first.outputs.retry || needs.salvage.outputs.retry || needs.locate.outputs.retry).labels }}
     timeout-minutes: ${{ fromJSON(needs.first.outputs.retry || needs.salvage.outputs.retry || needs.locate.outputs.retry).timeout_minutes }}
+    # actions: read lists the run's artifacts for the plan's files (#245); the step that
+    # reads them holds the token, the command never does
     permissions:
       contents: read
+      actions: read
     outputs:
       outcome: ${{ steps.part.outputs.outcome }}
     env:
@@ -223,8 +238,16 @@ jobs:
             echo "::error::the checkout kept its authorization header in its git config"
             exit 1
           fi
-      # the plan's files (its key files), for the command as CIRUNNERS_FILES
-      - if: fromJSON(inputs.part).files
+      # the plan's files (its key files), for the command as CIRUNNERS_FILES: through the API
+      # (#245), with the job's token in this step's env alone (the action's default input), never
+      # the command's; download-artifact only where the API refuses (no actions: read)
+      - id: files
+        if: fromJSON(inputs.part).files
+        uses: chaobrain/ci-runners/actions/flow@v1.19.0
+        with:
+          command: fetch
+          dest: ${{ runner.temp }}/ci-runners-files
+      - if: fromJSON(inputs.part).files && steps.files.outputs.fallback == 'true'
         uses: actions/download-artifact@v4
         with:
           name: ci-plan-files

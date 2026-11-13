@@ -2,7 +2,7 @@ name: ci-runners flow
 description: One step of the reusable workflow ci.yml and part.yml (design 16.6, §4.10), run from this action's own checkout; not for consumers' own workflows.
 inputs:
   command:
-    description: claim, contract, plan, pending, retry, locate or status (ci_runners/flow.py); admit and verdict for a public caller (public.yml)
+    description: claim, contract, plan, pending, retry, locate, fetch or status (ci_runners/flow.py); admit and verdict for a public caller (public.yml)
     required: true
   context:
     description: the status context (claim, contract, plan, pending, status)
@@ -58,8 +58,11 @@ inputs:
   parts:
     description: the ids of the parts the run started, space-separated (verdict)
     default: ''
+  dest:
+    description: the new directory the plan's files go to (fetch)
+    default: ''
   token:
-    description: the job's token (statuses read to claim, write to post; contents read for the contract; actions read to locate)
+    description: the job's token (statuses read to claim, write to post; contents read for the contract; actions read to locate and fetch)
     default: ${{ github.token }}
 outputs:
   run:
@@ -104,6 +107,9 @@ outputs:
   role:
     description: "the first attempt's host role, or empty (locate)"
     value: ${{ steps.flow.outputs.role }}
+  fallback:
+    description: "true where the plan's files could not be read through the API, so that download-artifact downloads them (fetch)"
+    value: ${{ steps.flow.outputs.fallback }}
 runs:
   using: composite
   steps:
@@ -130,8 +136,9 @@ runs:
         IN_STATE: ${{ inputs.state }}
         IN_DESCRIPTION: ${{ inputs.description }}
         IN_PARTS: ${{ inputs.parts }}
+        IN_DEST: ${{ inputs.dest }}
       run: |
-        case "$IN_COMMAND" in claim|contract|plan|pending|retry|locate|status|admit|verdict) ;; *) echo "::error::ci-runners flow: unknown command '$IN_COMMAND'"; exit 2;; esac
+        case "$IN_COMMAND" in claim|contract|plan|pending|retry|locate|fetch|status|admit|verdict) ;; *) echo "::error::ci-runners flow: unknown command '$IN_COMMAND'"; exit 2;; esac
         args=()
         [ -z "$IN_CONTEXT" ] || args+=("--context=$IN_CONTEXT")
         [ -z "$IN_SHA" ] || args+=("--sha=$IN_SHA")
@@ -151,5 +158,6 @@ runs:
         [ -z "$IN_STATE" ] || args+=("--state=$IN_STATE")
         [ -z "$IN_DESCRIPTION" ] || args+=("--description=$IN_DESCRIPTION")
         [ "$IN_COMMAND" != verdict ] || args+=("--parts=$IN_PARTS")
+        [ -z "$IN_DEST" ] || args+=("--dest=$IN_DEST")
         # this action's own checkout, the release the workflow names (design §9), not the host's
         exec sh "$GITHUB_ACTION_PATH/../../bin/ci-run" flow "$IN_COMMAND" "${args[@]}"

@@ -3340,7 +3340,20 @@ beside the parts, only where the plan routed parts on a head the claim did not s
 only where the runners posted nothing on the context since the claim read it (it reads
 again after its post and puts a red posted meanwhile back on top). A part's `red` job
 (`statuses: write`, on `ci-light`, after its attempts) posts `failure` where an attempt
-ends red; the attempts' own jobs hold no write permission. The verdict job, after the
+ends red; the attempts' own jobs hold no write permission. They hold `contents: read` and,
+from #245, `actions: read`, for the plan's files. The job's token reaches one step, the one
+that reads them (`actions/flow`'s default `token`, into that step's env, from the action's
+checkout under `python -I`, before the part's command in that job). Every other flow step of
+those jobs gets an empty token, and the part action takes none (`tests/test_reusable.py`
+pins this). Head code on that runner, which runs as the runner's account (T13 below), could
+then reach the caller's Actions data with it: the runs, logs and artifacts of a repository
+its author can already read. Nothing is written, and only same-repository authors are
+concerned, since forks never reach these jobs (§4.8 rule 1). A caller that does not grant
+`actions: read` keeps working: its parts download the files with `download-artifact`.
+`public-part.yml` keeps `download-artifact`. Its hosted path runs the command in the job's
+own VM, so no step's token is out of the command's reach, and #163 is our hosts' egress, not
+a hosted runner's. The salvage leg (the lost path only) still downloads its run's outcomes
+too. The verdict job, after the
 plan, the pending job and the parts, posts the run's one final status: the plan's end, or
 every part's, or `error` where the plan job ended without either (its runner lost, a step
 failed). No job that holds a write permission runs head code. A cancelled run posts no
@@ -3394,7 +3407,7 @@ not load is a red plan job with the reason:
 |---|---|---|
 | `schema` | yes | `1`; a later schema is a new key set, read by the release that brings it |
 | `parts` | yes | a list of at most 256 parts (GitHub's matrix limit); an empty list is a plan: no part job, the verdict job posts `success` "nothing to run" |
-| `files` | no | a directory below the checkout (relative, no `..`, no links, at most 1000 entries and 64 MiB) the plan command wrote: uploaded once (`ci-plan-files`), hidden entries included (#227: the plan named the directory, `.ci-plan` too), downloaded into every attempt before its command, at `CIRUNNERS_FILES`. `flow plan` refuses what the upload cannot carry (a link, an empty directory, an entry that is not a file, a name not in UTF-8 or with `" : < > \| * ?` or a line break) and a `.git` (a clone's config may hold the plan command's token); files that did not upload after the route (failed, timed out, skipped) are the plan's end (`error`, "plan: the plan's files did not upload after the route (<outcome>); no part ran"), not every part lost; a plan job lost after the route has no outputs and posts on the run's own head |
+| `files` | no | a directory below the checkout (relative, no `..`, no links, at most 1000 entries and 64 MiB) the plan command wrote: uploaded once (`ci-plan-files`), hidden entries included (#227: the plan named the directory, `.ci-plan` too), read into every attempt before its command, at `CIRUNNERS_FILES`: through the API (`flow fetch`, #245: the run's newest `ci-plan-files`, over kept connections, so `download-artifact`'s hang after a download, #163, leaves the part's path), else, where the API cannot be read (no `actions: read`, an outage, no such artifact listed), with `download-artifact`. `fetch` refuses on the way down what `flow plan` refuses on the way up, and a name outside the directory (absolute, `..`, a backslash, a drive, an empty or `.` part) or given twice, a file that is also a directory, the bounds by the sizes the zip declares (zipfile reads no more and checks each CRC), and a directory that is already there; it unpacks into a new directory and leaves nothing on a refusal, which fails the attempt and is never a reason to fall back. `flow plan` refuses what the upload cannot carry (a link, an empty directory, an entry that is not a file, a name not in UTF-8 or with `" : < > \| * ?` or a line break) and a `.git` (a clone's config may hold the plan command's token); files that did not upload after the route (failed, timed out, skipped) are the plan's end (`error`, "plan: the plan's files did not upload after the route (<outcome>); no part ran"), not every part lost; a plan job lost after the route has no outputs and posts on the run's own head |
 | `max_parallel` | no | an integer in [1, 256]: lowers the registry's `max_parallel` for this run, never raises it |
 | `parts[].id` | yes | `[A-Za-z0-9][A-Za-z0-9_.-]*`, at most 64 characters (its artifact's name), unique in the plan; not `plan`, the plan command's own part |
 | `parts[].command` | yes | as `part`'s `command`, at most 32 KiB |
@@ -3497,7 +3510,9 @@ jobs:
       plan: python scripts/ci_plan.py
 ```
 
-`actions: read` lets the parts' salvage leg read its run's jobs (§2's `runner_name`);
+`actions: read` lets the parts' salvage leg read its run's jobs (§2's `runner_name`) and
+each attempt read the plan's files through the API (#245; without it they come through
+`download-artifact`);
 `pull-requests: read` is the plan job's (16.6 as amended), and GitHub refuses a run whose
 called job asks for more than the caller grants. A
 fork's pull request skips the job (the guard, §4.8 rule 1); a consumer that wants a check

@@ -2,19 +2,19 @@ name: ci-runners flow
 description: One step of the reusable workflow ci.yml and part.yml (design 16.6, §4.10), run from this action's own checkout; not for consumers' own workflows.
 inputs:
   command:
-    description: claim, contract, plan, pending, retry, locate, fetch or status (ci_runners/flow.py); admit and verdict for a public caller (public.yml)
+    description: start, claim, contract, plan, pending, retry, locate, fetch or status (ci_runners/flow.py); admit and verdict for a public caller (public.yml)
     required: true
   context:
-    description: the status context (claim, contract, plan, pending, status)
+    description: the status context (start, claim, contract, plan, pending, status)
     default: ''
   sha:
-    description: the head (claim, contract, plan, pending, status)
+    description: the head (start, claim, contract, plan, pending, status)
     default: ''
   default-branch:
-    description: the repository's default branch (contract; empty reads it from the API)
+    description: the repository's default branch (start, contract; empty reads it from the API)
     default: ''
   project:
-    description: the registry key (plan, retry)
+    description: the registry key (plan, retry; empty in start, the repository's name)
     default: ''
   plan-file:
     description: the plan command's standard output (plan; empty is the plan of one pytest part)
@@ -26,10 +26,10 @@ inputs:
     description: that outcome's reason (plan)
     default: ''
   plan-only:
-    description: true for a plan-only run (plan)
+    description: true for a plan-only run (plan; in start, no claim)
     default: ''
   workspace:
-    description: the checkout the plan's files are below (plan)
+    description: the checkout the plan's files are below (plan), or the part's checkout to check (fetch)
     default: ''
   part:
     description: the routed part, JSON (retry)
@@ -59,26 +59,32 @@ inputs:
     description: the ids of the parts the run started, space-separated (verdict)
     default: ''
   dest:
-    description: the new directory the plan's files go to (fetch)
+    description: the new directory the plan's files go to (fetch; empty for the check alone, with no files)
     default: ''
   token:
     description: the job's token (statuses read to claim, write to post; contents read for the contract; actions read to locate and fetch)
     default: ${{ github.token }}
 outputs:
   run:
-    description: "true or false, the claim's decision (claim)"
+    description: "true or false, the claim's decision (start, claim)"
     value: ${{ steps.flow.outputs.run }}
   reason:
-    description: "why (claim)"
+    description: "why (start, claim)"
     value: ${{ steps.flow.outputs.reason }}
   seen:
-    description: "the newest of the runners' statuses read, epoch seconds, 0.0 for none (claim)"
+    description: "the newest of the runners' statuses read, epoch seconds, 0.0 for none (start, claim)"
     value: ${{ steps.flow.outputs.seen }}
+  ok:
+    description: "true where the head's contract holds and the plan command may run (start, contract)"
+    value: ${{ steps.flow.outputs.ok }}
+  project:
+    description: "the registry key: the project input, else the repository's name (start)"
+    value: ${{ steps.flow.outputs.project }}
   state:
-    description: "the run's end where this step ends it, for the verdict job to post (contract, plan)"
+    description: "the run's end where this step ends it, for the verdict job to post (start, contract, plan)"
     value: ${{ steps.flow.outputs.state }}
   description:
-    description: "that end's status description (contract, plan)"
+    description: "that end's status description (start, contract, plan)"
     value: ${{ steps.flow.outputs.description }}
   routed:
     description: "true where the plan has parts to run (plan)"
@@ -138,7 +144,7 @@ runs:
         IN_PARTS: ${{ inputs.parts }}
         IN_DEST: ${{ inputs.dest }}
       run: |
-        case "$IN_COMMAND" in claim|contract|plan|pending|retry|locate|fetch|status|admit|verdict) ;; *) echo "::error::ci-runners flow: unknown command '$IN_COMMAND'"; exit 2;; esac
+        case "$IN_COMMAND" in start|claim|contract|plan|pending|retry|locate|fetch|status|admit|verdict) ;; *) echo "::error::ci-runners flow: unknown command '$IN_COMMAND'"; exit 2;; esac
         args=()
         [ -z "$IN_CONTEXT" ] || args+=("--context=$IN_CONTEXT")
         [ -z "$IN_SHA" ] || args+=("--sha=$IN_SHA")

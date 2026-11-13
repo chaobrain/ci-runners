@@ -75,54 +75,40 @@ jobs:
       actions: read
       pull-requests: read
     outputs:
-      run: ${{ inputs.plan-only && 'true' || steps.claim.outputs.run }}
-      seen: ${{ steps.claim.outputs.seen }}
+      run: ${{ inputs.plan-only && 'true' || steps.start.outputs.run }}
+      seen: ${{ steps.start.outputs.seen }}
       sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
       parts: ${{ steps.plan.outputs.parts }}
       ids: ${{ steps.plan.outputs.ids }}
       max_parallel: ${{ steps.plan.outputs.max-parallel }}
       routed: ${{ steps.plan.outputs.routed }}
-      state: ${{ steps.contract.outputs.state || steps.plan.outputs.state }}
-      description: ${{ steps.contract.outputs.description || steps.plan.outputs.description }}
-      project: ${{ steps.project.outputs.name }}
+      state: ${{ steps.start.outputs.state || steps.plan.outputs.state }}
+      description: ${{ steps.start.outputs.description || steps.plan.outputs.description }}
+      project: ${{ steps.start.outputs.project }}
       # none (the plan named no files), else the upload's outcome: success alone hands them on
       files: ${{ steps.plan.outputs.files == '' && 'none' || steps.files.outcome }}
     steps:
-      # the registry key: the input, else the repository's name, from GITHUB_REPOSITORY (a
-      # schedule's payload has no repository object)
-      - id: project
-        shell: bash
-        env:
-          CIRUNNERS_PROJECT: ${{ inputs.project }}
-        run: |
-          p="${CIRUNNERS_PROJECT:-${GITHUB_REPOSITORY#*/}}"
-          case "$p" in ''|*[!A-Za-z0-9._-]*) echo "::error::the project input is not a registry name"; exit 1;; esac
-          echo "name=$p" >> "$GITHUB_OUTPUT"
-      # the claim's decision only (§4.1 reads statuses): its pending is the pending job's
-      - id: claim
-        if: ${{ !inputs.plan-only }}
+      # the registry key (the input, else the repository's name from GITHUB_REPOSITORY: a
+      # schedule's payload has no repository object), the claim's decision (§4.1 reads statuses;
+      # its pending is the pending job's) and the default branch's contract against the head's,
+      # read with the job token: one step (a step costs about 1 s of log upload), before
+      # anything of the head runs; an older head ends the run here, and no part starts (16.6)
+      - id: start
         uses: chaobrain/ci-runners/actions/flow@v1
         with:
-          command: claim
+          command: start
           context: ${{ inputs.context }}
           sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
-      # the default branch's contract against the head's, both read with the job token, before
-      # anything of the head runs: an older head ends the run here, and no part starts (16.6)
-      - id: contract
-        if: steps.claim.outputs.run == 'true' || inputs.plan-only
-        uses: chaobrain/ci-runners/actions/flow@v1
-        with:
-          command: contract
-          context: ${{ inputs.context }}
-          sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
+          project: ${{ inputs.project }}
+          plan-only: ${{ inputs.plan-only }}
           default-branch: ${{ github.event.repository.default_branch || '' }}
-      - if: steps.contract.outcome == 'success' && inputs.plan != ''
+      - if: steps.start.outputs.ok == 'true' && inputs.plan != ''
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       # a workspace another workflow left sparse keeps only its pattern's files: the whole tree
-      - if: steps.contract.outcome == 'success' && inputs.plan != ''
+      - if: steps.start.outputs.ok == 'true' && inputs.plan != ''
         shell: bash
         run: git sparse-checkout disable 2> /dev/null || true
       # the plan command, a part of its own on this light runner (the project's env and its
@@ -130,7 +116,7 @@ jobs:
       # part, #239); its standard output is the plan. The event's facts reach it as
       # variables; the read-only token only where the caller asks
       - id: command
-        if: steps.contract.outcome == 'success' && inputs.plan != ''
+        if: steps.start.outputs.ok == 'true' && inputs.plan != ''
         uses: chaobrain/ci-runners/actions/part@v1
         env:
           CIRUNNERS_PLAN: ${{ inputs.plan }}
@@ -143,19 +129,19 @@ jobs:
           CIRUNNERS_HEAD_SHA: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
           GH_TOKEN: ${{ inputs.plan-token && github.token || '' }}
         with:
-          project: ${{ steps.project.outputs.name }}
+          project: ${{ steps.start.outputs.project }}
           id: plan
           command: mkdir -p "$RUNNER_TEMP/ci-runners-plan" && eval "$CIRUNNERS_PLAN" > "$RUNNER_TEMP/ci-runners-plan/plan.json"
           timeout-minutes: '30'
           upload: 'false'
       - id: plan
-        if: always() && steps.contract.outcome == 'success'
+        if: always() && steps.start.outputs.ok == 'true'
         uses: chaobrain/ci-runners/actions/flow@v1
         with:
           command: plan
           context: ${{ inputs.context }}
           sha: ${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}
-          project: ${{ steps.project.outputs.name }}
+          project: ${{ steps.start.outputs.project }}
           plan-file: ${{ inputs.plan != '' && format('{0}/ci-runners-plan/plan.json', runner.temp) || '' }}
           plan-outcome: ${{ inputs.plan != '' && (steps.command.outputs.outcome || 'lost') || '' }}
           plan-reason: ${{ steps.command.outputs.reason }}

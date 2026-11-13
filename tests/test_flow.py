@@ -666,6 +666,122 @@ class Claim(unittest.TestCase):
             self.assertEqual(run(['claim', '--context', 'c', '--sha', SHA], Env(d).env, Api(), etc=d)[0], 2)
 
 
+class Start(unittest.TestCase):
+    """The plan job's first step (``flow start``): the registry key, the claim's decision and
+    the contract in one step, before anything of the head runs; each step of a self-hosted
+    job costs about 1 s of log upload at its end."""
+    BOT = 'github-actions[bot]'
+    OLD = {'main': 'contract = 2\n', SHA: 'contract = 1\n'}
+    NEW = {'main': 'contract = 2\n', SHA: 'contract = 2\n'}
+
+    def st(self, state, t=5):
+        return {'state': state, 'context': 'myproj/ci', 'creator': {'login': self.BOT}, 'description': '',
+                'created_at': f'2026-11-12T10:00:{t:02d}Z'}
+
+    def go(self, files, statuses, *extra, api_cls=Api):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'policy.toml'), 'w') as f:
+                f.write('schema = 2\n')
+            e = Env(d)
+            api = api_cls(files)
+            inner = api.__call__
+
+            def call(method, url, token, body=None):
+                if '/commits/' in url and method == 'GET':
+                    api.calls.append((method, url, body))
+                    if isinstance(statuses, Exception):
+                        raise statuses
+                    return statuses
+                return inner(method, url, token, body)
+            code, out, err = run(['start', '--context', 'myproj/ci', '--sha', SHA, '--default-branch', 'main', *extra],
+                                 e.env, call, etc=d)
+            return code, e.outputs(), api, out + err, e.summary()
+
+    def test_a_head_to_run_gets_the_claim_and_the_contract_and_posts_nothing(self):
+        code, o, api, _, _ = self.go(self.NEW, [self.st('failure')])
+        self.assertEqual(code, 0)
+        self.assertEqual((o['project'], o['run'], o['ok']), ('myproj', 'true', 'true'))
+        self.assertEqual(float(o['seen']), flow.claim._epoch('2026-11-12T10:00:05+00:00'))
+        self.assertNotIn('state', o)
+        self.assertEqual(api.posted(), [])  # read-only: the pending job posts the claim's pending
+        self.assertEqual(sorted(u.split('/repos/')[1].split('?')[0] for _, u, _ in api.calls),
+                         [REPO, f'{REPO}/commits/{SHA}/statuses', f'{REPO}/contents/.github/ci-runners.toml',
+                          f'{REPO}/contents/.github/ci-runners.toml'])
+
+    def test_an_old_head_the_claim_runs_ends_the_run_as_the_contract_does(self):
+        code, o, api, _, summary = self.go(self.OLD, [])
+        self.assertEqual(code, flow.EXIT_RED)
+        self.assertEqual((o['run'], o['ok'], o['state']), ('true', 'false', 'failure'))
+        self.assertIn('merge origin/main', o['description'])
+        self.assertIn('merge origin/main', summary)
+        self.assertEqual(api.posted(), [])
+
+    def test_a_green_head_ends_the_step_with_no_contract_output(self):
+        """A head the claim skips ends the step at exit 0 whatever its contract: no ``ok``
+        (no checkout, no plan command), no end for the verdict job, no summary."""
+        for files in (self.OLD, self.NEW, {'main': 'contract = "x"\n'}):
+            code, o, _, _, summary = self.go(files, [self.st('success')])
+            self.assertEqual(code, 0)
+            self.assertEqual(set(o), {'project', 'run', 'reason', 'seen'})
+            self.assertEqual(o['run'], 'false')
+            self.assertEqual(summary, '')
+
+    def test_plan_only_reads_no_claim(self):
+        code, o, api, _, _ = self.go(self.NEW, Exception('no statuses read'), '--plan-only', 'true')
+        self.assertEqual((code, o), (0, {'project': 'myproj', 'ok': 'true'}))
+        self.assertFalse([u for _, u, _ in api.calls if '/commits/' in u])
+        code, o, _, _, _ = self.go(self.OLD, Exception('no statuses read'), '--plan-only', 'true')
+        self.assertEqual((code, o['state'], 'run' in o), (flow.EXIT_RED, 'failure', False))
+        code, o, api, _, _ = self.go(self.NEW, [], '--plan-only', 'false')
+        self.assertEqual(o['run'], 'true')
+
+    def test_the_claim_and_the_contract_read_at_once(self):
+        """The claim's statuses and the contract's three reads overlap: each read here waits
+        until all four have started, and fails where they would run in turn."""
+        import threading
+        gate = threading.Barrier(4, timeout=5)
+
+        class Slow(Api):
+            def __call__(self, *a, **k):
+                try:
+                    gate.wait()
+                except threading.BrokenBarrierError:
+                    raise github.ApiError('GET x: the reads ran one after another') from None
+                return super().__call__(*a, **k)
+
+        def statuses(*_):  # the claim's read, the fourth at the gate
+            try:
+                gate.wait()
+            except threading.BrokenBarrierError:
+                raise github.ApiError('GET statuses: the reads ran one after another') from None
+            return []
+        with mock.patch.object(flow, '_statuses', statuses):
+            code, o, api, text, _ = self.go(self.NEW, [], api_cls=Slow)
+        self.assertEqual((code, o.get('ok'), o.get('run')), (0, 'true', 'true'), text)
+        self.assertEqual(len(api.calls), 3)
+
+    def test_the_registry_key_first(self):
+        """The project input, else the repository's name (``GITHUB_REPOSITORY``: a schedule's
+        payload has no repository object); a malformed one fails the step before any read."""
+        self.assertEqual(self.go(self.NEW, [])[1]['project'], 'myproj')  # chaobrain/myproj
+        code, o, _, _, _ = self.go(self.NEW, [], '--project', 'other.proj_1-x')
+        self.assertEqual((code, o['project']), (0, 'other.proj_1-x'))
+        for bad in ('a/b', 'a b', 'x;y', '\u00e9'):
+            code, o, api, text, _ = self.go(self.NEW, [], '--project', bad)
+            self.assertEqual((code, o, api.calls), (flow.EXIT_RED, {}, []), bad)
+            self.assertIn('::error::the project input is not a registry name', text)
+        with tempfile.TemporaryDirectory() as d:
+            e = Env(d)
+            code, _, err = run(['start', '--context', 'c/ci', '--sha', SHA, '--plan-only', 'true'],
+                               {**e.env, 'GITHUB_REPOSITORY': 'chaobrain/'}, Api())
+            self.assertEqual((code, e.outputs()), (flow.EXIT_RED, {}))
+
+    def test_a_failed_claim_read_fails_the_step_with_no_ok(self):
+        code, o, _, text, _ = self.go(self.NEW, github.ApiError('GET statuses: HTTP 502'))
+        self.assertEqual((code, o), (2, {'project': 'myproj'}))
+        self.assertIn('HTTP 502', text)
+
+
 class Status(unittest.TestCase):
     def test_a_red_part_posts_failure_at_once(self):
         api = Api()

@@ -4,7 +4,10 @@ Each mutant replaces one exact snippet in a copy of the tree and runs only the t
 that should kill it; a mutant that passes them survives and fails this script. Up to
 ``WORKERS`` mutants run at once, each in its own copy; tests still running after
 ``HANG`` seconds have hung, which kills the mutant. Run it with
-``python tests/mutants.py`` from the repository root (CI runs it on every PR).
+``python tests/mutants.py`` from the repository root (CI runs it on every PR), or one
+shard of them: ``--shard K/N`` runs every N-th mutant from the K-th (CI runs ``SHARDS``
+shards side by side, so that no job runs much past 5 min). Every shard checks every
+snippet first.
 """
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 from ci_runners import stamp  # noqa: E402  (a stamp PR's tree is mutated in main's state)
 
 WORKERS = 4  # a hosted runner's cores; each worker has its own copy of the tree
+SHARDS = 4  # test.yml's mutant jobs: 925 s in one job on a hosted runner (2026-11-13)
 HANG = 60  # seconds: the slowest guarded test takes about 9 s, so a mutant's tests still running have hung
 POL = 'ci_runners/policy.py'
 INV = 'ci_runners/inventory.py'
@@ -280,7 +284,7 @@ MUTANTS = [
      [f'{TRU}.Public.test_admit_comes_first_and_ends_the_run_where_it_refuses']),
     (PUW, "          CIRUNNERS_PLAN: ${{ inputs.plan }}\n", "          CIRUNNERS_PLAN: ${{ inputs.plan }}\n          GH_TOKEN: ${{ github.token }}\n",
      [f'{TRU}.Public.test_the_plan_command_holds_no_token']),
-    (PUW, "    env:\n      CIRUNNERS_PUBLIC: 'true'\n    steps:\n      - id: project", "    steps:\n      - id: project",
+    (PUW, "    env:\n      CIRUNNERS_PUBLIC: 'true'\n    steps:\n      # the registry key", "    steps:\n      # the registry key",
      [f'{TRU}.Public.test_every_flow_step_says_it_is_a_public_caller_s']),
     (CIW, "    uses: chaobrain/ci-runners/.github/workflows/public.yml@v1\n", "    uses: ./.github/workflows/public.yml\n",
      [f'{TRU}.Structure.test_a_public_caller_goes_to_public_yml_and_a_private_one_never']),
@@ -1650,8 +1654,8 @@ MUTANTS = [
     # the action refs and the release stamp, with no reusable workflow left (decision 12.17)
     ('docs/consumers.md', '/actions/salvage@v1\n', '/actions/salvage@v1.4.1\n',
      [f'{TA}.Actions.test_the_action_refs_follow_the_release_stamp']),
-    ('.github/workflows/test.yml', '      - uses: actions/checkout@v4\n',
-     '      - uses: chaobrain/ci-runners/actions/claim@v1.4.1\n      - uses: actions/checkout@v4\n',
+    ('.github/workflows/test.yml', '    timeout-minutes: 15\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n      - uses: actions/setup-python@v5\n        with:\n          python-version: \'3.12\'  # the hosts',
+     '    timeout-minutes: 15\n    steps:\n      - uses: chaobrain/ci-runners/actions/claim@v1.4.1\n      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n      - uses: actions/setup-python@v5\n        with:\n          python-version: \'3.12\'  # the hosts',
      [f'{TA}.Actions.test_the_action_refs_follow_the_release_stamp']),
     # the docs' indented YAML examples are checked too (design §4.8)
     ('docs/consumers.md', '     if: always()\n', '     with: {a: ${{ x }}, b: 1}\n     if: always()\n',
@@ -3979,9 +3983,6 @@ MUTANTS = [
     (PTW, "      RETRY: ${{ needs.first.outputs.retry || needs.salvage.outputs.retry || needs.locate.outputs.retry }}\n    steps:\n      # one commit, or (the plan's history, #228) the head's whole history and every branch's\n      # remote ref, the default branch's too; fetched with this job's read-only token, which\n      # the checkout keeps nowhere (persist-credentials) and the command never gets\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}\n",
      "      RETRY: ${{ needs.first.outputs.retry || needs.salvage.outputs.retry || needs.locate.outputs.retry }}\n    steps:\n      # one commit, or (the plan's history, #228) the head's whole history and every branch's\n      # remote ref, the default branch's too; fetched with this job's read-only token, which\n      # the checkout keeps nowhere (persist-credentials) and the command never gets\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n",
      [f'{TRU}.Structure.test_a_parts_checkout_is_one_commit_or_its_history_and_keeps_no_credential']),
-    (PTW, "      # the decision below, or none where the attempt's end asks for no retry (no step decides\n      # it then): a known outcome is never read as lost, whatever its upload did\n      retry: ${{ steps.retry.outputs.retry || (steps.part.outputs.next == 'none' && 'none') || '' }}\n    steps:\n      # one commit, or (the plan's history, #228) the head's whole history and every branch's\n      # remote ref, the default branch's too; fetched with this job's read-only token, which\n      # the checkout keeps nowhere (persist-credentials) and the command never gets\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}\n          persist-credentials: false\n      - shell: bash\n        run: |\n          git sparse-checkout disable 2> /dev/null || true\n          if git config --local --name-only --get-regexp '^http\\..*\\.extraheader$'; then\n",
-     "      # the decision below, or none where the attempt's end asks for no retry (no step decides\n      # it then): a known outcome is never read as lost, whatever its upload did\n      retry: ${{ steps.retry.outputs.retry || (steps.part.outputs.next == 'none' && 'none') || '' }}\n    steps:\n      # one commit, or (the plan's history, #228) the head's whole history and every branch's\n      # remote ref, the default branch's too; fetched with this job's read-only token, which\n      # the checkout keeps nowhere (persist-credentials) and the command never gets\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}\n          persist-credentials: false\n      - shell: bash\n        run: |\n          git sparse-checkout disable 2> /dev/null || true\n          if git config --local --name-only --get-regexp '^none$'; then\n",
-     [f'{TRU}.Structure.test_a_parts_checkout_is_one_commit_or_its_history_and_keeps_no_credential']),
     (ROU, "        if not isinstance(p['id'], str) or not ID.match(p['id']) or p['id'] in seen:",
      "        if not isinstance(p['id'], str) or not ID.match(p['id']):", [f'{TRO}.Plan.test_each_fault_is_named']),
     (ROU, "        if not _num(p['minutes']) or not 0 < p['minutes'] <= most:", "        if not _num(p['minutes']):",
@@ -4364,8 +4365,8 @@ MUTANTS = [
     (CIW, "    uses: chaobrain/ci-runners/.github/workflows/part.yml@v1\n",
      "    uses: chaobrain/ci-runners/.github/workflows/part.yml@v1\n    secrets: inherit\n",
      [f'{TRU}.Structure.test_no_secret_reaches_a_part']),
-    (CIW, "      - if: steps.contract.outcome == 'success' && inputs.plan != ''\n        shell: bash\n        run: git sparse-checkout disable",
-     "      - if: steps.contract.outcome == 'success' && inputs.plan != ''\n        shell: bash\n        run: echo ${{ inputs.plan }}; git sparse-checkout disable",
+    (CIW, "      - if: steps.start.outputs.ok == 'true' && inputs.plan != ''\n        shell: bash\n        run: git sparse-checkout disable",
+     "      - if: steps.start.outputs.ok == 'true' && inputs.plan != ''\n        shell: bash\n        run: echo ${{ inputs.plan }}; git sparse-checkout disable",
      [f'{TRU}.Structure.test_no_expression_in_a_shell_script']),
     (CIW, " && github.event_name != 'pull_request_target' &&\n", " &&\n", [f'{TRU}.Structure.test_the_plan_job_refuses_a_fork_and_pull_request_target']),
     (CIW, "      always() && !cancelled() && needs.plan.result != 'skipped' &&", "      always() && !cancelled() &&",
@@ -4484,9 +4485,9 @@ MUTANTS = [
       f'{TRU}.Structure.test_the_plan_job_posts_nothing_and_hands_a_token_only_to_the_plan_command']),
     (CIW, "          GH_TOKEN: ${{ inputs.plan-token && github.token || '' }}", "          GH_TOKEN: ${{ github.token }}",
      [f'{TRU}.Structure.test_the_plan_job_posts_nothing_and_hands_a_token_only_to_the_plan_command']),
-    (CIW, "          command: claim\n", "          command: claim\n          token: ${{ github.token }}\n",
+    (CIW, "          command: start\n", "          command: start\n          token: ${{ github.token }}\n",
      [f'{TRU}.Structure.test_the_plan_job_posts_nothing_and_hands_a_token_only_to_the_plan_command']),
-    (CIW, "        uses: chaobrain/ci-runners/actions/flow@v1\n        with:\n          command: claim",
+    (CIW, "        uses: chaobrain/ci-runners/actions/flow@v1\n        with:\n          command: start",
      "        uses: chaobrain/ci-runners/actions/claim@v1\n        with:\n          pending-description: x",
      [f'{TRU}.Structure.test_the_plan_job_posts_nothing_and_hands_a_token_only_to_the_plan_command']),
     (CIW, "        if: ${{ !cancelled() && steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != '' }}",
@@ -4501,7 +4502,7 @@ MUTANTS = [
      [f'{TRU}.Structure.test_one_final_status_and_its_pending_beside_the_parts']),
     (CIW, "      - if: needs.plan.outputs.state != ''\n", "      - if: always()\n",
      [f'{TRU}.Structure.test_one_final_status_and_its_pending_beside_the_parts']),
-    (CIW, "      state: ${{ steps.contract.outputs.state || steps.plan.outputs.state }}",
+    (CIW, "      state: ${{ steps.start.outputs.state || steps.plan.outputs.state }}",
      "      state: ${{ steps.plan.outputs.state }}", [f'{TRU}.Structure.test_one_final_status_and_its_pending_beside_the_parts']),
     (AFL, '        [ -z "$IN_SEEN" ] || args+=("--seen=$IN_SEEN")\n', "", [f'{TRU}.Flow.test_each_input_reaches_its_flag']),
     # the third review: the red post from a job without head code, the plan's files after a
@@ -4768,6 +4769,22 @@ MUTANTS = [
      [f'{TFL}.Contract.test_the_first_failed_read_is_the_one_reported']),
     (FLW, "            named = pool.submit(contents, env, call, SPEC, a.default_branch) if a.default_branch else None",
      "            named = None", [f'{TFL}.Contract.test_the_three_reads_overlap']),
+    # this repository's check split (PR 5): the shards cover every mutant, the required check needs them all
+    ('tests/mutants.py', "        mine\x20= list(enumerate(MUTANTS, 1))[k - 1::n_shards]", "        mine = list(enumerate(MUTANTS, 1))[k::n_shards]",
+     ['tests.test_workflow.OwnCheck.test_a_shard_is_every_nth_mutant']),
+    ('tests/mutants.py', "        every\x20= sorted({t for _, (*_, ts) in mine for t in ts})", "        every = sorted({t for *_, ts in MUTANTS for t in ts})",
+     ['tests.test_workflow.OwnCheck.test_a_shard_is_every_nth_mutant']),
+    ('tests/mutants.py', "        if\x20k.isdigit() and n.isdigit() and 1 <= int(k) <= int(n):", "        if k.isdigit() and n.isdigit():",
+     ['tests.test_workflow.OwnCheck.test_a_shard_is_every_nth_mutant']),
+    ('tests/mutants.py', "    if\x20len(argv) == 2 and argv[0] == '--shard':", "    if argv[0] == '--shard':",
+     ['tests.test_workflow.OwnCheck.test_a_shard_is_every_nth_mutant']),
+    ('tests/mutants.py', "SHARDS\x20= 4  #", "SHARDS = 3  #", ['tests.test_workflow.OwnCheck.test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all']),
+    ('.github/workflows/test.yml', "        shard: [1, 2, 3, 4]", "        shard: [1, 2, 3]",
+     ['tests.test_workflow.OwnCheck.test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all']),
+    ('.github/workflows/test.yml', "    needs: [tests, mutants]\n    if: always()", "    needs: [tests, mutants]",
+     ['tests.test_workflow.OwnCheck.test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all']),
+    ('.github/workflows/test.yml', '[ "$TESTS" = success ] && [ "$MUTANTS" = success ]', '[ "$TESTS" = success ]',
+     ['tests.test_workflow.OwnCheck.test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all']),
     # #245: the plan's files through the API, refused on the way down as on the way up
     (FLW, "        if (not name or name.startswith('/') or '\\\\' in name or any(p in ('', '.', '..') for p in parts)",
      "        if (not name or name.startswith('/') or any(p in ('', '.', '..') for p in parts)", [f'{TFE}.Unpack.test_a_name_outside_the_files_is_refused']),
@@ -4833,6 +4850,95 @@ MUTANTS = [
      '', [f'{TRU}.Flow.test_each_input_reaches_its_flag']),
     ('actions/flow/action.yml', "  fallback:\n    description: \"true where the plan's files", "  fallback-x:\n    description: \"true where the plan's files",
      [f'{TRU}.Structure.test_every_output_read_of_an_action_step_is_one_it_declares']),
+    # PR 5: one start step in the plan job (the key, the claim and the contract), the part's
+    # checkout check in its fetch step, files or none
+    (PTW, "|| '' }}\n    steps:\n      # one commit, or (the plan's history, #228) the head's whole history and every branch's\n      # remote ref, the default branch's too; fetched with this job's read-only token, which\n      # the checkout keeps nowhere (persist-credentials) and the command never gets\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}\n          persist-credentials: false\n      # one step after the checkout (a step costs about 1 s of log upload): the checkout made\n      # whole and failed where its authorization header stayed in its git config (#228), before\n      # the files and the command; then the plan's files (its key files), for the command as\n      # CIRUNNERS_FILES: through the API (#245), with the job's token in this step's env alone\n      # (the action's default input), never the command's; download-artifact only where the\n      # API refuses (no actions: read)\n      - id: files\n        uses: chaobrain/ci-runners/actions/flow@v1\n        with:\n          command: fetch\n          workspace: ${{ github.workspace }}\n",
+     "|| '' }}\n    steps:\n      # one commit, or (the plan's history, #228) the head's whole history and every branch's\n      # remote ref, the default branch's too; fetched with this job's read-only token, which\n      # the checkout keeps nowhere (persist-credentials) and the command never gets\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}\n          persist-credentials: false\n      # one step after the checkout (a step costs about 1 s of log upload): the checkout made\n      # whole and failed where its authorization header stayed in its git config (#228), before\n      # the files and the command; then the plan's files (its key files), for the command as\n      # CIRUNNERS_FILES: through the API (#245), with the job's token in this step's env alone\n      # (the action's default input), never the command's; download-artifact only where the\n      # API refuses (no actions: read)\n      - id: files\n        if: fromJSON(inputs.part).files\n        uses: chaobrain/ci-runners/actions/flow@v1\n        with:\n          command: fetch\n          workspace: ${{ github.workspace }}\n",
+     [f'{TRU}.Structure.test_a_parts_checkout_is_one_commit_or_its_history_and_keeps_no_credential']),
+    (PTW, "needs.locate.outputs.retry }}\n    steps:\n      # one commit, or (the plan's history, #228) the head's whole history and every branch's\n      # remote ref, the default branch's too; fetched with this job's read-only token, which\n      # the checkout keeps nowhere (persist-credentials) and the command never gets\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}\n          persist-credentials: false\n      # one step after the checkout (a step costs about 1 s of log upload): the checkout made\n      # whole and failed where its authorization header stayed in its git config (#228), before\n      # the files and the command; then the plan's files (its key files), for the command as\n      # CIRUNNERS_FILES: through the API (#245), with the job's token in this step's env alone\n      # (the action's default input), never the command's; download-artifact only where the\n      # API refuses (no actions: read)\n      - id: files\n        uses: chaobrain/ci-runners/actions/flow@v1\n        with:\n          command: fetch\n          workspace: ${{ github.workspace }}\n",
+     "needs.locate.outputs.retry }}\n    steps:\n      # one commit, or (the plan's history, #228) the head's whole history and every branch's\n      # remote ref, the default branch's too; fetched with this job's read-only token, which\n      # the checkout keeps nowhere (persist-credentials) and the command never gets\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}\n          persist-credentials: false\n      # one step after the checkout (a step costs about 1 s of log upload): the checkout made\n      # whole and failed where its authorization header stayed in its git config (#228), before\n      # the files and the command; then the plan's files (its key files), for the command as\n      # CIRUNNERS_FILES: through the API (#245), with the job's token in this step's env alone\n      # (the action's default input), never the command's; download-artifact only where the\n      # API refuses (no actions: read)\n      - id: files\n        if: fromJSON(inputs.part).files\n        uses: chaobrain/ci-runners/actions/flow@v1\n        with:\n          command: fetch\n          workspace: ${{ github.workspace }}\n",
+     [f'{TRU}.Structure.test_a_parts_checkout_is_one_commit_or_its_history_and_keeps_no_credential']),
+    (PTW, "|| '' }}\n    steps:\n      # one commit, or (the plan's history, #228) the head's whole history and every branch's\n      # remote ref, the default branch's too; fetched with this job's read-only token, which\n      # the checkout keeps nowhere (persist-credentials) and the command never gets\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}\n          persist-credentials: false\n      # one step after the checkout (a step costs about 1 s of log upload): the checkout made\n      # whole and failed where its authorization header stayed in its git config (#228), before\n      # the files and the command; then the plan's files (its key files), for the command as\n      # CIRUNNERS_FILES: through the API (#245), with the job's token in this step's env alone\n      # (the action's default input), never the command's; download-artifact only where the\n      # API refuses (no actions: read)\n      - id: files\n        uses: chaobrain/ci-runners/actions/flow@v1\n        with:\n          command: fetch\n          workspace: ${{ github.workspace }}\n",
+     "|| '' }}\n    steps:\n      # one commit, or (the plan's history, #228) the head's whole history and every branch's\n      # remote ref, the default branch's too; fetched with this job's read-only token, which\n      # the checkout keeps nowhere (persist-credentials) and the command never gets\n      - uses: actions/checkout@v4\n        with:\n          ref: ${{ inputs.sha }}\n          fetch-depth: ${{ fromJSON(inputs.part).history && '0' || '1' }}\n          persist-credentials: false\n      # one step after the checkout (a step costs about 1 s of log upload): the checkout made\n      # whole and failed where its authorization header stayed in its git config (#228), before\n      # the files and the command; then the plan's files (its key files), for the command as\n      # CIRUNNERS_FILES: through the API (#245), with the job's token in this step's env alone\n      # (the action's default input), never the command's; download-artifact only where the\n      # API refuses (no actions: read)\n      - id: files\n        uses: chaobrain/ci-runners/actions/flow@v1\n        with:\n          command: fetch\n",
+     [f'{TRU}.Structure.test_a_parts_checkout_is_one_commit_or_its_history_and_keeps_no_credential']),
+    (CIW, '          plan-only: ${{ inputs.plan-only }}\n          default-branch:',
+     '          default-branch:',
+     [f'{TRU}.Structure.test_one_start_step_before_anything_of_the_head']),
+    (CIW, "      - if: steps.start.outputs.ok == 'true' && inputs.plan != ''\n        uses: actions/checkout@v4",
+     "      - if: steps.start.outcome == 'success' && inputs.plan != ''\n        uses: actions/checkout@v4",
+     [f'{TRU}.Structure.test_one_start_step_before_anything_of_the_head']),
+    (PUW, "      - id: command\n        if: steps.start.outputs.ok == 'true' && inputs.plan != ''",
+     "      - id: command\n        if: inputs.plan != ''",
+     [f'{TRU}.Structure.test_one_start_step_before_anything_of_the_head']),
+    (CIW, '      seen: ${{ steps.start.outputs.seen }}',
+     '      seen: ${{ steps.claim.outputs.seen }}',
+     [f'{TRU}.Structure.test_one_start_step_before_anything_of_the_head']),
+    (PUW, '      description: ${{ steps.start.outputs.description || steps.plan.outputs.description }}\n      project: ${{ steps.start.outputs.project }}',
+     '      description: ${{ steps.start.outputs.description || steps.plan.outputs.description }}\n      project: ${{ steps.project.outputs.name }}',
+     [f'{TRU}.Structure.test_one_start_step_before_anything_of_the_head']),
+    (CIW, '          project: ${{ inputs.project }}\n          plan-only:',
+     '          plan-only:',
+     [f'{TRU}.Structure.test_one_start_step_before_anything_of_the_head']),
+    (AFL, 'case "$IN_COMMAND" in start|claim|',
+     'case "$IN_COMMAND" in claim|',
+     [f'{TRU}.Flow.test_the_action_runs_every_command_and_only_those']),
+    (AFL, '  ok:\n    description: "true where the head\'s contract holds and the plan command may run (start, contract)"\n    value: ${{ steps.flow.outputs.ok }}\n',
+     '',
+     [f'{TRU}.Structure.test_every_output_read_of_an_action_step_is_one_it_declares']),
+    (FLW, '    if not PROJECT.fullmatch(name):',
+     '    if not name:',
+     [f'{TFL}.Start.test_the_registry_key_first']),
+    (FLW, "    name = a.project or env.get('GITHUB_REPOSITORY', '').split('/', 1)[-1]",
+     "    name = a.project or env.get('GITHUB_REPOSITORY', '')",
+     [f'{TFL}.Start.test_the_registry_key_first']),
+    (FLW, '    _out(env, project=name)\n',
+     '',
+     [f'{TFL}.Start.test_plan_only_reads_no_claim']),
+    (FLW, "        claim_ = None if a.plan_only == 'true' else pool.submit(claimed, a, env, call, etc)",
+     '        claim_ = pool.submit(claimed, a, env, call, etc)',
+     [f'{TFL}.Start.test_plan_only_reads_no_claim']),
+    (FLW, "        if got['run'] != 'true':\n",
+     '        if False:\n',
+     [f'{TFL}.Start.test_a_green_head_ends_the_step_with_no_contract_output']),
+    (FLW, '        state, text = contract_state(a, env, call)\n        got = claim_.result() if claim_ else None\n',
+     '        got = claim_.result() if claim_ else None\n        state, text = contract_state(a, env, call)\n',
+     [f'{TFL}.Start.test_the_claim_and_the_contract_read_at_once']),
+    (FLW, '    if got is not None:\n        _out(env, **got)\n',
+     '    if got is not None:\n        pass\n',
+     [f'{TFL}.Start.test_a_head_to_run_gets_the_claim_and_the_contract_and_posts_nothing']),
+    (FLW, '    return contract_end(a, env, state, text)\n\n\n# ---',
+     '    return 0\n\n\n# ---',
+     [f'{TFL}.Start.test_an_old_head_the_claim_runs_ends_the_run_as_the_contract_does']),
+    (FLW, "    genv = {k: v for k, v in env.items() if k != 'GITHUB_TOKEN'}",
+     '    genv = dict(env)',
+     [f'{TFE}.Checkout.test_git_gets_no_token_no_hooks_and_no_fsmonitor']),
+    (FLW, "    git = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false']",
+     "    git = ['git', '-c', 'core.hooksPath=/dev/null']",
+     [f'{TFE}.Checkout.test_git_gets_no_token_no_hooks_and_no_fsmonitor']),
+    (FLW, "    git = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false']",
+     "    git = ['git', '-c', 'core.fsmonitor=false']",
+     [f'{TFE}.Checkout.test_git_gets_no_token_no_hooks_and_no_fsmonitor']),
+    (FLW, "        subprocess.run([*git, 'sparse-checkout', 'disable'], **quiet,",
+     "        subprocess.run([*git, 'status'], **quiet,",
+     [f'{TFE}.Checkout.test_a_sparse_workspace_is_made_whole']),
+    (FLW, '    if r.returncode != 0:\n        return True\n',
+     '    if r.returncode not in (0, 1):\n        return True\n',
+     [f'{TFE}.Checkout.test_what_a_reused_workspace_kept_passes_and_without_files_nothing_is_read']),
+    (FLW, '    except FileNotFoundError:\n        return True\n',
+     '    except FileNotFoundError:\n        return False\n',
+     [f'{TFE}.Checkout.test_git_gets_no_token_no_hooks_and_no_fsmonitor']),
+    (FLW, "EXTRAHEADER = r'^http\\..*\\.extraheader$'",
+     "EXTRAHEADER = r'^http\\.extraheader$'",
+     [f'{TFE}.Checkout.test_a_header_the_checkout_kept_fails_the_step_before_any_read']),
+    (FLW, "    print(r.stdout, end='')\n",
+     '',
+     [f'{TFE}.Checkout.test_a_header_the_checkout_kept_fails_the_step_before_any_read']),
+    (FLW, '    if not check_checkout(a.workspace, env):\n        return EXIT_RED\n',
+     '    check_checkout(a.workspace, env)\n',
+     [f'{TFE}.Checkout.test_a_header_the_checkout_kept_fails_the_step_before_any_read']),
+    (FLW, '    if not a.dest:\n        return 0\n',
+     '',
+     [f'{TFE}.Checkout.test_what_a_reused_workspace_kept_passes_and_without_files_nothing_is_read']),
 ]
 
 
@@ -4864,7 +4970,19 @@ def one(tree: pathlib.Path, rel: str, old: str, new: str, tests: list[str]) -> t
         shutil.rmtree(cache, ignore_errors=True)
 
 
-def main() -> int:
+def shard(argv: list[str]) -> tuple[int, int]:
+    """``(K, N)`` of ``--shard K/N`` (``(1, 1)`` without it); SystemExit for anything else."""
+    if not argv:
+        return 1, 1
+    if len(argv) == 2 and argv[0] == '--shard':
+        k, _, n = argv[1].partition('/')
+        if k.isdigit() and n.isdigit() and 1 <= int(k) <= int(n):
+            return int(k), int(n)
+    raise SystemExit('usage: python tests/mutants.py [--shard K/N]')
+
+
+def main(argv: list[str] | None = None) -> int:
+    k, n_shards = shard(sys.argv[1:] if argv is None else argv)
     workers = max(1, min(WORKERS, os.cpu_count() or 1))
     with tempfile.TemporaryDirectory() as d:
         # main's state: a stamp PR's tree (operations §5 step 2) is stamped back to hook first, so
@@ -4877,12 +4995,13 @@ def main() -> int:
             if count != 1:
                 print(f'mutant {n}: the snippet occurs {count} times in {rel}', file=sys.stderr)
                 return 2
+        mine = list(enumerate(MUTANTS, 1))[k - 1::n_shards]
         trees = queue.SimpleQueue()
         for w in range(workers):  # a tree per worker: a mutant is never seen by another's tests
             tree = pathlib.Path(d) / f'tree{w}'
             shutil.copytree(base, tree)
             trees.put(tree)
-        every = sorted({t for *_, ts in MUTANTS for t in ts})
+        every = sorted({t for _, (*_, ts) in mine for t in ts})
         tree0 = trees.get()
         if run(tree0, every, hang=600):
             print('the unmutated tree fails its tests or leaves a process behind', file=sys.stderr)
@@ -4896,11 +5015,12 @@ def main() -> int:
             finally:
                 trees.put(tree)
         with concurrent.futures.ThreadPoolExecutor(workers) as ex:
-            killed = list(ex.map(job, MUTANTS))
-    for n, ((rel, old, *_), (k, secs)) in enumerate(zip(MUTANTS, killed), 1):
-        print(f'{"killed  " if k else "SURVIVED"} {n:3d} {secs:5.1f}s {rel}: {old.strip()[:70]!r}')
-    survived = [k for k, _ in killed].count(False)
-    print(f'{len(MUTANTS) - survived}/{len(MUTANTS)} mutants killed ({workers} workers)')
+            killed = list(ex.map(job, [m for _, m in mine]))
+    for (n, (rel, old, *_)), (dead, secs) in zip(mine, killed):
+        print(f'{"killed  " if dead else "SURVIVED"} {n:3d} {secs:5.1f}s {rel}: {old.strip()[:70]!r}')
+    survived = [dead for dead, _ in killed].count(False)
+    part = f', shard {k}/{n_shards}' if n_shards > 1 else ''
+    print(f'{len(mine) - survived}/{len(mine)} mutants killed ({workers} workers{part})')
     return 1 if survived else 0
 
 

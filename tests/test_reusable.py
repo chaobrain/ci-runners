@@ -67,15 +67,6 @@ PERMISSIONS = {
 }
 
 
-#: part.yml's step after each checkout (#228): no credential stays in the checkout's config
-CREDENTIAL_CHECK = (
-    "git sparse-checkout disable 2> /dev/null || true\n"
-    "if git config --local --name-only --get-regexp '^http\\..*\\.extraheader$'; then\n"
-    '  echo "::error::the checkout kept its authorization header in its git config"\n'
-    "  exit 1\n"
-    "fi\n")
-
-
 def load(name: str) -> dict:
     return yamlsub.load((WF / name).read_text())
 
@@ -167,7 +158,13 @@ class Structure(unittest.TestCase):
             self.assertEqual(co['with'], {'ref': '${{ inputs.sha }}', 'persist-credentials': False,
                                           'fetch-depth': "${{ fromJSON(inputs.part).history && '0' || '1' }}"}, jid)
             self.assertEqual(jobs[jid]['permissions'], {'contents': 'read', 'actions': 'read'})
-            self.assertEqual(sts[1]['run'], CREDENTIAL_CHECK, jid)  # before the files and the command
+            # the step right after it checks it (flow fetch, tests.test_fetch.Checkout), files or
+            # none, before the files and the command: no condition, so it never skips
+            self.assertEqual((sts[1]['id'], sts[1]['with']['command'], 'if' in sts[1]), ('files', 'fetch', False), jid)
+            self.assertEqual(sts[1]['with']['workspace'], '${{ github.workspace }}', jid)
+            self.assertFalse([st for st in sts if 'run' in st], jid)  # no other step checks or runs a script
+            self.assertIn('if not check_checkout(a.workspace, env):\n        return EXIT_RED\n    if not a.dest:',
+                          (ROOT / 'ci_runners' / 'flow.py').read_text())  # the check first, files or none
         self.assertEqual([jid for jid, st in steps(load('part.yml')) if st.get('uses', '').startswith('actions/checkout@')],
                          ['first', 'retry'])
 
@@ -206,7 +203,8 @@ class Structure(unittest.TestCase):
                     self.assertNotIn('token', str(w).lower(), f'{jid}: {st.get("uses") or st.get("run")}')
             self.assertEqual(holders, ['fetch'], jid)
             files = [st for st in sts if st.get('id') == 'files'][0]
-            self.assertEqual(files['with'], {'command': 'fetch', 'dest': '${{ runner.temp }}/ci-runners-files'})
+            self.assertEqual(files['with'], {'command': 'fetch', 'workspace': '${{ github.workspace }}',
+                                            'dest': "${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}"})
             self.assertEqual(set(st['uses'].split('@')[0] for st in sts if 'actions/part@' in st.get('uses', '')),
                              {'chaobrain/ci-runners/actions/part'})
         self.assertNotIn('token', action_inputs('part'))  # the part action takes none
@@ -214,28 +212,6 @@ class Structure(unittest.TestCase):
         self.assertEqual([st['env']['GITHUB_TOKEN'] for st in flow_steps], ['${{ inputs.token }}'])
         self.assertNotIn('GITHUB_ENV', (ROOT / 'actions' / 'flow' / 'action.yml').read_text())
         self.assertNotIn('GITHUB_ENV', (ROOT / 'ci_runners' / 'flow.py').read_text())  # nothing hands it on
-
-    def test_the_credential_check_fails_on_what_a_checkout_could_keep(self):
-        if not shutil.which('git'):
-            self.skipTest('no git')
-        with tempfile.TemporaryDirectory() as d:
-            subprocess.run(['git', 'init', '-q', d], check=True)
-            env = {'PATH': '/usr/bin:/bin', 'HOME': d, 'GIT_CONFIG_NOSYSTEM': '1'}
-
-            def check():
-                return subprocess.run(['bash', '-c', CREDENTIAL_CHECK], cwd=d, env=env, capture_output=True, text=True)
-            self.assertEqual(check().returncode, 0)
-            for key in ('http.https://github.com/.extraheader', 'http.https://ghe.example/.extraheader'):
-                subprocess.run(['git', 'config', '--local', key, 'AUTHORIZATION: basic x'], cwd=d, check=True)
-                r = check()
-                self.assertEqual(r.returncode, 1, key)
-                self.assertIn("::error::the checkout kept its authorization header in its git config", r.stdout, key)
-                subprocess.run(['git', 'config', '--local', '--unset', key], cwd=d, check=True)
-            # what a reused workspace may hold from an earlier command is not the checkout's token:
-            # failing on it would let one head fail every later attempt on that runner
-            for key, value in (('http.postBuffer', '1'), ('credential.helper', 'store'), ('include.path', '../x')):
-                subprocess.run(['git', 'config', '--local', key, value], cwd=d, check=True)
-            self.assertEqual(check().returncode, 0)
 
     def test_no_expression_in_a_shell_script(self):
         """A consumer's string (its plan command, a part's id or command) reaches a shell only
@@ -369,7 +345,7 @@ class Structure(unittest.TestCase):
             self.assertEqual(len(down), 1, jid)
             files = ids.index('files')  # through the API first (#245), download-artifact where it refuses
             self.assertEqual((files + 1, down[0]), (down[0], ids.index('part') - 1), jid)
-            self.assertEqual(sts[files]['if'], 'fromJSON(inputs.part).files')
+            self.assertNotIn('if', sts[files])  # the checkout's check runs files or none; dest is empty without
             self.assertEqual(sts[down[0]]['if'], "fromJSON(inputs.part).files && steps.files.outputs.fallback == 'true'")
             self.assertEqual(sts[down[0]]['with'], {'name': 'ci-plan-files', 'path': '${{ runner.temp }}/ci-runners-files'})
             part = sts[ids.index('part')]
@@ -402,7 +378,7 @@ class Structure(unittest.TestCase):
         plan = [st for st in sts if st.get('id') == 'plan'][0]
         # a plan command whose part step left no outcome is lost, not passed
         self.assertEqual(plan['with']['plan-outcome'], "${{ inputs.plan != '' && (steps.command.outputs.outcome || 'lost') || '' }}")
-        self.assertEqual(plan['if'], "always() && steps.contract.outcome == 'success'")
+        self.assertEqual(plan['if'], "always() && steps.start.outputs.ok == 'true'")
         up = [st for st in sts if st.get('uses', '').startswith('actions/upload-artifact@')]
         self.assertEqual([u['with']['name'] for u in up], ['ci-plan-files'])
         # #227: hidden entries too (a `.ci-plan` directory, a `.name` inside); flow plan refused
@@ -433,7 +409,8 @@ class Structure(unittest.TestCase):
         self.assertIn("(needs.plan.outputs.files == 'none' || needs.plan.outputs.files == 'success')", cond)
         plan = load('ci.yml')['jobs']['plan']
         self.assertEqual(plan['outputs']['files'], "${{ steps.plan.outputs.files == '' && 'none' || steps.files.outcome }}")
-        self.assertEqual(plan['steps'][0]['id'], 'project')  # before anything reads it
+        self.assertEqual(plan['steps'][0]['id'], 'start')  # the key, before anything reads it
+        self.assertEqual(plan['outputs']['project'], '${{ steps.start.outputs.project }}')
         text = (WF / 'ci.yml').read_text()
         self.assertNotIn('github.event.repository.name', text)  # absent on a schedule
         self.assertEqual(load('ci.yml')['jobs']['parts']['with']['project'], '${{ needs.plan.outputs.project }}')
@@ -448,6 +425,34 @@ class Structure(unittest.TestCase):
             self.assertIn(c, cond)
         self.assertNotIn('wait-seconds', str(load('ci.yml')['jobs']['verdict']['steps']))
 
+    def test_one_start_step_before_anything_of_the_head(self):
+        """The registry key, the claim's decision and the contract are one flow step, the plan
+        job's first (a step of a self-hosted job costs about 1 s of log upload): nothing of the
+        head runs (its checkout, the plan command) and no plan is read unless its contract
+        holds, and a head the claim skipped runs none of them."""
+        for name in ('ci.yml', 'public.yml'):
+            job = load(name)['jobs']['plan']
+            start, *rest = job['steps']
+            self.assertEqual(start['id'], 'start', name)
+            self.assertNotIn('if', start, name)  # the claim's skip and plan-only are its own
+            self.assertEqual(start['with'], {
+                'command': 'start', 'context': '${{ inputs.context }}',
+                'sha': '${{ inputs.sha || github.event.pull_request.head.sha || github.sha }}',
+                'project': '${{ inputs.project }}', 'plan-only': '${{ inputs.plan-only }}',
+                'default-branch': "${{ github.event.repository.default_branch || '' }}"}, name)
+            ok = "steps.start.outputs.ok == 'true'"
+            for st in rest:
+                if st.get('id') != 'files':  # the plan's files: after a routed plan only
+                    self.assertIn(st['if'], (f"{ok} && inputs.plan != ''", f'always() && {ok}'), (name, st.get('id')))
+            self.assertEqual({k: job['outputs'][k] for k in ('run', 'seen', 'state', 'description', 'project')}, {
+                'run': "${{ inputs.plan-only && 'true' || steps.start.outputs.run }}",
+                'seen': '${{ steps.start.outputs.seen }}',
+                'state': '${{ steps.start.outputs.state || steps.plan.outputs.state }}',
+                'description': '${{ steps.start.outputs.description || steps.plan.outputs.description }}',
+                'project': '${{ steps.start.outputs.project }}'}, name)
+            self.assertEqual([st['with']['project'] for st in rest if 'project' in (st.get('with') or {})],
+                             ['${{ steps.start.outputs.project }}'] * (2 if name == 'ci.yml' else 1), name)
+
     def test_the_plan_job_posts_nothing_and_hands_a_token_only_to_the_plan_command(self):
         """16.6 as amended: the plan job's token is read-only, its flow steps read (claim,
         contract) or compute (plan), and the only token a step's environment carries is
@@ -455,7 +460,7 @@ class Structure(unittest.TestCase):
         job = load('ci.yml')['jobs']['plan']
         self.assertLessEqual(set(job['permissions'].values()), {'read'})
         flows = [st['with']['command'] for st in job['steps'] if st.get('uses', '').startswith('chaobrain/ci-runners/actions/flow@')]
-        self.assertEqual(flows, ['claim', 'contract', 'plan'])
+        self.assertEqual(flows, ['start', 'plan'])  # start: the key, the claim and the contract, one step
         uses = {st.get('uses', '').split('@')[0] for st in job['steps']} - {''}
         self.assertEqual(uses, {'chaobrain/ci-runners/actions/flow', 'actions/checkout', 'chaobrain/ci-runners/actions/part',
                                 'actions/upload-artifact'})  # no claim action: it posts pending
@@ -498,7 +503,7 @@ class Structure(unittest.TestCase):
         self.assertEqual(v['outputs']['state'], "${{ needs.plan.outputs.state || (needs.plan.outputs.routed == 'true' && "
                                                 "steps.verdict.outputs.state) || 'error' }}")
         self.assertEqual((post['with']['command'], post['with']['state']), ('status', '${{ needs.plan.outputs.state }}'))
-        self.assertEqual(jobs['plan']['outputs']['state'], '${{ steps.contract.outputs.state || steps.plan.outputs.state }}')
+        self.assertEqual(jobs['plan']['outputs']['state'], '${{ steps.start.outputs.state || steps.plan.outputs.state }}')
         # who posts: pending, a red attempt (part.yml) and the verdict job; nothing else
         posters = {j for j, job in jobs.items() if 'write' in (job.get('permissions') or {}).values()}
         self.assertEqual(posters, {'pending', 'parts', 'verdict', 'public'})  # public: public.yml's own three
@@ -588,6 +593,12 @@ class Flow(unittest.TestCase):
         flags = set(re.findall(r"add_argument\('(--[a-z-]+)'", (ROOT / 'ci_runners' / 'flow.py').read_text()))
         self.assertLessEqual(passed, flags)
         self.assertIn('exec sh "$GITHUB_ACTION_PATH/../../bin/ci-run" flow "$IN_COMMAND"', text)
+
+
+    def test_the_action_runs_every_command_and_only_those(self):
+        text = (ROOT / 'actions' / 'flow' / 'action.yml').read_text()
+        listed = re.search(r'case "\$IN_COMMAND" in ([a-z|]+)\)', text).group(1).split('|')
+        self.assertEqual(sorted(listed), sorted(flow.parser()._subparsers._group_actions[0].choices))
 
 
 class Sweep(unittest.TestCase):

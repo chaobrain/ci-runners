@@ -6,6 +6,7 @@ from __future__ import annotations
 import pathlib
 import re
 import unittest
+import unittest.mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -37,6 +38,55 @@ class FlowExpressions(unittest.TestCase):
             self.assertTrue(blocks or f.name != 'consumers.md')
             for b in blocks:
                 self.assertEqual(self.bad(b.splitlines()), [], f.name)
+
+
+class OwnCheck(unittest.TestCase):
+    """This repository's check (test.yml): the unit tests and every mutant shard side by
+    side, each job bounded at 15 min, and the required ``unit (3.12)`` green only where all are."""
+
+    def test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all(self):
+        import sys
+        sys.path.insert(0, str(ROOT / 'tests'))
+        import mutants
+        from tests import yamlsub
+        doc = yamlsub.load((ROOT / '.github' / 'workflows' / 'test.yml').read_text())
+        jobs = doc['jobs']
+        self.assertEqual(jobs['mutants']['strategy']['matrix']['shard'], list(range(1, mutants.SHARDS + 1)))
+        self.assertIs(jobs['mutants']['strategy']['fail-fast'], False)
+        run = jobs['mutants']['steps'][-1]['run']
+        self.assertEqual(run, f'python tests/mutants.py --shard ${{{{ matrix.shard }}}}/{mutants.SHARDS}')
+        self.assertEqual(jobs['mutants']['name'], f'mutants (${{{{ matrix.shard }}}}/{mutants.SHARDS})')
+        for jid in ('tests', 'mutants'):
+            self.assertLessEqual(jobs[jid]['timeout-minutes'], 15, jid)
+        unit = jobs['unit']
+        self.assertEqual(unit['name'], 'unit (3.12)')
+        self.assertEqual((unit['needs'], unit['if']), (['tests', 'mutants'], 'always()'))
+        self.assertEqual(unit['steps'][0]['env'], {'TESTS': '${{ needs.tests.result }}',
+                                                   'MUTANTS': '${{ needs.mutants.result }}'})
+        self.assertTrue(unit['steps'][0]['run'].endswith('[ "$TESTS" = success ] && [ "$MUTANTS" = success ]\n'))
+        tests_run = jobs['tests']['steps'][-1]['run']
+        self.assertIn('python -I -m unittest discover -s tests -t .', tests_run)
+        self.assertIn('python -m ci_runners.inventory lint . --deny tests/deny.sha256', tests_run)
+
+    def test_a_shard_is_every_nth_mutant(self):
+        import sys
+        sys.path.insert(0, str(ROOT / 'tests'))
+        import mutants
+        self.assertEqual(mutants.shard([]), (1, 1))
+        self.assertEqual(mutants.shard(['--shard', '3/4']), (3, 4))
+        for bad in (['--shard', '0/4'], ['--shard', '5/4'], ['--shard', '1'], ['--shard', 'a/b'], ['-x'],
+                    ['--shard', '1/2', 'x']):
+            with self.assertRaises(SystemExit, msg=bad):
+                mutants.shard(bad)
+        calls = []
+        with unittest.mock.patch.object(mutants, 'MUTANTS', [('README.md', 'x', 'y', [f't{i}']) for i in range(10)]), \
+                unittest.mock.patch.object(mutants, 'run', side_effect=lambda tree, tests, hang=0: calls.append(tests) or 0), \
+                unittest.mock.patch.object(mutants, 'one', side_effect=lambda tree, *m: (True, 0.0)), \
+                unittest.mock.patch.object(mutants.stamp, 'stamp'), \
+                unittest.mock.patch('pathlib.Path.read_text', return_value='x'), \
+                unittest.mock.patch('shutil.copytree'), unittest.mock.patch('builtins.print'):
+            self.assertEqual(mutants.main(['--shard', '2/4']), 0)
+        self.assertEqual(calls, [['t1', 't5', 't9']])  # the shard's own tests, once, unmutated
 
 
 if __name__ == '__main__':

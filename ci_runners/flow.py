@@ -121,9 +121,9 @@ def post(env: Mapping[str, str], call: Callable, *, context: str, sha: str, stat
 
 
 def _text(description: str) -> str:
-    """A status description: one line, at most 140 characters."""
-    one = ' '.join(description.split())
-    return one if len(one) <= 140 else one[:137] + '...'
+    """A status description: one line, at most 140 characters, never cut inside a URL
+    (``github.status_text``, issue #250)."""
+    return github.status_text(description)
 
 
 def _bot(etc: str, env: Mapping[str, str]) -> str:
@@ -367,9 +367,11 @@ def check_contract(default: str | None, head: str | None, branch: str) -> tuple[
     return 'ok', f'contract {have}, {branch} {want}'
 
 
-def contract_state(a: argparse.Namespace, env: Mapping[str, str], call: Callable) -> tuple[str, str]:
-    """``(state, description)`` of the head's contract (``check_contract``), read with the
-    job token; a read that fails is ``error``. Writes nothing."""
+def contract_state(a: argparse.Namespace, env: Mapping[str, str], call: Callable) -> tuple[str, str, str]:
+    """``(state, description, detail)`` of the head's contract (``check_contract``), read
+    with the job token; a read that fails is ``error``, its cause first and no URL
+    (``contract: <SPEC> not read: HTTP 500``, issue #250), and ``detail`` the whole error
+    for the job's log and summary (else empty). Writes nothing."""
     try:
         # the three reads at once (#239: about 2 s one after another through the egress); the
         # default branch's spec waits for the repository only where the event names no branch
@@ -384,17 +386,18 @@ def contract_state(a: argparse.Namespace, env: Mapping[str, str], call: Callable
         if private == is_public(env):  # each caller its own legs (18.7): the workflow's guard misses some events
             state, text = 'error', PRIVATE_ON_PUBLIC if private else PUBLIC
     except github.ApiError as e:
-        state, text = 'error', f'contract: {SPEC} not read ({e})'
-    return state, text
+        return 'error', f'contract: {SPEC} not read: {e.cause}', str(e)
+    return state, text, ''
 
 
-def contract_end(a: argparse.Namespace, env: Mapping[str, str], state: str, text: str) -> int:
-    """The contract's outputs: ``ok``, else the end the verdict job posts, and exit 1."""
-    print(f'ci-run flow contract: {state}: {text}', file=sys.stderr)
+def contract_end(a: argparse.Namespace, env: Mapping[str, str], state: str, text: str, detail: str = '') -> int:
+    """The contract's outputs: ``ok``, else the end the verdict job posts, and exit 1;
+    ``detail``, the whole error the description shortens, goes to the log and summary."""
+    print(f'ci-run flow contract: {state}: {text}' + (f' ({detail})' if detail else ''), file=sys.stderr)
     if state == 'ok':
         _out(env, ok='true')
         return 0
-    _summary(env, f'## {a.context}: {state}\n\n{text}\n')
+    _summary(env, f'## {a.context}: {state}\n\n{text}\n' + (f'\n{detail}\n' if detail else ''))
     _out(env, ok='false', state=state, description=_text(text))  # the verdict job posts it
     return EXIT_RED
 
@@ -423,14 +426,14 @@ def run_start(a: argparse.Namespace, env: Mapping[str, str], call: Callable, etc
     _out(env, project=name)
     with concurrent.futures.ThreadPoolExecutor(1) as pool:
         claim_ = None if a.plan_only == 'true' else pool.submit(claimed, a, env, call, etc)
-        state, text = contract_state(a, env, call)
+        state, text, detail = contract_state(a, env, call)
         got = claim_.result() if claim_ else None
     if got is not None:
         _out(env, **got)
         if got['run'] != 'true':
             print('ci-run flow start: the claim skips the head; its contract is not read', file=sys.stderr)
             return 0
-    return contract_end(a, env, state, text)
+    return contract_end(a, env, state, text, detail)
 
 
 # ------------------------------------------------------------------ the plan (§4.10)

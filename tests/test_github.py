@@ -198,5 +198,87 @@ class ClaimMain(unittest.TestCase):
         self.assertEqual(self.main(call, etc=pathlib.Path(self.tmp.name) / 'absent')[0], 2)
 
 
+#: a GitHub URL at the limit: the longest owner (39) and repository (100) names, a long run id
+LONG_URL = f'https://api.github.com/repos/{"o" * 39}/{"r" * 100}/actions/runs/{"9" * 20}/artifacts'
+
+
+def whole_urls(text: str, source: str) -> bool:
+    """Every word of ``text`` that holds ``://`` is a whole word of ``source``."""
+    words = source.split()
+    return all(w in words for w in text.split() if '://' in w)
+
+
+class StatusText(unittest.TestCase):
+    """Issue #250: a status description is one line of at most 140 characters, its URLs
+    dropped first when it is longer, never cut inside one."""
+
+    def test_a_short_description_is_kept_on_one_line(self):
+        self.assertEqual(github.status_text('passed: a, b'), 'passed: a, b')
+        self.assertEqual(github.status_text('a\nb  c'), 'a b c')
+        self.assertEqual(github.status_text(f'see {LONG_URL[:120]}'), f'see {LONG_URL[:120]}')  # it fits: kept
+        at = 'x' * 140
+        self.assertEqual(github.status_text(at), at)  # at the limit: kept
+
+    def test_one_past_the_limit_is_cut_with_dots(self):
+        got = github.status_text('word ' * 28 + 'w')  # 141
+        self.assertLessEqual(len(got), github.STATUS_MAX)
+        self.assertTrue(got.endswith('word...'), got)  # at a word's end
+        self.assertEqual(len(github.status_text('x' * 141)), github.STATUS_MAX)  # one long word: cut where room ends
+        self.assertEqual(github.status_text('a ' + 'x' * 200), 'a ' + 'x' * 135 + '...')  # not 'a...'
+
+    def test_a_url_is_dropped_before_anything_else_is_cut(self):
+        text = f'verdict: artifacts not listed (GET {LONG_URL}: HTTP 403); the job needs actions: read'
+        got = github.status_text(text)
+        self.assertEqual(got, 'verdict: artifacts not listed (GET HTTP 403); the job needs actions: read')
+        self.assertNotIn('api.github.com', got)
+        words = ' '.join(['x'] * 60)
+        self.assertEqual(github.status_text(f'{words} ({LONG_URL})'), words)  # the word that holds it goes whole
+
+    def test_a_cut_never_falls_inside_a_url_at_any_length(self):
+        for n in range(0, 200, 3):
+            for text in (f'cause HTTP 502 {"w" * n} {LONG_URL} and more words after it',
+                         f'{"a " * n}{LONG_URL}',
+                         f'{LONG_URL} {"b" * n}',
+                         f'x {"c " * n} (http://a.example/{"p" * n}) tail'):
+                got = github.status_text(text)
+                self.assertLessEqual(len(got), github.STATUS_MAX, text)
+                self.assertNotIn('\n', got)
+                self.assertTrue(whole_urls(got, text), got)
+                self.assertNotIn('//api', got.replace(LONG_URL, ''))  # no piece of a URL is left
+        self.assertTrue(github.status_text('cause HTTP 502 ' + 'w ' * 80 + LONG_URL).startswith('cause HTTP 502 '))
+
+    def test_an_api_errors_cause_is_its_short_end(self):
+        self.assertEqual(github.ApiError(f'GET {LONG_URL}: HTTP 403').cause, 'HTTP 403')
+        self.assertEqual(github.ApiError('GET x: whatever', 'HTTP 502').cause, 'HTTP 502')
+        self.assertEqual(github.ApiError('no ci-plan-files artifact listed').cause, 'no ci-plan-files artifact listed')
+        self.assertEqual(str(github.ApiError(f'GET {LONG_URL}: HTTP 403')), f'GET {LONG_URL}: HTTP 403')  # kept whole
+
+    def test_the_api_raises_its_cause(self):
+        def opener(req, timeout):
+            raise urllib.error.HTTPError(req.full_url, 403, 'x', {}, io.BytesIO())
+        with self.assertRaises(github.ApiError) as cm:
+            github.api('GET', LONG_URL + '?page=1', 't', opener=opener, pause=0)
+        self.assertEqual((cm.exception.cause, str(cm.exception)), ('HTTP 403', f'GET {LONG_URL}: HTTP 403'))
+
+        def slow(req, timeout):
+            raise TimeoutError()
+        with self.assertRaises(github.ApiError) as cm:
+            github.api('GET', LONG_URL, 't', opener=slow, pause=0, tries=1)
+        self.assertEqual(cm.exception.cause, 'TimeoutError')
+
+    def test_the_claims_pending_description_fits(self):
+        posted = []
+
+        def call(method, url, token, body=None):
+            if method == 'POST':
+                posted.append(body)
+            return []
+        env = {'GITHUB_REPOSITORY': 'o/r', 'GITHUB_TOKEN': 't'}
+        github.run_claim(env, context='c/ci', sha='a' * 40, description=f'queued {LONG_URL} ' + 'y ' * 80, bot='b',
+                         call=call)
+        self.assertLessEqual(len(posted[0]['description']), github.STATUS_MAX)
+        self.assertTrue(whole_urls(posted[0]['description'], LONG_URL))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -156,7 +156,7 @@ class Client:
                 last = type(e).__name__
             if i + 1 < self._tries:
                 time.sleep(self._pause)
-        raise github.ApiError(f'{what}: {last}')
+        raise github.ApiError(f'{what}: {last}', last)
 
     def api(self, method: str, url: str, token: str, body: dict | None = None) -> object:
         """``github.api`` over the kept connection: the answer's JSON."""

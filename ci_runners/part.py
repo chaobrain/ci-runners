@@ -970,6 +970,25 @@ def parse_args(argv: Sequence[str]) -> Inputs:
                   a.queue_timeout_minutes, a.results, a.resume == 'true', a.attempt_of, a.lock, a.target)
 
 
+def queue_capped(inv: inventory.Inventory, runner: str) -> bool:
+    """Whether a first attempt on ``runner`` meets its project's ``max_waiting`` (§7 rule 2,
+    decision 13.6): only where the runner's pool has more runners than the host has CI
+    slots, so that a part can wait for one. Where it has no more (one runner per slot,
+    decisions 16.2 and 16.4), a part that a runner picked up waits for nothing but the
+    moment between its ticket and its slot, in which the other parts of a batch that landed
+    at once see its ticket: the cap lapses, so that they are not refused with a slot free.
+    A runner the inventory does not name keeps the cap. Pure."""
+    try:
+        names = [r[0] for r in setup_mod._runners(inv)]
+        pools = setup_mod.runner_pools(inv)
+    except (ValueError, KeyError, TypeError):
+        return True
+    if runner not in names:
+        return True
+    pool = pools[names.index(runner)]
+    return pools.count(pool) > int(inv.host['slots'])
+
+
 class Executor:
     """One part. The I/O is injectable: ``run`` (subprocess.run), ``spawn``
     (subprocess.Popen) and ``scope`` (False runs the supervisor without systemd, for tests);
@@ -1288,8 +1307,10 @@ class Executor:
                 q = slots.SlotQueue(h['files']['slot_lock'], h['slots'], h['files']['slot_queue'], poll=self.poll,
                                     default_project=h.get('default_project', ''))
                 mine = sum(1 for t in q.waiting() if t.project == proj.name)
-                # a retry queues past the cap, which still counts it (13.6): it has nowhere else to go
-                if not a.attempt_of and slots.queue_full(mine, proj.max_waiting):
+                # a retry queues past the cap, which still counts it (13.6): it has nowhere else to go;
+                # a pool with no more runners than slots has no cap (§7 rule 2: queue_capped)
+                if not a.attempt_of and queue_capped(self.inv, self.env.get('RUNNER_NAME', '')) \
+                        and slots.queue_full(mine, proj.max_waiting):
                     return self._end(record, rec, a, unavailable='project queue full')
                 with self.shared_access(record, [q.queue]):
                     q.take_ticket(proj.name, f'part {a.id}', every=nightly)

@@ -9,7 +9,7 @@ host, added by the lead. It holds what a consumer's inputs may leave out.
     retries = 1                           # 0 or 1 (design §4.4)
     gpu_mem_mib = 6000                    # free MiB a leased card needs
     memory = "40G"                        # a part's MemoryMax unless the input sets one
-    max_waiting = 1                       # waiting parts per pool (design §7 rule 2)
+    max_waiting = 1                       # waiting parts per pool with more runners than slots (§7 rule 2)
     max_parallel = 16                     # parts of one run of the reusable workflow at once (§7 rule 1, 16.6)
     refresh = true                        # ci-envrefresh.timer rebuilds its env when an upstream moves (§4.9)
     [fallback]                            # labels per runner class, for next=fallback

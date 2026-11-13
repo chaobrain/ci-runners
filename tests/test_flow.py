@@ -157,9 +157,32 @@ class Contract(unittest.TestCase):
                         return super().__call__(method, url, token, body)
 
                 api = One({'main': 'contract = 2\n', SHA: 'contract = 2\n'})
-                code, _, _ = run(['contract', '--context', 'c/ci', '--sha', SHA, '--default-branch', 'main'], e.env, api)
+                code, _, err = run(['contract', '--context', 'c/ci', '--sha', SHA, '--default-branch', 'main'], e.env, api)
                 self.assertEqual((code, e.outputs()['state']), (1, 'error'), fail)
-                self.assertIn(want, e.outputs()['description'], fail)
+                # issue #250: the cause in the description, the read (its URL) in the log
+                self.assertEqual(e.outputs()['description'], 'contract: .github/ci-runners.toml not read: HTTP 502')
+                self.assertIn(want, err, fail)
+                self.assertIn(want, e.summary(), fail)
+
+    def test_an_unread_contract_at_the_limit_keeps_its_cause_and_no_url(self):
+        """Issue #250: the longest owner and repository names, each cause a read can end with."""
+        repo = f'{"o" * 39}/{"r" * 100}'
+        for cause in ('HTTP 403', 'HTTP 500', 'HTTP 502', 'TimeoutError', 'OSError'):
+            with tempfile.TemporaryDirectory() as d:
+                e = Env(d)
+                e.env['GITHUB_REPOSITORY'] = repo
+
+                def call(method, url, token, body=None):  # as client.Client raises it
+                    raise github.ApiError(f'{method} {url.split("?")[0]}: {cause}', cause)
+                code, _, err = run(['contract', '--context', 'c/ci', '--sha', SHA, '--default-branch', 'main'],
+                                   e.env, call)
+                text = e.outputs()['description']
+                self.assertEqual((code, e.outputs()['state']), (1, 'error'))
+                self.assertEqual(text, f'contract: .github/ci-runners.toml not read: {cause}')
+                self.assertLessEqual(len(text), 140)
+                self.assertNotIn('://', text)
+                self.assertIn(f'https://api.github.com/repos/{repo}', err)  # the read, in the log
+                self.assertIn(f'https://api.github.com/repos/{repo}', e.summary())  # and the summary
 
     def test_a_public_repository_is_refused_before_anything_of_its_head_runs(self):
         with tempfile.TemporaryDirectory() as d:
@@ -407,6 +430,20 @@ class Plan(unittest.TestCase):
         self.assertNotIn('\n', out['description'])
         self.assertLessEqual(len(out['description']), 140)
         self.assertEqual(flow._text('a\nb  c'), 'a b c')
+
+    def test_a_plan_end_with_a_url_is_never_cut_inside_it(self):
+        url = f'https://api.github.com/repos/{"o" * 39}/{"r" * 100}/contents/x'
+        for n in (0, 40, 90):
+            with tempfile.TemporaryDirectory() as d:
+                e = Env(d)
+                code, _, _ = run(['plan', '--context', 'c/ci', '--sha', SHA, '--project', 'myproj', '--plan-outcome',
+                                  'lost', '--plan-reason', f'{"w" * n} GET {url}: HTTP 502 then more', '--rows',
+                                  os.path.join(d, 'x')], e.env, Api())
+                text = e.outputs()['description']
+                self.assertLessEqual(len(text), 140)
+                self.assertTrue(text.startswith('plan: lost ('), text)
+                self.assertTrue(all(w == url for w in text.split() if '://' in w), text)
+                self.assertIn('HTTP 502', text)
 
     def test_the_registry_max_parallel(self):
         self.assertEqual(flow.MAX_PARALLEL, 16)

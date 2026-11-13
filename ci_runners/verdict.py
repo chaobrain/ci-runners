@@ -12,8 +12,9 @@ artifact are read from their records on this host (``salvage``), as many as ther
 retry, and a consumer's own fallback after a retry that did not start (attempt 3, issue
 #161), whatever the attempt before it said in ``next``. A part with neither artifact nor
 record is ``lost``, as is one whose zip cannot be fetched or read. A listing that fails
-posts ``error`` and names it. The verdict is then posted as the ``context`` status of
-``S``, and the parts' summaries go to the job summary.
+posts ``error`` with its cause first and no URL (``listing_error``, issue #250). The
+verdict is then posted as the ``context`` status of ``S``, and the parts' summaries go to
+the job summary.
 
 ``decide`` is pure. Only an infrastructure end the retry did not cure is ``error``; a
 ``red`` part fails the head whatever the others did (D6).
@@ -80,7 +81,7 @@ class Verdict:
 
 
 #: GitHub refuses (HTTP 422) a commit status whose description is longer than this
-STATUS_MAX = 140
+STATUS_MAX = github.STATUS_MAX
 
 
 def decide(ends: Iterable[End]) -> Verdict:
@@ -109,7 +110,7 @@ def _describe(head: str, ends: list[End]) -> str:
 
 
 def _cut(text: str) -> str:
-    return text if len(text) <= STATUS_MAX else text[:STATUS_MAX - 3] + '...'
+    return github.status_text(text)
 
 
 def collect(root: str) -> dict[str, dict[int, tuple[dict, str]]]:
@@ -311,8 +312,19 @@ def parse_ids(text: str) -> list[str]:
     return ids
 
 
-def summary_md(v: Verdict, context: str, items: list[End]) -> str:
-    head = f'## {context}: {v.state}\n\n{v.description}\n\n'
+def listing_error(e: github.ApiError) -> Verdict:
+    """The verdict where the run's artifacts could not be listed (issue #250): ``error``,
+    its cause first and no URL, ``verdict: artifacts not listed: HTTP 403 (the job needs
+    actions: read)`` (the hint for a 403 or 404), ``...: HTTP 502``, ``...: TimeoutError``;
+    the whole error, URL and all, goes to the job's log and summary. Pure."""
+    hint = ' (the job needs actions: read)' if e.cause in ('HTTP 403', 'HTTP 404') else ''
+    return Verdict('error', _cut(f'verdict: artifacts not listed: {e.cause}{hint}'))
+
+
+def summary_md(v: Verdict, context: str, items: list[End], detail: str = '') -> str:
+    """The job summary: the status's state and description, ``detail`` (the whole error
+    the description shortens, where there is one) and each part's summary. Pure."""
+    head = f'## {context}: {v.state}\n\n{v.description}\n\n' + (f'{detail}\n\n' if detail else '')
     parts = []
     for e in items:
         parts.append(e.summary or f'### part `{e.id}`\n\n{e.outcome} ({e.reason}), attempt {e.attempt}\n')
@@ -378,10 +390,10 @@ def _verdict(a: argparse.Namespace, env: Mapping[str, str], inv: inventory.Inven
             found = read(ids, call, fetch, base, repo, env['GITHUB_RUN_ID'], token,
                          lambda text: print(f'ci-run verdict: {text}', file=sys.stderr), WORKERS)
         except github.ApiError as e:  # nothing is known of any part: not a part's loss
-            hint = '; the job needs actions: read' if 'HTTP 403' in str(e) or 'HTTP 404' in str(e) else ''
-            items, v = [], Verdict('error', _cut(f'verdict: the run\'s artifacts could not be listed ({e}){hint}'))
+            items, v, detail = [], listing_error(e), str(e)
+            print(f'ci-run verdict: the run\'s artifacts could not be listed ({e})', file=sys.stderr)
         else:
-            items = ends(ids, found, salvage)
+            items, detail = ends(ids, found, salvage), ''
             v = decide(items)
         call('POST', f'{base}/repos/{repo}/statuses/{a.sha}', token,
              {'state': v.state, 'context': a.context, 'description': v.description, 'target_url': target})
@@ -390,7 +402,7 @@ def _verdict(a: argparse.Namespace, env: Mapping[str, str], inv: inventory.Inven
         return 2
     if env.get('GITHUB_STEP_SUMMARY'):
         with open(env['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
-            f.write(summary_md(v, a.context, items))
+            f.write(summary_md(v, a.context, items, detail))
     if env.get('GITHUB_OUTPUT'):
         with open(env['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
             f.write(f'state={v.state}\n')

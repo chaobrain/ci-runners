@@ -410,14 +410,37 @@ files = {{ slot_lock = "{t}/s.lock", slot_queue = "{t}/s.queue" }}
         self.assertEqual(self.main('--parts', 'gpu-3'), 1)
         [(_, _, _, body)] = self.posted
         self.assertEqual(body['state'], 'error')  # never a part's loss, never success
-        self.assertEqual(body['description'], "verdict: the run's artifacts could not be listed "
-                                              "(GET .../artifacts: HTTP 403); the job needs actions: read")
+        # issue #250: the cause first, no URL; the whole error in the job's summary
+        self.assertEqual(body['description'], 'verdict: artifacts not listed: HTTP 403 (the job needs actions: read)')
+        self.assertIn('GET .../artifacts: HTTP 403', self.summary.read_text())
         self.assertEqual(self.fetched, [])
         self.assertEqual(self.output.read_text(), 'state=error\n')
         self.listing = verdict.github.ApiError('GET ' + 'x' * 200 + ': HTTP 502')
         self.assertEqual(self.main('--parts', 'gpu-3'), 1)
-        self.assertEqual(len(self.posted[1][3]['description']), verdict.STATUS_MAX)  # GitHub's bound
-        self.assertNotIn('actions: read', self.posted[1][3]['description'])
+        self.assertEqual(self.posted[1][3]['description'], 'verdict: artifacts not listed: HTTP 502')
+
+    def test_a_listing_error_at_the_limit_keeps_its_cause_and_no_url(self):
+        """Issue #250: the longest owner and repository names and a long run id; each cause
+        a listing can end with (``client.Client``'s), its hint where it is a permission."""
+        repo, run = f'{"o" * 39}/{"r" * 100}', '9' * 20
+        env = {**self.env, 'GITHUB_REPOSITORY': repo, 'GITHUB_RUN_ID': run}
+        url = f'https://api.github.com/repos/{repo}/actions/runs/{run}/artifacts'
+        for cause, want in (('HTTP 403', 'HTTP 403 (the job needs actions: read)'),
+                            ('HTTP 404', 'HTTP 404 (the job needs actions: read)'),
+                            ('HTTP 502', 'HTTP 502'), ('TimeoutError', 'TimeoutError'), ('OSError', 'OSError')):
+            self.posted = []
+            self.summary.unlink(missing_ok=True)
+            self.listing = verdict.github.ApiError(f'GET {url}: {cause}', cause)
+            self.assertEqual(self.main('--parts', 'gpu-3', env=env), 1)
+            text = self.posted[0][3]['description']
+            self.assertEqual(text, f'verdict: artifacts not listed: {want}')
+            self.assertLessEqual(len(text), verdict.STATUS_MAX)
+            self.assertNotIn('://', text)
+            self.assertIn(url, self.err.getvalue())  # the whole error in the job's log
+            self.assertIn(url, self.summary.read_text())  # and its summary
+        self.listing = verdict.github.ApiError('GET artifacts: not a list')  # an answer of the wrong shape
+        self.assertEqual(self.main('--parts', 'gpu-3', env=env), 1)
+        self.assertEqual(self.posted[-1][3]['description'], 'verdict: artifacts not listed: not a list')
 
     def test_an_artifact_that_cannot_be_fetched_is_lost_not_read_from_an_older_one(self):
         self.art('ci-part-cpu-1', {'outcome': 'pass', 'next': 'none'}, created='2026-11-11T19:00:00Z')

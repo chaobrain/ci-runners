@@ -3182,8 +3182,14 @@ hosts, a coverage job). These rules are the consumer's:
    the highest id, which need not be the newest. An artifact whose zip cannot be fetched or
    read is not there: its part is read from this host's records, else `lost`, and an older
    artifact of its name is never read in its place. A listing that fails posts `error`
-   and names it (`actions: read` where GitHub refused it); until #242 the verdict read what
-   was downloaded then. It merges the parts' summaries into the job summary and fails
+   with its cause first and no URL (issue #250): `verdict: artifacts not listed: HTTP 403
+   (the job needs actions: read)` (the hint for a 403 or 404), `...: HTTP 502`, `...:
+   TimeoutError`; the whole error, URL and all, goes to the job's log and summary. Until
+   #242 the verdict read what was downloaded then. *Every status description* the actions
+   post (claim, flow, verdict) is one line of at most 140 characters (GitHub's bound),
+   built with its cause first; a longer one loses its URLs first and is then cut at a word
+   with `...`, never inside a URL (`github.status_text`). The flow's unread contract is
+   `contract: .github/ci-runners.toml not read: <cause>`, its read in the log and summary. It merges the parts' summaries into the job summary and fails
    unless the state is success. (#242 measured `download-artifact` at 4-5 s a verdict,
    and once 174 s where it lingered after its download, #163.)
 6. **Permissions:** `contents: read`, plus `statuses: write` for claim, and for the

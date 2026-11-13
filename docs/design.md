@@ -4578,6 +4578,23 @@ Rules:
      unpacked beside the releases reaches neither the part step nor the hook, so the cancel's proof (16.4) runs on
      the installed release of one host, with a canary at `@v1.21.0`, before the other hosts install it and before
      `v1` moves.
+  3. **The rollout.** The egress host's hook link moved first and the proxy kept running. Every host's plan was all
+     `keep`, plus on the two hosts whose part pool has a runner more than their slots the new warn line; `apply` had
+     nothing to change and no runner restarted. On the first host, with a two-card part holding both cards: a
+     one-card part that ran through ended as before; one cancelled while it waited for its card ended `stopped`
+     with the cancel mark (`signal 2`) and no infrastructure end; one at `@v1.20.0` (its step without `exec`),
+     cancelled while it waited, was marked and stopped by the new job-completed hook (`cancelled` in its log line);
+     three such cancels within 15 minutes left the host's count at 0 and the host undrained; a waiting executor
+     killed by hand while its job went on still counted one `lost`; the cancelled two-card part, which was running,
+     had its scope stopped by the hook. `register.sh`, run with no token while the presence timer and two part
+     scopes were active, refused and named them before it read anything. On the 4-slot host, seven CPU parts of
+     one project at once, two of them waiting together for a slot, all passed on their first attempt. After each
+     install an idle runner's stop left GitHub's list within 2 s and its restart listened without a session
+     conflict.
+  4. **The canaries.** On every host and class at `@v1.21.0` (the hosts' own labels; a later tier's host under a
+     maintainer's hold), green and red as the RED file says, before `v1` moved on 2026-11-13 (the 3090 green head
+     on a second head: on the first, a timing part of another run held the cpu part's CPUs, so the compile part
+     ran before it and its ordering test was red); then at `@v1`, and a canary calling `ci.yml@v1`.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

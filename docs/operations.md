@@ -412,7 +412,7 @@ presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 ru
 1. **先装 release、移 `v1`。** 从包含 issue #232 的 release 起（`v1.18.0` 之后的第一个）inventory 才能带 home 池。旧版本的加载器会拒绝第二个 `light` 类的池（`class light is also the class of light`），这台主机上读 inventory 的一切（部件、presence、`pool status`、setup）都会失败。所以和 `tier` 一样，要先在这台主机上装这个 release、`releases/hook` 指向它、`v1` 也移到它之后，才能加这一行。
 2. **inventory 加一行。** 在 `[hosts.<role>.pools]` 里加 `home = { count = 1, class = "light", labels = ["<role>-home", "<role>-light"] }`。light 池必须已经带 `ci-light`（16.1 的 H1 步骤），两个 light 类的池里正好一个带 `ci-` 标签，否则加载器拒绝并给出原因。home 池不能有 `slot`、`audience` 或 `per_card`，它的标签里必须有一个这台主机其他池都不带的（`<role>-home`），其余只能是 light 池也带的（`<role>-light`）：和别的池共用标签，那个池的作业就会落到它上面。标签不进 deny 清单（标签是公开的），不需要改 `tests/deny.sha256`。用 `python -m ci_runners.inventory check <inventory>` 检查。
 3. **plan 和 apply。** `plan.sh <role>` 里只多出这些：解包 `actions-runner/<role>-home-1/`、写它的 `.env`（`CI_RUNNER_CLASS=light`、`CI_RUNNER_POOL_LABELS=<role>-home,<role>-light`）、`labels <role>-home,<role>-light`，以及 `daemon-reload`、对已在运行的定时器的 `enable --now`（不会重启它们）、`enable` 各 runner 单元（只建链接，不启动），用 hook 副本的主机上还有对已在运行的 `ci-hooks.service` 的 `enable --now`（同样不重启）。别的 runner 的文件和单元都不变，所以 apply 不重启任何正在运行的单元。
-4. **注册这一个 runner。** `register.sh` 要求这个账户的 runner 都停着（作业和令牌在同一个账户里），所以注册时要先等 runner 都空闲（`ci-run presence --dry-run` 看 `idle`），先停 presence 的定时器（否则它会在注册期间把它停过的 runner 再启动起来，作业就和令牌同时在这个账户里）：`systemctl --user stop ci-presence.timer`，再停 runner：`systemctl --user stop 'ci-runner@*'`，然后运行 `gh api -X POST orgs/chaobrain/actions/runners/registration-token --jq .token | setup/register.sh <role>-home-1`。注册完它会自己启动。别的 runner 再手动 `systemctl --user start` 起来（还有原因的会被 `ExecCondition=` 拦下，由 presence 之后启动），最后 `systemctl --user start ci-presence.timer`。这是唯一一次停掉正在运行的 runner：停到启动只要几秒，但 GitHub 还留着旧会话（日志里 `A session for this runner already exists`，runner 自己重试），所以这台主机的 runner 要 3 到 4 分钟才在 GitHub 上重新在线（2026-11-13 四台主机都是这样），这段时间它不接作业。
+4. **注册这一个 runner。** `register.sh` 要求这个账户的 runner 都停着（作业和令牌在同一个账户里），所以注册时要先等 runner 都空闲（`ci-run presence --dry-run` 看 `idle`），先停 presence 的定时器（否则它会在注册期间把它停过的 runner 再启动起来，作业就和令牌同时在这个账户里）：`systemctl --user stop ci-presence.timer`，再停 runner：`systemctl --user stop 'ci-runner@*'`，然后运行 `gh api -X POST orgs/chaobrain/actions/runners/registration-token --jq .token | setup/register.sh <role>-home-1`。注册完它会自己启动。别的 runner 再手动 `systemctl --user start` 起来（还有原因的会被 `ExecCondition=` 拦下，由 presence 之后启动），最后 `systemctl --user start ci-presence.timer`。这是唯一一次停掉正在运行的 runner：停到启动只要几秒。在 issue #255 的 release 之前，GitHub 还留着旧会话（日志里 `A session for this runner already exists`，runner 自己重试），所以这台主机的 runner 要 3 到 4 分钟才在 GitHub 上重新在线（2026-11-13 四台主机都是这样），这段时间它不接作业；从那个 release 起，空闲 runner 停止时会结束自己的会话（下面的“停 runner 时结束它在 GitHub 的会话”）。
 5. **现场检查。** `ci-run presence --dry-run` 显示 `<role>-home-1: ...; never stopped`；`ci-run pool status --json` 里这台主机那一行的 `pools` 有 `home` 这一项和它的标签（使用方按使用指南 §4 从这里找 home 标签）；在 `<role>-home` 上跑的作业 `ci-run presence hold --minutes 1` 被接受，在只能落到 light 池的作业（`ci-light`）上被拒绝。
 
 `ci-run drain on --pool home` 会被拒绝（drain 不停 home runner，部件也不读它的 drain）：要 drain 就 drain 整台主机或 light 池。回退：按 §3 的第 2、3、5 步停掉并注销 `<role>-home-1`、删掉它的目录，再从 inventory 删掉这一行。
@@ -426,6 +426,37 @@ presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 ru
 **回滚**：把 inventory 改成 `presence = { enabled = false }`（或删掉这个表）。下一个 tick 就启动它停掉的和被 `ExecCondition=` 拦下的所有 runner，然后什么都不做；`check` 也总是放行。状态文件读不出来时，回滚把所有停着的 runner 都当成 presence 停的，一并启动。
 
 **仍然存在的竞争**：presence 只能缩小、不能消除取作业和资源变化之间的竞争。停之前的最后一次查看到 systemd 把 SIGTERM 送到 runner 之间（毫秒级），GitHub 仍可能把作业派给它：作业会被重新排队，或者以 `stopped`/`lost` 结束，由 16.5 的重试行重试，不会跑两次。tick 之后到作业开始之间资源也可能变化：执行器的拒绝（drain、busy、健康门、租约）仍然生效。
+
+**停 runner 时结束它在 GitHub 的会话**（design 16.4 的 *The stop*，issue #255）：runner 单元的 `ExecStop=` 先运行 `ci-run presence interrupt <runner>`。runner 空闲（没有它的 `Runner.Worker`）时，它给这个 runner 自己的 `Runner.Listener` 发 SIGINT，最多等 40 秒：listener 删除会话后以 0 退出，`run.sh` 打印 "Exiting runner..." 并以 0 退出，单元停成 `inactive`，GitHub 上立刻离线。runner 忙着、`/proc` 读不到、inventory 读不到、出错或旧 release 没有这个命令时，它什么都不发，停止和以前一模一样：SIGTERM 给 `run.sh`，其余的进程 SIGKILL，部件的 scope 照常跑完，作业没有输出而结束，salvage 读出部件的真实结果。在这之前，每次停止都 SIGKILL listener，GitHub 还把停掉的 runner 显示为在线 46–91 秒，并把排队的作业派给它（2026-11-13 实测：部件排队 78–79 秒，平时 2–3 秒）；在这段时间里启动，日志里是 `A session for this runner already exists ... Conflict`。
+
+*发布之前在一个 runner 上试*（release 运维的第一步；`<data>`、`<etc>`、`<python>` 用这台主机 runner 单元里 `ExecCondition=` 那一行的值，`systemctl --user cat ci-runner@<runner>.service` 可以看到）：
+
+1. **取代码，不切换 release。** 以 CI 账户运行：`id=$(printf %.12s <sha>); mkdir -p <data>/ci-runners/trial/$id && curl -fsSL https://github.com/chaobrain/ci-runners/archive/<sha>.tar.gz | tar -xz -C <data>/ci-runners/trial/$id --strip-components=1`。`<sha>` 是这个 PR 合并后 `main` 的 commit。不要用 `install.sh`：它会把 `releases/hook` 移过去。
+2. **选一个 part runner，暂停 presence。** 选一个现在空闲的 `<role>-part-N`（`ci-run presence --dry-run` 里显示 `idle`），然后 `systemctl --user stop ci-presence.timer`，免得 tick 在试的时候停它或启它。
+3. **只给这个 runner 加 drop-in：**
+
+   ```
+   mkdir -p ~/.config/systemd/user/ci-runner@<runner>.service.d
+   cat > ~/.config/systemd/user/ci-runner@<runner>.service.d/stop-trial.conf <<'CONF'
+   [Service]
+   ExecStop=
+   ExecStop=-/bin/sh -c 'CI_RUNNERS_ETC=<etc> CI_RUNNERS_PYTHON=<python> timeout 50 <data>/ci-runners/trial/<id>/bin/ci-run presence interrupt "$$1"' presence %i
+   CONF
+   systemctl --user daemon-reload
+   systemctl --user show -p ExecStop ci-runner@<runner>.service   # 应该显示 trial/<id>/bin/ci-run
+   ```
+
+   改动在下一次停止时生效，runner 不用重启。
+4. **空闲时停止。** 在一台有组织管理权限的 `gh` 的机器上开始轮询：`while :; do echo "$(date -u +%T) $(gh api orgs/chaobrain/actions/runners --paginate --jq '.runners[] | select(.name=="<runner>") | .status')"; sleep 2; done`。然后在主机上运行 `date -u +%T; time systemctl --user stop ci-runner@<runner>.service`。
+   - 通过：`stop` 在 45 秒内返回（预期 1–3 秒）；`journalctl --user -u ci-runner@<runner>.service --since -2min` 里有 `presence: <runner>: the listener exited after its interrupt`、`Runner listener exit with 0 return code` 和 `Exiting runner...`，没有 `(Runner.Listener) with signal SIGKILL`；`systemctl --user show -p ActiveState -p Result ci-runner@<runner>.service` 显示 `inactive` 和 `success`；轮询在停止后 10 秒内显示 `offline`。
+   - 不通过：日志里有 `did not end within 40 s` 或 Listener 的 SIGKILL；`Result` 不是 `success`；停止 15 秒后仍是 `online`。
+5. **马上再启动。** `systemctl --user start ci-runner@<runner>.service`。通过：30 秒内日志里出现 `Listening for Jobs`，没有 `A session for this runner already exists`，轮询显示 `online`。
+6. **忙的时候停止。** 跑一次金丝雀，让它的一个至少跑 3 分钟的部件落在这个 runner 上（用这台主机的标签）。日志里出现 `Running job` 之后，运行 `systemctl --user stop ci-runner@<runner>.service`。通过（和以前一样）：日志里有 `presence: <runner>: a job runs; the stop kills the runner as before` 和 Listener 的 SIGKILL；`systemctl --user list-units 'ci-part-*'` 里部件的 scope 一直在，直到命令跑完；这次 run 里这个部件的作业没有输出就结束，它的 salvage 作业上传的 `outcome.json` 带 `salvaged: true` 和部件的真实结果（绿 head 是 `pass`）。不通过：部件结果是 `stopped`，或者它的 scope 随停止一起没了。然后 `systemctl --user start ci-runner@<runner>.service`。
+7. **收尾。** `rm ~/.config/systemd/user/ci-runner@<runner>.service.d/stop-trial.conf && systemctl --user daemon-reload`，`systemctl --user start ci-presence.timer`，然后删掉 `<data>/ci-runners/trial/<id>`。把每一步的时间和结果记在 PR 或发布记录里。
+
+只有每一步都通过，release 才装到各台主机上（§5 第 4 步；`plan.sh` 只多出 `ci-runner@.service` 里的 `ExecStop=` 一行和 `daemon-reload`，不重启正在运行的 runner）。
+
+*回滚*（发布以后）：给所有 runner 加一个空的 `ExecStop=`：`mkdir -p ~/.config/systemd/user/ci-runner@.service.d && printf '[Service]\nExecStop=\n' > ~/.config/systemd/user/ci-runner@.service.d/no-interrupt.conf && systemctl --user daemon-reload`。从下一次停止起，停止又和以前一样（不用重启 runner）。修好以后删掉这个文件，再 `daemon-reload`。
 
 ## 16. 看懂一次路由（design 决定 16.5，RUN-10 R5）
 

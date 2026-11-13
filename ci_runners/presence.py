@@ -51,6 +51,11 @@ cluster's); a ``lost`` part on a host that stayed up; a hook refusal ``stale``, 
 ``error``. Ends before the last self-drain or the last undrain do not count.
 Nothing undrains by itself.
 
+*The stop* (16.4, issue #255): the runner unit's ``ExecStop=`` runs ``ci-run presence interrupt
+<runner>`` (``interrupt``): an idle runner's listener gets SIGINT and ends its session at
+GitHub before systemd ends the unit; a busy one is stopped as before. It works whether or
+not presence is enabled.
+
 *Rollback*: ``presence = { enabled = false }`` (or no table): the tick starts every runner
 it stopped, at once, and does nothing else but stop the public runners; ``check`` always
 lets a runner start.
@@ -94,6 +99,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -133,6 +139,10 @@ HOLD_ENTRIES = 32  # the most holders at once
 HOLD_CLASS = 'nightly'  # the policy class a job's repository needs on the host to hold it (19.8)
 PUBLIC_UNIT = 'ci-pub-runner@'  # the public runners' units (18.4; the launcher's, C3)
 CHECK_FILE, PUBLIC_FILE = 'confine-check.json', 'public.json'  # the check's record (18.5); the tick's public row
+#: s: how long the runner unit's ``ExecStop=`` waits for the listener it interrupted (the runner
+#: app bounds its session's deletion at 30 s; decision 16.4's stop)
+INTERRUPT_WAIT = 40
+INTERRUPT_POLL = 0.2  # s: the look for the interrupted listener's end
 CHECK_MAX_AGE = 26 * 3600  # s: an older check withdraws the public audience (18.5)
 PUBLIC_CAUSE = 'public: '
 
@@ -245,25 +255,90 @@ def card_causes(cards: Sequence[int], status: Mapping[int, tuple[str, float, int
     return out
 
 
-def workers(root: str, read: Callable[[str], str], listdir: Callable[[str], list[str]],
-            proc: str = '/proc') -> set[str] | None:
-    """The runners under ``root`` with a ``Runner.Worker`` (a job), read from each
-    process's ``cmdline`` (``argv[0]`` ``<root>/<name>/bin/Runner.Worker``, as written or
-    as its real path); None when ``proc`` cannot be listed. Any process naming the path
-    counts: a false one keeps a runner online, never stops one."""
+def runner_procs(root: str, binary: str, read: Callable[[str], str], listdir: Callable[[str], list[str]],
+                 proc: str = '/proc') -> dict[str, list[int]] | None:
+    """``name -> PIDs`` of the runners under ``root`` with a process of the runner app's
+    ``binary`` (``Runner.Worker``, ``Runner.Listener``), read from each process's
+    ``cmdline`` (``argv[0]`` ``<root>/<name>/bin/<binary>``, as written or as its real
+    path); None when ``proc`` cannot be listed."""
     prefixes = {r.rstrip('/') + '/' for r in (root, os.path.realpath(root))}
     try:
         pids = [p for p in listdir(proc) if p.isdigit()]
     except OSError:
         return None
-    names = set()
+    found: dict[str, list[int]] = {}
     for pid in pids:
         argv0 = read(os.path.join(proc, pid, 'cmdline')).split('\0', 1)[0]
         for prefix in prefixes:
             rest = argv0[len(prefix):].split('/') if argv0.startswith(prefix) else []
-            if len(rest) == 3 and rest[0] and rest[1:] == ['bin', 'Runner.Worker']:
-                names.add(rest[0])
-    return names
+            if len(rest) == 3 and rest[0] and rest[1:] == ['bin', binary]:
+                found.setdefault(rest[0], []).append(int(pid))
+                break
+    return found
+
+
+def workers(root: str, read: Callable[[str], str], listdir: Callable[[str], list[str]],
+            proc: str = '/proc') -> set[str] | None:
+    """The runners under ``root`` with a ``Runner.Worker`` (a job); None when ``proc``
+    cannot be listed. Any process naming the path counts: a false one keeps a runner
+    online, never stops one."""
+    found = runner_procs(root, 'Runner.Worker', read, listdir, proc)
+    return None if found is None else set(found)
+
+
+def start_time(pid: int, read: Callable[[str], str], proc: str = '/proc') -> str:
+    """The process's start time (``stat`` field 22, clock ticks since boot), or ``''``
+    when it is gone: a PID with another start time is another process. Pure but ``read``."""
+    fields = read(os.path.join(proc, str(pid), 'stat')).rpartition(')')[2].split()
+    return fields[19] if len(fields) > 19 else ''
+
+
+def interrupt(root: str, name: str, *, read: Callable[[str], str] = hostload._read,
+              listdir: Callable[[str], list[str]] = os.listdir, kill: Callable[[int, int], None] = os.kill,
+              sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic,
+              wait: float = INTERRUPT_WAIT, out: Callable[[str], None] = print) -> int:
+    """The runner unit's ``ExecStop=`` (decision 16.4's stop): end an idle runner's session
+    at GitHub before systemd ends the unit. Always 0: whatever this step does not do, the
+    stop does as before it (SIGTERM to ``run.sh``, SIGKILL to the rest).
+
+    Idle (no ``Runner.Worker`` of ``name``, the fact presence reads): SIGINT to this
+    runner's own ``Runner.Listener`` (by its path below ``root``, each PID checked against its
+    start time), which deletes its session and exits 0, so ``run-helper.sh`` and ``run.sh``
+    exit 0 without a relaunch; then wait up to ``wait`` s for it to end. A job (a worker),
+    an unreadable ``/proc`` or any error: nothing is sent, so a busy runner's listener
+    and worker die as before and its part's scope runs on (§4.3, §4.5). A part scope
+    without a worker is no job and does not count."""
+    try:
+        w = runner_procs(root, 'Runner.Worker', read, listdir)
+        if w is None or name in w:
+            out(f'presence: {name}: {"a job runs" if w else "processes unread"}; the stop kills the runner as before')
+            return 0
+
+        def listeners() -> list[int]:
+            return (runner_procs(root, 'Runner.Listener', read, listdir) or {}).get(name, [])
+        found = {pid: start_time(pid, read) for pid in listeners()}
+        sent = []
+        for pid in listeners():  # a second look: each start time read is a listener's
+            if found.get(pid):
+                try:
+                    kill(pid, signal.SIGINT)
+                except ProcessLookupError:
+                    continue
+                sent.append((pid, found[pid]))
+        if not sent:
+            out(f'presence: {name}: no listener; nothing to interrupt')
+            return 0
+        end = clock() + wait
+        while any(start_time(pid, read) == t for pid, t in sent):
+            if clock() >= end:
+                out(f'presence: {name}: the listener did not end within {wait:g} s; the stop kills it')
+                return 0
+            sleep(INTERRUPT_POLL)
+        out(f'presence: {name}: the listener exited after its interrupt')
+        return 0
+    except Exception as e:  # noqa: BLE001 - the stop goes on as before
+        out(f'presence: {name}: interrupt failed, the stop kills the runner: {type(e).__name__}: {e}')
+        return 0
 
 
 def scope_prefix(name: str) -> str:
@@ -1320,7 +1395,16 @@ def check(inv: inventory.Inventory, probe: Probe, name: str, out: Callable[[str]
 
 
 def main(argv: list[str], inv_loader: Callable[[], inventory.Inventory]) -> int:
-    usage = 'usage: ci-run presence [--dry-run] | ci-run presence check RUNNER | ci-run presence hold [--minutes N | --release]'
+    usage = ('usage: ci-run presence [--dry-run] | ci-run presence check RUNNER | ci-run presence interrupt RUNNER'
+             ' | ci-run presence hold [--minutes N | --release]')
+    if len(argv) == 2 and argv[0] == 'interrupt':
+        try:
+            inv = inv_loader()
+            root = os.path.join(str(inv.host['data']), 'actions-runner')
+        except Exception as e:  # noqa: BLE001 - the inventory unread: the stop goes on as before
+            print(f'presence: inventory unread, nothing interrupted: {type(e).__name__}', file=sys.stderr)
+            return 0
+        return interrupt(root, argv[1])
     if len(argv) == 2 and argv[0] == 'check':
         try:
             inv = inv_loader()

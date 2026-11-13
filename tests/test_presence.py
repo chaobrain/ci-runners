@@ -723,6 +723,154 @@ class Check(Fixture):
             r = subprocess.run(['/bin/sh', '-c', m.group(1), 'presence', 'hz-gpu0'], capture_output=True, timeout=30)
             self.assertEqual(r.returncode, want, rc)
 
+class Interrupt(unittest.TestCase):
+    """The runner unit's ``ExecStop=`` (16.4's stop): an idle runner's own listener gets
+    SIGINT and is waited for; a job, an unreadable /proc or an error sends nothing."""
+    ROOT_ = '/d/actions-runner'
+
+    def setUp(self):
+        self.procs = {}  # pid -> (argv0, start time)
+        self.sent, self.slept, self.lines = [], [], []
+        self.now = 0.0
+        self.on_sleep = None
+
+    def proc(self, pid, name, binary, start='1000'):
+        self.procs[pid] = (f'{self.ROOT_}/{name}/bin/{binary}', start)
+
+    def read(self, path):
+        parts = path.split('/')
+        pid = int(parts[2]) if parts[2].isdigit() else -1
+        if pid not in self.procs:
+            return ''
+        argv0, start = self.procs[pid]
+        if parts[3] == 'cmdline':
+            return f'{argv0}\0run\0'
+        if not start:  # its stat gone
+            return ''
+        return f'{pid} (Runner.Listener) S 1 ' + ' '.join(['0'] * 17) + f' {start} 0 0\n'
+
+    def listdir(self, path):
+        return [str(p) for p in self.procs] + ['self', 'stat']
+
+    def kill(self, pid, sig):
+        self.sent.append((pid, sig))
+
+    def sleep(self, s):
+        self.slept.append(s)
+        self.now += s
+        if self.on_sleep:
+            self.on_sleep()
+
+    def run_it(self, name='hz-part-1', **kw):
+        args = dict(read=self.read, listdir=self.listdir, kill=self.kill, sleep=self.sleep,
+                    clock=lambda: self.now, out=self.lines.append)
+        args.update(kw)
+        return presence.interrupt(self.ROOT_, name, **args)
+
+    def test_start_time_reads_field_22(self):
+        self.proc(7, 'hz-part-1', 'Runner.Listener', start='424242')
+        self.assertEqual(presence.start_time(7, self.read), '424242')
+        self.assertEqual(presence.start_time(8, self.read), '')
+
+    def test_an_idle_runner_interrupts_its_own_listener_and_waits(self):
+        self.proc(10, 'hz-part-1', 'Runner.Listener')
+        self.proc(11, 'hz-part-2', 'Runner.Listener')
+        self.proc(12, 'hz-part-2', 'Runner.Worker')  # another runner's job does not count
+        self.proc(13, 'hz-part-1x', 'Runner.Listener')
+
+        def exits():
+            if len(self.slept) == 5:
+                del self.procs[10]
+        self.on_sleep = exits
+        self.assertEqual(self.run_it(), 0)
+        self.assertEqual(self.sent, [(10, presence.signal.SIGINT)])
+        self.assertEqual(len(self.slept), 5)
+        self.assertEqual(self.lines, ['presence: hz-part-1: the listener exited after its interrupt'])
+
+    def test_a_reused_pid_counts_as_ended(self):
+        """A PID with another start time is another process: the wait ends."""
+        self.proc(10, 'hz-part-1', 'Runner.Listener')
+
+        def reused():
+            self.procs[10] = ('/bin/bash', '2000')
+        self.on_sleep = reused
+        self.assertEqual(self.run_it(), 0)
+        self.assertEqual(len(self.slept), 1)
+
+    def test_a_busy_runner_gets_nothing(self):
+        self.proc(10, 'hz-part-1', 'Runner.Listener')
+        self.proc(12, 'hz-part-1', 'Runner.Worker')
+        self.assertEqual(self.run_it(), 0)
+        self.assertEqual((self.sent, self.slept), ([], []))
+        self.assertIn('a job runs', self.lines[0])
+
+    def test_unread_processes_or_an_error_send_nothing(self):
+        self.proc(10, 'hz-part-1', 'Runner.Listener')
+
+        def no_proc(path):
+            raise OSError('no /proc')
+        self.assertEqual(self.run_it(listdir=no_proc), 0)
+        self.assertEqual(self.sent, [])
+        self.assertIn('processes unread', self.lines[-1])
+
+        def broken(path):
+            raise ValueError('bad read')
+        self.assertEqual(self.run_it(read=broken), 0)
+        self.assertEqual(self.sent, [])
+        self.assertIn('interrupt failed', self.lines[-1])
+
+    def test_no_listener_or_one_gone_before_the_signal(self):
+        self.assertEqual(self.run_it(), 0)
+        self.proc(10, 'hz-part-1', 'Runner.Listener', start='')  # listed, but its stat is gone
+        self.assertEqual(self.run_it(), 0)
+
+        def gone(pid, sig):
+            raise ProcessLookupError(pid)
+        self.procs[10] = (self.procs[10][0], '1000')
+        self.assertEqual(self.run_it(kill=gone), 0)
+        self.assertEqual((self.sent, self.slept), ([], []))
+        self.assertEqual(self.lines, ['presence: hz-part-1: no listener; nothing to interrupt'] * 3)
+
+    def test_a_listener_that_never_exits_ends_the_step_at_its_bound(self):
+        self.proc(10, 'hz-part-1', 'Runner.Listener')
+        self.assertEqual(self.run_it(), 0)
+        self.assertEqual(self.sent, [(10, presence.signal.SIGINT)])
+        self.assertAlmostEqual(self.now, presence.INTERRUPT_WAIT, delta=presence.INTERRUPT_POLL)
+        self.assertIn(f'did not end within {presence.INTERRUPT_WAIT} s', self.lines[-1])
+
+    def test_main_reads_the_data_root_and_never_fails(self):
+        inv = mock.Mock(host={'data': '/d'})
+        with mock.patch.object(presence, 'interrupt', return_value=0) as f:
+            self.assertEqual(presence.main(['interrupt', 'hz-part-1'], lambda: inv), 0)
+        f.assert_called_once_with('/d/actions-runner', 'hz-part-1')
+
+        def broken():
+            raise OSError('no inventory')
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(presence.main(['interrupt', 'hz-part-1'], broken), 0)
+
+    def test_the_runner_units_stop_step(self):
+        """The rendered ExecStop= line, run by sh as systemd would (``$$`` is ``$``): it passes
+        the runner to ``ci-run presence interrupt`` under a bound, and systemd ignores its exit (``-``)."""
+        tmpl = (ROOT / 'setup' / 'units' / 'ci-runner@.service').read_text()
+        with tempfile.TemporaryDirectory() as t:
+            fake = pathlib.Path(t) / 'd' / 'ci-runners' / 'releases' / 'hook' / 'bin' / 'ci-run'
+            fake.parent.mkdir(parents=True)
+            line = next(x for x in setup.render(tmpl, {'CI_DATA': f'{t}/d', 'CI_ETC': '/e', 'CI_PYTHON': '/p',
+                                                       'PROXY_ORDER': '', 'HOOKS_ORDER': '', 'HOOKS_CHECK': ''}).splitlines()
+                        if x.startswith('ExecStop='))
+            m = re.fullmatch(r"ExecStop=-/bin/sh -c '(.*)' presence %i", line)
+            self.assertIsNotNone(m, line)
+            self.assertIn(f'timeout 50 {t}/d/ci-runners/releases/hook/bin/ci-run ', m.group(1))
+            fake.write_text('#!/bin/sh\n[ "$CI_RUNNERS_ETC $CI_RUNNERS_PYTHON $1 $2 $3" = "/e /p presence interrupt hz-part-1" ]'
+                            ' || exit 9\necho ok\n')
+            fake.chmod(0o755)
+            r = subprocess.run(['/bin/sh', '-c', m.group(1).replace('$$', '$'), 'presence', 'hz-part-1'],
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual((r.returncode, r.stdout), (0, 'ok\n'), r.stderr)
+        self.assertGreater(50, presence.INTERRUPT_WAIT + 5)  # the shell's bound is over the step's own
+
+
 PUB_POOL = 'compile = 1, pub-gpu = { per_card = true, class = "gpu", audience = "public", labels = ["ci-pub-gpu", "hz-pub-gpu"] } }'
 PUB0, PUB_OTHER = 'ci-pub-runner@hz-pub-gpu0-17.service', 'ci-pub-runner@hy-pub-gpu0-3.service'
 PUB1 = 'ci-pub-runner@hz-pub-gpu1-18.service'

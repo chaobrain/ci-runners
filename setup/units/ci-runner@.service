@@ -17,6 +17,11 @@ WorkingDirectory=@CI_DATA@/actions-runner/%i
 ExecCondition=/bin/sh -c 'CI_RUNNERS_ETC=@CI_ETC@ CI_RUNNERS_PYTHON=@CI_PYTHON@ @CI_DATA@/ci-runners/releases/hook/bin/ci-run presence check "$$1"; test $$? -ne 77' presence %i
 @HOOKS_CHECK@
 ExecStart=@CI_DATA@/actions-runner/%i/run.sh
+# A stop ends an idle runner's session at GitHub first (decision 16.4's stop): SIGINT to this
+# runner's listener, which deletes its session and exits, then up to 40 s for it. A busy runner,
+# an unreadable /proc, an error or an older release without the command: nothing is sent, and
+# the stop is as before (SIGTERM to run.sh, SIGKILL to the rest; the part's scope runs on).
+ExecStop=-/bin/sh -c 'CI_RUNNERS_ETC=@CI_ETC@ CI_RUNNERS_PYTHON=@CI_PYTHON@ timeout 50 @CI_DATA@/ci-runners/releases/hook/bin/ci-run presence interrupt "$$1"' presence %i
 NoNewPrivileges=yes
 KillMode=mixed
 KillSignal=SIGTERM

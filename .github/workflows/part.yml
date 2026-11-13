@@ -69,7 +69,7 @@ jobs:
       # the command's; download-artifact only where the API refuses (no actions: read)
       - id: files
         if: fromJSON(inputs.part).files
-        uses: chaobrain/ci-runners/actions/flow@v1.19.0
+        uses: chaobrain/ci-runners/actions/flow@v1
         with:
           command: fetch
           dest: ${{ runner.temp }}/ci-runners-files
@@ -243,7 +243,7 @@ jobs:
       # the command's; download-artifact only where the API refuses (no actions: read)
       - id: files
         if: fromJSON(inputs.part).files
-        uses: chaobrain/ci-runners/actions/flow@v1.19.0
+        uses: chaobrain/ci-runners/actions/flow@v1
         with:
           command: fetch
           dest: ${{ runner.temp }}/ci-runners-files

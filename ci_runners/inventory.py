@@ -238,6 +238,8 @@ HOST_KEYS = {
     'presence': (lambda v: _presence(v), False),
     # the public pool's isolation backend (decision 18.2, 18.7): accepted, inert until a later phase
     'isolation': (lambda v: isinstance(v, str) and v in ISOLATION, False),
+    # the action archive cache (decision 20): each private runner's .env names <data>/ci-runners/cache/actions
+    'actions_cache': (lambda v: type(v) is bool, False),
 }
 #: the first path's keys (decision 11.12): accepted and ignored in v1.3, so that a host's
 #: inventory needs no change in the release's window (design §9); nothing reads them

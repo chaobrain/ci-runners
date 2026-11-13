@@ -18,6 +18,8 @@
     ci-run presence [--dry-run] | check RUNNER   stop and start idle runners by their resources
                            (ci-presence.timer, the runner unit's ExecCondition; decision 16.4)
     ci-run hooks copy      the hooks' copies in the private /tmp (ci-hooks.service; decision 13.5)
+    ci-run actions-cache fill|status|remove ...   the action archive cache the runners copy actions
+                           from, filled per release by the operator (decision 20)
     ci-run slurm check|plan|apply|env|canary|status|cost|uninstall ...   a Slurm site's accounts (decision 14.9)
     ci-run pool status|run|add|check|ready ...   the machine registry's live capacity, a command on a free
                            machine, and adding a host (decision 15.1)
@@ -119,6 +121,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'hooks':
         from ci_runners import hookcopy
         return hookcopy.main(args, load_inventory().host)
+    if cmd == 'actions-cache':  # the cache under the inventory's data (decision 20)
+        from ci_runners import actioncache
+        return actioncache.main(args, load_inventory().host)
     if cmd == 'drain':
         from ci_runners import drain
         return drain.main(args, load_inventory())

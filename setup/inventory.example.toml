@@ -34,6 +34,8 @@ python = "/<path to a Python 3.11 or later>"    # export it as CI_RUNNERS_PYTHON
 # push_key = "ssh-ed25519 <key>"                # the snapshot push's key (decision 12.4)
 # probe_key = "ssh-ed25519 <key>"               # the other host's CI account's pool probe key (15.1, item 8);
 #                                               # a list of them, one per calling host, from 15.8
+# actions_cache = true                          # decision 20: each runner's .env names <data>/ci-runners/
+#                                               # cache/actions/, which ci-run actions-cache fill fills per release
 # isolation = "ns-subuid"                      # decision 18.2 (from C2): the public pool's backend, account
 #                                               # or ns-subuid; accepted and inert until a later phase
 # presence = { enabled = false, tick_seconds = 20, infra_failures = 3 }  # decision 16.4 (from R3): enabled =

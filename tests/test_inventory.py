@@ -360,6 +360,17 @@ class Load(unittest.TestCase):
             with self.assertRaises(inv.InventoryError, msg=bad):
                 inv.load(text)
 
+    def test_the_action_cache_switch_is_a_bool(self):
+        """Decision 20: ``actions_cache``, as the example documents it (commented), is true or
+        false; anything else is refused, and the key names no inventory (not a string)."""
+        new = re.sub(r'^# (actions_cache = true)\s.*$', r'\1', EXAMPLE, flags=re.M)
+        self.assertIs(inv.load(new).host['actions_cache'], True)
+        self.assertNotIn('actions_cache', inv.load(EXAMPLE).host)
+        self.assertIs(inv.load(new.replace('actions_cache = true', 'actions_cache = false')).host['actions_cache'], False)
+        for bad in ('"yes"', '1', '"true"', '[]'):
+            with self.assertRaises(inv.InventoryError, msg=bad):
+                inv.load(new.replace('actions_cache = true', f'actions_cache = {bad}'))
+
     def test_an_unknown_schema_is_refused(self):
         for s in ('schema = 2', 'schema = "1"', ''):
             with self.assertRaises(inv.InventoryError, msg=s):

@@ -14,6 +14,9 @@
   written;
 - the runner app, checked by sha256, extracted once per runner directory;
 - each runner's ``.env``;
+- with ``actions_cache`` (decision 20), the action archive cache's directory
+  (``cache/actions/``), which each runner's ``.env`` names; ``ci-run actions-cache fill``
+  fills it, never setup;
 - the ``systemctl --user`` commands;
 - with ``push_key`` (a 3090 host, decision 12.4), the push key's line in the account's
   ``~/.ssh/authorized_keys``: ``restrict``, forced to ``org-sync --receive``; with
@@ -59,7 +62,7 @@ import tarfile
 import time
 import tomllib
 
-from ci_runners import hookcopy, inventory, locks, slots
+from ci_runners import actioncache, hookcopy, inventory, locks, slots
 
 RUNNER_VERSION = '2.338.2'
 RUNNER_SHA256 = 'baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40'
@@ -290,7 +293,9 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
     which its hooks and its jobs' steps inherit. A per-card runner names its card in
     ``CI_RUNNER_CARD``; a runner of a pool with a ``slot`` table its slot in
     ``CI_RUNNER_SLOT`` (decision 16.2; nothing reads it until R2). ``CI_RUNNER_POOL_LABELS``
-    are the labels of its ``pool`` (its key), else of its class's pool."""
+    are the labels of its ``pool`` (its key), else of its class's pool. Where the inventory
+    sets ``actions_cache``, ``ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE`` names the account's
+    action archive cache (decision 20); the public pool's runners are never setup's."""
     h = inv.host
     hooks = hookcopy.hooks_dir(h)  # the copies in the private /tmp on a 3090 host (decision 13.5)
     lines = []
@@ -310,6 +315,8 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
         lines.append(f'CI_RUNNER_SLOT={slot}')
     if h.get('python'):
         lines.append(f'CI_RUNNERS_PYTHON={h["python"]}')
+    if h.get('actions_cache'):  # the runner copies a filled action archive instead of downloading it (decision 20)
+        lines.append(f'ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE={actioncache.cache_dir(h)}')
     lines.append('LANG=C.UTF-8')
     return '\n'.join(lines) + '\n'
 
@@ -834,6 +841,8 @@ def build(etc: str, adopt: bool = False) -> Plan:
             (etc, 0o700), (os.path.join(base, 'state'), 0o700), (os.path.join(base, 'logs'), 0o700),
             (os.path.join(data, 'actions-runner'), 0o700), (os.path.join(data, 'ci-work'), 0o700),
             (os.path.join(home, '.config', 'systemd', 'user'), 0o755)]
+    if h.get('actions_cache'):  # the action archive cache, filled per release by the operator (decision 20)
+        dirs += [(os.path.dirname(actioncache.cache_dir(h)), 0o700), (actioncache.cache_dir(h), 0o700)]
     unit_dir = os.path.join(home, '.config', 'systemd', 'user')
     for d, mode in dirs:
         if os.path.isdir(d) and (d == unit_dir or os.stat(d).st_mode & 0o777 == mode):

@@ -2633,6 +2633,116 @@ The order is therefore made where the runners are, by presence, and no plan name
   nightly's reference seconds need those very hosts. The hold names a host, for a bounded
   time, gated by the host's own policy, and needs no token.
 
+## Lead decision (proposed, 2026-11-13): an action archive cache per host account (decision 20, issue #249)
+
+Proposed for the lead's approval. Every job's "Set up job" downloads the archives of the
+actions it uses, and the runner deletes its `_work/_actions` at the start of each job, so
+nothing carries over from one job to the next. Measured on 2026-11-13, a part job fetches
+about 4.7 MB that way (chaobrain/ci-runners 0.9 MB, actions/checkout 0.43, actions/upload-artifact
+2.2, actions/download-artifact 1.2), every byte through the egress, and its "Set up job"
+takes 4–8 s; one host's link to the egress is several times narrower than the others'. The
+runner app (2.338.2, `ActionManager.cs`) has an archive cache of its own: with
+`ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=<dir>` in its environment, and where `<dir>` exists, it
+looks for `<dir>/<owner>_<repo>/<sha>.tar.gz` (on Linux), `<sha>` the commit it resolved for
+the action's ref ("Getting action download info" still runs). On a hit it copies the file
+into its temporary directory, unpacks it with `tar -xzf` and requires exactly one directory
+at the top; on a miss, or a failed copy, it downloads as before. A cached file that copies but
+does not unpack, or that holds other than one top directory, fails the job at setup
+(`InvalidActionArchiveException`, `InvalidOperationException`), with no fallback.
+
+1. **Where.** One directory per host account, `<data>/ci-runners/cache/actions/` (§3.2),
+   mode 700, shared by all the account's runners: on 3090b and 3090a the CI account's, on
+   h100 in our subtree of the shared account. A new optional inventory key, `actions_cache`
+   (a bool; off without it), opts a host in: setup's plan then makes the directory and adds
+   `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=<that directory>` to each runner's `.env` (§5.3).
+   The listener reads `.env` when it starts, so the line takes effect at each runner's next
+   start; `apply` restarts no runner (operations §18 restarts idle ones). Copy mode only:
+   `ACTIONS_RUNNER_SYMLINK_CACHED_ACTIONS` is never set. In that mode the runner links each
+   job's action directory to one unpacked tree in the cache, which a job, running as the
+   account, could edit for the jobs after it; a copy gives each job its own.
+2. **Not on the public pool.** Its runners are not setup's (18.6), and their host layer is
+   root's and read-only inside the confinement (18.3): a cache there would have to be a
+   root-owned, read-only mount, which this decision leaves out. Public jobs keep downloading.
+3. **Who fills it, and when: `ci-run actions-cache fill`.** The release operator, as each
+   opted-in host's CI account, per release: after `install.sh` of the new release and before
+   `v1` moves (§9, step 4), so that the first jobs on the new tag hit; and again whenever
+   wanted, for instance after an upstream `actions/*` major tag moved (until then the old
+   entry only misses). The fill:
+   1. reads the actions the installed release names (`releases/<tag>`, by default
+      `releases/hook`, or `--tree DIR`): every `uses: owner/repo[/path]@ref` of its
+      actions' `action.yml` and of the reusable workflows the stamp rewrites (§9). A local
+      action, a container and a reusable workflow are no archive, and this repository's own
+      CI (`test.yml`) runs on hosted runners. Every `actions/<name>` of this repository is
+      one archive of the repository at the release's commit, which `v1` names too once it
+      has moved;
+   2. resolves each ref to the commit the runner will ask for, with `git ls-remote
+      https://github.com/<o>/<r> refs/tags/<ref> refs/tags/<ref>^{} refs/heads/<ref>`: a
+      40-hex ref is itself, else the peeled tag (an annotated tag's commit), the tag, then the
+      branch;
+   3. downloads each archive by its commit from the runner's own URL
+      (`api.github.com/repos/<o>/<r>/tarball/<sha>`, redirected to `codeload.github.com`)
+      through the host's `https_proxy`, without a token (the repositories are public; four
+      requests a fill, within the unauthenticated limit of 60 an hour per address, which the
+      hosts behind the egress share);
+   4. checks it before it can appear: a gzip stream read to its end; a tar archive whose
+      members all lie under one top-level directory; no absolute name, no `..`; a link only
+      to a path inside that directory; no device or FIFO; at most 64 MiB, and 512 MiB
+      unpacked;
+   5. stores it atomically: a temporary file in the entry's directory, fsynced, mode 444,
+      renamed to `<sha>.tar.gz`, so an entry's name only ever holds a checked archive, and
+      no entry changes in place. An entry whose sha256 matches the manifest is kept, not
+      downloaded again; any other file under an entry's name is deleted before the download,
+      so a failed download leaves a miss, never a bad file;
+   6. writes `manifest.json` the same way: schema 1, per entry the repository, the commit, the
+      refs and the releases it was filled for, its sha256, size and fill time;
+   7. exits 1 when an entry failed; the others are stored. A fill and a removal hold the
+      directory's lock, one at a time.
+4. **Proving a hit: `ci-run actions-cache status`.** A hit shows only in the runner's
+   diagnostic log (`_diag/Worker_*.log`: `Found action archive '<file>' in cache directory`),
+   which is not public; the job log prints `Download action repository 'x@ref' (SHA:…)`
+   either way. So `status`, as the CI account on the host and read-only, checks every entry
+   (present, its sha256 against the manifest, still one top directory), reports an archive
+   the manifest does not hold, and says whether a job used each entry since the fill: the
+   fill sets each entry's atime to 0 (`os.utime(path, (0, mtime))`), so the runner's first
+   copy moves the atime past the mtime even under `relatime`; our own reads open with
+   `O_NOATIME`. Where the cache's file system is mounted `noatime`, status says this signal
+   is unavailable. `--diag <runners directory>` also counts the `Found action archive` lines
+   per entry in the runners' diagnostic logs of the last N days (7). It prints entries as
+   `owner/repo@sha7` with counts and states, no path, so the operator can paste it into the
+   release record; it exits 1 on a problem. The public, aggregate evidence is the
+   "Set up job" seconds of part jobs before and after (`ci-run stats`, or the jobs API).
+5. **A stale, missing or corrupt entry.** A stale or missing entry falls back to a download
+   (the runner's own logic), never to a failure. A corrupt one would fail every job that uses
+   it, hence the checked, atomic fill and `status`; the operator's remedy is `remove --all`
+   and a fill. Removing the directory or the `.env` line turns the cache off.
+6. **Removal.** `ci-run actions-cache remove --keep <release>...` deletes the entries that no
+   kept release names (a prune, after a release once the previous one is uninstalled);
+   `--all` deletes every entry and the manifest and keeps the directory (the runners then
+   download). Unlinking an entry a runner is copying is safe: the runner holds its
+   descriptor. To turn the cache off for a host: drop the inventory key, `plan`/`apply`,
+   restart the runners, then `remove --all`.
+7. **Security.** Job code runs as the account (T13): it can write this directory as it can
+   already edit the hook, `.env` and `releases/`. So the cache extends T13: an archive a job
+   plants runs in a later job on that host, the gap already accepted for private consumers,
+   and the reason the public pool gets no cache (item 2). `status` reports a changed or an
+   unlisted archive, but a job can rewrite the manifest too: it catches accidents and is no
+   boundary. A known limit, as `v1.4.0`'s note 5: with step debug logging on, the runner's
+   debug line `Copied action archive '<file>'` names the cache's path (under `data`) in the
+   job log, visible to the private repositories' members only (11.1).
+8. **Rollout.** The code ships with a release and changes nothing by itself. Per host, the
+   lead approves the inventory key and the plan (two directories and one more line in each
+   runner's `.env`); after `apply` the operator fills the cache as the account, the runners
+   read it from their next start, and `status` after the first jobs on the host goes into
+   the release record, with the "Set up job" seconds before and after.
+- *Options weighed.* (a) A caching HTTP proxy at the egress: the egress proxy relays TLS
+  end to end (`CONNECT`, decision 11.10), so it could cache only by terminating TLS, which
+  would make it hold the jobs' traffic in clear. (b) The runner's symlink mode: one shared
+  unpacked tree per action that a job could edit for later jobs (item 1). (c) A fill by a
+  timer on each host: an upstream move would hit within the hour, but every host would run
+  a network job and a new unit, while a miss only costs the download it costs today.
+  (d) A fill in the hook at a job's start: the hook does no network I/O (§6.3), and the job
+  would wait for it. Recommended: items 1–8.
+
 ## Decisions of this spec
 
 - **D1. ci-runners is public.** Rulesets protect `main` and the `v*` tags, with only the
@@ -2762,6 +2872,7 @@ ci_runners/           stdlib-only Python: pure functions, thin I/O
   reaper.py           stale scopes, work directories, records and logs
   hook.py             the pre-job and post-job hooks; their copy in `/tmp` (decision 13.5)
   setup.py            plan and apply
+  actioncache.py      `ci-run actions-cache fill|status|remove`: the action archive cache (20)
   inventory.py        schema, loader, lint
   slurmsite.py        the Slurm site config: schema, loader, prices, deny tokens (14.6)
   slurmgate.py        the cluster's gate (14.5), the batch template and the job's supervisor (14.3)
@@ -2823,6 +2934,9 @@ account (decision 11.3; retired by 12.17, again from 15.8).
                                            capacity.json (pool status's rows, 16.5)
 <our subtree>/ci-runners/logs/             hook and reaper logs, kept 14 days
 <our subtree>/ci-runners/envs/<project>/   the projects' conda envs (decision 11.4)
+<our subtree>/ci-runners/cache/actions/    the action archive cache, where the inventory sets
+                                           actions_cache (20): <owner>_<repo>/<sha>.tar.gz
+                                           (mode 444), manifest.json; mode 700
 <our subtree>/actions-runner/<name>/       one runner each: the app, .env, credentials
 <our subtree>/ci-work/<name>/              its work directory
 ~/.config/systemd/user/ci-*                the units: the one place outside our subtree
@@ -3524,7 +3638,8 @@ cgroup v1 with systemd 249 (11.11).
 |---|---|
 | directories | §3.2 under our subtree; `etc/` mode 700 |
 | runner app | the pinned release, checked by sha256, into 9 runner directories (§5.1); 22 from 15.8 |
-| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON` (for the launcher and the units; the hooks have the interpreter written into them by setup, so a job's environment never chooses it); `CI_RUNNER_POOL_LABELS`, the pool's own labels, for a retry's `retry-on`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card; `https_proxy` and `http_proxy` at the tunnel's local port, and `no_proxy` (inventory `tunnel.direct`: localhost and the package mirror that answers directly, decision 11.10) |
+| `.env` per runner | the two hook variables; `CI_RUNNER_CLASS`; `CI_RUNNERS_ETC`; `CI_RUNNERS_PYTHON` (for the launcher and the units; the hooks have the interpreter written into them by setup, so a job's environment never chooses it); `CI_RUNNER_POOL_LABELS`, the pool's own labels, for a retry's `retry-on`; on an `h100` runner `CI_RUNNER_CARD=<N>`, its card; `https_proxy` and `http_proxy` at the tunnel's local port, and `no_proxy` (inventory `tunnel.direct`: localhost and the package mirror that answers directly, decision 11.10); with `actions_cache` (20), `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=<data>/ci-runners/cache/actions` |
+| the action archive cache (20) | with `actions_cache = true` only: `cache/` and `cache/actions/` under our subtree, mode 700, and the `.env` line above, read at each runner's next start (`apply` restarts none). Setup never fills it: the release operator runs `ci-run actions-cache fill` as the account (§9). Without the key, neither the directories nor the line |
 | `ci-runner@.service` (template) | `ExecStart=<data>/actions-runner/%i/run.sh`; `After=`/`Wants=ci-tunnel.service`; `NoNewPrivileges=yes`; `KillMode=mixed`; `Restart=always`, `RestartSec=30`; `Slice=ci.slice`; enabled per instance |
 | `ci-tunnel.service` | `ssh -F etc/tunnel/ssh_config -N -L 127.0.0.1:<http port>:127.0.0.1:<egress port>` to the egress account (decision 11.10): batch mode, the egress host's key pinned in `etc/tunnel/known_hosts`, `ExitOnForwardFailure`, keep-alive every 30 s (a dead link ends after 90 s); `Restart=always` after 10 s |
 | `etc/tunnel/` | the key pair, `ssh_config` and `known_hosts`, placed by the lead before the plan; `plan.sh` refuses without them, with the key or the directory readable by others, with a link in place of a file, or with an `ssh_config` that sets anything but `Host egress`, its `HostName`, `User` and `Port` (the unit fixes every other option, among them the key, the pinned host key with no global or DNS source, and no agent, gateway port or local command). A changed tunnel table changes the tunnel's unit, and the plan then restarts it. The runner app is fetched only once the tunnel's port answers (ssh binds it after authenticating). |
@@ -3567,6 +3682,7 @@ refreshed from a546b92f (T17):
 | directories | §3.2 under `data`; `etc/` mode 700 |
 | runner app | the pinned release, checked by sha256, into 9 runner directories on 3090b and 8 on 3090a (§5.1) |
 | `.env` per runner | as on h100; `CI_RUNNER_CARD=<N>` on a `gpu` runner; `https_proxy` at the tunnel; from `v1.5` the two hook variables name the copies in `/tmp/ci-runners-hooks/` (decision 13.5) |
+| the action archive cache (20) | as on h100, under `data` |
 | the hooks (`v1.5`) | `hooks/job-started.sh` and `job-completed.sh` under `data` gain the line `base=<data>/ci-runners`, from which they find `releases/hook` (13.5) |
 | `ci-runner@.service`, `ci-tunnel.service`, `ci-reaper.timer` | as on h100; from `v1.5` the runner's unit also has `After=ci-hooks.service` and an `ExecStartPre=` that checks both hook copies are executable files (13.5); from 15.5 `Wants=` (not `Requires=`) `ci-hooks.service`, a first `ExecStartPre=` that it is active, and `StartLimitIntervalSec=0` |
 | `ci-hooks.service` (`v1.5`) | oneshot, `RemainAfterExit=yes`: `ci-run hooks copy` into the private `/tmp` (13.5); enabled; started before the runners, and reloaded (`ExecReload=`, the same copy) by `apply` when a hook changes; from 15.5 `Restart=on-failure` after 30 s, `StartLimitIntervalSec=0` |
@@ -3748,7 +3864,7 @@ bound).
 | T10 | A hostile event payload targets the hook. | JSON parsing in `python -I`; no shell interpolation; fixtures with hostile strings |
 | T11 | A green status is forged: anyone with write can post statuses on Free. | `claim` counts only the statuses of the runners' identity, the policy's `bot` (15.9). A workflow of the repository can still post as the bot with its own job token, so someone with write can still forge one; consumers audit merges |
 | T12 | A burst of refused jobs blocks our runners (on the public pool, anyone may open fork pull requests). | refusal in under 10 s; the lead can pause a repository in the policy; each opted-in public repository requires approval before an outside contributor's workflow runs (a repository setting, the lead's); the public pool's runners serve that repository only |
-| T13 | (also any co-user of h100's account, an accepted gap; on the 3090 hosts the CI account's own jobs only; not on the public pool, whose hooks, policy and snapshot are read-only mounts in the confinement and whose runner lives for one job, 18.3) An accepted job (or its dependency) edits the host layer it owns: the hook (or its copy in `/tmp`, 13.5), the policy, `.env`, the units, the drain file, the load record (13.1, 13.2), presence's state or the capacity file (16.4, 16.5), so later jobs pass unchecked or the route is misled. | private consumers only (§5.3); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs; `ci-run hooks copy` checks its `/tmp` directory through a descriptor (no link, the account's, mode 700) and then writes the copies by path, which only the account itself could race in its private `/tmp` (accepted, 13.5) |
+| T13 | (also any co-user of h100's account, an accepted gap; on the 3090 hosts the CI account's own jobs only; not on the public pool, whose hooks, policy and snapshot are read-only mounts in the confinement and whose runner lives for one job, 18.3) An accepted job (or its dependency) edits the host layer it owns: the hook (or its copy in `/tmp`, 13.5), the policy, `.env`, the units, the drain file, the load record (13.1, 13.2), presence's state or the capacity file (16.4, 16.5), so later jobs pass unchecked or the route is misled; or it plants an archive in the action archive cache (20), which a later job on the host unpacks and runs as an action. | private consumers only (§5.3), and so no cache on the public pool (20.2); the cache only in copy mode, so a job edits no other job's unpacked action, and `actions-cache status` reports a changed or unlisted archive (an accident's check, not a boundary: a job can rewrite the manifest too, 20.7); nothing on the host detects an edited hook, so a changed policy hash in the hook lines shows only a changed policy; the hook writes its log without following links or blocking on FIFOs; `ci-run hooks copy` checks its `/tmp` directory through a descriptor (no link, the account's, mode 700) and then writes the copies by path, which only the account itself could race in its private `/tmp` (accepted, 13.5) |
 | T14 | A co-user of h100's shared account reads the org-sync token, or edits the snapshot. | no token on h100 (decision 11.9): the snapshot arrives over the maintainer's ssh access, checked by `--receive` (§6.5). A host that syncs itself holds a fine-grained read-only token (members, metadata): it shows the member list and the private repositories' names, nothing else. An edited snapshot is T13's case. |
 | T15 | A co-user of h100's shared account takes the tunnel key, or any local user of a host uses the tunnel's port on 127.0.0.1 (on the 3090 hosts, every local account can reach it). | the egress account has no shell and no listening forward, and its key opens only the egress proxy's port (decision 11.10). The proxy passes only its allowlist on port 443: HTTPS to GitHub, the Actions service's storage and the package indexes, which job code reaches through the tunnel anyway. The suffix `.blob.core.windows.net` lets them reach any Azure storage account over HTTPS, and `storage.googleapis.com` any Google Cloud Storage bucket: accepted gaps, since the Actions storage accounts have no stable names and package downloads use those buckets. They appear as the egress host's address. The allowlist is root-owned on the egress host. The lead revokes the key by deleting one line there. |
 | T16 | (3090 hosts) A job, or a local user, holds the shared host lock or a slot, and stalls the other side's work; or a local account empties the ticket queue. | the files are `flock` locks, so a hold ends with its process: a part's hold ends with its scope (inner timeout, the job-completed hook, the reaper); a waiting part ends `unavailable` at its queue timeout; the files hold no data, and a lost ticket only loses a place in the queue |
@@ -3940,7 +4056,9 @@ Rules:
   2. The stamp PR: `actions/RELEASE` set to `v1.N.0`, and, from R6, the action refs in
      `ci.yml`, `part.yml` and (issue #213) `sweep.yml`, and `ci.yml`'s ref to `part.yml` (16.6).
   3. The lead tags `v1.N.0` on the stamp's merge commit.
-  4. `install.sh` on every host, the egress host first (17); nothing switches yet.
+  4. `install.sh` on every host, the egress host first (17); then, on each host whose
+     inventory sets `actions_cache`, `ci-run actions-cache fill` as its CI account, which
+     stores the archives of the actions the new release names (20). Nothing switches yet.
   5. A canary consumer branch composes the actions at `@v1.N.0` on both 3090 hosts and
      passes.
   6. The lead moves `v1`. The hosts already have the release, so the order is safe.

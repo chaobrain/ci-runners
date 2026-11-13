@@ -503,6 +503,43 @@ cards = {{ per_card = true, class = "gpu", labels = ["hx-gpu"] }}
         self.assertIn('CI_RUNNER_SLOT=0\n', setup.env_file(inv, 'gpu', '/e', 0, 0))  # slot 0 is a slot
         self.assertEqual(setup.env_file(inv, 'gpu', '/e', 3), setup.env_file(inventory.load(self.inv.read_text()), 'gpu', '/e', 3))
 
+    def test_the_action_cache_only_where_the_inventory_opts_in(self):
+        """Decision 20: with ``actions_cache = true`` the plan makes ``cache/actions/`` (mode
+        700) and every runner's ``.env`` names it, before ``LANG``; without it, or false, neither.
+        The public pool's runners are never setup's, and its stripped inventory carries no
+        switch, so no public runner gets the line."""
+        cache = f'{self.data}/ci-runners/cache/actions'
+        line = f'ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE={cache}'
+        off = inventory.load(self.inv.read_text())
+        for card in (None, 3):
+            self.assertNotIn('ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE', setup.env_file(off, 'gpu', '/e', card))
+        self.assertNotIn('/cache/actions', setup.build(str(self.etc)).text())
+        text = self.inv.read_text()
+        self.inv.write_text(text.replace('orgsync = true\n', 'orgsync = true\nactions_cache = false\n', 1))
+        self.assertNotIn('ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE', setup.env_file(inventory.load(self.inv.read_text()), 'gpu', '/e', 3))
+        self.assertNotIn('/cache/actions', setup.build(str(self.etc)).text())
+        self.inv.write_text(text.replace('orgsync = true\n', 'orgsync = true\nactions_cache = true\n', 1))
+        inv = inventory.load(self.inv.read_text())
+        env = setup.env_file(inv, 'gpu', '/e', 3)
+        self.assertEqual(env.splitlines()[-2:], [line, 'LANG=C.UTF-8'])
+        self.assertEqual(env, setup.env_file(off, 'gpu', '/e', 3).replace('LANG=', f'{line}\nLANG=', 1))
+        plan = setup.build(str(self.etc))
+        mk = {a['path']: a['mode'] for a in plan.actions if a['kind'] == 'mkdir'}
+        self.assertEqual((mk[cache], mk[os.path.dirname(cache)]), (0o700, 0o700))
+        envs = [a['content'] for a in plan.actions if a['kind'] == 'file' and a['path'].endswith('/.env')]
+        self.assertEqual(len(envs), len(setup.runners(inv)))
+        self.assertTrue(all(f'\n{line}\n' in e for e in envs))
+        pub = self.inv.read_text().replace(
+            'cards = { per_card = true, class = "gpu", labels = ["hx-gpu"] }',
+            'cards = { per_card = true, class = "gpu", labels = ["hx-gpu"] }\n'
+            'pub-gpu = { per_card = true, class = "gpu", audience = "public", labels = ["ci-pub-gpu", "hx-pub-gpu"] }'
+        ).replace('orgsync = true\n', 'orgsync = true\nisolation = "ns-subuid"\n')
+        inv = inventory.load(pub)
+        self.assertEqual(setup.runners(inv), setup.runners(inventory.load(self.inv.read_text())))  # no public runner
+        view = inventory.public_view(inv, [3])
+        self.assertNotIn('actions_cache', view)
+        self.assertNotIn('ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE', setup.env_file(inventory.load(view), 'gpu', '/e', 3))
+
     def test_a_3090_host_s_runners(self):
         """Decision 12.5, design §5.1: the 3090 pools, each labelled with the host's own
         labels; the per-card pool's class is gpu, which its runners' .env names."""

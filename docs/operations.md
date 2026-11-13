@@ -146,7 +146,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 1. **功能 PR**：带单元测试、夹具和一台主机上的现场检查，合并进 `main`。
 2. **stamp PR**：`python -m ci_runners.stamp vX.Y.Z`：把 `actions/RELEASE` 改成 `vX.Y.Z`，并把可复用工作流 `ci.yml`、`part.yml`、`sweep.yml` 里对本仓库 action 的引用和 `ci.yml` 对 `part.yml` 的引用都改成 `@vX.Y.Z`（design §9、决定 16.6），其他文件不动；`tests/test_actions.py` 和 `tests/test_reusable.py` 会检查工作流里的 ref 与 stamp 一致、文档示例引用 `@v1`。合并。
 3. **打 tag**：在 stamp 的合并 commit 上打 `vX.Y.Z`。
-4. **安装**：在每台主机上运行 `install.sh --tag vX.Y.Z --expect <sha>`，包括 egress 主机（以 root 身份，`CI_RUNNERS_ETC=/opt/ci-runners/etc`）。这一步不会切换任何东西。主机的计划有变化时，先看 `plan.sh`，再 `apply`。
+4. **安装**：在每台主机上运行 `install.sh --tag vX.Y.Z --expect <sha>`，包括 egress 主机（以 root 身份，`CI_RUNNERS_ETC=/opt/ci-runners/etc`）。这一步不会切换任何东西。主机的计划有变化时，先看 `plan.sh`，再 `apply`。inventory 写了 `actions_cache = true` 的主机，接着以 CI 账户运行 `ci-run actions-cache fill`，把新 release 用到的 action 归档放进缓存（§18），这样移动 `v1` 之后的第一批作业就能命中。
 5. **金丝雀**：金丝雀仓库的一个分支把各 action 引用为 `@vX.Y.Z`，跑一个绿的 head 和一个红的 head。
 6. **移动 `v1`** 到 `vX.Y.Z`，然后开 restore PR：`python -m ci_runners.stamp hook`，stamp 改回 `hook`，三个工作流里的引用改回 `@v1`。
 
@@ -224,6 +224,7 @@ ci-run drain off                # 恢复整台主机和所有池子；--pool P �
 | 想知道某个部件是哪个 runner 跑的 | 作业 API 的 `runner_name`（被调用的工作流里的作业也有，design §2），或者主机上部件记录 `record.json` 里的 `runner`。 |
 | 同一个 head 重新触发没有跑 | claim 跳过了已经绿的 head，推一个新 commit 再跑。 |
 | env build 时出现 403 | 缺少 `no_proxy`，包镜像被送到了 egress 代理。按 §4 从 runner 的 `.env` 导入代理变量。 |
+| 作业在 "Set up job" 失败：`InvalidActionArchiveException`，或 `contains 'N' directories` | action 归档缓存里有坏条目（§18）。以 CI 账户跑 `ci-run actions-cache status` 找出它，然后 `remove --all`，再 `fill`。 |
 | 卡一直 `unavailable: health gate` | 卡温 ≥ 80 °C 或读不到。用 `nvidia-smi` 看温度。 |
 
 ## 9. 验收记录（RUN-5，2026-11-06）
@@ -465,3 +466,15 @@ GH_TOKEN=$(gh auth token) ci-run stats [--repo OWNER/NAME ...] [--since 24h|90m|
 
 **API 开销**：每次调用 30 秒、3 次尝试；一个仓库有 R 个 run、P 次推送、K 个 run 里共 N 个被重试的部件时，共 ceil(R/100) + R + ceil(P/100) + K + 2N 次请求（作业每页 100 个；下载是两次请求：GitHub 的重定向，再是不带登录的签名 URL）。2026-11-12 金丝雀一天 44 个 run 用了 77 次。超过 `--max-requests`（默认 2000）就拒绝出报告，不会出一份不全的；GitHub 的 run 搜索最多给 1000 个 run，第一页的 `total_count` 超过 1000 也拒绝；`Link` 指向 GitHub API 之外的地址时拒绝（登录不会发到别处）。退出码：0 报告；1 GitHub 读不到或到了上限；2 参数错误或没有登录。
 
+## 18. action 归档缓存（design 决定 20，提议中）
+
+每个作业的 "Set up job" 都要把用到的 action 下载一遍（runner 在每个作业开始时清空 `_work/_actions`），一个部件作业大约 4.7 MB，全部经过 egress。runner 自带归档缓存：`.env` 里有 `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=<目录>`、而且这个目录存在时，它先找 `<目录>/<owner>_<repo>/<sha>.tar.gz`（`<sha>` 是它为这个 ref 解析出的 commit），找到就复制、解包，找不到就照旧下载。缓存放在每个 CI 账户的 `<data>/ci-runners/cache/actions/`（h100 上是我们的子目录），这个账户的所有 runner 共用；公共池（决定 18）的 runner 没有缓存，照旧下载。
+
+- **打开**（lead 的步骤，一次一台主机）：inventory 的主机表加 `actions_cache = true`，`python -m ci_runners.inventory check <inventory>` 检查；`plan.sh <role>` 里只多出 `mkdir cache/` 和 `cache/actions/`（模式 700），以及每个 runner 的 `.env` 多一行 `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=<data>/ci-runners/cache/actions`；lead 批准后 `apply`，然后马上 fill（下一条）。`apply` 不重启任何 runner，listener 只在启动时读 `.env`，所以每个 runner 下次启动时才用上缓存（presence 的停启、15.5 的自动恢复、重启主机都算）。要马上生效，就逐个重启空闲的 runner：`ci-run presence --dry-run` 里是 `idle` 的，`systemctl --user restart ci-runner@<name>`；重启的 runner 在 GitHub 上要 3 到 4 分钟才重新在线（§15 第 4 步），所以一次只重启几个。只用复制模式：不要设 `ACTIONS_RUNNER_SYMLINK_CACHED_ACTIONS`（那样所有作业共用一份解包后的目录，作业能改给后面的作业用）。
+- **填充**：以 CI 账户运行 `ci-run actions-cache fill`。默认读 `releases/hook` 指向的 release（`--release vX.Y.Z` 读别的已安装 release，`--tree DIR` 读一个 checkout）：它的各个 `actions/*/action.yml` 和 stamp 改写的可复用工作流里的每个 `uses: owner/repo[/path]@ref`（本仓库自己的 `test.yml` 跑在托管 runner 上，不算）；用 `git ls-remote` 把每个 ref 解析成 runner 会要的 commit（40 位十六进制的就是它自己，否则先 peeled 的 tag、再 tag、再分支）；经主机的 `https_proxy` 不带令牌下载 `api.github.com/repos/<o>/<r>/tarball/<sha>`（和 runner 用的是同一个地址）；检查（gzip 完整、只有一个顶层目录、所有成员都在它下面、没有绝对路径和 `..`、链接不出这个目录、没有设备和 FIFO、不超过 64 MiB、解开不超过 512 MiB）；通过后在同一目录写临时文件、fsync、改成 444、改名成 `<sha>.tar.gz`。manifest（`manifest.json`）里 sha256 对得上的条目保留，不再下载；名字下的其他文件先删掉再下载，所以下载失败时 runner 只是没命中，不会拿到坏文件。每条输出一行：`stored`、`kept` 或 `failed`，最后是 `fill for <release>: N stored, N kept, N failed`；有失败时退出 1，其余条目照样存好，修好网络再跑一次即可。同一时间只能有一个 fill 或 remove（`cache/actions/.lock`）。运行前 shell 里要有 egress 的代理变量：按 §4 从 runner 的 `.env` 导入 `https_proxy`、`http_proxy`、`no_proxy`。
+- **什么时候填**：每次发布在 §5 第 4 步（`install.sh` 之后、移动 `v1` 之前），这样新 tag 上的第一批作业就能命中。上游的 `actions/*@v4` 这类大版本 tag 是会移动的：移动之后旧条目只是不再命中（作业照旧下载），想让它重新命中就再跑一次 fill。
+- **证明命中**（`ci-run actions-cache status`，以 CI 账户运行，只读）：命中只记在 runner 的诊断日志里（`_diag/Worker_*.log` 的 `Found action archive '<文件>' in cache directory`），作业日志不论命中与否都打印 `Download action repository 'x@ref' (SHA:...)`。status 逐条检查（文件在、sha256 和 manifest 一致、仍是一个顶层目录），报告 manifest 里没有的归档，并说明 fill 之后有没有作业用过它：fill 把每个条目的 atime 设成 0，runner 第一次复制就会把 atime 推到 mtime 之后（`relatime` 下也是）；status 自己读文件用 `O_NOATIME`，不会把它算成用过。缓存所在的文件系统用 `noatime` 挂载时，status 会说这个信号不可用。`--diag <data>/actions-runner` 另外按条目统计最近 `--days N`（默认 7）天各 runner 诊断日志里的 `Found action archive` 行数。输出只有 `owner/repo@sha7`、ref、release、状态和计数，没有路径，可以直接贴进发布记录；有问题时退出 1。公开的、汇总的证据是部件作业 "Set up job" 前后的秒数（`ci-run stats`，或作业 API）。
+- **条目缺失、过期或损坏时作业会怎样**：缺失或过期（ref 已经指向别的 commit）只是没命中，runner 照旧下载，作业不受影响。损坏的条目（复制得了但解不开，或者不是正好一个顶层目录）会让用到它的作业在 "Set up job" 失败（`InvalidActionArchiveException` 或 `contains 'N' directories`），runner 不会退回下载：fill 的检查和原子改名就是为了不出现这种文件。真的出现了就 `ci-run actions-cache remove --all`，再 fill；删掉这一个文件也可以。
+- **清理**：旧 release 卸掉以后，`ci-run actions-cache remove --keep <仍在用的 release>...` 删掉不被这些 release 引用的条目；`--all` 删掉所有条目和 manifest，目录本身保留（runner 之后全部下载）。runner 正在复制的条目被删也没关系，它拿着自己的文件描述符。
+- **关闭**：从 inventory 删掉 `actions_cache`，`plan.sh`/`apply`（`.env` 里那一行去掉），runner 重启之后，`remove --all`。只删目录或只删 `.env` 那一行也能关掉缓存。
+- **安全**：作业以 CI 账户运行，能写这个目录，就像它本来就能改 hook、`.env` 和 `releases/` 一样（design T13）：一个作业放进去的归档会在这台主机后面的作业里当作 action 运行。这是私有仓库已经接受的缺口，也是公共池没有缓存的原因。status 能发现被改过或 manifest 里没有的归档，但作业也能改 manifest，所以它只能发现意外，不是边界。打开 step debug 日志时，runner 的 `Copied action archive '<文件>'` 调试行会在作业日志里写出缓存路径（在 `data` 下）。

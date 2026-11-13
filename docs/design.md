@@ -4408,6 +4408,14 @@ Rules:
   2. **Keys behind `v1`.** A home pool, a registry's `dev_slots` and a plan's `history` are refused by older
      releases, so none is written on a host, nor printed by a consumer pinned to `ci.yml@v1`, before `v1` points here
      and every host has installed it.
+  3. **The rollout.** Each host's runner directories matched `ci-run runners` before its install. The egress host's
+     hook link moved first and the proxy kept running (no egress change). Every host's plan changed only the installed
+     job-started hook (its etc line; on the 3090 hosts the `/tmp` copies were rewritten by a reload of `ci-hooks`): nothing
+     restarted. On each host the installed hook refused this repository (`self`) from the host's etc, with the runner's
+     class from the inventory.
+  4. **The canaries.** On h100 and 6000pro (`canary-<host>-v1190`: claim, a CPU part, a one-card part, salvage, verdict
+     on the host's labels) and the 3090 hosts (`canary-3090-v1190`, with a one-card part on each 3090 host): green on every
+     part, and the red heads red on every part the RED file reds. `v1` moved to it on 2026-11-13.
 - **Inventory schema.** `schema = N` in `inventory.toml`. The executor refuses an
   unknown schema (`unavailable`) rather than guess.
 - **RUN-10's order** (decision 16). The release that accepts and ignores the new

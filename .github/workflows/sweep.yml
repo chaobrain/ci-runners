@@ -36,7 +36,7 @@ jobs:
       actions: write
       statuses: write
     steps:
-      - uses: chaobrain/ci-runners/actions/sweep@v1.19.0
+      - uses: chaobrain/ci-runners/actions/sweep@v1
         with:
           workflow: ${{ inputs.workflow }}
           context: ${{ inputs.context }}

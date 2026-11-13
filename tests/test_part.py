@@ -224,8 +224,10 @@ class Execute(Host):
 
     def test_a_retry_queues_past_a_full_project_queue(self):
         """Decision 13.6: the cap (``max_waiting``, §7 rule 2) refuses a first attempt, which
-        goes elsewhere; a retry has nowhere else to go, so it queues, and the cap counts it."""
+        goes elsewhere; a retry has nowhere else to go, so it queues, and the cap counts it.
+        The cap holds on a pool with more runners than slots (three on two here)."""
         self.two_slots()
+        self.inv = inventory.load(self.inv_text.replace('slots = 1\n', 'slots = 2\n').replace('part = 1 }', 'part = 3 }'))
         (self.etc / 'projects' / 'p.toml').write_text(
             (self.etc / 'projects' / 'p.toml').read_text().replace('[hosts.hb]\n', '[hosts.hb]\nmax_slots = 2\n'))
         q = self.slot.parent / 's.queue'
@@ -236,6 +238,35 @@ class Execute(Host):
         _, out = self.execute(id='a', attempt_of='hz:org/repo/77-1/a-1', command='touch "$CI_PART_DIR/ran"')
         self.assertEqual((out['outcome'], out['attempt']), ('pass', 2), out['reason'])
         self.assertTrue(pathlib.Path(self.path(out), 'work', 'ran').exists())
+
+    def test_a_batch_on_a_pool_of_one_runner_per_slot_is_never_refused_as_a_full_queue(self):
+        """A batch of one project's parts lands on a pool whose runners are its slots: each
+        part sees the others' tickets for the moment before they take their slots. With a
+        slot free, no first attempt is refused ``project queue full`` (the cap lapses, §7
+        rule 2); on a pool with more runners than slots the same ticket refuses it."""
+        self.two_slots()
+        self.inv = inventory.load(self.inv_text.replace('slots = 1\n', 'slots = 2\n').replace('part = 1 }', 'part = 2 }'))
+        (self.etc / 'projects' / 'p.toml').write_text(
+            (self.etc / 'projects' / 'p.toml').read_text().replace('[hosts.hb]\n', '[hosts.hb]\nmax_slots = 2\n'))
+        q = self.slot.parent / 's.queue'
+        q.mkdir()
+        (q / '000000000001.wait').write_text(f'1 {os.getpid()} {int(time.time())} /x ci-slot project=p cmd\n')
+        _, out = self.execute(id='a')  # the other part's ticket is older: it is served first, and we after it
+        self.assertEqual(out['outcome'], 'pass', out['reason'])
+        for runner in ('hb-part-3', 'elsewhere-1'):  # a runner the inventory does not name: the cap holds
+            _, out = self.execute(env={**self.env, 'RUNNER_NAME': runner}, id=f'b-{runner}')
+            self.assertEqual((out['outcome'], out['reason']), ('unavailable', 'project queue full'), runner)
+
+    def test_the_cap_holds_only_where_a_pool_has_more_runners_than_slots(self):
+        def inv(pools, slots):
+            return inventory.load(self.inv_text.replace('slots = 1\n', f'slots = {slots}\n')
+                                  .replace('pools = { light = 1, part = 1 }', f'pools = {{ {pools} }}'))
+        self.assertFalse(part.queue_capped(inv('light = 1, part = 2', 2), 'hb-part-1'))
+        self.assertFalse(part.queue_capped(inv('light = 1, part = 2', 3), 'hb-part-2'))
+        self.assertTrue(part.queue_capped(inv('light = 1, part = 3', 2), 'hb-part-1'))
+        self.assertTrue(part.queue_capped(inv('light = 1, part = 2', 2), 'hb-part-9'))  # not the inventory's
+        self.assertFalse(part.queue_capped(inv('light = 3, part = 1', 2), 'hb-part-1'))  # its own pool's count
+        self.assertTrue(part.queue_capped(inv('light = 1, part = 1, compile = 3', 2), 'hb-compile-1'))
 
     def test_cards_are_leased(self):
         smi = '0, 24576, 576\n1, 24576, 24000\n'

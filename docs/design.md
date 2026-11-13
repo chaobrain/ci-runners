@@ -3263,6 +3263,46 @@ refresh checks its own record. It is for a host whose account others share (h100
 token would be readable for the build's length; its upstreams are cloned without
 credentials.
 
+#### Proposed: automatic registration and environment builds on private runner hosts
+
+A maintainer enables automatic registration on each target host and provides the
+host's resource defaults. A host-side reconciliation uses a fresh, complete org
+snapshot (6.5) to discover private repositories. A repository opts in when its
+default branch contains a valid `.github/ci-runners.toml`. Read the spec using
+the same repository and ref checks as an environment build. A branch or PR cannot
+register a project. A paused repository is skipped.
+
+Use the repository name as the project key when it is valid and unclaimed. Bind
+an automatically managed record to the snapshot's repository ID. The host
+supplies the resource limits and environment location. Existing manual entries
+take precedence. Skip conflicts and report them. Reconciliation is idempotent
+and writes entries atomically. Skip repositories on failed reads and skip the
+whole run on an invalid or stale snapshot. If a repository disappears, changes
+identity, or loses its valid spec, report it for maintainer review. Preserve its
+files and require review before reusing the project key.
+
+**Apply changes to the default-branch spec.** On each reconciliation, build
+the environment for a newly enrolled project or when the TOML differs from the
+last spec successfully applied on this host. Existing manually registered
+projects may opt in without changing their registry entries. Read the TOML and
+its requirements files from the same default-branch commit. Coalesce merges
+between checks by building the latest observed spec. An unchanged TOML alone
+does not trigger a rebuild on an unrelated push.
+
+Use the existing per-project build lock for automated builds, manual builds
+and upstream refresh. Recheck the applied spec under the lock. Record the
+source commit and TOML digest with the new environment and atomically switch
+the active environment only after a successful build. Running jobs keep their
+original environment. If a read, validation or build fails, report the failure
+and retain the last working environment. Retry unapplied specs on a later
+reconciliation. A newly registered project becomes usable after its first
+successful build. The existing upstream refresh uses the active environment's
+saved spec.
+
+Public repositories continue through the public workflow. Enabling
+reconciliation on a host and provisioning credentials scoped to read the
+repositories and their required upstreams go through the lead.
+
 ### 4.10 The reusable workflow `ci.yml` and the plan (decision 16.6; from R6)
 
 `chaobrain/ci-runners/.github/workflows/ci.yml@v1` runs a consumer's CI in three pickups:

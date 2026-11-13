@@ -2229,8 +2229,8 @@ amends.
        - *A mistake in the confinement.* The check covers what it plants and tries (item
          5). It cannot prove a path it does not try: a file system or device that the
          mounts expose by accident, a descriptor that a later change leaks into the
-         namespace. Hence the control run, an independent review of the launcher and the
-         check (AGENTS.md, Review), a check after every change of the launcher, and a second
+         namespace. Hence the control run, the coordinator's full review of the launcher and
+         the check (AGENTS.md, Review), a check after every change of the launcher, and a second
          fence where the kernel has one (Landlock for files, seccomp for system calls).
        - *The same-uid supervisor.* The relay, the watchdog and the read-back run as the
          account and handle what the job controls: its bytes on the relay, its files, its
@@ -2378,7 +2378,7 @@ amends.
   one; bubblewrap maps only the caller's own uid, which is `ns-uid`, unless it joins a
   namespace made beforehand by `newuidmap`, and it is not installed here. Our launcher
   makes exactly the map and the mounts of items 3 and 4 (the device minor, the driver's
-  params overlay), the same on every host, at the price of owning security-critical code: it stays small, gets an independent
+  params overlay), the same on every host, at the price of owning security-critical code: it stays small, gets the coordinator's full
   review, and the check does not trust it. The check does not depend on the backend, so if
   C1 shows the launcher harder than podman configured to the same effect, podman can be
   swapped in without changing this contract.
@@ -4798,7 +4798,8 @@ nightly on capability labels) are its PRs, not this repository's.
 **Decision 18: public GPU jobs on confined runners** (issue #194). It replaces P1 and P2,
 whose tests carry over. Each phase is its own issue and PR, with its tests, each failing on
 a mutant, and its evidence; host and org steps are the lead's (18.10). The launcher, the
-check, the relay and the issuer get an independent review (AGENTS.md, Review).
+check, the relay and the issuer get the coordinator's full review: read whole, with mutants
+(AGENTS.md, Review).
 
 - **C0**: this contract (decision 18). *Acceptance:* the lead approves the PR.
 - **C1, the launcher and the check, as an experiment** (18.3 to 18.5; issue #196, its

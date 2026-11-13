@@ -3929,6 +3929,10 @@ Rules:
    `max_slots` per host (default 1, until `v2`) and `memory_max`. `max_waiting` per pool
    (decision 13.6) lapses for a pool whose instances equal its slots, since no runner
    there waits; it still bounds a pool that has more runners than slots, until `v2`.
+   *Built 2026-11-13* (`part.queue_capped`): until then the cap held on every pool, and a
+   batch of one project's parts that landed on a host at once was refused `project queue
+   full` with a slot free, since each part saw the others' tickets in the moment before
+   they took their slots (`max_waiting` 1, the default).
 3. **Light jobs never wait behind heavy ones**: claim, plan and verdict run on the
    `ci-light` runners and take no slot; each host's `home` runner serves its salvage legs.
 4. **Interop with `ci_slot.sh`** (3090 hosts; decision 12.9). `ci_slot.sh`'s tickets

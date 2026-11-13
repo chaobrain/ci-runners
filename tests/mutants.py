@@ -151,6 +151,22 @@ ASW = 'actions/sweep/action.yml'
 
 #: (file, snippet, replacement, tests that kill it)
 MUTANTS = [
+    # §7 rule 2: max_waiting holds only on a pool with more runners than slots
+    (PRT, "    return pools.count(pool) > int(inv.host['slots'])", "    return pools.count(pool) >= int(inv.host['slots'])",
+     [f'{TT}.Execute.test_the_cap_holds_only_where_a_pool_has_more_runners_than_slots',
+      f'{TT}.Execute.test_a_batch_on_a_pool_of_one_runner_per_slot_is_never_refused_as_a_full_queue']),
+    (PRT, "    return pools.count(pool) > int(inv.host['slots'])", "    return True",
+     [f'{TT}.Execute.test_a_batch_on_a_pool_of_one_runner_per_slot_is_never_refused_as_a_full_queue']),
+    (PRT, "    return pools.count(pool) > int(inv.host['slots'])", "    return False",
+     [f'{TT}.Execute.test_a_retry_queues_past_a_full_project_queue']),
+    (PRT, "    if runner not in names:\n        return True\n", "    if runner not in names:\n        return False\n",
+     [f'{TT}.Execute.test_the_cap_holds_only_where_a_pool_has_more_runners_than_slots',
+      f'{TT}.Execute.test_a_batch_on_a_pool_of_one_runner_per_slot_is_never_refused_as_a_full_queue']),
+    (PRT, "    pool = pools[names.index(runner)]", "    pool = pools[0]",
+     [f'{TT}.Execute.test_the_cap_holds_only_where_a_pool_has_more_runners_than_slots']),
+    (PRT, "if not a.attempt_of and queue_capped(self.inv, self.env.get('RUNNER_NAME', '')) \\\n",
+     "if not a.attempt_of and queue_capped(self.inv, 'hb-part-1') \\\n",
+     [f'{TT}.Execute.test_a_batch_on_a_pool_of_one_runner_per_slot_is_never_refused_as_a_full_queue']),
     # issue #257: a cancelled part never counts toward the self-drain; a lost one still does
     (PRS, "    if kind == 'lost' and boot and rec.get('boot_start') == boot and not cancelled:",
      "    if kind == 'lost' and boot and rec.get('boot_start') == boot:",
@@ -2297,8 +2313,8 @@ MUTANTS = [
      "    if True:", [f'{TT}.BehindNightly.test_a_nightly_part_keeps_the_hold_record_for_its_life']),
     (PRT, "    except OSError:\n        pass\n\n\ndef every_holder", "    except ValueError:\n        pass\n\n\ndef every_holder",
      [f'{TT}.BehindNightly.test_a_hold_record_that_cannot_be_written_holds_nothing_back']),
-    (PRT, "                if not a.attempt_of and slots.queue_full(mine, proj.max_waiting):",
-     "                if slots.queue_full(mine, proj.max_waiting):", [f'{TT}.Execute.test_a_retry_queues_past_a_full_project_queue']),
+    (PRT, "                if not a.attempt_of and queue_capped(",
+     "                if queue_capped(", [f'{TT}.Execute.test_a_retry_queues_past_a_full_project_queue']),
     (PRT, "                n = len(mine) if nightly else a.gpus", "                n = a.gpus",
      [f'{TT}.Classes.test_a_nightly_part_takes_every_slot_and_card']),
     (PRT, "            if a.gpus or (nightly and h['gpus']):", "            if a.gpus:",

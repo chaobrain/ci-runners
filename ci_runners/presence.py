@@ -46,7 +46,8 @@ whose resource is still taken.
 *Black holes.* ``presence.infra_failures`` (3) infrastructure ends within 15 min drain the
 host as 15.2's miss does (``drained: infra`` in the host's log): a part's ``unavailable``
 other than busy, drained or a full queue (and other than a cluster part's, which is the
-cluster's); a ``lost`` part on a host that stayed up; a hook refusal ``stale``, ``runner``
+cluster's); a ``lost`` part on a host that stayed up, unless its job was cancelled (issue
+#257: a cancelled part never counts, ``part_end`` holds the rule); a hook refusal ``stale``, ``runner``
 (a runner directory the inventory does not know), ``policy``, ``inventory``, ``timeout`` or
 ``error``. Ends before the last self-drain or the last undrain do not count.
 Nothing undrains by itself.
@@ -741,18 +742,28 @@ def boot_id(read: Callable[[str], str] = hostload._read) -> str:
     return read('/proc/sys/kernel/random/boot_id').strip()
 
 
-def part_end(doc: Mapping | None, rec: Mapping, boot: str) -> str:
-    """Why a part's end is an infrastructure end (16.4), or empty: ``unavailable`` other
-    than busy, drained or a full queue, and other than a cluster part's (the cluster's, not
-    this host's); ``lost`` on a host that stayed up (its boot id unchanged). ``doc`` is its
-    ``outcome.json``, None for a record that never finished (lost). Pure."""
+def part_end(doc: Mapping | None, rec: Mapping, boot: str, cancelled: bool = False) -> str:
+    """Why a part's end counts toward the self-drain (16.4), or empty. The counting rule, in
+    one place:
+
+    - it counts: ``unavailable`` other than ``NOT_INFRA`` (busy, drained, a full queue, a
+      wait that ran out, the caller's request) and other than a cluster part's (the
+      cluster's, not this host's); ``lost`` on a host that stayed up (its boot id unchanged)
+      when nothing cancelled its job;
+    - it never counts: a part whose job was cancelled (issue #257), by GitHub or by the run,
+      before or while its command ran: ``stopped`` (the executor saw the signal) and a
+      ``lost`` record that carries the cancel mark (``cancelled``: ``outcome.CANCELLED``,
+      written by the executor at the signal or by the job-completed hook for a part whose
+      executor outlived its job); nor ``pass``, ``red``, ``oom``, ``thermal`` or ``reboot``.
+
+    ``doc`` is its ``outcome.json``, None for a record that never finished (lost). Pure."""
     kind = 'lost' if doc is None else str(doc.get('outcome', ''))
     reason = '' if doc is None else str(doc.get('reason', ''))
     if kind == 'unavailable':
         if reason.startswith(NOT_INFRA) or rec.get('class') == CLUSTER:
             return ''
         return f'unavailable: {reason}'
-    if kind == 'lost' and boot and rec.get('boot_start') == boot:
+    if kind == 'lost' and boot and rec.get('boot_start') == boot and not cancelled:
         return 'lost'
     return ''
 
@@ -800,7 +811,7 @@ def _record_end(record: str, since: float, *, alive: Callable[[int, float], bool
         if t <= since:
             return None
         doc = None
-    why = part_end(doc, rec, boot)
+    why = part_end(doc, rec, boot, os.path.lexists(os.path.join(record, outcome.CANCELLED)))
     ref = '/'.join(record.split(os.sep)[-4:])
     return {'key': f'part:{ref}', 'time': t, 'why': why, 'record': ref} if why else None
 

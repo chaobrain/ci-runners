@@ -1208,8 +1208,11 @@ class Executor:
         """The job is cancelled or its runner stops. Before the command starts: end
         ``stopped``. Once it runs: leave it to its scope (job-completed stops it on a
         cancel; after a stopped runner it finishes and ``salvage`` reads it) and exit
-        without outputs."""
+        without outputs. Either way the record is marked cancelled first (issue #257), so a
+        part killed before it writes its outcome is still no infrastructure end."""
         self.stopped = True
+        if self.record:
+            outcome.mark_cancelled(self.record, f'signal {signum}')
         if self.proc is not None:
             raise SystemExit(128 + signum)
 

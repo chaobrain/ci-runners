@@ -11,7 +11,8 @@ decision under ``env -i`` with the ``GITHUB_*`` and ``RUNNER_*`` it reads (``ENV
 ``CI_RUNNER_CLASS`` and ``CI_RUNNER_AUDIENCE`` where a caller passes them. A runner the
 inventory does not name is refused (``runner``, the host's fault: a stale runner directory)
 and an inventory that does not load refuses (``inventory``). Details go to the host's
-``logs/hook-<date>.log`` only. Any error refuses the job. ``job-completed`` stops the job's
+``logs/hook-<date>.log`` only. Any error refuses the job. ``job-completed`` marks the job's
+parts whose executor outlived it as cancelled (``cancel_parts``, issue #257), stops the job's
 part scopes and always exits 0, within 120 s.
 """
 from __future__ import annotations
@@ -150,10 +151,64 @@ def _job_scopes(env: dict[str, str]) -> list[str]:
     return [line.split()[0] for line in r.stdout.splitlines() if line.strip()]
 
 
+MAX_RECORD = 1 << 20
+
+
+def cancel_parts(env: dict[str, str], alive=None) -> list[str]:
+    """The job's parts whose executor outlived the job (issue #257): this runner's records of
+    this run (``GITHUB_REPOSITORY``, ``GITHUB_RUN_ID``, any run attempt) with no
+    ``outcome.json`` whose executor still runs. The job ended under them, so it was
+    cancelled (a step the runner's signal did not reach, an orphan the runner kills next):
+    each gets the cancel mark (``outcome.CANCELLED``), and one still waiting for a slot, a
+    card or a lock (no ``run_epoch`` in its record yet) gets SIGTERM, so that it ends
+    ``stopped`` and starts no command. An executor already gone is left alone: its job was not
+    cancelled under it, and presence counts it. Returns the records marked."""
+    from ci_runners import outcome, slots
+    alive = alive or slots.alive
+    runner, run, repo = env.get('RUNNER_NAME', ''), env.get('GITHUB_RUN_ID', ''), env.get('GITHUB_REPOSITORY', '')
+    if not runner or not run.isdigit() or not re.fullmatch(r'[A-Za-z0-9-]+/[A-Za-z0-9._-]+', repo):
+        return []
+    root = os.path.join(os.path.dirname(os.path.abspath(env.get('CI_RUNNERS_ETC', '.'))), 'state', 'parts',
+                        *repo.lower().split('/'))
+    out = []
+    try:
+        runs = [e.path for e in os.scandir(root) if re.fullmatch(rf'{run}-[0-9]+', e.name)
+                and e.is_dir(follow_symlinks=False)]
+    except OSError:
+        return []
+    for d in sorted(runs):
+        try:
+            records = sorted(e.path for e in os.scandir(d) if e.is_dir(follow_symlinks=False))
+        except OSError:
+            continue
+        for record in records:
+            try:
+                if os.path.lexists(os.path.join(record, 'outcome.json')):
+                    continue
+                rec = json.loads(_read(os.path.join(record, 'record.json'), MAX_RECORD))
+                if not isinstance(rec, dict) or rec.get('runner') != runner:
+                    continue
+                pid, start = int(rec.get('executor', 0)), float(rec.get('start_epoch', 0))
+                if pid <= 1 or not alive(pid, start):
+                    continue
+                outcome.mark_cancelled(record, 'job-completed')
+                out.append('/'.join(record.split(os.sep)[-2:]))
+                if 'run_epoch' not in rec:
+                    os.kill(pid, signal.SIGTERM)
+            except (OSError, ValueError, TypeError, OverflowError):
+                continue  # one unreadable record stops no other
+    return out
+
+
 def completed(env: dict[str, str]) -> int:
-    """Stop the job's part scopes (their processes die with the cgroup, so their slots
-    and leases go too). Always 0: a failed cleanup is the reaper's to finish."""
-    stopped = []
+    """Mark the job's parts its end cancelled (``cancel_parts``), then stop the job's part
+    scopes (their processes die with the cgroup, so their slots and leases go too). Always
+    0: a failed cleanup is the reaper's to finish."""
+    stopped, cancelled = [], []
+    try:
+        cancelled = cancel_parts(env)
+    except Exception as e:  # noqa: BLE001 - the scopes are stopped all the same
+        _log(env.get('CI_RUNNERS_ETC', '.'), {'hook': 'job-completed', 'error': type(e).__name__})
     try:
         scopes = _job_scopes(env)
         if scopes:
@@ -163,7 +218,8 @@ def completed(env: dict[str, str]) -> int:
         _log(env.get('CI_RUNNERS_ETC', '.'), {'hook': 'job-completed', 'error': type(e).__name__})
         return 0
     _log(env.get('CI_RUNNERS_ETC', '.'), {'hook': 'job-completed', 'runner': env.get('RUNNER_NAME', ''),
-                                         'run': env.get('GITHUB_RUN_ID', ''), 'stopped': stopped})
+                                         'run': env.get('GITHUB_RUN_ID', ''), 'stopped': stopped,
+                                         **({'cancelled': cancelled} if cancelled else {})})
     return 0
 
 

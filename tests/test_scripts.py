@@ -35,8 +35,10 @@ class Register(unittest.TestCase):
         self.out.mkdir()
         _exe(self.home / 'data/ci-runners/releases/hook/bin/ci-run',
              '#!/bin/sh\n[ "$1" = runners ] && printf "r-light-1 light,r light\\nr-part-1 part,r part\\n"\n')
+        # list-units prints the active units of ``active`` that its patterns name (by their prefix)
         _exe(self.bin / 'systemctl', f'#!/bin/sh\necho "$*" >> {self.out}/systemctl\n'
-                                     f'[ "$3" = --state=active ] && cat {self.out}/active 2>/dev/null\nexit 0\n')
+                                     f'if [ "$3" = --state=active ]; then shift 5; for p; do '
+                                     f'grep -F "${{p%%\\**}}" {self.out}/active 2>/dev/null; done; fi\nexit 0\n')
         for r in ('r-light-1', 'r-part-1'):
             d = self.home / 'data/actions-runner' / r
             # the stand-in config.sh records its argv and environment, then reads the token as the runner does
@@ -109,6 +111,21 @@ class Register(unittest.TestCase):
         self.assertFalse((self.out / 'stolen').exists())
         self.assertFalse((self.out / 'r-part-1.argv').exists())
 
+    def test_job_code_left_after_the_runners_stop_also_refuses(self):
+        """Issue #261: the token must not meet job code of the account. A part scope runs on
+        after its runner stops, and the presence timer starts the runners it stopped: either
+        active refuses, as an active runner does, and configures nothing."""
+        for line in ('ci-part-r-part-1-pytest-77-1-1.scope loaded active running x\n',
+                     'ci-presence.timer loaded active waiting x\n'):
+            (self.out / 'active').write_text(line)
+            r = self.register('r-light-1')
+            self.assertEqual(r.returncode, 1, line)
+            self.assertIn('stop the account', r.stderr)
+            self.assertIn(line.split()[0], r.stderr)
+            self.assertFalse((self.out / 'r-light-1.argv').exists())
+        (self.out / 'active').unlink()
+        self.assertEqual(self.register('r-light-1').returncode, 0)
+
     def test_refusals(self):
         self.assertEqual(self.register('r-gpu-9').returncode, 2)
         self.assertEqual(self.register('r-light-1', token='').returncode, 2)
@@ -118,6 +135,10 @@ class Register(unittest.TestCase):
         self.assertIn('stop the account', r.stderr)
         (self.out / 'active').unlink()
         os.unlink(self.home / 'data/actions-runner/r-part-1/bin/Runner.Listener')  # an unfinished unpack
+        (self.out / 'active').write_text('other.service loaded active running x\n')  # not ours: no refusal
+        self.assertEqual(self.register('r-part-1').returncode, 1)  # the unpack's refusal, not the active one's
+        self.assertNotIn('stop the account', self.register('r-part-1').stderr)
+        (self.out / 'active').unlink()
         self.assertEqual(self.register('r-part-1').returncode, 1)
         self.assertEqual(self.register('r-light-1').returncode, 0)
         self.assertEqual(self.register('r-light-1').returncode, 1)  # registered already

@@ -6,7 +6,9 @@
 # ACTIONS_RUNNER_INPUT_TOKEN (and clears it), in an environment that holds only that,
 # PATH, HOME, LANG and the runner's three proxy variables where the host has the egress
 # tunnel. No runner of the account may be running meanwhile, since job code runs as the
-# same account. Auto-update stays on.
+# same account and could read the token from config.sh's environment: nor a part scope
+# (a part's command outlives a stopped runner), nor the presence timer (its tick starts
+# the runners it stopped). Auto-update stays on.
 set -eu
 [ $# -ge 1 ] || { echo "usage: $0 RUNNER... < token" >&2; exit 2; }
 etc=${CI_RUNNERS_ETC:-$HOME/data/ci-runners/etc}  # <data>/ci-runners/etc (design §3.2)
@@ -15,8 +17,10 @@ export CI_RUNNERS_ETC=$etc
 base=$(dirname "$etc"); data=$(dirname "$base")
 ci_run=$base/releases/hook/bin/ci-run
 known=$("$ci_run" runners)
-running=$(systemctl --user list-units --state=active --plain --no-legend 'ci-runner@*.service' | awk '{print $1}')
-[ -z "$running" ] || { echo "register.sh: stop the account's runners first: $running" >&2; exit 1; }
+running=$(systemctl --user list-units --state=active --plain --no-legend 'ci-runner@*.service' 'ci-part-*.scope' \
+  'ci-presence.timer' | awk '{print $1}')
+[ -z "$running" ] || { echo "register.sh: stop the account's runners, let its parts end and stop ci-presence.timer first:" \
+  $running >&2; exit 1; }
 for r in "$@"; do
   echo "$known" | awk -v n="$r" '$1 == n {f=1} END {exit !f}' || { echo "register.sh: $r is not a runner of this host" >&2; exit 2; }
   dir=$data/actions-runner/$r

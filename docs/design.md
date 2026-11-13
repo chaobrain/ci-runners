@@ -2545,7 +2545,9 @@ The order is therefore made where the runners are, by presence, and no plan name
        each other host gets the warning `policy: repository entries differ from <n>
        other host(s)` in `warnings` and `policy_drift: true`. `pool status` prints the
        warnings with the problems, marked `warn:`. A warning is not a problem: the host
-       stays up and its runners still take shared-label jobs. No host yields to one whose
+       stays up and its runners still take shared-label jobs. *Added 2026-11-13 (issue
+       #260):* the probe also reports the runners its inventory leaves idle (§5.2,
+       `setup.runner_faults`), each a warning of the row. No host yields to one whose
        repository entries differ from its own (19.2): those jobs it would refuse. The file
        digest is shown and not compared (the actors and comments may differ). Operations
        §2's new-host steps copy the `[repositories]` entries from a host in service and
@@ -3570,6 +3572,16 @@ All are idempotent and run as the runner account. None needs sudo.
   files with their diffs, units, `.env` lines and runner directories. It changes
   nothing. It also checks linger for the account (a root step) and each enabled unit's link,
   and prints the runners not running now on standard error (15.5). The lead approves this output. Save only its standard output as the plan.
+  *Added 2026-11-13 (issue #260):* the plan also lists, as `warn` lines with no action,
+  the runners its inventory leaves idle (`setup.runner_faults`): a runner directory named
+  as this host's that no pool holds any more (a lowered `count`), registered or not and
+  its unit enabled or not, and the runners of a pool of a slot class (`part`, `compile`)
+  past the host's `slots`, which presence keeps offline (`slot`, 16.4). `apply` retires
+  none of them: deleting a registration needs a removal token, which setup never holds,
+  so the operator retires each one by hand while it is idle (stop and disable its unit,
+  `config.sh remove` with a removal token, remove its directory). `pool status` shows the
+  same lines as the host row's warnings (`warn:`, as a drifted policy's, decision 19; not
+  problems, which mark a host down).
 - `setup/apply.sh <host> --plan <file>` applies exactly an approved plan. It refuses if
   the plan's text differs from a fresh `plan.sh` output, or while a root step the plan
   lists (§5.3) is not done. It writes a state file, and a
@@ -3587,8 +3599,10 @@ All are idempotent and run as the runner account. None needs sudo.
   `env -i`, with the token in `ACTIONS_RUNNER_INPUT_TOKEN` (never in an argv, never
   stored) and only the proxy's three variables read from `.env` as data. It refuses
   while any runner of the account is active, since job code runs as that account and
-  could read the token from the environment of `config.sh`. It starts the runners
-  once all are configured. Auto-update stays on.
+  could read the token from the environment of `config.sh`; *amended 2026-11-13 (issue
+  #261)*, also while a part scope (`ci-part-*.scope`: a part's command outlives a stopped
+  runner) or `ci-presence.timer` (its tick starts the runners it stopped) is active. It
+  starts the runners once all are configured. Auto-update stays on.
 - `setup/uninstall.sh <host>` reverses `apply` from its state file: it disables each
   unit on its own, removes only the unit files the state file records (nothing if a
   unit is still active), leaves the runners for the lead to deregister, and leaves

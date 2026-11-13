@@ -94,8 +94,10 @@ by the association's room; positive exactly where ``start_now`` is true.
 tier's idle runners yield to an earlier tier's listening ones (presence, 19.2), and its row
 carries it. The CI account's own probe (``_with_inventory``) adds
 the host's ``role``, its ``pools`` (``pool_table``), its hook policy's digests
-(``policy_digests``: a policy that does not load is the problem ``policy: does not load``)
-and its health gate's failure (the problem ``health: ...``), and its hold (19.8:
+(``policy_digests``: a policy that does not load is the problem ``policy: does not load``),
+its health gate's failure (the problem ``health: ...``), the runners its inventory leaves
+idle (``setup.runner_faults``, issue #260: row ``warnings``, never problems, since a problem
+marks the host down), and its hold (19.8:
 ``hold_until``, ``holds``; ``pool status`` prints ``hold until``); a cluster target's row has
 its ``memory_gib``, ``max_minutes`` and an opaque ``partition`` (``partition_key``). ``pool
 status`` flags a host whose repository entries differ from most hosts' (``capacity.flag_policy``).
@@ -1078,6 +1080,15 @@ def _with_inventory(p: dict, etc: str) -> dict:
     pub = public_of(inv)
     if pub is not None:
         p['public'] = pub
+    try:  # issue #260: the runners the inventory leaves idle, a warning of the row (no problem: the host is up)
+        from ci_runners import setup
+        faults = setup.runner_faults(inv, os.path.join(str(inv.host['data']), 'actions-runner'),
+                                     os.path.join(str(inv.host['home']), '.config', 'systemd', 'user',
+                                                  'default.target.wants'))
+    except Exception:  # noqa: BLE001 - a row without them, never no row
+        faults = []
+    if faults:
+        p['runner_faults'] = faults
     return p
 
 
@@ -1210,6 +1221,9 @@ def host_row(m: Machine, p: Mapping | None, why: str = '', here: str = '') -> di
         row['hold_until'], row['holds'] = p['hold_until'], p['holds']  # 19.8
     if isinstance(p.get('health'), str) and p['health']:
         row['problems'].append(p['health'] if p['health'].startswith('health') else f'health: {p["health"]}')
+    faults = p.get('runner_faults')  # issue #260: warnings, not problems: the host takes jobs all the same
+    if isinstance(faults, list) and faults and all(isinstance(x, str) for x in faults):
+        row['warnings'] = [*row.get('warnings', []), *faults]
     free = int(p.get('slots_free', 0))
     cores = max(0, (m.cpus or int(p.get('cpus', 0))) - math.ceil(float(p.get('load', 0.0))))
     gpu_free = {int(k): int(v) for k, v in p.get('gpu_free', {}).items()}

@@ -49,10 +49,11 @@ PERMISSIONS = {
                'parts': {'contents': 'read', 'statuses': 'write', 'actions': 'read'},
                'verdict': {'statuses': 'write', 'actions': 'read'}},
     # no job that runs head code holds a write permission: the red job posts
-    'part.yml': {'first': {'contents': 'read'},
+    # first and retry list the run's artifacts for the plan's files (#245), in that step alone
+    'part.yml': {'first': {'contents': 'read', 'actions': 'read'},
                  'locate': {'contents': 'read', 'actions': 'read'},
                  'salvage': {'contents': 'read'},
-                 'retry': {'contents': 'read'},
+                 'retry': {'contents': 'read', 'actions': 'read'},
                  'red': {'statuses': 'write'}},
     # a public caller's: the same grants as a private caller's jobs, admit and lost reading only
     'public.yml': {'admit': {'contents': 'read'},
@@ -165,11 +166,54 @@ class Structure(unittest.TestCase):
             self.assertTrue(co['uses'].startswith('actions/checkout@'), jid)
             self.assertEqual(co['with'], {'ref': '${{ inputs.sha }}', 'persist-credentials': False,
                                           'fetch-depth': "${{ fromJSON(inputs.part).history && '0' || '1' }}"}, jid)
-            self.assertEqual(jobs[jid]['permissions'], {'contents': 'read'})
+            self.assertEqual(jobs[jid]['permissions'], {'contents': 'read', 'actions': 'read'})
             self.assertEqual(sts[1]['run'], CREDENTIAL_CHECK, jid)  # before the files and the command
-            self.assertNotIn('token', str(sts[1:]).lower(), jid)
         self.assertEqual([jid for jid, st in steps(load('part.yml')) if st.get('uses', '').startswith('actions/checkout@')],
                          ['first', 'retry'])
+
+    def test_every_output_read_of_an_action_step_is_one_it_declares(self):
+        """An output a composite action does not declare reads as empty: #245's ``fallback``
+        was written by ``flow fetch`` and never seen, so download-artifact never ran."""
+        for name in REUSABLE:
+            doc = load(name)
+            for jid, job in doc['jobs'].items():
+                uses = {st['id']: st['uses'] for st in job.get('steps') or [] if st.get('id') and st.get('uses')}
+                text = str(job)
+                for sid, out in re.findall(r'steps\.([a-z0-9_-]+)\.outputs\.([a-z0-9_-]+)', text):
+                    m = re.fullmatch(r'chaobrain/ci-runners/actions/([a-z]+)@\S+', uses.get(sid, ''))
+                    if m:
+                        declared = yamlsub.load((ROOT / 'actions' / m.group(1) / 'action.yml').read_text())['outputs']
+                        self.assertIn(out, declared, f'{name}: {jid}: steps.{sid}.outputs.{out}')
+
+    def test_the_token_reaches_the_files_step_alone(self):
+        """#245: in a job that runs head code, the job's token reaches one step, the one that
+        reads the plan's files (``actions/flow``'s default ``token``, into that step's own env),
+        never the part's command: no job env, no step env and no input names a token, every
+        other flow step passes an empty one, and the flow action keeps it in its step's env."""
+        jobs = load('part.yml')['jobs']
+        for jid in ('first', 'retry'):
+            sts = jobs[jid]['steps']
+            self.assertNotIn('token', str(jobs[jid].get('env') or {}).lower(), jid)
+            holders = []
+            for st in sts:
+                self.assertNotIn('token', str(st.get('env') or {}).lower(), jid)
+                self.assertNotIn('github.token', str(st).lower(), jid)
+                w = st.get('with') or {}
+                if 'actions/flow@' in st.get('uses', ''):
+                    if w.get('token', None) != '':
+                        holders.append(w['command'])
+                else:
+                    self.assertNotIn('token', str(w).lower(), f'{jid}: {st.get("uses") or st.get("run")}')
+            self.assertEqual(holders, ['fetch'], jid)
+            files = [st for st in sts if st.get('id') == 'files'][0]
+            self.assertEqual(files['with'], {'command': 'fetch', 'dest': '${{ runner.temp }}/ci-runners-files'})
+            self.assertEqual(set(st['uses'].split('@')[0] for st in sts if 'actions/part@' in st.get('uses', '')),
+                             {'chaobrain/ci-runners/actions/part'})
+        self.assertNotIn('token', action_inputs('part'))  # the part action takes none
+        flow_steps = yamlsub.load((ROOT / 'actions' / 'flow' / 'action.yml').read_text())['runs']['steps']
+        self.assertEqual([st['env']['GITHUB_TOKEN'] for st in flow_steps], ['${{ inputs.token }}'])
+        self.assertNotIn('GITHUB_ENV', (ROOT / 'actions' / 'flow' / 'action.yml').read_text())
+        self.assertNotIn('GITHUB_ENV', (ROOT / 'ci_runners' / 'flow.py').read_text())  # nothing hands it on
 
     def test_the_credential_check_fails_on_what_a_checkout_could_keep(self):
         if not shutil.which('git'):
@@ -323,8 +367,11 @@ class Structure(unittest.TestCase):
             ids = [st.get('id') for st in sts]
             down = [i for i, st in enumerate(sts) if st.get('uses', '').startswith('actions/download-artifact@')]
             self.assertEqual(len(down), 1, jid)
-            self.assertLess(down[0], ids.index('part'), jid)  # the files are there before the command
-            self.assertEqual(sts[down[0]]['with']['name'], 'ci-plan-files')
+            files = ids.index('files')  # through the API first (#245), download-artifact where it refuses
+            self.assertEqual((files + 1, down[0]), (down[0], ids.index('part') - 1), jid)
+            self.assertEqual(sts[files]['if'], 'fromJSON(inputs.part).files')
+            self.assertEqual(sts[down[0]]['if'], "fromJSON(inputs.part).files && steps.files.outputs.fallback == 'true'")
+            self.assertEqual(sts[down[0]]['with'], {'name': 'ci-plan-files', 'path': '${{ runner.temp }}/ci-runners-files'})
             part = sts[ids.index('part')]
             self.assertIn('ci-runners-files', part['env']['CIRUNNERS_FILES'])
             # the plan's queue_minutes or flow's default, which the job's bound includes

@@ -35,13 +35,19 @@ from __future__ import annotations
 import argparse
 import base64
 import concurrent.futures
+import http.client
+import io
 import json
 import math
 import os
 import re
+import shutil
+import stat
 import sys
 import tomllib
 import urllib.parse
+import zipfile
+import zlib
 from collections.abc import Callable, Mapping, Sequence
 
 from ci_runners import capacity, claim, github, policy, registry
@@ -461,6 +467,105 @@ def check_files(workspace: str, rel: str) -> str:
     return ''
 
 
+#: the plan's files artifact (ci.yml's plan job uploads it, each part reads it)
+FILES_ARTIFACT = 'ci-plan-files'
+#: its zip: the files' bound, and room for a header per entry
+MAX_FILES_ZIP = MAX_FILES_BYTES + (2 << 20)
+
+
+def unpack_files(data: bytes, dest: str) -> int:
+    """The plan's files from their artifact's zip ``data`` into ``dest`` (which must not
+    exist yet); how many files. Refused (ValueError), with nothing left behind, for what
+    ``check_files`` refuses on the upload side (#235): a name outside ``dest`` (absolute,
+    ``..``, a backslash, an empty or ``.`` part), a link or an entry that is neither a
+    file nor a directory, a ``.git``, a character the upload refuses (``UNCARRIED``), a name
+    given twice, and more than ``MAX_FILES`` entries or ``MAX_FILES_BYTES`` (the sizes the
+    zip declares, which zipfile reads no more than, checking each file's CRC)."""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+        infos = z.infolist()
+    except Exception as e:  # a bad zip: zipfile, zlib, ...
+        raise ValueError(f'files: the zip cannot be read ({type(e).__name__})') from None
+    seen: set[str] = set()
+    names: set[str] = set()
+    files, total = [], 0
+    for info in infos:
+        name = info.filename
+        parts = name.rstrip('/').split('/') if name.endswith('/') else name.split('/')
+        if (not name or name.startswith('/') or '\\' in name or any(p in ('', '.', '..') for p in parts)
+                or re.match(r'[A-Za-z]:', name)):
+            raise ValueError(f'files: {name!r} is not a path below the files')
+        for p in parts:
+            if p == '.git':
+                raise ValueError(f'files: {name!r} is a git directory (it may hold a credential)')
+            if UNCARRIED & set(p):
+                raise ValueError(f'files: {name!r} has a character the upload refuses')
+        kind = stat.S_IFMT(info.external_attr >> 16)
+        if kind == stat.S_IFLNK:
+            raise ValueError(f'files: {name!r} is a link')
+        if kind not in (0, stat.S_IFREG, stat.S_IFDIR) or (kind == stat.S_IFDIR) != info.is_dir():
+            raise ValueError(f'files: {name!r} is not a file or a directory')
+        for i in range(1, len(parts) + 1):  # the directories it implies count as entries, as on the upload side
+            seen.add('/'.join(parts[:i]) + ('/' if i < len(parts) or info.is_dir() else ''))
+        if not info.is_dir():
+            if name in names:
+                raise ValueError(f'files: {name!r} is named twice')
+            names.add(name)
+            files.append(info)
+            total += info.file_size
+        if len(seen) > MAX_FILES or total > MAX_FILES_BYTES:
+            raise ValueError(f'files: more than {MAX_FILES} entries or {MAX_FILES_BYTES >> 20} MiB')
+    if {s.rstrip('/') for s in seen if s.endswith('/')} & names:
+        raise ValueError('files: a name is both a file and a directory')
+    # a new directory, and only the directories and files made below: with no link among the
+    # entries, none is on a path; O_NOFOLLOW and O_EXCL hold that for each file too
+    os.mkdir(dest, 0o700)  # FileExistsError where it is there: nothing is merged into another's
+    try:
+        for info in files:
+            path = os.path.join(dest, *info.filename.split('/'))
+            os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+            with os.fdopen(fd, 'wb') as out, z.open(info) as src:
+                shutil.copyfileobj(src, out)
+    except BaseException as e:
+        shutil.rmtree(dest, ignore_errors=True)
+        if isinstance(e, (OSError, zipfile.BadZipFile, EOFError, zlib.error, NotImplementedError, RuntimeError)):
+            raise ValueError(f'files: the zip cannot be unpacked ({type(e).__name__})') from None
+        raise
+    return len(files)
+
+
+def run_fetch(a: argparse.Namespace, env: Mapping[str, str], call: Callable, fetch: Callable) -> int:
+    """The plan's files through the API (#245): the run's newest ``ci-plan-files``, its zip
+    read and unpacked into ``--dest`` (``unpack_files``). Where the API cannot be read (no
+    ``actions: read``, an outage, no such artifact) it says so in ``fallback=true`` and
+    exits 0, and the workflow's next step downloads them with ``download-artifact``; what
+    the zip holds is never a reason to fall back: a refusal fails the step."""
+    from ci_runners import verdict
+    base, repo, token = _env(env)
+    run = env.get('GITHUB_RUN_ID', '')
+    if not run.isdigit():
+        raise FlowError('GITHUB_RUN_ID is malformed')
+    try:
+        arts = [x for x in verdict.run_artifacts(call, base, repo, run, token)
+                if isinstance(x, dict) and x.get('name') == FILES_ARTIFACT and type(x.get('id')) is int
+                and isinstance(x.get('created_at'), str) and not x.get('expired')]
+        if not arts:
+            raise github.ApiError(f'no {FILES_ARTIFACT} artifact listed')
+        aid = max(arts, key=lambda x: (x['created_at'], x['id']))['id']
+        data = fetch(f'{base}/repos/{repo}/actions/artifacts/{aid}/zip', token, MAX_FILES_ZIP)
+    except (github.ApiError, OSError, http.client.HTTPException) as e:
+        hint = '; give the job actions: read' if 'HTTP 403' in str(e) or 'HTTP 404' in str(e) else ''
+        print(f'::notice::ci-run flow fetch: the plan\'s files are not read through the API ({e}){hint}: '
+              'download-artifact downloads them', file=sys.stderr)
+        _out(env, fallback='true')
+        return 0
+    n = unpack_files(data, a.dest)
+    _out(env, fallback='false')
+    print(f'ci-run flow fetch: {n} file(s) of the plan into {a.dest}', file=sys.stderr)
+    return 0
+
+
 def entry(p: Mapping, files: bool = False) -> dict:
     """A routed part as ``part.yml`` reads it (its ``part`` input): the plan's keys and
     the route's, the part action's ``gpus``, ``memory`` and ``queue``, the artifacts as a
@@ -793,6 +898,8 @@ def parser() -> argparse.ArgumentParser:
     pe.add_argument('--seen', required=True)
     pe.add_argument('--description', default='queued on the runners')
     sub.add_parser('admit')
+    fe = sub.add_parser('fetch')
+    fe.add_argument('--dest', required=True)
     v = sub.add_parser('verdict')
     v.add_argument('--context', required=True)
     v.add_argument('--sha', required=True)
@@ -805,11 +912,21 @@ def parser() -> argparse.ArgumentParser:
     return ap
 
 
-def main(argv: Sequence[str], etc: str, call: Callable | None = None, env: Mapping[str, str] | None = None) -> int:
+def main(argv: Sequence[str], etc: str, call: Callable | None = None, env: Mapping[str, str] | None = None,
+         fetch: Callable | None = None) -> int:
     a = parser().parse_args(list(argv))
     env = os.environ if env is None else env
+    if a.cmd == 'fetch' and (call is None or fetch is None):  # kept connections (#242)
+        from ci_runners import client
+        own = client.Client(env)
+        try:
+            return main(argv, etc, call or own.api, env, fetch or own.artifact)
+        finally:
+            own.close()
     call = call or github.api
     try:
+        if a.cmd == 'fetch':
+            return run_fetch(a, env, call, fetch)
         if a.cmd == 'contract':
             return run_contract(a, env, call)
         if a.cmd == 'plan':

@@ -223,5 +223,23 @@ class Kept(unittest.TestCase):
             client.Client(env={'https_proxy': 'socks5://127.0.0.1:1080'})._open('api.github.com', 443)
 
 
+class Cause(unittest.TestCase):
+    """Issue #250: a failed call's ``ApiError`` carries its short cause beside the whole."""
+
+    def test_the_cause_of_each_end(self):
+        url = 'https://api.example/repos/o/r/actions/runs/1/artifacts'
+        for answers, cause in (([Resp(403, b'{}')], 'HTTP 403'), ([Resp(502, b'')] * 3, 'HTTP 502'),
+                               ([TimeoutError()] * 3, 'TimeoutError')):
+            c = client.Client(env={}, connect=Net(api_example=answers).connect, pause=0)
+            with self.assertRaises(github.ApiError) as cm:
+                c.api('GET', url + '?page=1', 't')
+            self.assertEqual((cm.exception.cause, str(cm.exception)), (cause, f'GET {url}: {cause}'))
+        net = Net(api_example=[zip_redirect()] * 3, store_example=[Resp(502, b'')] * 3)
+        with self.assertRaises(github.ApiError) as cm:
+            client.Client(env={}, connect=net.connect, pause=0).artifact(
+                'https://api.example/repos/o/r/actions/artifacts/5/zip', 't', 10)
+        self.assertEqual(cm.exception.cause, 'HTTP 502')  # the storage's answer, without its signed URL
+
+
 if __name__ == '__main__':
     unittest.main()

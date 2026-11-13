@@ -297,13 +297,13 @@ plan 命令作为部件 `plan` 运行（有主机记录），但**从 v1.19.0 �
 | verdict | `success` | `passed: <id>, <id>, ...`，超过 140 个字符时 `passed: all N parts` |
 | verdict | `failure`（测试红：有部件最后一次尝试是 `red`） | `red: <id> red, ...` |
 | verdict | `error`（基础设施：没有红，但有部件最后是 `lost`、`unavailable`、`oom`、`thermal`、`reboot`、`stopped`） | `infrastructure: <id> <outcome>, ...` |
-| verdict | `error`（列不出本 run 的 artifact，#242） | `verdict: the run's artifacts could not be listed (...)`，GitHub 拒绝时加 `; the job needs actions: read` |
+| verdict | `error`（列不出本 run 的 artifact，#242） | `verdict: artifacts not listed: <原因>`，原因在前、不带 URL（#250）：`HTTP 403 (the job needs actions: read)`（403、404 时加这句提示）、`HTTP 502`、`TimeoutError`；完整的错误（带 URL）在作业的日志和 summary 里 |
 | verdict（plan 作业结束运行时） | `failure` | `contract ...: merge origin/<分支>`（§8）、`plan: red (...)`、`plan: <计划的错误>` |
 | verdict（plan 作业结束运行时） | `error` | `plan: <outcome> (...)`（plan 命令 `lost`、`unavailable` 等）、`route: ...`、`plan: no plan output`、默认分支的 `contract` 读不进来、`a public repository: its run is public.yml's, on hosted runners (decision 18.7)`（公开仓库的运行落到了私有仓库的那一套作业）、`a private repository: its run is ci.yml's own, not public.yml's` |
 | verdict（plan 作业结束运行时） | `success` | `nothing to run`（空的 `parts`）、`plan only: N part(s) routed, none run` |
 | `sweep.yml`（§10，取消了运行之后） | `error` | `queued past <N> min: part <id> on <labels>`、`... plan on <labels>`、`... <n> jobs, first part <id> on <labels>` |
 
-描述超过 140 个字符时截断，以 `...` 结尾。
+描述超过 140 个字符时先去掉其中的 URL，还超过就在词的边界截断，以 `...` 结尾，不会截在 URL 中间（#250）；默认分支的 `contract` 读不进来时是 `contract: .github/ci-runners.toml not read: <原因>`，读的是哪个 URL 写在日志和 summary 里。
 
 `pull_request_target`、fork 的 PR 在 plan 作业的 guard 里就跳过；**公开仓库**调用 `ci.yml` 时，它的 `public` 作业转到 `public.yml`（决定 18.7，C2 起）：先由 `admit` 作业在 GitHub 托管的 runner 上检查，仓库不属于本组织、事件不是同仓库的 `pull_request` 或受保护分支的 `push`、或发起者是 bot 时，直接失败，head 的任何东西都不运行（2026-11-13 决定：托管的部分对本组织的公开仓库开放，不需要开通；开通只针对 GPU 池）；通过后 plan、claim、verdict 和 `cpu`、`light` 部件都在 GitHub 托管的 runner 上跑（计划命令不带任何 token），只有 `gpu` 部件去仓库自己的隔离单作业 runner（`[self-hosted, ci-pub-gpu]`，C4 起才有）；计划里有 `gpu` 部件、而仓库不在负责人开通 GPU 池的名单（`flow.PUBLIC_CALLERS`，随发布更新；现在是空的）里时，plan 时就是红的（`not opted in to the public GPU pool`）；只有 CPU 部件的计划不需要任何开通；计划里要 `gpu2`、`timing` 或集群的，plan 时就是红的；公开仓库不接受 `workflow_dispatch` 和 `schedule`，也没有 `plan-token`。事件的 payload 里没有仓库信息时（如 `schedule`），plan 作业的 `contract` 步骤用 API 查仓库是否私有，公开的就结束运行（verdict 作业发 `error`），head 的任何东西都不运行。部件在 GitHub 的队列里一直没有 runner 接的情况，由定时调用的 `sweep.yml` 限制（§10；GitHub 不能取消单个作业，它取消整个运行并发 `error`）；不调用它的仓库没有上限（GitHub 的 24 小时），只能靠自己的 sweeper。一个工作流里只调用一次 `ci.yml`（定位丢失尝试的主机时按作业名找 `part <id> / first`）。运行被取消（同一个 PR 推了新 head）时不重试、不发结论，新 head 的运行会发。不要把 secret 传进来：`ci.yml` 不接收也不转发任何 secret；plan 作业的 token 只读（`contents`、`statuses`、`actions`、`pull-requests` 都是 `read`），所以调用方要给 `pull-requests: read`（GitHub 拒绝被调用的作业要的权限超过调用方给的）；跑部件的作业只有 `contents: read`，token 不进部件命令的环境，只在 `plan-token` 打开时以只读的形式进 plan 命令；checkout 不保存凭据。注意：部件命令以 CI 账户运行（design T13），它能改写同一个作业里之后的步骤用到的文件，所以同一作业里的重试决定、作业的输出并不防部件命令本身（plan 命令对 plan 作业的输出也一样）；结论以 verdict 读到的 artifact 和主机记录为准。手动取消的运行不发最终状态，它发过的 pending 留到下一次运行。
 

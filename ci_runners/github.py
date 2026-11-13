@@ -25,7 +25,43 @@ SHA = re.compile(r'[0-9a-f]{40}')
 
 
 class ApiError(RuntimeError):
-    pass
+    """A call that failed. ``str(e)`` is the whole of it, the request's method and URL
+    first; ``cause`` is its short end alone (``HTTP 403``, ``TimeoutError``, ``storage
+    HTTP 502``, a refusal), what a status description carries (issue #250). Without one
+    given, a ``<METHOD> <url>: <cause>`` message gives its end, any other the whole."""
+
+    def __init__(self, text: str, cause: str = '') -> None:
+        super().__init__(text)
+        m = REQUEST.fullmatch(text)
+        self.cause = cause or (m.group(1) if m else text)
+
+
+#: an ``ApiError``'s ``<METHOD> <url>: <cause>``
+REQUEST = re.compile(r'[A-Z]+ \S+: (.+)', re.DOTALL)
+
+
+#: GitHub refuses (HTTP 422) a commit status whose description is longer than this
+STATUS_MAX = 140
+URL = re.compile(r'\S*[a-z][a-z0-9+.-]*://\S*', re.IGNORECASE)
+
+
+def status_text(text: str) -> str:
+    """A commit status description (issue #250): one line, at most ``STATUS_MAX``
+    characters. A longer text loses its URLs first (each word holding ``://``: the job log
+    and summary keep them), then is cut at a word boundary and ends ``...``; a cut never
+    falls inside a URL, and a URL that stays is whole. Build a description with its cause
+    first, so that what is cut is the least needed. Pure."""
+    one = ' '.join(text.split())
+    if len(one) <= STATUS_MAX:
+        return one
+    one = ' '.join(URL.sub('', one).split())
+    if len(one) <= STATUS_MAX:
+        return one
+    room = STATUS_MAX - 3
+    cut = one.rfind(' ', 0, room + 1)
+    if cut < room // 2:  # one long word (no URL is left): cut it where the room ends
+        cut = room
+    return one[:cut].rstrip() + '...'
 
 
 def api(method: str, url: str, token: str, body: dict | None = None, opener: Callable = urllib.request.urlopen,
@@ -47,7 +83,7 @@ def api(method: str, url: str, token: str, body: dict | None = None, opener: Cal
             last = type(e).__name__
         if i + 1 < tries:
             time.sleep(pause)
-    raise ApiError(f'{method} {url.split("?")[0]}: {last}')
+    raise ApiError(f'{method} {url.split("?")[0]}: {last}', last)
 
 
 def statuses(call: Callable, url: str, token: str) -> list:
@@ -74,7 +110,7 @@ def run_claim(env: Mapping[str, str], *, context: str, sha: str, description: st
     if c.run:
         target = f'{env.get("GITHUB_SERVER_URL", "https://github.com")}/{repo}/actions/runs/{env.get("GITHUB_RUN_ID", "")}'
         call('POST', f'{base}/repos/{repo}/statuses/{sha}', token,
-             {'state': 'pending', 'context': context, 'description': description[:140], 'target_url': target})
+             {'state': 'pending', 'context': context, 'description': status_text(description), 'target_url': target})
     return c
 
 

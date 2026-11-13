@@ -409,6 +409,80 @@ files = {{ slot_lock = "/tmp/s.lock", slot_queue = "/tmp/s.queue" }}
         self.assertIn(f'Environment=CI_RUNNERS_ETC={self.etc}\n', reaper)
         self.assertIn('Environment=CI_RUNNERS_PYTHON=/usr/bin/python3\n', reaper)
 
+    def extra(self, name, registered=False, enabled=False):
+        d = self.data / 'actions-runner' / name
+        for f in setup.RUNNER_FILES:
+            (d / f).parent.mkdir(parents=True, exist_ok=True)
+            (d / f).write_text('#!/bin/sh\n')
+        if registered:
+            (d / '.runner').write_text('{}')
+        if enabled:
+            fake_enable(self.home, ['systemctl', '--user', 'enable', f'ci-runner@{name}.service'])
+
+    def test_a_runner_past_its_pools_count_is_listed_and_nothing_is_done_to_it(self):
+        """Issue #260: a lowered count leaves runner directories no pool holds. The plan lists
+        each (registered or not, its unit enabled or not) as a warning and plans nothing for
+        it: a plan with only that section is still nothing to change."""
+        self.assertEqual(self.apply(setup.build(str(self.etc)).text()), 0)
+        self.extra('hb-part-3', registered=True, enabled=True)  # the pool had 3
+        self.extra('hb-part-4')  # unpacked, never registered
+        self.extra('hb-pub-gpu0-7')  # a public runner: not setup's
+        self.extra('hx-part-1', registered=True)  # another role's name: not this host's
+        (self.data / 'actions-runner' / 'hb-part-5.ci-new').mkdir()  # an unpack's leftover
+        (self.data / 'actions-runner' / 'hb-part-6').write_text('')  # a file, no runner
+        plan = setup.build(str(self.etc))
+        warns = [x for x in plan.lines if x.startswith('  warn   ')]
+        self.assertEqual(len(warns), 2, warns)
+        self.assertIn('runner hb-part-3 is past its pool\'s count (registered, unit enabled)', warns[0])
+        self.assertIn('runner hb-part-4 is past its pool\'s count (not registered, unit not enabled)', warns[1])
+        self.assertIn(setup.RETIRE, warns[0])
+        self.assertIn('runners the inventory leaves idle (this plan changes nothing of them):', plan.lines)
+        self.assertEqual(plan.actions, [])  # nothing to retire, stop or remove
+        self.ran.clear()
+        self.assertEqual(self.apply(plan.text()), 0)
+        self.assertEqual(self.ran, [])
+        self.assertTrue((self.data / 'actions-runner' / 'hb-part-3' / '.runner').exists())
+
+    def test_a_slot_pool_past_the_hosts_slots_is_listed(self):
+        """Issue #260: presence keeps no more slot-class runners of a pool online than the host
+        has CI slots, so a part (or compile) pool's runners past ``slots`` stay offline; a
+        pool of another class is not capped by slots."""
+        inv = self.etc / 'inventory.toml'
+        self.assertEqual(setup.runner_faults(inventory.load(inv.read_text()), '/nonexistent', '/nonexistent'), [])
+        text = inv.read_text().replace('pools = { light = 1, part = 2 }',
+                                       'pools = { light = 3, part = 3, compile = { count = 3 } }')
+        inv.write_text(text)
+        got = setup.runner_faults(inventory.load(text), '/nonexistent', '/nonexistent')
+        self.assertEqual(got, [
+            'pool part has 3 runners and the host 2 CI slot(s): at most 2 listen at once, hb-part-3 stay offline '
+            '(slot); lower its count to 2',
+            'pool compile has 3 runners and the host 2 CI slot(s): at most 2 listen at once, hb-compile-3 stay '
+            'offline (slot); lower its count to 2'])
+        for name in ('hb-light-2', 'hb-light-3', 'hb-part-3', 'hb-compile-1', 'hb-compile-2', 'hb-compile-3'):
+            self.extra(name)
+        self.assertIn(f'  warn   {got[0]}', setup.build(str(self.etc)).lines)
+
+    def test_pool_status_shows_them_as_warnings_not_problems(self):
+        """Issue #260: the CI account's probe carries the same lines, and the row shows them as
+        warnings (``warn:``): a problem would mark the host down for every route."""
+        from ci_runners import pool
+        self.extra('hb-part-3', registered=True)
+        p = pool._with_inventory({'slots_free': 1, 'load': 0, 'cpus': 16}, str(self.etc))
+        self.assertEqual(len(p['runner_faults']), 1)
+        self.assertIn('runner hb-part-3 is past its pool\'s count (registered', p['runner_faults'][0])
+        m = pool.Machine(key='hb', access='local')
+        row = pool.host_row(m, p)
+        self.assertEqual(row['problems'], [])
+        self.assertEqual(row['warnings'], p['runner_faults'])
+        self.assertTrue(row['start_now'])
+        self.assertIn('warn: runner hb-part-3 is past', pool.table([row]))
+        for bad in ('x', [1], {'a': 'b'}):
+            self.assertNotIn('warnings', pool.host_row(m, {**p, 'runner_faults': bad}), msg=repr(bad))
+        shutil.rmtree(self.data / 'actions-runner' / 'hb-part-3')
+        self.assertNotIn('runner_faults', pool._with_inventory({}, str(self.etc)))
+        with mock.patch.object(setup, 'runner_faults', side_effect=OSError('x')):
+            self.assertNotIn('runner_faults', pool._with_inventory({}, str(self.etc)))  # a row all the same
+
 
 class Standalone(unittest.TestCase):
     """A standalone host of the RUN-5 model (decision 11.3, 11.6; h100's, while it ran): no

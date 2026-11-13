@@ -212,6 +212,58 @@ def runners_now(inv: inventory.Inventory) -> str:
         (f'; none for {", ".join(down)}' if down else '')
 
 
+#: what retires a runner past its pool's count, by hand while it is idle (issue #260): ``apply``
+#: holds no token to delete a registration, so it retires none
+RETIRE = ('stop and disable its unit, delete its registration (config.sh remove, with a removal token), '
+          'remove its directory')
+
+
+def extra_runners(inv: inventory.Inventory, root: str, wants: str) -> list[tuple[str, bool, bool]]:
+    """``(name, registered, enabled)`` of each runner directory under ``root``
+    (``<data>/actions-runner``) that is named as this host's (``<role>-...``) and is none of
+    the inventory's runners (issue #260: a pool whose ``count`` went down): ``registered``,
+    it has a ``.runner``; ``enabled``, its unit's link is in ``wants`` (the
+    ``default.target.wants`` directory). A public runner (``<role>-pub-gpu...``, decision
+    18.4) is not setup's, and an unpack's leftover (``.ci-new``) is no runner. Reads only
+    names and links."""
+    ours = {r[0] for r in _runners(inv)}
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        if (not n.startswith(f'{inv.this}-') or n in ours or '.' in n
+                or n.startswith(f'{inv.this}{inventory.PUBLIC_HOST_SUFFIX}') or not os.path.isdir(os.path.join(root, n))):
+            continue
+        out.append((n, os.path.lexists(os.path.join(root, n, '.runner')),
+                    os.path.lexists(os.path.join(wants, f'ci-runner@{n}.service'))))
+    return out
+
+
+def runner_faults(inv: inventory.Inventory, root: str, wants: str) -> list[str]:
+    """The runners that can take no job for a reason of the inventory's, one line each (issue
+    #260), as ``plan`` and ``pool status`` say them: a runner past its pool's count
+    (``extra_runners``), and the runners of a pool whose class takes a CI slot (presence's
+    ``SLOT_CLASSES``) past the host's ``slots``: presence keeps no more of them online than
+    there are slots (16.4), so those past it stay stopped (``slot``) while the others listen.
+    Changes nothing."""
+    from ci_runners import presence
+    out = [f'runner {n} is past its pool\'s count ({"registered" if reg else "not registered"}, unit '
+           f'{"enabled" if on else "not enabled"}): retire it while idle: {RETIRE}' for n, reg, on in
+           extra_runners(inv, root, wants)]
+    slots = int(inv.host['slots'])
+    by_pool: dict[str, list[str]] = {}
+    for (name, _, cls, _, _), pool in zip(_runners(inv), runner_pools(inv), strict=True):
+        if cls in presence.SLOT_CLASSES:
+            by_pool.setdefault(pool, []).append(name)
+    for pool, names in by_pool.items():
+        if len(names) > slots:
+            out.append(f'pool {pool} has {len(names)} runners and the host {slots} CI slot(s): at most {slots} '
+                       f'listen at once, {", ".join(names[slots:])} stay offline (slot); lower its count to {slots}')
+    return out
+
+
 def hook_text(src: str, python: str, base: str, etc: str = '') -> str:
     """A hook as installed: its interpreter line names ``python`` and its release line
     ``base`` (``<data>/ci-runners``), both validated by the caller as one absolute path, so
@@ -1029,6 +1081,11 @@ def build(etc: str, adopt: bool = False) -> Plan:
             plan.add(f'  unpack {RUNNER_URL} -> {rdir}/', kind='runner', path=rdir, cache=cache, port=port)
         _file(plan, os.path.join(rdir, '.env'), env_file(inv, cls, etc, card, slot, pool), 0o600)
         plan.add(f'         labels {",".join(labels)}; work {os.path.join(data, "ci-work", name)} (at registration)')
+    faults = runner_faults(inv, os.path.join(data, 'actions-runner'), os.path.join(unit_dir, 'default.target.wants'))
+    if faults:  # no action: apply changes none of them (issue #260)
+        plan.add('runners the inventory leaves idle (this plan changes nothing of them):')
+        for line in faults:
+            plan.add(f'  warn   {line}')
     if plan.actions or missing:  # nothing changed and all enabled: a second apply is a no-op
         plan.add('systemd --user (timers, runners):')
         if missing:

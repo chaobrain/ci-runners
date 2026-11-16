@@ -313,6 +313,21 @@ plan 命令作为部件 `plan` 运行（有主机记录），但**从 v1.19.0 �
 - 指定集群目标（`target`）、`exclude` 之类的强制选择：`ci.yml` 不提供，需要时按 §3 自己组合 `claim`、`part`、`salvage`、`verdict`，只写能力标签。
 - 自己格式的 summary：在自己的作业里写；`ci.yml` 的 summary 格式是固定的。`ci.yml` 自己用的 `actions/flow` 是它内部的步骤，不要在自己的工作流里调用。
 
+报告作业如果已经把标准部件制品按名称下载成目录，可以用 `ci-run artifacts DIR`
+统一读取。也可从同版本的 ci-runners checkout 运行
+`python -m ci_runners.cli artifacts DIR`，无需主机清单或 GitHub 凭据。
+命令在标准输出写一个 JSON 文档，顶层为 `schema: 1` 和 `parts`。
+`parts` 以部件 ID 为键，第二层以尝试编号的字符串为键，
+每个条目包含原始 `outcome` 对象和 `summary` 字符串。
+
+它读取 `DIR/ci-part-<id>-<attempt>/outcome.json` 和可选的 `summary.md`，
+保留与 verdict 相同的重跑筛选规则。缺失或无效的 outcome 会被跳过，
+缺失的摘要返回空字符串，没有可读制品时 `parts` 为空。
+项目自己的制品和主机记录仍由各自的调用方读取。
+Python 报告代码可以调用 `ci_runners.artifacts.collect(DIR, history=True)`
+读取完整的下载历史，以原始尝试编号关联项目日志。此模式保留旧重跑留下的尝试，
+缺失或无法读取的 outcome 以空对象表示。
+
 ## 10. 定时 sweeper `sweep.yml`（design §4.10、决定 19.9，issue #213）
 
 部件的作业在 GitHub 的队列里一直没有 runner 接（没有带这些标签的 runner 在听，或者决定 19.9 的黑洞：一个在听却从来接不到作业的 runner），GitHub 要等 24 小时才结束它，运行的结论也跟着等。计划的 `queue_minutes`（§8）管不到这一段：它只限制 runner 接走作业**之后**在主机上等槽位或租约的时间（而且要读它，每次 sweep 对每个运行都要列一次 artifact、下载一次）。`sweep.yml` 给这一段一个上限：仓库定时调用它，它找出指定工作流里在 GitHub 队列里等了超过 `minutes` 分钟的作业，取消那个运行（GitHub 不能取消单个作业，只能取消整个运行），并在运行的 context 上发 `error`。

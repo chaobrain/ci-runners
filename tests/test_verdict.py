@@ -16,7 +16,7 @@ import zipfile
 from contextlib import redirect_stderr
 from unittest import mock
 
-from ci_runners import inventory, verdict
+from ci_runners import artifacts, inventory, verdict
 from ci_runners.verdict import End
 
 SHA = 'a' * 40
@@ -99,7 +99,7 @@ class Read(unittest.TestCase):
         self.assertIsNone(verdict.members('n', zipped({'outcome.json': b'{"outcome": "pass", "r": "\xff"}'})))
         self.assertEqual(verdict.members('n', zipped({'outcome.json': '{"outcome": "pass"}', 'summary.md': b'\xff'})),
                          ({'outcome': 'pass'}, ''))  # a summary that is not UTF-8 is left out
-        with mock.patch.object(verdict, 'MAX_FILE', 25):  # an oversized member is left out
+        with mock.patch.object(artifacts, 'MAX_FILE', 25):  # an oversized member is left out
             self.assertIsNone(verdict.members('n', zipped({'outcome.json': '{"outcome": "pass", "x": "yy"}'})))
             self.assertEqual(verdict.members('n', zipped({'outcome.json': '{"outcome": "pass"}', 'summary.md': 's' * 26})),
                              ({'outcome': 'pass'}, ''))

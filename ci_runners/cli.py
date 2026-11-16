@@ -11,6 +11,7 @@
     ci-run claim ...       claim a head (actions/claim; design §4.1)
     ci-run part ...        run one part (actions/part; design §4.3)
     ci-run verdict ...     post a run's verdict (actions/verdict; §4.8)
+    ci-run artifacts DIR   read downloaded standard part outcomes and summaries as JSON
     ci-run salvage ...     this host's parts of a run that stop short (actions/salvage; §4.5)
     ci-run env build P     build project P's env from its default branch's spec (decision 11.4)
     ci-run drain on|off [--pool P] | status   the drain switch (decision 13.1)
@@ -90,6 +91,9 @@ def main(argv: list[str]) -> int:
     if cmd == 'stats':  # the caller's own login; the inventory is not needed (decision 16.8)
         from ci_runners import stats
         return stats.main(args, etc_dir())
+    if cmd == 'artifacts':
+        from ci_runners import artifacts
+        return artifacts.main(args)
     if cmd == 'runner-watch':  # the maintainer's account: no inventory there (decision 15.6)
         from ci_runners import runnerwatch
         return runnerwatch.main(args)

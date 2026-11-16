@@ -4,6 +4,8 @@ from __future__ import annotations
 import io
 import json
 import pathlib
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -21,6 +23,18 @@ def write(root: pathlib.Path, name: str, outcome: dict, summary: str = '') -> No
 
 
 class Reader(unittest.TestCase):
+    def test_report_history_does_not_require_host_python_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write(pathlib.Path(directory), 'ci-part-cpu-1', {'outcome': 'pass'})
+            result = subprocess.run([sys.executable, '-c',
+                                     'import json, sys; sys.modules["tomllib"] = None; '
+                                     'from ci_runners.artifacts import collect; '
+                                     'print(json.dumps(collect(sys.argv[1], history=True)))', directory],
+                                    cwd=pathlib.Path(__file__).resolve().parents[1],
+                                    capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {'cpu': {'1': [{'outcome': 'pass'}, '']}})
+
     def test_report_history_keeps_stale_attempts_and_directories_without_outcomes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

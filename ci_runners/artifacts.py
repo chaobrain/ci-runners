@@ -15,9 +15,6 @@ import re
 import zipfile
 from collections.abc import Callable, Iterable, Mapping
 
-from ci_runners import github
-
-
 #: the outcomes a part's ``outcome.json`` may name (design §4.4)
 KINDS = frozenset({'pass', 'red', 'oom', 'thermal', 'reboot', 'unavailable', 'lost', 'stopped'})
 #: the highest attempt read: an artifact's ``ci-part-<id>-<n>`` has two digits. A part has
@@ -113,6 +110,9 @@ def newest(listing: Iterable[Mapping], ids: Iterable[str]) -> dict[str, int]:
 
 def run_artifacts(call: Callable, base: str, repo: str, run_id: str, token: str) -> list:
     """The run's artifacts as the API lists them, up to ``github.PAGES`` pages."""
+    # Offline report readers also run on Python 3.10, without the host policy's tomllib.
+    from ci_runners import github
+
     out: list = []
     for page in range(1, github.PAGES + 1):
         got = call('GET', f'{base}/repos/{repo}/actions/runs/{run_id}/artifacts?per_page={github.PAGE}&page={page}',
@@ -167,6 +167,8 @@ def read(ids: Iterable[str], call: Callable, fetch: Callable, base: str, repo: s
     artifact of its name is never read in its place. ``workers`` zips are fetched at once
     (``fetch`` is then called from as many threads). Raises github.ApiError where the
     listing fails."""
+    from ci_runners import github
+
     todo = sorted(newest(run_artifacts(call, base, repo, run_id, token), ids).items())
 
     def one(item: tuple[str, int]) -> tuple[dict, str] | str:

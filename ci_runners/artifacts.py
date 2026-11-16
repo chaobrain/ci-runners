@@ -32,10 +32,15 @@ MAX_FILE = 1 << 20
 MAX_ZIP = 8 << 20
 
 
-def collect(root: str) -> dict[str, dict[int, tuple[dict, str]]]:
+def collect(root: str, *, history: bool = False) -> dict[str, dict[int, tuple[dict, str]]]:
     """The salvage action's downloaded artifacts below ``root``, by part id and attempt:
     ``(outcome.json, summary.md)``. A directory whose name is not an artifact's, or whose
-    ``outcome.json`` is not an object with a known outcome, is skipped."""
+    ``outcome.json`` is not an object with a known outcome, is skipped.
+
+    With ``history``, keep older attempts and directories without a readable outcome.
+    Reports use them to associate project-specific logs with the original attempt.
+    A missing or unreadable outcome is represented by an empty dict.
+    """
     out: dict[str, dict[int, tuple[dict, str]]] = {}
     try:
         names = sorted(os.listdir(root))
@@ -51,9 +56,13 @@ def collect(root: str) -> dict[str, dict[int, tuple[dict, str]]]:
             o = json.loads(doc) if doc is not None else None
         except ValueError:
             o = None
-        if not isinstance(o, dict) or not isinstance(o.get('outcome'), str) or o['outcome'] not in KINDS:
+        if not history and (not isinstance(o, dict) or not isinstance(o.get('outcome'), str) or o['outcome'] not in KINDS):
             continue
+        if not isinstance(o, dict):
+            o = {}
         out.setdefault(m.group(1), {})[int(m.group(2))] = (o, _read(os.path.join(d, 'summary.md')) or '')
+    if history:
+        return out
     return {pid: current(attempts) for pid, attempts in out.items()}
 
 

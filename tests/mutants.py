@@ -1668,8 +1668,8 @@ MUTANTS = [
      [f'{TV}.Decide.test_the_description_fits_a_status_whatever_the_state']),
     (ART, "if not m or os.path.islink(d) or not os.path.isdir(d):", "if not m or not os.path.isdir(d):",
      [f'{TV}.Artifacts.test_what_is_not_an_artifact_is_skipped']),
-    (ART, "        if not isinstance(o, dict) or not isinstance(o.get('outcome'), str) or o['outcome'] not in KINDS:\n            continue",
-     "        if not isinstance(o, dict):\n            continue", [f'{TV}.Artifacts.test_what_is_not_an_artifact_is_skipped']),
+    (ART, "        if not history and (not isinstance(o, dict) or not isinstance(o.get('outcome'), str) or o['outcome'] not in KINDS):\n            continue",
+     "        if not history and not isinstance(o, dict):\n            continue", [f'{TV}.Artifacts.test_what_is_not_an_artifact_is_skipped']),
     # every attempt after the last artifact is read (issue #161)
     (VRD, "    return max(attempts, default=0) + 1",
      "    return max(attempts, default=0) + 1 if not attempts or attempts[max(attempts)][0].get('next') in ('retry', 'fallback') else 0",
@@ -5110,12 +5110,14 @@ MUTANTS = [
     (ART, "print(json.dumps({'schema': 1, 'parts': parts}, sort_keys=True))",
      "print(json.dumps({'schema': 2, 'parts': parts}, sort_keys=True))",
      ['tests.test_artifacts.Reader.test_cli_reports_current_attempts_in_the_versioned_shape']),
-    (ART, "        if not isinstance(o, dict) or not isinstance(o.get('outcome'), str) or o['outcome'] not in KINDS:\n            continue",
-     "        if not isinstance(o, dict) or o.get('outcome') not in KINDS:\n            continue",
+    (ART, "        if not history and (not isinstance(o, dict) or not isinstance(o.get('outcome'), str) or o['outcome'] not in KINDS):\n            continue",
+     "        if not history and (not isinstance(o, dict) or o.get('outcome') not in KINDS):\n            continue",
      ['tests.test_artifacts.Reader.test_a_downloaded_outcome_with_a_list_kind_is_skipped']),
     (ART, "    if not isinstance(o, dict) or not isinstance(o.get('outcome'), str) or o['outcome'] not in KINDS:\n        return None",
      "    if not isinstance(o, dict) or o.get('outcome') not in KINDS:\n        return None",
      ['tests.test_artifacts.Reader.test_a_zip_outcome_with_an_object_kind_is_skipped']),
+    (ART, "    if history:\n        return out\n", "",
+     ['tests.test_artifacts.Reader.test_report_history_keeps_stale_attempts_and_directories_without_outcomes']),
 ]
 
 

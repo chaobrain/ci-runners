@@ -324,6 +324,9 @@ plan 命令作为部件 `plan` 运行（有主机记录），但**从 v1.19.0 �
 保留与 verdict 相同的重跑筛选规则。缺失或无效的 outcome 会被跳过，
 缺失的摘要返回空字符串，没有可读制品时 `parts` 为空。
 项目自己的制品和主机记录仍由各自的调用方读取。
+Python 报告代码可以调用 `ci_runners.artifacts.collect(DIR, history=True)`
+读取完整的下载历史，以原始尝试编号关联项目日志。此模式保留旧重跑留下的尝试，
+缺失或无法读取的 outcome 以空对象表示。
 
 ## 10. 定时 sweeper `sweep.yml`（design §4.10、决定 19.9，issue #213）
 

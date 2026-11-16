@@ -21,6 +21,18 @@ def write(root: pathlib.Path, name: str, outcome: dict, summary: str = '') -> No
 
 
 class Reader(unittest.TestCase):
+    def test_report_history_keeps_stale_attempts_and_directories_without_outcomes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            first = {'outcome': 'pass', 'run-attempt': 2}
+            stale = {'outcome': 'red', 'run-attempt': 1}
+            write(root, 'ci-part-cpu-1', first)
+            write(root, 'ci-part-cpu-2', stale)
+            (root / 'ci-part-cpu-3').mkdir()
+            self.assertEqual(artifacts.collect(directory, history=True),
+                             {'cpu': {1: (first, ''), 2: (stale, ''), 3: ({}, '')}})
+            self.assertEqual(artifacts.collect(directory), {'cpu': {1: (first, '')}})
+
     def test_cli_reports_current_attempts_in_the_versioned_shape(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

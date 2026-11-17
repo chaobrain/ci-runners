@@ -5073,22 +5073,28 @@ approval before implementation. It does not change the inventory schema.
   paths that currently omit it keep doing so. With an explicit value,
   the executor must resolve the actual slot and validate the requested
   count against both its configured `slot.workers` and the number of
-  logical CPUs available to the command. Use actual affinity on the
-  execution path and account for the assigned cpuset; do not use the
-  host-wide CPU count. Only after the check does the command receive the
-  requested `CI_WORKERS`. The field neither changes affinity nor limits
-  programs that choose to ignore `CI_WORKERS`.
-- An explicit request that cannot be verified (no slot cap or unavailable
-  CPU affinity) or exceeds either bound ends as `unavailable` with a
-  specific worker-capacity reason, before running the part command.
-  Paths without a slot worker cap, including a legacy slotless runner,
-  a public hosted part and Slurm, must not silently accept the override.
-  Rejecting it at execution does not change what the route selects.
-- Carry the original value through the workflow and the first attempt's
-  record. All existing retry paths, including recovery after a lost
-  attempt, retain the requested count and revalidate it on the runner
-  used for that attempt. Do not clamp it, drop it, or replace it with the
-  retry runner's default. Existing retry limits and route rules remain.
+  logical CPUs available to the command. Measure CPU affinity inside the
+  actual part's systemd scope, after applying the slot's CPU pinning and
+  before starting the user command. Do not use the host-wide CPU count
+  or the runner parent's affinity. Only after the check does the command
+  receive the requested `CI_WORKERS`. The field neither changes affinity
+  nor limits programs that choose to ignore `CI_WORKERS`.
+- Reject an explicit request if there is no verifiable slot worker cap
+  or CPU affinity, or if the requested count exceeds either bound. End
+  as `unavailable` before starting the user command, with a worker-capacity
+  reason. Public GitHub-hosted and Slurm parts have no slot worker cap;
+  their explicit override refusal is final and is not retried. A private
+  runner's slot mismatch can use the existing retry policy and limits.
+  Worker-capacity refusals do not count as infrastructure failures and
+  must not contribute to automatic host drain. None of these refusals
+  changes route eligibility, labels or overflow decisions.
+- The original plan part is the source of truth for `workers` on every
+  attempt. Carry it through the workflow, including retries after a lost
+  attempt with no record or outcome. Record the requested and effective
+  counts for diagnosis only; do not recover the request from the first
+  attempt's record or from `CI_WORKERS`. Revalidate the original request
+  in each attempt's execution scope. Do not clamp, drop or replace it
+  with a retry runner's default.
 - Advertise this plan extension only after the workflow components and
   host releases that accept and execute it are installed. BrainMass can
   then describe workers in its existing coverage plan and continue to use
@@ -5098,4 +5104,7 @@ Acceptance: compare the same plan with and without `workers` to verify
 identical routing; demonstrate that a four-worker request on an
 eight-CPU slot exports `CI_WORKERS=4` and that omission keeps the slot
 default. Verify invalid input, exceeding either bound independently,
-absence of a verifiable cap, and preservation and revalidation on retry.
+absence of a verifiable cap, and an execution scope whose affinity is
+narrower than the runner parent's. Cover final refusals on public hosted
+and Slurm paths, exclusion from infrastructure failure counting, and
+preservation and revalidation on retry even when the first record is lost.

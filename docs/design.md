@@ -5154,8 +5154,9 @@ project caps, slot memory and speed, and existing queue and run time limits.
   NUMA placement. If a slot or mask cannot be verified or cannot fit N,
   report structured `unavailable` with `command_started: false`.
   This refusal does not count toward infrastructure failure or drain.
-- **Defaults and retries.** Omitting `cores` preserves generic routing
-  and the full slot mask. Omitting both fields preserves the existing
+- **Defaults and retries.** For `needs: cpu`, omitting `cores` keeps
+  `ci-cpu` routing and the full slot mask. Specifying `cores` routes
+  only to `ci-cpu-dynamic`. Omitting both fields preserves the existing
   worker default. On the dynamic path with explicit `cores` and omitted
   `workers`, use the smaller of the slot worker default and actual width.
   Explicit `workers` never affects routing or affinity; it must fit the

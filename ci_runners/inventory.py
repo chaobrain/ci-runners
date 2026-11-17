@@ -108,6 +108,8 @@ def _num(v: object) -> bool:
 #: the classes whose runners take one host CI slot (design §4.3, §7)
 CI_SLOT_CLASSES = ('part', 'compile')
 
+DYNAMIC_CPU = "ci-cpu-dynamic"
+CORE_REFUSAL = "cores: "
 _CPU_WIDTH_CANDIDATE = re.compile(r'ci-cpu-[0-9]+\Z')
 CPU_WIDTH_LABEL = re.compile(r'ci-cpu-[1-9][0-9]*\Z')
 
@@ -335,6 +337,10 @@ def load(text: str) -> Inventory:
             if not pub and cls in CI_SLOT_CLASSES:
                 slot_pools.append(pool)
             sized = [label for label in labels if _CPU_WIDTH_CANDIDATE.fullmatch(label)]
+            dynamic = DYNAMIC_CPU in labels
+            if dynamic and (cls != 'part' or pub or 'ci-cpu' not in labels or sized or not v.get('slot')
+                            or len(pools_of(h, 'part')) != 1):
+                raise InventoryError(f'{where}: ci-cpu-dynamic requires one private slotted ci-cpu pool')
             if sized:
                 cap = sized[0]
                 if len(sized) != 1 or not CPU_WIDTH_LABEL.fullmatch(cap) or cls != 'part' or pub:
@@ -356,11 +362,11 @@ def load(text: str) -> Inventory:
                 if len(v['slot']['cpus']) != n:
                     raise InventoryError(f'hosts.{role}.pools.{pool}: slot.cpus has {len(v["slot"]["cpus"])} '
                                          f'cpusets for {n} runners')
-                slot_ranges.extend((lo, hi, pool, bool(sized))
+                slot_ranges.extend((lo, hi, pool, bool(sized) or dynamic)
                                    for c in v['slot']['cpus'] for lo, hi in cpu_ranges(c))
             if not sized:
                 seen[cls, pub] = pool
-        if widths:
+        if widths or any(flag for _, _, _, flag in slot_ranges):
             if h['slots'] < len(slot_pools):
                 raise InventoryError(f'hosts.{role}.slots: {h["slots"]} shared CI slots for {len(slot_pools)} pools '
                                      f'({", ".join(slot_pools)}); sized CPU pools need at least one slot per pool')

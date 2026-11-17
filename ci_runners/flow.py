@@ -665,6 +665,8 @@ def entry(p: Mapping, files: bool = False) -> dict:
     if 'workers' in p:
         # Actions converts JSON numbers through double precision. Keep the exact decimal text.
         out['workers'] = str(p['workers'])
+    if 'cores' in p:
+        out['cores'] = str(p['cores'])
     out['gpus'] = GPUS.get(p['needs'], 0)
     out['memory'] = f'{math.ceil(p["memory_gib"] * 1024)}M' if p.get('memory_gib') is not None else ''
     out['results'] = p.get('results', '')
@@ -828,6 +830,8 @@ def decide(part: Mapping, doc: Mapping | None, role: str, rows: Sequence | None,
     if isinstance(bare.get('workers'), str):
         # A private fallback routes the part again through the schema's integer validation.
         bare['workers'] = int(bare['workers'])
+    if isinstance(bare.get('cores'), str):
+        bare['cores'] = int(bare['cores'])
     r = retry_public(bare, first) if is_public(env) else rt.retry(bare, first, rows, unread)
     if not r['retry']:
         return None

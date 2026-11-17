@@ -8,7 +8,7 @@ def positive(value: object) -> bool:
     return type(value) is int and value > 0
 
 
-def cli_count(value: str) -> int:
+def cli_count(value: str, field: str = 'workers') -> int:
     if value.isascii() and value.isdecimal():
         try:
             n = int(value)
@@ -17,7 +17,7 @@ def cli_count(value: str) -> int:
         else:
             if positive(n):
                 return n
-    raise argparse.ArgumentTypeError('workers must be a positive integer')
+    raise argparse.ArgumentTypeError(f'{field} must be a positive integer')
 
 
 def refusal(requested: int, reason: str) -> dict:

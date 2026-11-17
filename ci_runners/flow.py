@@ -662,6 +662,9 @@ def entry(p: Mapping, files: bool = False) -> dict:
     the route's, the part action's ``gpus``, ``memory`` and ``queue``, the artifacts as a
     list, whether the plan handed files, and the salvage leg's bound."""
     out = dict(p)
+    if 'workers' in p:
+        # Actions converts JSON numbers through double precision. Keep the exact decimal text.
+        out['workers'] = str(p['workers'])
     out['gpus'] = GPUS.get(p['needs'], 0)
     out['memory'] = f'{math.ceil(p["memory_gib"] * 1024)}M' if p.get('memory_gib') is not None else ''
     out['results'] = p.get('results', '')
@@ -822,6 +825,9 @@ def decide(part: Mapping, doc: Mapping | None, role: str, rows: Sequence | None,
         return None
     q = math.ceil(float(part.get('queue') or 0))  # the route's bound without the queue, and the queue on top
     bare = {**part, 'timeout_minutes': int(part['timeout_minutes']) - q}
+    if isinstance(bare.get('workers'), str):
+        # A private fallback routes the part again through the schema's integer validation.
+        bare['workers'] = int(bare['workers'])
     r = retry_public(bare, first) if is_public(env) else rt.retry(bare, first, rows, unread)
     if not r['retry']:
         return None

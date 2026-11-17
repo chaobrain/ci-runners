@@ -537,7 +537,7 @@ def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0, p2
             worker_exit(record, requested, f'requested {requested}; only {len(actual)} CPUs available after pinning')
             return 0
         cpus = cpu_list(actual)
-        child_env = {**os.environ, 'CI_WORKERS': str(requested)}
+        child_env = {**os.environ, 'CI_WORKERS': str(requested), 'CI_CPUS': cpus}
         worker_info = {'workers': {'requested': requested, 'effective': requested, 'command_started': True,
                                    'cpus': cpus}}
     if p2p:

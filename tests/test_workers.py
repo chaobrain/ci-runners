@@ -2,6 +2,8 @@
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -29,7 +31,7 @@ class Plan(unittest.TestCase):
                                                    **{'ci-cpu-6': route_fixture.R(1)}))
         routed = route.route([base], rows)[0]
         with_workers = flow.entry(route.route([{**base, 'workers': 3}], rows)[0])
-        self.assertEqual(with_workers.pop('workers'), 3)
+        self.assertEqual(with_workers.pop('workers'), '3')
         self.assertEqual(with_workers, flow.entry(routed))
 
     def test_retry_uses_the_original_part_even_without_an_artifact(self):
@@ -68,6 +70,28 @@ class Executor(slots_fixture.SlotHost):
         _, default = self.go(self.runner(slot='0'), command=cmd, id='default')
         self.assertEqual(self.work(default, 'value'), '3:0')
         self.assertNotIn('workers', default)
+
+    def test_large_worker_count_survives_both_attempts_and_is_unavailable(self):
+        n = 10**18 + 1
+        p = route.load_plan({'schema': 1, 'parts': [route_fixture.part(workers=n)]})[0]
+        routed = flow.entry(route.route([p], None)[0])
+        wire = json.loads(json.dumps(routed))
+        self.assertEqual(wire['workers'], str(n))
+
+        runner = self.runner(slot='0')
+        args = ['--project', 'p', '--command', 'touch "$CI_PART_DIR/ran"', '--id', p['id'],
+                '--timeout-minutes', '1', '--queue-timeout-minutes', '0.02', '--workers', wire['workers']]
+        for attempt in (1, 2):
+            with self.subTest(attempt=attempt):
+                if attempt == 2:
+                    retry = flow.decide(wire, first, 'hb', None, '', 1, {})
+                    self.assertEqual(retry['row'], 'fallback')
+                    args += ['--attempt-of', retry['attempt_of']]
+                _, out = self.go(runner, **vars(part.parse_args(args)))
+                self.assertEqual((out['outcome'], out['attempt']), ('unavailable', attempt))
+                self.assertEqual(out['workers'], {'requested': n, 'command_started': False})
+                self.assertFalse((Path(self.path(out)) / 'work' / 'ran').exists())
+                first = out
 
     def test_slot_limit_is_checked_on_each_attempt(self):
         runner = self.runner(slot='0')
@@ -129,6 +153,28 @@ class Supervisor(unittest.TestCase):
                 self.assertEqual((out['outcome'], out['next']), ('unavailable', 'fallback'))
                 self.assertFalse(out['workers']['command_started'])
                 self.assertEqual(presence.part_end(out, {'class': 'part'}, ''), '')
+
+    def test_child_ci_cpus_uses_the_narrowed_affinity(self):
+        # A real child inherits a narrowed mask. The wrapper models the kernel dropping
+        # a CPU from the requested mask because of the scope's cpuset.
+        with tempfile.TemporaryDirectory() as d:
+            cpu = min(os.sched_getaffinity(0))
+            marker = Path(d, 'command')
+            command = ('import os, sys; from pathlib import Path; '
+                       'Path(sys.argv[1]).write_text(os.environ["CI_CPUS"] + ":" + '
+                       'str(sorted(os.sched_getaffinity(0))[0]))')
+            script = """import os, sys
+from unittest import mock
+from ci_runners import part
+pin = os.sched_setaffinity
+cpu = int(sys.argv[2])
+with mock.patch.object(os, 'sched_setaffinity', side_effect=lambda pid, cpus: pin(pid, {cpu})):
+    part.supervise(sys.argv[1], 10, sys.argv[3:], worker_spec=(1, 2, [cpu, cpu + 1]))
+"""
+            env = {**os.environ, 'CI_CPUS': f'{cpu}-{cpu+1}'}
+            subprocess.run([sys.executable, '-c', script, d, str(cpu), sys.executable, '-c',
+                            command, str(marker)], check=True, env=env)
+            self.assertEqual(marker.read_text(), f'{cpu}:{cpu}')
 
     def test_hosted_worker_request_has_an_unavailable_artifact(self):
         with tempfile.TemporaryDirectory() as d:

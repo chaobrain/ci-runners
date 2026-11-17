@@ -17,6 +17,12 @@ def fixture():
     return PLAIN.replace(old, '\n'.join(lines)).replace('slots = 2', 'slots = 5', 1)
 
 
+def dynamic_fixture():
+    return PLAIN.replace('part = { count = 3, labels = ["3090b-cpu"] }',
+                         'part = { count = 2, labels = ["3090b-cpu", "ci-cpu", "ci-cpu-dynamic"], '
+                         'slot = { cpus = ["0-7", "8-17"], workers = 6, memory = "10G", speed = 1.0 } }')
+
+
 def snapshot(inv, alive, busy=(), yielded=()):
     p = {'runner_names': list(alive), 'runner_busy': list(busy)}
     return host(pools=pool.pool_table(inv, p, set(yielded)),
@@ -31,21 +37,35 @@ class SizedPools(unittest.TestCase):
         return [f'{self.inv.this}-cpu{width}-1' for width in widths]
 
     def test_same_host_routes_and_binds_distinct_slots(self):
-        cap = rows(snapshot(self.inv, self.names(4, 6, 8)))
+        inv = inventory.load(dynamic_fixture())
+        cap = rows(snapshot(inv, [f'{inv.this}-part-{n}' for n in (1, 2)]))
         plans, _ = flow.load({'schema': 1, 'parts': [planned(str(n), cores=n) for n in (4, 6, 8)]})
         routed = route.route(plans, cap)
-        for p, key, cpus in zip(routed, ('cpu4', 'cpu6', 'cpu8'), ('16-19', '20-25', '26-33'), strict=True):
-            self.assertEqual(p['labels'], ['self-hosted', f'ci-cpu-{p["cores"]}'])
-            self.assertEqual(p['why'], '1 free')
-            env = dict(line.split('=', 1) for line in setup.env_file(self.inv, 'part', '/etc/ci', slot=0,
-                                                                    pool=key).splitlines())
-            self.assertEqual(env['CI_RUNNER_POOL'], key)
-            slot, why = part.runner_slot(self.inv.host, 'part', env)
+        for p in routed:
+            self.assertEqual(p['labels'], ['self-hosted', 'ci-cpu-dynamic'])
+        self.assertEqual([p['why'] for p in routed[:2]], ['2 free', '1 free'])
+        self.assertIn('0 free', routed[2]['why'])
+        self.assertEqual(next(p['max_cores'] for p in cap[0].row['pools'] if p['pool'] == 'part'), 8)
+        for index, cpus in enumerate(('0-7', '8-17')):
+            env = dict(line.split('=', 1) for line in setup.env_file(inv, 'part', '/etc/ci', slot=index,
+                                                                    pool='part').splitlines())
+            self.assertEqual(env['CI_RUNNER_SLOT'], str(index))
+            slot, why = part.runner_slot(inv.host, 'part', env)
             self.assertEqual(why, '')
             self.assertEqual(slot.cpus, cpus)
-        for env in ({'CI_RUNNER_SLOT': '0'}, {'CI_RUNNER_POOL': 'light', 'CI_RUNNER_SLOT': '0'},
-                    {'CI_RUNNER_POOL': 'cpu6'}):
-            self.assertTrue(part.runner_slot(self.inv.host, 'part', env)[1])
+
+        # An old installed inventory is still readable during migration, but is not routable by width.
+        old_env = dict(line.split('=', 1) for line in setup.env_file(self.inv, 'part', '/etc/ci', slot=0,
+                                                                    pool='cpu6').splitlines())
+        self.assertEqual(old_env['CI_RUNNER_POOL'], 'cpu6')
+        self.assertEqual(part.runner_slot(self.inv.host, 'part', old_env)[0].cpus, '20-25')
+
+    def test_dynamic_inventory_requires_one_private_slotted_generic_pool(self):
+        for text in (dynamic_fixture().replace('"ci-cpu", ', ''),
+                     PLAIN.replace('"3090b-cpu"]','"3090b-cpu", "ci-cpu", "ci-cpu-dynamic"]'),
+                     fixture().replace('"ci-cpu-4"', '"ci-cpu-dynamic"')):
+            with self.subTest(text=text), self.assertRaisesRegex(inventory.InventoryError, 'private slotted ci-cpu pool'):
+                inventory.load(text)
 
     def test_inventory_rejects_wrong_width_duplicate_and_overlap(self):
         source = fixture()
@@ -84,7 +104,9 @@ class SizedPools(unittest.TestCase):
             flow.route_public([planned(cores=6)], 'owner/project')
 
     def test_shared_bookings_and_legacy_overflow(self):
-        cap = rows(snapshot(self.inv, self.names(6)), SLURMS, target())
+        inv = inventory.load(dynamic_fixture())
+        raw = snapshot(inv, [f'{inv.this}-part-1'])
+        cap = rows(raw, SLURMS, target())
         sized, generic = route.route([planned('six', cores=6), planned('generic')], cap)
         self.assertEqual(sized['why'], '1 free')
         self.assertEqual(generic['where'], 'slurm')
@@ -92,22 +114,38 @@ class SizedPools(unittest.TestCase):
         self.assertEqual(generic['labels'], ['self-hosted', 'ci-cpu'])
         self.assertEqual(sized['where'], 'host')
         self.assertIn('0 free; exact CPU width never overflows', sized['why'])
-        with self.assertRaisesRegex(route.RouteError, 'ci-cpu-7'):
-            route.route([planned(cores=7)], cap)
-        self.assertEqual(route.route([planned(cores=6)], None)[0]['labels'], ['self-hosted', 'ci-cpu-6'])
+        with self.assertRaisesRegex(route.RouteError, 'exceeds dynamic pool limit 8'):
+            route.route([planned(cores=9)], cap)
+        legacy = rows(snapshot(self.inv, self.names(6)))
+        for unverified in (None, legacy, rows({**raw, 'read_at': 0})):
+            with self.assertRaisesRegex(route.RouteError, 'no verified dynamic CPU capacity'):
+                route.route([planned(cores=6)], unverified)
+        self.assertEqual(route.route([planned()], None)[0]['labels'], ['self-hosted', 'ci-cpu'])
+
+    def test_rejects_inconsistent_shared_label_limits(self):
+        inv = inventory.load(dynamic_fixture())
+        raw = snapshot(inv, [f'{inv.this}-part-1'])
+        lower = {**raw, 'key': 'peer', 'pools': [
+            {**p, 'max_cores': 4} if p['pool']=='part' else p for p in raw['pools']]}
+        with self.assertRaisesRegex(route.RouteError, 'no verified dynamic CPU capacity'):
+            route.route([planned(cores=6)], rows(raw, lower))
 
     def test_retries_keep_width(self):
-        cap = rows(snapshot(self.inv, self.names(6)))
-        p = route.route([planned(cores=6)], cap)[0]
-        pool_labels = inventory.labels_of(self.inv.host, 'cpu6')
-        for row in ('same-host', 'fallback', 'more-memory', 'any'):
-            retry = route.retry(p, {'where': row, 'next': 'retry', 'host': self.inv.this,
-                                    'pool_labels': pool_labels}, cap)
-            with self.subTest(row=row):
-                self.assertIn('ci-cpu-6', retry['labels'])
-                self.assertNotIn('ci-cpu', retry['labels'])
-                if row == 'same-host':
-                    self.assertIn(f'{self.inv.this}-cpu6', retry['labels'])
+        inv = inventory.load(dynamic_fixture())
+        cap = rows(snapshot(inv, [f'{inv.this}-part-1']))
+        p = route.route([planned(cores=6, workers=3)], cap)[0]
+        for kind in ('same-host', 'fallback', 'more-memory', 'any'):
+            retry = route.retry(p, {'where': kind, 'next': 'retry', 'host': self.inv.this,
+                                    'pool_labels': ['ci-cpu-6']}, cap)
+            with self.subTest(row=kind):
+                self.assertEqual(retry['labels'], ['self-hosted', 'ci-cpu-dynamic'])
+                self.assertFalse(route.retry(p, {'where':kind,'next':'retry'}, None)['retry'])
+        matrix = flow.entry(p)
+        self.assertEqual((matrix['cores'], matrix['workers']), ('6', '3'))
+        self.assertEqual(flow.decide(matrix, None, '', cap, '', 1, {})['labels'], ['self-hosted','ci-cpu-dynamic'])
+        self.assertIsNone(flow.decide(matrix, None, '', None, '', 1, {}))
+        without_override = route.route([planned(cores=6)], cap)[0]
+        self.assertEqual({k:v for k,v in p.items() if k!='workers'}, without_override)
 
     def test_drain_and_tier_by_pool(self):
         rs = [r for r in presence.runners(self.inv) if r.pool in ('cpu4', 'cpu6', 'cpu8')]

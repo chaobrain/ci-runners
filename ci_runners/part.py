@@ -481,8 +481,17 @@ def worker_exit(record: str, requested: int, why: str, *, final: bool = False) -
     return ex
 
 
+def core_exit(record: str, requested: int, why: str, *, final: bool = False) -> dict:
+    ex = {'unavailable': inventory.CORE_REFUSAL + why,
+          'cores': {'requested': requested, 'command_started': False},
+          'workers_final': final, 'end_epoch': time.time(), 'boot_end': boot_id()}
+    _write_json(os.path.join(record, 'exit.json'), ex)
+    return ex
+
+
 def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0, p2p: Sequence[str] = (),
-              worker_spec: tuple[int, int, Sequence[int]] | None = None) -> int:
+              worker_spec: tuple[int, int, Sequence[int]] | None = None,
+              core_spec: tuple[int, int, Sequence[int], int | None] | None = None) -> int:
     """Run ``argv`` in its own session with OOM score +500, end it at ``timeout``, and
     write ``exit.json``. Runs inside the part's scope, in a session of its own, so the
     job's signals (a cancel, a stopped runner) do not reach it: only a stop of the scope
@@ -522,6 +531,31 @@ def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0, p2
     timed_out = False
     worker_info = {}
     child_env = None
+    if core_spec is not None:
+        width, maximum, pin, requested = core_spec
+        try:
+            chosen = set(sorted(set(pin) & os.sched_getaffinity(0))[:width])
+            if len(chosen) != width:
+                core_exit(record, width, f'requested {width}; only {len(chosen)} slot CPUs available in the part scope')
+                return 0
+            os.sched_setaffinity(0, chosen)
+            actual = os.sched_getaffinity(0)
+        except OSError:
+            core_exit(record, width, 'could not pin CPUs or read affinity inside the part scope')
+            return 0
+        if actual != chosen:
+            core_exit(record, width, 'measured affinity does not match the selected CPUs')
+            return 0
+        if requested is not None and requested > min(maximum, len(actual)):
+            worker_exit(record, requested, f'requested {requested}; limit is {min(maximum, len(actual))} '
+                        f'(slot worker limit {maximum}, allocated CPUs {len(actual)})')
+            return 0
+        effective = min(maximum, len(actual)) if requested is None else requested
+        cpus = cpu_list(actual)
+        child_env = {**os.environ, 'CI_CPUS': cpus, 'CI_WORKERS': str(effective)}
+        worker_info = {'cores': {'requested': width, 'effective': len(actual), 'command_started': True, 'cpus': cpus}}
+        if requested is not None:
+            worker_info['workers'] = {'requested': requested, 'effective': effective, 'command_started': True, 'cpus': cpus}
     if worker_spec is not None:
         requested, maximum, pin = worker_spec
         if requested > maximum:
@@ -949,7 +983,7 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
         retry_on = []
     peak = rec.get('peak_c') or {}
     run_seconds = int(max(0.0, end - float(rec['run_epoch']))) if rec.get('run_epoch') else 0
-    worker_info = {'workers': ex['workers']} if ex and 'workers' in ex else {}
+    worker_info = {k: ex[k] for k in ('cores', 'workers') if ex and k in ex}
     return {**worker_info, 'outcome': o.kind, 'reason': o.reason, 'next': h.next, 'retry-on': retry_on, 'host': role,
             'gpus': ','.join(str(c) for c in rec.get('cards', [])), 'queue-seconds': int(rec.get('queue_seconds', 0)),
             'run-seconds': run_seconds,
@@ -994,6 +1028,7 @@ class Inputs:
     lock: str = ''  # empty: the class's default, ``x`` on ``compile``, else ``none`` (design §4.3)
     target: str = ''  # a slurm part's targets, in the order to try (decision 14.2)
     workers: int | None = None
+    cores: int | None = None
 
 
 def parse_args(argv: Sequence[str]) -> Inputs:
@@ -1012,9 +1047,10 @@ def parse_args(argv: Sequence[str]) -> Inputs:
     p.add_argument('--lock', choices=('', *LOCKS), default='')
     p.add_argument('--target', default='')
     p.add_argument('--workers', type=workers.cli_count)
+    p.add_argument('--cores', type=lambda value: workers.cli_count(value, 'cores'))
     a = p.parse_args(list(argv))
     return Inputs(a.project, a.command, a.id, a.timeout_minutes, a.gpus, a.gpu_mem_mib, a.memory,
-                  a.queue_timeout_minutes, a.results, a.resume == 'true', a.attempt_of, a.lock, a.target, a.workers)
+                  a.queue_timeout_minutes, a.results, a.resume == 'true', a.attempt_of, a.lock, a.target, a.workers, a.cores)
 
 
 def queue_capped(inv: inventory.Inventory, runner: str) -> bool:
@@ -1145,7 +1181,7 @@ class Executor:
         self.slot, why = runner_slot(h, cls, self.env)
         if why:
             return f'slot: {why}'
-        if a.workers is None and self.slot is not None and not slot_cpus(self.slot) <= os.sched_getaffinity(0):
+        if a.cores is None and a.workers is None and self.slot is not None and not slot_cpus(self.slot) <= os.sched_getaffinity(0):
             return f'slot: slot {self.slot.index}\'s cpus {self.slot.cpus} are not all CPUs this runner may use'
         return ''
 
@@ -1322,6 +1358,9 @@ class Executor:
         hold: locks.HostLock | None = None  # the host lock, held for the whole command (design §5.5 item 3)
         rec['lock'] = lock
         try:
+            if a.cores is not None and cls != 'part':
+                ex = core_exit(record, a.cores, 'dynamic cores require a private CPU runner', final=True)
+                return self._end(record, rec, a, ex=ex)
             if a.workers is not None:
                 public_gpu = cls == 'gpu' and self.env.get('RUNNER_NAME', '').startswith(
                     f'{self.inv.this}{inventory.PUBLIC_HOST_SUFFIX}')
@@ -1335,10 +1374,15 @@ class Executor:
             if cls == slurmpart.CLASS:  # one batch job on a Slurm cluster (decision 14.3)
                 return self._slurm(a, proj, memory, record, rec, work, lock)
             why = self.gate(a, cls, lock)
-            if why and not (a.workers is not None and why.startswith('slot: ')):
+            if why and not ((a.workers is not None or a.cores is not None) and why.startswith('slot: ')):
                 return self._end(record, rec, a, unavailable=why)
-            worker_spec = None
-            if a.workers is not None:
+            worker_spec = core_spec = None
+            if a.cores is not None:
+                if self.slot is None or inventory.DYNAMIC_CPU not in (labels or ()):
+                    ex = core_exit(record, a.cores, 'no verifiable slot on a dynamic CPU pool')
+                    return self._end(record, rec, a, ex=ex)
+                core_spec = (a.cores, self.slot.workers, sorted(slot_cpus(self.slot)), a.workers)
+            elif a.workers is not None:
                 if self.slot is None:
                     detail = f' ({why})' if why else ''
                     ex = worker_exit(record, a.workers, f'this runner has no verifiable slot worker limit{detail}')
@@ -1480,15 +1524,15 @@ class Executor:
                            cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume,
                            held=hold.mode if hold else '', runner=self.slot)
             # With an override, the in-scope supervisor pins itself and the command inherits its mask.
-            inner = command_argv(a.command, cpus=pin if worker_spec is None else '', nice=0 if cls == 'compile' else 10)
+            inner = command_argv(a.command, cpus=pin if worker_spec is None and core_spec is None else '', nice=0 if cls == 'compile' else 10)
             cap = registry.memory_bytes(memory) if self.caps_memory() else 0
             p2p = self.p2p if cls in P2P_CLASSES else []
             # the inner timeout: the plan's minutes, times the slot's speed on a runner with one (16.2)
             timeout = a.timeout_minutes * 60 if self.slot is None else a.timeout_minutes * 60 * self.slot.speed
             supervisor_args = json.dumps(p2p)
             supervisor_call = 'json.loads(sys.argv[4])))'
-            if worker_spec is not None:
-                supervisor_args = json.dumps([p2p, worker_spec])
+            if worker_spec is not None or core_spec is not None:
+                supervisor_args = json.dumps([p2p, worker_spec, core_spec])
                 supervisor_call = '*json.loads(sys.argv[4])))'
             sup = [sys.executable, '-I', '-c', 'import json, sys; sys.path.insert(0, sys.argv.pop(1)); '
                    'from ci_runners.part import supervise; '

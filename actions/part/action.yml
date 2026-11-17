@@ -10,6 +10,9 @@ inputs:
   command:
     description: run with bash -c in the job's checkout, inside the project's env
     required: true
+  cores:
+    description: optional logical CPU count within a fixed slot on a dynamic CPU runner
+    default: ''
   workers:
     description: optional CI_WORKERS override, bounded by the slot and its actual CPU affinity
     default: ''
@@ -100,6 +103,7 @@ runs:
       env:
         IN_PROJECT: ${{ inputs.project }}
         IN_ID: ${{ inputs.id }}
+        IN_CORES: ${{ inputs.cores }}
         IN_WORKERS: ${{ inputs.workers }}
         IN_COMMAND: ${{ inputs.command }}
         IN_TIMEOUT: ${{ inputs.timeout-minutes }}
@@ -117,6 +121,7 @@ runs:
       run: >-
         set --;
         if [ -n "$IN_WORKERS" ]; then set -- --workers "$IN_WORKERS"; fi;
+        if [ -n "$IN_CORES" ]; then set -- "$@" --cores "$IN_CORES"; fi;
         exec "$GITHUB_ACTION_PATH/../lib/ci-run.sh" part --project "$IN_PROJECT" --id "$IN_ID" --command "$IN_COMMAND"
         --timeout-minutes "$IN_TIMEOUT" --gpus "$IN_GPUS" --gpu-mem-mib "$IN_GPU_MEM" --memory "$IN_MEMORY"
         --queue-timeout-minutes "$IN_QUEUE" --results "$IN_RESULTS"

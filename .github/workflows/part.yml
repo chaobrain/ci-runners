@@ -89,6 +89,7 @@ jobs:
           queue-timeout-minutes: ${{ fromJSON(inputs.part).queue }}
           results: ${{ fromJSON(inputs.part).results }}
           target: ${{ fromJSON(inputs.part).target }}
+          cores: ${{ fromJSON(inputs.part).cores }}
       # the part step fails on red and on a failed upload: upload once more (the same file)
       # where its own upload did not succeed; a red part's is done (issue #242)
       - id: again
@@ -260,6 +261,7 @@ jobs:
           queue-timeout-minutes: ${{ fromJSON(inputs.part).queue }}
           results: ${{ fromJSON(inputs.part).results }}
           target: ${{ fromJSON(env.RETRY).target }}
+          cores: ${{ fromJSON(inputs.part).cores }}
           resume: ${{ fromJSON(env.RETRY).resume }}
           attempt-of: ${{ fromJSON(env.RETRY).attempt_of }}
       # as the first attempt's: once more only where the part action's own upload did not succeed

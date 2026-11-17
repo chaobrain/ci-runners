@@ -105,6 +105,10 @@ def _num(v: object) -> bool:
     return type(v) in (int, float) and math.isfinite(v) and v > 0
 
 
+#: the classes whose runners take one host CI slot (design §4.3, §7)
+CI_SLOT_CLASSES = ('part', 'compile')
+
+_CPU_WIDTH_CANDIDATE = re.compile(r'ci-cpu-[0-9]+\Z')
 CPU_WIDTH_LABEL = re.compile(r'ci-cpu-[1-9][0-9]*\Z')
 
 
@@ -310,6 +314,7 @@ def load(text: str) -> Inventory:
         seen: dict[tuple[str, bool], str] = {}
         widths: set[str] = set()
         slot_ranges = []
+        slot_pools = []
         for pool, v in h['pools'].items():
             if isinstance(v, dict) and v.get('per_card') and not h['gpus']:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: per_card on a host without gpus')
@@ -327,7 +332,9 @@ def load(text: str) -> Inventory:
                 _check_private_labels(f'hosts.{role}.pools.{pool}', role, pool, v)
             where = f'hosts.{role}.pools.{pool}'
             labels = labels_of(h, pool) or []
-            sized = [label for label in labels if label.startswith('ci-cpu-')]
+            if not pub and cls in CI_SLOT_CLASSES:
+                slot_pools.append(pool)
+            sized = [label for label in labels if _CPU_WIDTH_CANDIDATE.fullmatch(label)]
             if sized:
                 cap = sized[0]
                 if len(sized) != 1 or not CPU_WIDTH_LABEL.fullmatch(cap) or cls != 'part' or pub:
@@ -354,6 +361,9 @@ def load(text: str) -> Inventory:
             if not sized:
                 seen[cls, pub] = pool
         if widths:
+            if h['slots'] < len(slot_pools):
+                raise InventoryError(f'hosts.{role}.slots: {h["slots"]} shared CI slots for {len(slot_pools)} pools '
+                                     f'({", ".join(slot_pools)}); sized CPU pools need at least one slot per pool')
             ranges = sorted(slot_ranges)
             for i, (_, hi, pool, sized) in enumerate(ranges):
                 for j in range(i + 1, len(ranges)):

@@ -153,6 +153,12 @@ ASW = 'actions/sweep/action.yml'
 #: (file, snippet, replacement, tests that kill it)
 CPU_WIDTH = 'tests.test_cpu_width.SizedPools'
 CPU_WIDTH_MUTANTS = [
+    (INV, "if h['slots'] < len(slot_pools):", "if False:",
+     [f'{CPU_WIDTH}.test_inventory_needs_one_shared_slot_per_cpu_and_timing_pool']),
+    (INV, 'if not pub and cls in CI_SLOT_CLASSES:', "if not pub and cls == 'part':",
+     [f'{CPU_WIDTH}.test_inventory_needs_one_shared_slot_per_cpu_and_timing_pool']),
+    (INV, '_CPU_WIDTH_CANDIDATE.fullmatch(label)', "label.startswith('ci-cpu-')",
+     [f'{CPU_WIDTH}.test_inventory_keeps_legacy_nonnumeric_cpu_labels']),
     ('ci_runners/setup.py', "lines.append(f'CI_RUNNER_POOL={pool}')",
      "lines.append('CI_RUNNER_POOL=part')", [f'{CPU_WIDTH}.test_same_host_routes_and_binds_distinct_slots']),
     ('ci_runners/part.py', "        return key, ''\n    if cls == 'part' and len",
@@ -2324,7 +2330,7 @@ MUTANTS = [
     (PRT, "pin = str((h.get('compile_cpus') if cls == 'compile' else h.get('cpus')) or '')", "pin = str(h.get('cpus') or '')",
      [f'{TT}.Classes.test_a_compile_part_is_pinned_at_nice_0_and_takes_a_slot']),
     (PRT, "nice=0 if cls == 'compile' else 10)", "nice=10)", [f'{TT}.Classes.test_a_compile_part_is_pinned_at_nice_0_and_takes_a_slot']),
-    (PRT, "SLOT_CLASSES = ('part', 'compile')", "SLOT_CLASSES = ('part',)",
+    (PRT, "SLOT_CLASSES = inventory.CI_SLOT_CLASSES", "SLOT_CLASSES = ('part',)",
      [f'{TT}.Classes.test_a_compile_part_is_pinned_at_nice_0_and_takes_a_slot']),
     (PRT, "            p2p = self.p2p if cls in P2P_CLASSES else []", "            p2p = []",
      [f'{TT}.Classes.test_a_failed_p2p_self_test_is_unavailable_p2p_with_next_none',

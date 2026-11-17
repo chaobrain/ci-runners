@@ -57,7 +57,7 @@ ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 #: (design §4.3 ``record``): a retry on another host takes its attempt from the name (13.3)
 RECORD_REF = re.compile(r'[a-z0-9][a-z0-9-]{0,30}:[^/:]+/[^/:]+/[0-9]+-[0-9]+/'
                         r'(?P<id>[A-Za-z0-9][A-Za-z0-9_.-]{0,63})-(?P<n>[1-9][0-9]{0,2})')
-SLOT_CLASSES = ('part', 'compile')  # the classes whose parts take one host CI slot (design §4.3, §7)
+SLOT_CLASSES = inventory.CI_SLOT_CLASSES
 EVERY_SLOT = 'nightly'  # the class whose parts take every slot and every card lease (decision 12.8)
 LOCKS = ('none', 's', 'x', 'l')  # the ``lock`` input: hold the host lock for the command, or not
 #: what each class's ``part`` accepts (design §4.8): ``(least cards, most cards, locks,

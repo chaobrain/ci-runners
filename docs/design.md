@@ -5018,7 +5018,12 @@ before implementation.
   private `part` pool per configured width. A sized pool must carry exactly
   one `ci-cpu-N` label (canonical decimal, with no leading zeros), a unique
   host-local label for retries, and one `slot.cpus` entry of exactly N
-  logical CPUs per runner. Existing cpuset overlap checks still apply.
+  logical CPUs per runner. Only a digits-only suffix is considered for
+  width validation; nonnumeric labels such as ci-cpu-avx512 retain their
+  meaning as custom labels. Existing cpuset overlap checks still apply.
+  If a host has a sized CPU pool, its shared slots must cover at least one
+  runner per private part or compile pool, so no pool is kept offline
+  indefinitely just because another pool has idle listeners.
   `slot.workers` controls application parallelism, independently of affinity.
   A sized pool joins the generic queue only if it also advertises `ci-cpu`.
 - Setup writes the exact inventory pool key into the runner environment.

@@ -430,7 +430,10 @@ cpu6 = { class = "part", count = 1, labels = ["<role>-cpu6", "ci-cpu-6"], slot =
 
 每个 `slot.cpus` 要与标签核数一致。只有额外带 `ci-cpu` 的新池
 才会接普通 CPU 作业。主机的 `slots` 仍由所有 CPU 池和计时池共用；
+只要配置了指定核数的池，slots 至少要等于私有 part 和 compile 池的总数，
+否则 inventory 会拒绝加载，避免某个池一直没有 runner 上线。
 要让各池的 runner 都能同时接单，预留至少等于这些 runner 总数的槽位。
+非数字后缀（例如 ci-cpu-avx512）仍是普通自定义标签。
 如果原池没有自己的 `slot.cpus`，也要给它规划独立的 CPU 范围，
 否则普通 CPU 作业仍可能在新池的 CPU 上运行。
 

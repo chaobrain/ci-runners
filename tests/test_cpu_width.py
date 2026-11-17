@@ -14,7 +14,7 @@ def fixture():
         lines.append(f'cpu{width} = {{ class = "part", count = 1, '
                      f'labels = ["{role}-cpu{width}", "ci-cpu-{width}", "ci-cpu"], '
                      f'slot = {{ cpus = ["{cpus}"], workers = {width}, memory = "10G", speed = 1.0 }} }}')
-    return PLAIN.replace(old, '\n'.join(lines))
+    return PLAIN.replace(old, '\n'.join(lines)).replace('slots = 2', 'slots = 5', 1)
 
 
 def snapshot(inv, alive, busy=(), yielded=()):
@@ -56,6 +56,25 @@ class SizedPools(unittest.TestCase):
         ):
             with self.subTest(why=why), self.assertRaisesRegex(inventory.InventoryError, why):
                 inventory.load(changed)
+
+    def test_inventory_needs_one_shared_slot_per_cpu_and_timing_pool(self):
+        source = fixture()
+        with self.assertRaisesRegex(inventory.InventoryError, r'4 shared CI slots for 5 pools'):
+            inventory.load(source.replace('slots = 5', 'slots = 4', 1))
+        self.assertEqual(inventory.load(source).host['slots'], 5)
+        self.assertEqual(inventory.load(PLAIN.replace('slots = 2', 'slots = 1', 1)).host['slots'], 1)
+
+    def test_inventory_keeps_legacy_nonnumeric_cpu_labels(self):
+        role = self.inv.this
+        legacy = PLAIN.replace(f'"{role}-cpu"', f'"{role}-cpu", "ci-cpu-avx512"', 1)
+        inv = inventory.load(legacy)
+        self.assertIn('ci-cpu-avx512', inventory.labels_of(inv.host, 'part'))
+        mixed = fixture().replace('"ci-cpu-4"', '"ci-cpu-4", "ci-cpu-fast"', 1)
+        inv = inventory.load(mixed)
+        self.assertIn('ci-cpu-fast', inventory.labels_of(inv.host, 'cpu4'))
+        for invalid in ('ci-cpu-0', 'ci-cpu-04'):
+            with self.subTest(label=invalid), self.assertRaisesRegex(inventory.InventoryError, 'ci-cpu-N label'):
+                inventory.load(mixed.replace('"ci-cpu-4"', f'"{invalid}"', 1))
 
     def test_rejects_invalid_cores_and_public_route(self):
         for p in [planned(cores=x) for x in (0, -1, 6.0, '6', True, None)] + [planned(needs='gpu', cores=6)]:

@@ -1010,6 +1010,9 @@ def pool_table(inv, p: Mapping, yielded: set[str] | None = None) -> list[dict]:
         if isinstance(slot, dict):
             e.update(memory_gib=round(registry.memory_bytes(slot['memory']) / (1 << 30), 3), speed=float(slot['speed']),
                      workers=int(slot['workers']))
+            if inventory.DYNAMIC_CPU in common:
+                e['max_cores'] = min(sum(hi - lo + 1 for lo, hi in inventory.cpu_ranges(c))
+                                     for c in slot['cpus'])
         out.append(e)
     return out
 
@@ -1250,6 +1253,8 @@ def _pool_entry(v: object) -> bool:
     if not _counts({k: v.get(k) for k in ('registered', 'online', 'free')}):
         return False
     if not all(type(v[k]) is int and v[k] >= 0 for k in ('listening', 'yielded') if k in v):
+        return False
+    if 'max_cores' in v and (type(v['max_cores']) is not int or v['max_cores'] <= 0):
         return False
     return all(type(v[k]) in (int, float) and math.isfinite(v[k]) and v[k] > 0
                for k in ('memory_gib', 'speed', 'workers') if k in v)

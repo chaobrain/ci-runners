@@ -128,7 +128,7 @@ DOWN = ('inactive', 'failed')
 #: also a wait that ran out (the host was busy: no slot, no card, no host lock) and a request
 #: the class's row refuses (the caller's ``gpus``, ``lock`` or class, not the host)
 NOT_INFRA = ('busy', 'drained', 'project queue full', drain_mod.UNREADABLE, 'queue timeout', 'gpus ', 'lock ',
-             'this host has no compile_cpus', workers.REASON)
+             'this host has no compile_cpus', workers.REASON, inventory.CORE_REFUSAL)
 HOOK_INFRA = ('stale', 'runner', 'policy', 'inventory', 'timeout', 'error')  # the hook's refusals that are infrastructure ends
 CLUSTER = 'slurm'  # a cluster part's unavailable is the cluster's, not the host's
 YIELD_CLASSES = ('part', 'gpu', 'multi')  # the classes whose runners yield to an earlier tier (19.2)

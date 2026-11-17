@@ -88,10 +88,11 @@ from ci_runners import capacity, inventory, workers
 BASE = 'self-hosted'
 #: a need to its capability label (16.1)
 NEEDS = {'cpu': 'ci-cpu', 'gpu': 'ci-gpu', 'gpu2': 'ci-gpu2', 'timing': 'ci-timing', 'light': 'ci-light'}
+DYNAMIC_CPU = inventory.DYNAMIC_CPU
 SLURM = 'ci-slurm'
 MEM_BIG = 'mem-big'
 #: the labels a route may name: never a host's (16.1)
-SHARED = frozenset({BASE, SLURM, MEM_BIG, *NEEDS.values()})
+SHARED = frozenset({BASE, SLURM, MEM_BIG, DYNAMIC_CPU, *NEEDS.values()})
 #: a job's bound past its parts' scaled minutes (16.2)
 GRACE_MIN = 15
 #: the largest ``tier`` of a host row (``pool.TIER_MAX``)
@@ -144,7 +145,7 @@ def _workers_error(part: Mapping) -> str:
 
 
 def _capability(part: Mapping) -> str:
-    return f'ci-cpu-{part["cores"]}' if 'cores' in part else NEEDS[part['needs']]
+    return DYNAMIC_CPU if 'cores' in part else NEEDS[part['needs']]
 
 
 def load_plan(doc: object) -> list[dict]:
@@ -205,7 +206,7 @@ def _has(r, labels: Sequence[str]) -> bool:
 
 
 def _sized(labels) -> bool:
-    return any(inventory.CPU_WIDTH_LABEL.fullmatch(label) for label in labels)
+    return DYNAMIC_CPU in labels or any(inventory.CPU_WIDTH_LABEL.fullmatch(label) for label in labels)
 
 
 def _cpu(label: str) -> bool:
@@ -225,7 +226,7 @@ def _pools(r) -> list[dict] | None:
             return None
         mem, speed, y = p.get('memory_gib'), p.get('speed', 1.0), p.get('yielded')
         free = p.get('free')
-        out.append({'labels': {str(x) for x in p['labels']},
+        out.append({'labels': {str(x) for x in p['labels']}, 'max_cores': p.get('max_cores'),
                     'free': free if type(free) is int and free >= 0 else None,
                     'memory_gib': mem if _num(mem) and mem > 0 else None,
                     'speed': speed if _num(speed) and speed > 0 else 1.0,
@@ -244,6 +245,23 @@ class _Facts:
         self.cpu_booked: dict[tuple[str, int], int] = {}
         self.pool_cpu = any(_sized(r.runners) for r in self.up)
         self.jobs: dict[tuple[str, str], int] = {}  # (machine, partition) -> cluster jobs booked
+
+    def dynamic_limit(self) -> int | None:
+        """One verified maximum for the runners sharing the dynamic GitHub label."""
+        limits = set()
+        for r in _hosts(self.rows):
+            pools = [p for p in (_pools(r) or ()) if DYNAMIC_CPU in p['labels']]
+            if not pools and DYNAMIC_CPU not in r.runners:
+                continue
+            if r.age is None or any(str(x).startswith(capacity.STALE) for x in r.problems):
+                return None
+            if len(pools) != 1 or not _has(r, [DYNAMIC_CPU]):
+                return None
+            width = pools[0]['max_cores']
+            if type(width) is not int or width <= 0 or NEEDS['cpu'] not in pools[0]['labels']:
+                return None
+            limits.add(width)
+        return next(iter(limits)) if len(limits) == 1 and self.serving([DYNAMIC_CPU]) else None
 
     def serving(self, labels: Sequence[str]) -> list:
         return [r for r in self.up if _has(r, labels)]
@@ -367,6 +385,14 @@ def _route_one(f: _Facts | None, part: Mapping, unread: str, errors: list[str]) 
     cap = _capability(part)
     labels = [BASE, cap]
     out = {**part, 'labels': labels, 'where': 'host', 'target': '', 'timeout_minutes': _timeout(part['minutes'], 1.0)}
+    if 'cores' in part:
+        limit = f.dynamic_limit() if f is not None else None
+        if limit is None:
+            errors.append(f'{cap}: part {part["id"]}: no verified dynamic CPU capacity; refresh capacity and check pool labels and limits')
+            return out
+        if part['cores'] > limit:
+            errors.append(f'{cap}: part {part["id"]}: requested {part["cores"]} cores exceeds dynamic pool limit {limit}')
+            return out
     if f is None:
         out['why'] = f'capacity unreadable ({unread}): {cap}, no overflow'
         return out
@@ -487,6 +513,18 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
             'target': part.get('target', ''), 'timeout_minutes': part['timeout_minutes'], 'resume': False}
     if int(first.get('attempt') or 1) > 1 or first.get('next') not in ('retry', 'fallback') or row not in ROWS:
         return {**same, 'retry': False, 'row': row, 'labels': [], 'why': 'no retry: final, or retried once already'}
+    if 'cores' in part:
+        # Recheck shared-label eligibility even after a lost attempt; never reuse old exact labels.
+        plan = {k: v for k, v in part.items() if k in PART_KEYS}
+        try:
+            dynamic = route([plan], rows, unread)[0]
+        except RouteError as ex:
+            return {**same, 'retry': False, 'labels': [], 'why': f'dynamic CPU retry: {ex}'}
+        labels = dynamic['labels']
+        if row == 'more-memory' and MEM_BIG not in labels and rows and _Facts(rows).serving([DYNAMIC_CPU, MEM_BIG]):
+            labels = [*labels, MEM_BIG]
+        return {**same, 'labels': labels, 'where': 'host', 'target': '', 'resume': row == 'more-memory',
+                'timeout_minutes': dynamic['timeout_minutes'], 'why': f'dynamic CPU retry: {dynamic["why"]}'}
     host = str(first.get('host') or '')
 
     def yielding() -> bool:  # 19.3: the first attempt's host may be yielding to an earlier tier
@@ -506,12 +544,7 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
             return {**same, 'row': 'any', 'why': f'same host: {host} may be yielding to an earlier tier; '
                                                  'the part\'s labels again'}
         if own:
-            exact = []
-            if 'cores' in part:
-                exact = [_capability(part)]
-                if MEM_BIG in part['labels']:
-                    exact.append(MEM_BIG)
-            return {**same, 'labels': list(dict.fromkeys([BASE, *own, *exact])), 'where': 'host', 'target': '',
+            return {**same, 'labels': list(dict.fromkeys([BASE, *own])), 'where': 'host', 'target': '',
                     'why': f'same host {host}'}
         return {**same, 'row': 'any', 'why': 'same host: its labels not recorded; the part\'s labels again'}
     if row == 'more-memory':

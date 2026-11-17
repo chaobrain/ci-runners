@@ -26,9 +26,8 @@ class Plan(unittest.TestCase):
                 load(value)
 
     def test_workers_does_not_affect_route_or_admission(self):
-        base = route_fixture.part(cores=6)
-        rows = route_fixture.rows(route_fixture.host(ci_cpu=route_fixture.R(1),
-                                                   **{'ci-cpu-6': route_fixture.R(1)}))
+        base = route_fixture.part()
+        rows = route_fixture.rows(route_fixture.host(ci_cpu=route_fixture.R(1)))
         routed = route.route([base], rows)[0]
         with_workers = flow.entry(route.route([{**base, 'workers': 3}], rows)[0])
         self.assertEqual(with_workers.pop('workers'), '3')

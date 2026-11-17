@@ -175,8 +175,6 @@ CPU_WIDTH_MUTANTS = [
      'self.cpu_booked[key] = used', [f'{CPU_WIDTH}.test_shared_bookings_and_legacy_overflow']),
     ('ci_runners/route.py', "    if 'cores' in part:\n        return None, 'exact CPU width never overflows'\n",
      '', [f'{CPU_WIDTH}.test_shared_bookings_and_legacy_overflow']),
-    ('ci_runners/route.py', '                exact = [_capability(part)]',
-     '                exact = []', [f'{CPU_WIDTH}.test_retries_keep_width']),
     ('ci_runners/presence.py', '            if caps <= labels:',
      "            if {x for x in caps if not x.startswith('ci-cpu-')} <= labels:", [f'{CPU_WIDTH}.test_drain_and_tier_by_pool']),
     ('ci_runners/drain.py', '    pool = pool or inventory.pool_of(host, cls)',
@@ -800,7 +798,7 @@ MUTANTS = [
     (PRT, "    if not math.isfinite(float(table['speed'])):", "    if False:", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
     (PRT, "'timeout_minutes': round(a.timeout_minutes * self.slot.speed, 3)}", "'timeout_minutes': a.timeout_minutes * self.slot.speed}", ['tests.test_part_slots.Slots.test_the_inner_timeout_is_the_minutes_times_the_slots_speed']),
     (PRT, "        if env.get('CI_RUNNER_CARD', '') != card:", "        if False:", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
-    (PRT, "        if a.workers is None and self.slot is not None and not slot_cpus(self.slot) <= os.sched_getaffinity(0):", "        if False:", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
+    (PRT, "        if a.cores is None and a.workers is None and self.slot is not None and not slot_cpus(self.slot) <= os.sched_getaffinity(0):", "        if False:", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
     (PRT, "        if why:\n            return f'slot: {why}'", "        if False:\n            return f'slot: {why}'", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
     (PRT, "    return {c for lo, hi in inventory.cpu_ranges(slot.cpus) or () for c in range(lo, hi + 1)}", "    return {c for lo, hi in inventory.cpu_ranges(slot.cpus) or () for c in range(lo, hi)}", ['tests.test_part_slots.Pure.test_runner_slot']),
     (PRT, "        i = j + 1\n    return ','.join(out)", "        i = j + 1\n    return ' '.join(out)", ['tests.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
@@ -1872,7 +1870,7 @@ MUTANTS = [
      [f'{TM}.PerCard.test_the_early_stop_ends_a_hot_part_as_thermal']),
     (PRT, "    argv = ['taskset', '-c', cpus] if cpus else []", "    argv = []",
      [f'{TM}.Parse.test_taskset_where_the_inventory_gives_cpus', f'{TM}.PerCard.test_a_cool_card_runs_pinned_and_sampled']),
-    (PRT, " command_argv(a.command, cpus=pin if worker_spec is None else '', nice=", " command_argv(a.command, cpus='', nice=",
+    (PRT, " command_argv(a.command, cpus=pin if worker_spec is None and core_spec is None else '', nice=", " command_argv(a.command, cpus='', nice=",
      [f'{TM}.PerCard.test_a_cool_card_runs_pinned_and_sampled']),
     # the org snapshot (design §6.5): policy schema 2, the merge, the hook, claim and ci-orgsync
     (POL, "    if type(schema) is not int or schema != 2:", "    if schema != 2:", [f'{TP}.Load.test_malformed_policies']),
@@ -5184,12 +5182,45 @@ WORKER_MUTANTS = [
      [f'{TWK}.Executor.test_public_gpu_and_slurm_never_start_or_retry']),
     (PRT, "    nowhere = nowhere or bool((ex or {}).get('workers_final'))\n", '',
      [f'{TWK}.Executor.test_public_gpu_and_slurm_never_start_or_retry']),
-    ('ci_runners/presence.py', ', workers.REASON)', ')',
+    ('ci_runners/presence.py', ', workers.REASON, inventory.CORE_REFUSAL)', ', inventory.CORE_REFUSAL)',
      [f'{TWK}.Executor.test_unslotted_private_runner_can_retry_but_does_not_count_for_drain']),
     (HST, '    if a.workers is not None:', '    if False:',
      [f'{TWK}.Supervisor.test_hosted_worker_request_has_an_unavailable_artifact']),
 ]
 MUTANTS.extend(WORKER_MUTANTS)
+
+DYNAMIC = 'tests.test_dynamic_cpu'
+DYNAMIC_MUTANTS = [
+    (INV, "or len(pools_of(h, 'part')) != 1", "or False",
+     [f'{CPU_WIDTH}.test_dynamic_inventory_requires_one_private_slotted_generic_pool']),
+    (ROU, "return DYNAMIC_CPU if 'cores' in part else NEEDS[part['needs']]",
+     "return NEEDS[part['needs']]", [f'{CPU_WIDTH}.test_same_host_routes_and_binds_distinct_slots']),
+    (ROU, "if len(limits) == 1 and self.serving([DYNAMIC_CPU])", "if len(limits) > 0 and self.serving([DYNAMIC_CPU])",
+     [f'{CPU_WIDTH}.test_rejects_inconsistent_shared_label_limits']),
+    (ROU, "            return {**same, 'retry': False, 'labels': [], 'why': f'dynamic CPU retry: {ex}'}",
+     "            return same", [f'{CPU_WIDTH}.test_retries_keep_width']),
+    (FLW, "        out['cores'] = str(p['cores'])", "        out['cores'] = p['cores']",
+     [f'{CPU_WIDTH}.test_retries_keep_width']),
+    (PTW, '          target: $' + '{{ fromJSON(env.RETRY).target }}\n          cores: $' + '{{ fromJSON(inputs.part).cores }}',
+     '          target: $' + '{{ fromJSON(env.RETRY).target }}\n          cores: $' + '{{ fromJSON(env.RETRY).cores }}',
+     [f'{DYNAMIC}.Wiring.test_both_attempts_forward_the_original_core_count']),
+    (PRT, 'if self.slot is None or inventory.DYNAMIC_CPU not in (labels or ()):', 'if self.slot is None:',
+     [f'{DYNAMIC}.Executor.test_ordinary_runner_rejects_explicit_cores']),
+    (PRT, 'set(sorted(set(pin) & os.sched_getaffinity(0))[:width])', 'set(sorted(os.sched_getaffinity(0))[:width])',
+     [f'{DYNAMIC}.Wiring.test_scope_must_read_back_the_exact_selected_mask']),
+    (PRT, '        if actual != chosen:', '        if False:',
+     [f'{DYNAMIC}.Wiring.test_scope_must_read_back_the_exact_selected_mask']),
+    (PRT, 'effective = min(maximum, len(actual)) if requested is None else requested',
+     'effective = maximum if requested is None else requested',
+     [f'{DYNAMIC}.Executor.test_dynamic_core_count_controls_affinity_but_omission_does_not']),
+    (PRT, 'if requested is not None and requested > min(maximum, len(actual)):', 'if False:',
+     [f'{DYNAMIC}.Executor.test_dynamic_core_count_controls_affinity_but_omission_does_not']),
+    (PRT, "            if len(chosen) != width:", "            if not chosen:",
+     [f'{DYNAMIC}.Executor.test_concurrent_parts_meet_in_disjoint_slots_and_refuse_too_narrow_scope',
+      f'{DYNAMIC}.Executor.test_dynamic_core_count_controls_affinity_but_omission_does_not']),
+]
+MUTANTS.extend(DYNAMIC_MUTANTS)
+
 
 
 def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:

@@ -5082,9 +5082,15 @@ approval before implementation. It does not change the inventory schema.
 - Reject an explicit request if there is no verifiable slot worker cap
   or CPU affinity, or if the requested count exceeds either bound. End
   as `unavailable` before starting the user command, with a worker-capacity
-  reason. Public GitHub-hosted and Slurm parts have no slot worker cap;
-  their explicit override refusal is final and is not retried. A private
-  runner's slot mismatch can use the existing retry policy and limits.
+  reason. Public GitHub-hosted parts, public GPU pool parts and Slurm
+  parts have no slot worker cap. Each rejects an explicit override as
+  final, without retry. A private runner's slot mismatch can use the
+  existing retry policy and limits.
+- If the check after CPU pinning inside the scope fails, report a
+  structured worker-capacity rejection to the executor's outcome
+  classifier as `unavailable`, with the reason and evidence that the
+  user command did not start. A plain nonzero exit status or a log line
+  is not enough: it must not be classified as a failed or lost test.
   Worker-capacity refusals do not count as infrastructure failures and
   must not contribute to automatic host drain. None of these refusals
   changes route eligibility, labels or overflow decisions.
@@ -5105,6 +5111,8 @@ identical routing; demonstrate that a four-worker request on an
 eight-CPU slot exports `CI_WORKERS=4` and that omission keeps the slot
 default. Verify invalid input, exceeding either bound independently,
 absence of a verifiable cap, and an execution scope whose affinity is
-narrower than the runner parent's. Cover final refusals on public hosted
-and Slurm paths, exclusion from infrastructure failure counting, and
-preservation and revalidation on retry even when the first record is lost.
+narrower than the runner parent's. Verify that an in-scope refusal
+produces a structured `unavailable` result, leaves the user command
+unstarted, and does not increment the automatic drain count. Cover final
+refusals on public hosted, public GPU and Slurm paths, and preservation
+and revalidation on retry even when the first record is lost.

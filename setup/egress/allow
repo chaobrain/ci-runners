@@ -30,3 +30,8 @@ download.pytorch.org
 conda.anaconda.org
 repo.anaconda.com
 storage.googleapis.com
+
+# BrainCell documentation
+docs.python.org
+www.sphinx-doc.org
+brainx.chaobrain.com

@@ -4998,3 +4998,47 @@ uses until then.
     the runners.
     - *Follow-up for the lead:* tighten it later to `read`, with write granted by team.
       On Free that is the only way to protect each private repository's `main`.
+
+## Proposed decision: fixed-width CPU slots
+
+This proposal extends decisions 16.1–16.6 and 19. It requires lead approval
+before implementation.
+
+- Plans continue to use schema 1. A part may use `needs: cpu4` or `needs: cpu8`
+  for exactly four or eight logical CPUs, respectively. The initial route uses
+  `[self-hosted, ci-cpu4]` or `[self-hosted, ci-cpu8]`, with `mem-big` when
+  selected by the existing memory rule. Generic `needs: cpu` still routes to
+  `ci-cpu`. Sized pools may also advertise `ci-cpu` to serve generic work.
+- A host may keep its existing generic private `part` pool and add at most one
+  private `part` pool for each width. A sized pool has exactly one width
+  label, a unique host-local label for retries, and a `slot.cpus` entry of
+  the advertised width per runner. Existing cpuset overlap checks still
+  apply. `slot.workers` remains the pool operator's choice of application
+  parallelism; it does not determine CPU affinity.
+- Setup writes the exact inventory pool key into the runner environment.
+  The executor uses that key to resolve its slot index and record its pool
+  labels, rather than picking the first pool of the runner's class. Legacy
+  runners without the key retain their existing behavior on single-pool
+  hosts. On a multi-pool host an unknown or ambiguous pool must fail rather
+  than run with an unrelated cpuset. Pool-specific drain, presence and
+  capacity reporting use the same pool identity; a class-wide CPU drain
+  still covers all CPU pools.
+- Capacity and tier comparisons use the requested capability. A runner
+  with only the other width (or only the generic label) cannot satisfy the
+  sized request. Account for earlier assignments in the same plan when
+  generic and sized queues share runners. Retries must preserve the width,
+  including same-host, fallback and memory retries.
+- Sized parts stay in their own queue when full and never overflow to
+  Slurm, which does not currently promise an exact CPU width for these
+  requests. Unreadable capacity still routes to the requested label; a
+  readable snapshot with no eligible host uses the existing route error.
+  Public repositories do not gain access to private CPU pools.
+- Deploy support before adding pool configuration or using the new needs.
+  The lead applies host setup and registers the new labels; existing pools,
+  workflows and the default plan need no edit.
+
+Acceptance: one synthetic host offers four- and eight-CPU pools and shows
+both in capacity. A mixed plan routes each sized part to the matching pool,
+and a part bound to slot index 0 in each pool gets the correct distinct
+cpuset. Cover wrong-width inventory, legacy generic plans, width-preserving
+retries, and no Slurm fallback for saturated sized pools.

@@ -5053,3 +5053,66 @@ label. Index 0 resolves to a different cpuset in each pool. Cover invalid
 `cores` values, inventory with a mismatched width or overlapping cpusets,
 generic plans without `cores`, shared capacity accounting, width-preserving
 retries and tier decisions, and no Slurm fallback for a full sized pool.
+
+## Proposed decision: per-part worker count
+
+This proposal extends decisions 16.2, 16.5 and 16.6. It requires lead
+approval before implementation. It does not change the inventory schema.
+
+- Plan schema 1 accepts optional `parts[].workers`, alongside `cores`.
+  It is a positive JSON integer: reject zero, negatives, fractions, strings,
+  booleans and null in plan validation. For example, a part with
+  `"needs": "cpu", "cores": 8, "workers": 4` requests an eight-logical-CPU
+  slot and four application workers. `workers` is not specific to pytest.
+- The route preserves the field but does not use it to select labels,
+  runner capacity, a cluster target or a timeout. The same plan with and
+  without `workers` has the same routing decision. Callers that need a
+  predictable CPU slot can set `cores` separately.
+- Omitting `workers` preserves the existing execution environment: a
+  slotted runner exports its existing `slot.workers` as `CI_WORKERS`;
+  paths that currently omit it keep doing so. With an explicit value,
+  the executor must resolve the actual slot and validate the requested
+  count against both its configured `slot.workers` and the number of
+  logical CPUs available to the command. Measure CPU affinity inside the
+  actual part's systemd scope, after applying the slot's CPU pinning and
+  before starting the user command. Do not use the host-wide CPU count
+  or the runner parent's affinity. Only after the check does the command
+  receive the requested `CI_WORKERS`. The field neither changes affinity
+  nor limits programs that choose to ignore `CI_WORKERS`.
+- Reject an explicit request if there is no verifiable slot worker cap
+  or CPU affinity, or if the requested count exceeds either bound. End
+  as `unavailable` before starting the user command, with a worker-capacity
+  reason. Public GitHub-hosted parts, public GPU pool parts and Slurm
+  parts have no slot worker cap. Each rejects an explicit override as
+  final, without retry. A private runner's slot mismatch can use the
+  existing retry policy and limits.
+- If the check after CPU pinning inside the scope fails, report a
+  structured worker-capacity rejection to the executor's outcome
+  classifier as `unavailable`, with the reason and evidence that the
+  user command did not start. A plain nonzero exit status or a log line
+  is not enough: it must not be classified as a failed or lost test.
+  Worker-capacity refusals do not count as infrastructure failures and
+  must not contribute to automatic host drain. None of these refusals
+  changes route eligibility, labels or overflow decisions.
+- The original plan part is the source of truth for `workers` on every
+  attempt. Carry it through the workflow, including retries after a lost
+  attempt with no record or outcome. Record the requested and effective
+  counts for diagnosis only; do not recover the request from the first
+  attempt's record or from `CI_WORKERS`. Revalidate the original request
+  in each attempt's execution scope. Do not clamp, drop or replace it
+  with a retry runner's default.
+- Advertise this plan extension only after the workflow components and
+  host releases that accept and execute it are installed. BrainMass can
+  then describe workers in its existing coverage plan and continue to use
+  `pytest -n "$CI_WORKERS"` without a workflow-dispatch worker input.
+
+Acceptance: compare the same plan with and without `workers` to verify
+identical routing; demonstrate that a four-worker request on an
+eight-CPU slot exports `CI_WORKERS=4` and that omission keeps the slot
+default. Verify invalid input, exceeding either bound independently,
+absence of a verifiable cap, and an execution scope whose affinity is
+narrower than the runner parent's. Verify that an in-scope refusal
+produces a structured `unavailable` result, leaves the user command
+unstarted, and does not increment the automatic drain count. Cover final
+refusals on public hosted, public GPU and Slurm paths, and preservation
+and revalidation on retry even when the first record is lost.

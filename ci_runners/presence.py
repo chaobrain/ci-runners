@@ -108,7 +108,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 
 from ci_runners import drain as drain_mod
-from ci_runners import hostload, inventory, outcome, slots
+from ci_runners import hostload, inventory, outcome, slots, workers
 
 TICK_SECONDS = 20  # the default tick (presence.tick_seconds)
 INFRA_FAILURES = 3  # the default count of infrastructure ends that drain the host
@@ -128,7 +128,7 @@ DOWN = ('inactive', 'failed')
 #: also a wait that ran out (the host was busy: no slot, no card, no host lock) and a request
 #: the class's row refuses (the caller's ``gpus``, ``lock`` or class, not the host)
 NOT_INFRA = ('busy', 'drained', 'project queue full', drain_mod.UNREADABLE, 'queue timeout', 'gpus ', 'lock ',
-             'this host has no compile_cpus')
+             'this host has no compile_cpus', workers.REASON)
 HOOK_INFRA = ('stale', 'runner', 'policy', 'inventory', 'timeout', 'error')  # the hook's refusals that are infrastructure ends
 CLUSTER = 'slurm'  # a cluster part's unavailable is the cluster's, not the host's
 YIELD_CLASSES = ('part', 'gpu', 'multi')  # the classes whose runners yield to an earlier tier (19.2)

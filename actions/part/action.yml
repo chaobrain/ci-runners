@@ -10,6 +10,9 @@ inputs:
   command:
     description: run with bash -c in the job's checkout, inside the project's env
     required: true
+  workers:
+    description: optional CI_WORKERS override, bounded by the slot and its actual CPU affinity
+    default: ''
   timeout-minutes:
     description: the inner bound, below the job's timeout-minutes
     required: true
@@ -97,6 +100,7 @@ runs:
       env:
         IN_PROJECT: ${{ inputs.project }}
         IN_ID: ${{ inputs.id }}
+        IN_WORKERS: ${{ inputs.workers }}
         IN_COMMAND: ${{ inputs.command }}
         IN_TIMEOUT: ${{ inputs.timeout-minutes }}
         IN_GPUS: ${{ inputs.gpus }}
@@ -111,10 +115,12 @@ runs:
       # exec: the executor is the step's process, so the runner's signal at a cancel reaches it
       # (a shell between them would take it and orphan the executor, issue #257)
       run: >-
+        set --;
+        if [ -n "$IN_WORKERS" ]; then set -- --workers "$IN_WORKERS"; fi;
         exec "$GITHUB_ACTION_PATH/../lib/ci-run.sh" part --project "$IN_PROJECT" --id "$IN_ID" --command "$IN_COMMAND"
         --timeout-minutes "$IN_TIMEOUT" --gpus "$IN_GPUS" --gpu-mem-mib "$IN_GPU_MEM" --memory "$IN_MEMORY"
         --queue-timeout-minutes "$IN_QUEUE" --results "$IN_RESULTS"
-        --resume "$IN_RESUME" --attempt-of "$IN_ATTEMPT_OF" --lock "$IN_LOCK" --target "$IN_TARGET"
+        --resume "$IN_RESUME" --attempt-of "$IN_ATTEMPT_OF" --lock "$IN_LOCK" --target "$IN_TARGET" "$@"
     - id: upload
       if: always() && steps.part.outputs.outcome != '' && inputs.upload != 'false'
       uses: actions/upload-artifact@v4

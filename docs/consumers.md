@@ -126,7 +126,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 
 - 只在测试失败时以非零退出；
 - 收到 TERM 时停掉自己的进程树（超时会先发 TERM，30 秒后发 KILL）；
-- 用 `CUDA_VISIBLE_DEVICES` 给的卡（CPU 部件为空），不自己选卡；进程已经用 taskset 绑到 `CI_CPUS` 列出的 CPU（cpuset 列表，例如 `0-3,8-9`，不是个数；集群部件是作业在节点上分到的 CPU），定并行度时以它为准；
+- 用 `CUDA_VISIBLE_DEVICES` 给的卡（CPU 部件为空），不自己选卡；进程已经绑到 `CI_CPUS` 列出的 CPU（cpuset 列表，例如 `0-3,8-9`，不是个数；集群部件是作业在节点上分到的 CPU），定并行度时以它为准；
 - 把 JUnit XML 写进 `$CI_RESULTS_DIR`，结果会出现在 summary 里；
 - 能续跑的话，支持 `CI_RESUME=1`（OOM 之后的重试会带上它）。
 
@@ -141,7 +141,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 
 **槽位**（design 16.2，从 RUN-10 的 R2 起）。一个部件 runner 就是一个槽位：固定的一组 CPU 和一个内存上限。部件跑在这样的 runner 上时：
 
-- 进程绑到槽位的 cpuset，`CI_CPUS` 就是它；
+- 进程绑到槽位的 cpuset；显式指定 `workers` 时，`CI_CPUS` 报告绑核后实际可用的 CPU；
 - 内存上限是槽位的 `memory`；部件自己的 `memory` 更小时用它，但永远不超过 registry 的上限；
 - 内层超时是部件的 `timeout-minutes` × 槽位的 `speed`（参考主机上是 1.0）：慢的主机按比例多给时间，`timeout-minutes` 照旧写在参考主机上需要的分钟数；
 - 命令多拿到三个变量，作业自己设的同名变量不会传进来：
@@ -233,6 +233,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 | `parts[].needs` | `cpu`、`gpu`、`gpu2`、`timing`、`light` 之一（§4 的表）；`light`：跑在 `ci-light` 上，不占 slot、不用卡，`minutes` 最多 15，从不溢出到别的标签 | 是 | — | `<id>: needs 'tpu' is not one of cpu, gpu, gpu2, timing, light` |
 | `parts[].minutes` | 数，(0, 240]（`light` 为 (0, 15]）：参考主机上的时长 | 是 | — | `<id>: minutes is a number in (0, 240]`；`<id>: minutes is a number in (0, 15] for needs light` |
 | `parts[].cores` | 正整数；仅用于 `needs: cpu`。例如 `"cores": 6` 只匹配 6 个逻辑 CPU 的 `ci-cpu-6` 槽位；池满时排队，不转 Slurm | 否 | 省略时沿用 `ci-cpu` | `cores is only allowed for needs cpu`；`cores is a positive integer` |
+| `parts[].workers` | 正整数；只覆盖命令的 `CI_WORKERS`，不参与路由。每次尝试都从原计划取值；不得超过槽位的 worker 上限或绑核后实际可用的逻辑 CPU 数 | 否 | 省略时沿用槽位默认值 | 超出上限或没有槽位时，命令不会启动，结果为 `unavailable`；公开托管、公开 GPU 和 Slurm 不重试 |
 | `parts[].memory_gib` | 正数（GiB），最多 4096 | 否 | registry 的 `memory` | `<id>: memory_gib is a positive number`；`<id>: memory_gib is at most 4096` |
 | `parts[].results` | 字符串（`CI_RESULTS_DIR` 下 JUnit XML 的 glob） | 否 | 无 | `<id>: results is a string (a glob)` |
 | `parts[].queue_minutes` | 数，(0, 240]：一次尝试在主机上等 slot 或租约的上限（`part` 的 `queue-timeout-minutes`）；到了就是 `unavailable`，按重试的五行处理（同丢失的尝试一样换一台）；作业的 `timeout-minutes` 加上它 | 否 | 15 | `<id>: queue_minutes is a number in (0, 240]` |

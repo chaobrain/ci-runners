@@ -83,7 +83,7 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 
-from ci_runners import capacity, inventory
+from ci_runners import capacity, inventory, workers
 
 BASE = 'self-hosted'
 #: a need to its capability label (16.1)
@@ -103,7 +103,7 @@ LIGHT_MAX_MINUTES = 15
 NO_OVERFLOW = ('timing', 'light')
 MAX_PARTS = 256
 PART_KEYS = {'id': True, 'command': True, 'needs': True, 'minutes': True, 'memory_gib': False, 'results': False,
-             'queue_minutes': False, 'artifacts': False, 'history': False, 'cores': False}
+             'queue_minutes': False, 'artifacts': False, 'history': False, 'cores': False, 'workers': False}
 #: a plan's keys; ``schema`` and ``parts`` required (the rest the reusable workflow's, ``flow.load``)
 PLAN_KEYS = {'schema': True, 'parts': True, 'files': False, 'max_parallel': False}
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]*\Z')
@@ -139,6 +139,10 @@ def _cores_error(part: Mapping) -> str:
     return '' if type(cores) is int and cores > 0 else 'cores is a positive integer'
 
 
+def _workers_error(part: Mapping) -> str:
+    return 'workers is a positive integer' if 'workers' in part and not workers.positive(part['workers']) else ''
+
+
 def _capability(part: Mapping) -> str:
     return f'ci-cpu-{part["cores"]}' if 'cores' in part else NEEDS[part['needs']]
 
@@ -171,7 +175,7 @@ def load_plan(doc: object) -> list[dict]:
             errors.append(f'{name}: command is a non-empty string')
         if not isinstance(p['needs'], str) or p['needs'] not in NEEDS:
             errors.append(f'{name}: needs {p["needs"]!r} is not one of {", ".join(NEEDS)}')
-        if why := _cores_error(p):
+        if why := _cores_error(p) or _workers_error(p):
             errors.append(f'{name}: {why}')
         most = LIGHT_MAX_MINUTES if p['needs'] == 'light' else MAX_MINUTES
         if not _num(p['minutes']) or not 0 < p['minutes'] <= most:
@@ -420,7 +424,7 @@ def route(parts: Sequence[Mapping], rows: Sequence | None, unread: str = '') -> 
     An unknown need raises ``PlanError``."""
     bad = [f'{p.get("id")}: needs {p.get("needs")!r} is not one of {", ".join(NEEDS)}'
            for p in parts if not isinstance(p.get('needs'), str) or p['needs'] not in NEEDS]
-    bad += [f'{p.get("id")}: {why}' for p in parts if (why := _cores_error(p))]
+    bad += [f'{p.get("id")}: {why}' for p in parts if (why := _cores_error(p) or _workers_error(p))]
     if bad:
         raise PlanError('; '.join(bad))
     hosts = _hosts(rows or [])

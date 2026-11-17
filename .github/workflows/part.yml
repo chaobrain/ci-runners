@@ -82,6 +82,7 @@ jobs:
           project: ${{ inputs.project }}
           id: ${{ fromJSON(inputs.part).id }}
           command: ${{ fromJSON(inputs.part).command }}
+          workers: ${{ fromJSON(inputs.part).workers }}
           gpus: ${{ fromJSON(inputs.part).gpus }}
           memory: ${{ fromJSON(inputs.part).memory }}
           timeout-minutes: ${{ fromJSON(inputs.part).minutes }}
@@ -252,6 +253,7 @@ jobs:
           project: ${{ inputs.project }}
           id: ${{ fromJSON(inputs.part).id }}
           command: ${{ fromJSON(inputs.part).command }}
+          workers: ${{ fromJSON(inputs.part).workers }}
           gpus: ${{ fromJSON(inputs.part).gpus }}
           memory: ${{ fromJSON(env.RETRY).memory }}
           timeout-minutes: ${{ fromJSON(inputs.part).minutes }}

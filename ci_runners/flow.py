@@ -309,6 +309,8 @@ def retry_public(part: Mapping, first: Mapping) -> dict:
     row = rt.row_of(str(first.get('outcome', '')), str(first.get('next', '')))
     out = {'retry': True, 'row': row, 'labels': list(PUBLIC_LABELS[part['needs']]), 'where': 'host', 'target': '',
            'timeout_minutes': part['timeout_minutes'], 'resume': row == 'more-memory'}
+    if 'workers' in part:
+        return {**out, 'retry': False, 'labels': [], 'resume': False, 'why': 'workers is unsupported on public runners'}
     if int(first.get('attempt') or 1) > 1 or first.get('next') not in ('retry', 'fallback') or row not in rt.ROWS:
         return {**out, 'retry': False, 'labels': [], 'resume': False, 'why': 'no retry: final, or retried once already'}
     return {**out, 'why': 'a public part: its own labels again'}
@@ -816,7 +818,7 @@ def decide(part: Mapping, doc: Mapping | None, role: str, rows: Sequence | None,
     """The retry of ``part`` after its first attempt's ``doc`` (None: no outputs, lost),
     or None for no retry. Pure but for ``env``'s run names."""
     first = _first(doc, role)
-    if retries < 1:
+    if retries < 1 or ('workers' in part and part.get('where') == 'slurm'):
         return None
     q = math.ceil(float(part.get('queue') or 0))  # the route's bound without the queue, and the queue on top
     bare = {**part, 'timeout_minutes': int(part['timeout_minutes']) - q}

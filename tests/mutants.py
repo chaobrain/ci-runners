@@ -352,7 +352,7 @@ MUTANTS = [
     (HST, "            os.killpg(p.pid, signal.SIGKILL)\n        except (ProcessLookupError, PermissionError):",
      "            pass\n        except (ProcessLookupError, PermissionError):",
      [f'{TPU}.Hosted.test_nothing_the_command_leaves_behind_outlives_it']),
-    (HST, "    return 0 if outcome == 'pass' else 1", "    return 0", [f'{TPU}.Hosted.test_pass_red_and_the_outcome_the_verdict_reads']),
+    (HST, "    return 1 if outcome == 'red' else 0", "    return 0", [f'{TPU}.Hosted.test_pass_red_and_the_outcome_the_verdict_reads']),
     (HST, "'next': 'none', 'retry-on'", "'next': 'retry', 'retry-on'",
      [f'{TPU}.Hosted.test_pass_red_and_the_outcome_the_verdict_reads']),
     (HST, " or not 0 < a.timeout_minutes <= MAX_MINUTES or", " or", [f'{TPU}.Hosted.test_it_refuses_to_run_on_one_of_our_runners']),
@@ -800,7 +800,7 @@ MUTANTS = [
     (PRT, "    if not math.isfinite(float(table['speed'])):", "    if False:", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
     (PRT, "'timeout_minutes': round(a.timeout_minutes * self.slot.speed, 3)}", "'timeout_minutes': a.timeout_minutes * self.slot.speed}", ['tests.test_part_slots.Slots.test_the_inner_timeout_is_the_minutes_times_the_slots_speed']),
     (PRT, "        if env.get('CI_RUNNER_CARD', '') != card:", "        if False:", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
-    (PRT, "        if self.slot is not None and not slot_cpus(self.slot) <= os.sched_getaffinity(0):", "        if False:", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
+    (PRT, "        if a.workers is None and self.slot is not None and not slot_cpus(self.slot) <= os.sched_getaffinity(0):", "        if False:", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
     (PRT, "        if why:\n            return f'slot: {why}'", "        if False:\n            return f'slot: {why}'", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
     (PRT, "    return {c for lo, hi in inventory.cpu_ranges(slot.cpus) or () for c in range(lo, hi + 1)}", "    return {c for lo, hi in inventory.cpu_ranges(slot.cpus) or () for c in range(lo, hi)}", ['tests.test_part_slots.Pure.test_runner_slot']),
     (PRT, "        i = j + 1\n    return ','.join(out)", "        i = j + 1\n    return ' '.join(out)", ['tests.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
@@ -1664,7 +1664,7 @@ MUTANTS = [
      "return hashlib.sha256(normalise(token).encode()).hexdigest()", [f'{TI}.Deny.test_hash_is_salted_and_normalised']),
     (INV, "    return token.strip(_SEP).lower()", "    return token.lower()", [f'{TI}.Deny.test_hash_is_salted_and_normalised']),
     # the supervisor relays the command's output
-    (PRT, "preexec_fn=adj, stdout=subprocess.PIPE,\n                             stderr=subprocess.STDOUT)", "preexec_fn=adj)",
+    (PRT, "preexec_fn=adj, stdout=subprocess.PIPE,\n                             stderr=subprocess.STDOUT, env=child_env)", "preexec_fn=adj, env=child_env)",
      [f'{TT}.Execute.test_a_stopped_executor_leaves_the_part_to_salvage']),
     (PRT, "                alive = False\n", "                return\n", [f'{TT}.Execute.test_a_stopped_executor_leaves_the_part_to_salvage']),
     # the actions and their launcher
@@ -1872,7 +1872,7 @@ MUTANTS = [
      [f'{TM}.PerCard.test_the_early_stop_ends_a_hot_part_as_thermal']),
     (PRT, "    argv = ['taskset', '-c', cpus] if cpus else []", "    argv = []",
      [f'{TM}.Parse.test_taskset_where_the_inventory_gives_cpus', f'{TM}.PerCard.test_a_cool_card_runs_pinned_and_sampled']),
-    (PRT, " command_argv(a.command, cpus=pin, nice=", " command_argv(a.command, cpus='', nice=",
+    (PRT, " command_argv(a.command, cpus=pin if worker_spec is None else '', nice=", " command_argv(a.command, cpus='', nice=",
      [f'{TM}.PerCard.test_a_cool_card_runs_pinned_and_sampled']),
     # the org snapshot (design §6.5): policy schema 2, the merge, the hook, claim and ci-orgsync
     (POL, "    if type(schema) is not int or schema != 2:", "    if schema != 2:", [f'{TP}.Load.test_malformed_policies']),
@@ -4131,8 +4131,8 @@ MUTANTS = [
      [f'{TRO}.Plan.test_each_fault_is_named']),
     (ROU, "        bad = sorted(set(p) - set(PART_KEYS))", "        bad = []", [f'{TRO}.Plan.test_each_fault_is_named']),
     # #228: a part's checkout depth from the plan's history; no credential kept
-    (ROU, "             'queue_minutes': False, 'artifacts': False, 'history': False, 'cores': False}",
-     "             'queue_minutes': False, 'artifacts': False, 'cores': False}",
+    (ROU, "             'queue_minutes': False, 'artifacts': False, 'history': False, 'cores': False, 'workers': False}",
+     "             'queue_minutes': False, 'artifacts': False, 'cores': False, 'workers': False}",
      [f'{TRO}.Labels.test_the_part_keeps_its_own_keys']),
     (ROU, "        if 'history' in p and not isinstance(p['history'], bool):",
      '        if False:',
@@ -4481,7 +4481,7 @@ MUTANTS = [
      [f'{TFL}.Plan.test_a_route_error_is_an_error_naming_the_label']),
     (FLW, "    most = proj.max_parallel if proj is not None else MAX_PARALLEL", "    most = MAX_PARALLEL",
      [f'{TFL}.Plan.test_the_matrix_carries_what_part_yml_reads']),
-    (FLW, "    if retries < 1:\n        return None", "    if False:\n        return None",
+    (FLW, "    if retries < 1 or ('workers' in part and part.get('where') == 'slurm'):\n        return None", "    if False:\n        return None",
      [f'{TFL}.Retry.test_the_registry_may_allow_none']),
     (FLW, "    if first.get('record'):", "    if False:", [f'{TFL}.Retry.test_any_row_on_the_parts_labels_naming_the_first_record']),
     (FLW, "    return f'{role}:{env.get(\"GITHUB_REPOSITORY\", \"\").lower()}/{run}/{part_id}-1'", "    return ''",
@@ -5001,8 +5001,8 @@ MUTANTS = [
      '            pass\n    call = call or github.api', [f'{TFE}.Fetch.test_one_kept_client_serves_the_listing_and_the_zip']),
     (PTW, "          command: retry\n          token: ''  # no token",
      "          command: retry\n          # token: ''  # no token", [f'{TRU}.Structure.test_the_token_reaches_the_files_step_alone']),
-    (PTW, "      - if: fromJSON(inputs.part).files && steps.files.outputs.fallback == 'true'\n        uses: actions/download-artifact@v4\n        with:\n          name: ci-plan-files\n          path: ${{ runner.temp }}/ci-runners-files\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@v1\n        env:\n          CIRUNNERS_FILES: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}\n        with:\n          project: ${{ inputs.project }}\n          id: ${{ fromJSON(inputs.part).id }}\n          command: ${{ fromJSON(inputs.part).command }}\n          gpus: ${{ fromJSON(inputs.part).gpus }}\n          memory: ${{ fromJSON(inputs.part).memory }}",
-     "      - if: fromJSON(inputs.part).files\n        uses: actions/download-artifact@v4\n        with:\n          name: ci-plan-files\n          path: ${{ runner.temp }}/ci-runners-files\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@v1\n        env:\n          CIRUNNERS_FILES: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}\n        with:\n          project: ${{ inputs.project }}\n          id: ${{ fromJSON(inputs.part).id }}\n          command: ${{ fromJSON(inputs.part).command }}\n          gpus: ${{ fromJSON(inputs.part).gpus }}\n          memory: ${{ fromJSON(inputs.part).memory }}", [f'{TRU}.Structure.test_each_attempt_gets_the_files_the_queue_bound_and_uploads_its_artifacts']),
+    (PTW, "      - if: fromJSON(inputs.part).files && steps.files.outputs.fallback == 'true'\n        uses: actions/download-artifact@v4\n        with:\n          name: ci-plan-files\n          path: ${{ runner.temp }}/ci-runners-files\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@v1\n        env:\n          CIRUNNERS_FILES: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}\n        with:\n          project: ${{ inputs.project }}\n          id: ${{ fromJSON(inputs.part).id }}\n          command: ${{ fromJSON(inputs.part).command }}\n          workers: ${{ fromJSON(inputs.part).workers }}\n          gpus: ${{ fromJSON(inputs.part).gpus }}\n          memory: ${{ fromJSON(inputs.part).memory }}",
+     "      - if: fromJSON(inputs.part).files\n        uses: actions/download-artifact@v4\n        with:\n          name: ci-plan-files\n          path: ${{ runner.temp }}/ci-runners-files\n      - id: part\n        uses: chaobrain/ci-runners/actions/part@v1\n        env:\n          CIRUNNERS_FILES: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}\n        with:\n          project: ${{ inputs.project }}\n          id: ${{ fromJSON(inputs.part).id }}\n          command: ${{ fromJSON(inputs.part).command }}\n          workers: ${{ fromJSON(inputs.part).workers }}\n          gpus: ${{ fromJSON(inputs.part).gpus }}\n          memory: ${{ fromJSON(inputs.part).memory }}", [f'{TRU}.Structure.test_each_attempt_gets_the_files_the_queue_bound_and_uploads_its_artifacts']),
     (PTW, '    # reads them holds the token, the command never does\n    permissions:\n      contents: read\n      actions: read\n    outputs:\n      outcome: ${{ steps.part.outputs.outcome }}\n      # its outcome',
      '    # reads them holds the token, the command never does\n    permissions:\n      contents: read\n      actions: write\n    outputs:\n      outcome: ${{ steps.part.outputs.outcome }}\n      # its outcome', [f'{TRU}.Structure.test_permissions_explicit_and_least']),
     (AFL, '        [ -z "$IN_DEST" ] || args+=("--dest=$IN_DEST")\n',
@@ -5153,6 +5153,39 @@ MUTANTS = [
 ]
 
 MUTANTS.extend(CPU_WIDTH_MUTANTS)
+
+
+# The explicit workers request: every execution path sees the original plan, and the
+# command never starts when its runner cannot honor it.
+TWK = 'tests.test_workers'
+RETRY_WORKERS = '          workers: ${{ fromJSON(inputs.part).workers }}\n          gpus: ${{ fromJSON(inputs.part).gpus }}\n          memory: ${{ fromJSON(env.RETRY).memory }}\n          timeout-minutes: ${{ fromJSON(inputs.part).minutes }}\n          queue-timeout-minutes: ${{ fromJSON(inputs.part).queue }}\n'
+WORKER_MUTANTS = [
+    ('ci_runners/workers.py', 'type(value) is int', 'isinstance(value, int)',
+     [f'{TWK}.Plan.test_positive_json_integer']),
+    (FLW, '    out = dict(p)\n', "    out = {k: v for k, v in p.items() if k != 'workers'}\n",
+     [f'{TWK}.Plan.test_workers_does_not_affect_route_or_admission']),
+    (PTW, RETRY_WORKERS, RETRY_WORKERS.replace('inputs.part).workers', 'env.RETRY).workers'),
+     [f'{TWK}.Plan.test_retry_uses_the_original_part_even_without_an_artifact']),
+    (FLW, "    if 'workers' in part:\n        return {**out", "    if False:\n        return {**out",
+     [f'{TWK}.Plan.test_public_and_slurm_are_final_even_without_an_artifact']),
+    (FLW, " or ('workers' in part and part.get('where') == 'slurm')", "",
+     [f'{TWK}.Plan.test_public_and_slurm_are_final_even_without_an_artifact']),
+    (PRT, "'CI_WORKERS': str(requested)", "'CI_WORKERS': str(maximum)",
+     [f'{TWK}.Executor.test_child_inherits_the_checked_pin_and_worker_override']),
+    (PRT, '        if requested > maximum:', '        if False:',
+     [f'{TWK}.Executor.test_slot_limit_is_checked_on_each_attempt']),
+    (PRT, '        if requested > len(actual):', '        if requested > len(pin):',
+     [f'{TWK}.Supervisor.test_narrowed_affinity_is_checked_after_pinning_without_starting_command']),
+    (PRT, '                if cls == slurmpart.CLASS or public_gpu:', '                if cls == slurmpart.CLASS:',
+     [f'{TWK}.Executor.test_public_gpu_and_slurm_never_start_or_retry']),
+    (PRT, "    nowhere = nowhere or bool((ex or {}).get('workers_final'))\n", '',
+     [f'{TWK}.Executor.test_public_gpu_and_slurm_never_start_or_retry']),
+    ('ci_runners/presence.py', ', workers.REASON)', ')',
+     [f'{TWK}.Executor.test_unslotted_private_runner_can_retry_but_does_not_count_for_drain']),
+    (HST, '    if a.workers is not None:', '    if False:',
+     [f'{TWK}.Supervisor.test_hosted_worker_request_has_an_unavailable_artifact']),
+]
+MUTANTS.extend(WORKER_MUTANTS)
 
 
 def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:

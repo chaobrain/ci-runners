@@ -50,7 +50,7 @@ from ci_runners import envuse, inventory, locks, outcome, registry, slots
 from ci_runners import p2p as p2p_mod
 from ci_runners import setup as setup_mod
 from ci_runners import sampler as sampler_mod
-from ci_runners import slurmpart, slurmsite
+from ci_runners import slurmpart, slurmsite, workers
 
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 #: a part record of any host, ``<role>:<owner>/<repo>/<run>-<run attempt>/<id>-<attempt>``
@@ -475,7 +475,14 @@ def run_p2p(argv: Sequence[str], bound: float) -> str:
     return last.removeprefix('p2p: ') or f'the self-test exited {child.returncode}'
 
 
-def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0, p2p: Sequence[str] = ()) -> int:
+def worker_exit(record: str, requested: int, why: str, *, final: bool = False) -> dict:
+    ex = {**workers.refusal(requested, why), 'workers_final': final, 'end_epoch': time.time(), 'boot_end': boot_id()}
+    _write_json(os.path.join(record, 'exit.json'), ex)
+    return ex
+
+
+def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0, p2p: Sequence[str] = (),
+              worker_spec: tuple[int, int, Sequence[int]] | None = None) -> int:
     """Run ``argv`` in its own session with OOM score +500, end it at ``timeout``, and
     write ``exit.json``. Runs inside the part's scope, in a session of its own, so the
     job's signals (a cancel, a stopped runner) do not reach it: only a stop of the scope
@@ -513,6 +520,26 @@ def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0, p2
         with open('/proc/self/oom_score_adj', 'w') as f:
             f.write('500')
     timed_out = False
+    worker_info = {}
+    child_env = None
+    if worker_spec is not None:
+        requested, maximum, pin = worker_spec
+        if requested > maximum:
+            worker_exit(record, requested, f'requested {requested}; slot worker limit is {maximum}')
+            return 0
+        try:
+            os.sched_setaffinity(0, pin)
+            actual = os.sched_getaffinity(0)
+        except OSError:
+            worker_exit(record, requested, 'could not pin CPUs or read affinity inside the part scope')
+            return 0
+        if requested > len(actual):
+            worker_exit(record, requested, f'requested {requested}; only {len(actual)} CPUs available after pinning')
+            return 0
+        cpus = cpu_list(actual)
+        child_env = {**os.environ, 'CI_WORKERS': str(requested)}
+        worker_info = {'workers': {'requested': requested, 'effective': requested, 'command_started': True,
+                                   'cpus': cpus}}
     if p2p:
         why = run_p2p(p2p, p2p_mod.BOUND)
         if why or signalled:
@@ -521,7 +548,7 @@ def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0, p2
                                                              'boot_end': boot_id()})
             return 0
     child = subprocess.Popen(list(argv), start_new_session=True, preexec_fn=adj, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT)
+                             stderr=subprocess.STDOUT, env=child_env)
     if signalled:  # a signal before the command's process was known: end it now
         try:
             os.killpg(child.pid, signal.SIGTERM)
@@ -572,7 +599,7 @@ def supervise(record: str, timeout: float, argv: Sequence[str], cap: int = 0, p2
         pass
     if mcap is not None and mcap.killed:
         oom_kills += 1
-    _write_json(os.path.join(record, 'exit.json'), {'rc': rc, 'timed_out': timed_out, 'oom_kills': oom_kills,
+    _write_json(os.path.join(record, 'exit.json'), {**worker_info, 'rc': rc, 'timed_out': timed_out, 'oom_kills': oom_kills,
                                                      'signalled': bool(signalled), 'end_epoch': time.time(),
                                                      'boot_end': boot_id()})
     return rc if rc >= 0 else 128 - rc
@@ -904,6 +931,7 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
     if o.kind == 'lost' and ex and ex.get('red'):  # a slurm job's time limit (decision 14.4)
         o = outcome.Outcome('red', str(ex['red']))
     attempt = int(rec.get('attempt', 1))
+    nowhere = nowhere or bool((ex or {}).get('workers_final'))
     h = outcome.hint(o.kind, attempt=attempt, retries=int(rec.get('retries', 1)), cool_card=cool_card is not None,
                      host_fault=bool(p2p) or nowhere, retry_here=bool(ex and ex.get('retry_here')))
     cls, role = str(rec.get('class', '')), str(rec.get('host', ''))
@@ -921,7 +949,8 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
         retry_on = []
     peak = rec.get('peak_c') or {}
     run_seconds = int(max(0.0, end - float(rec['run_epoch']))) if rec.get('run_epoch') else 0
-    return {'outcome': o.kind, 'reason': o.reason, 'next': h.next, 'retry-on': retry_on, 'host': role,
+    worker_info = {'workers': ex['workers']} if ex and 'workers' in ex else {}
+    return {**worker_info, 'outcome': o.kind, 'reason': o.reason, 'next': h.next, 'retry-on': retry_on, 'host': role,
             'gpus': ','.join(str(c) for c in rec.get('cards', [])), 'queue-seconds': int(rec.get('queue_seconds', 0)),
             'run-seconds': run_seconds,
             'record': f'{role}:{record_ref(record)}', 'summary': f'{record_ref(record)}/summary.md', 'attempt': attempt,
@@ -964,6 +993,7 @@ class Inputs:
     attempt_of: str = ''
     lock: str = ''  # empty: the class's default, ``x`` on ``compile``, else ``none`` (design §4.3)
     target: str = ''  # a slurm part's targets, in the order to try (decision 14.2)
+    workers: int | None = None
 
 
 def parse_args(argv: Sequence[str]) -> Inputs:
@@ -981,9 +1011,10 @@ def parse_args(argv: Sequence[str]) -> Inputs:
     p.add_argument('--attempt-of', default='')
     p.add_argument('--lock', choices=('', *LOCKS), default='')
     p.add_argument('--target', default='')
+    p.add_argument('--workers', type=workers.cli_count)
     a = p.parse_args(list(argv))
     return Inputs(a.project, a.command, a.id, a.timeout_minutes, a.gpus, a.gpu_mem_mib, a.memory,
-                  a.queue_timeout_minutes, a.results, a.resume == 'true', a.attempt_of, a.lock, a.target)
+                  a.queue_timeout_minutes, a.results, a.resume == 'true', a.attempt_of, a.lock, a.target, a.workers)
 
 
 def queue_capped(inv: inventory.Inventory, runner: str) -> bool:
@@ -1114,7 +1145,7 @@ class Executor:
         self.slot, why = runner_slot(h, cls, self.env)
         if why:
             return f'slot: {why}'
-        if self.slot is not None and not slot_cpus(self.slot) <= os.sched_getaffinity(0):
+        if a.workers is None and self.slot is not None and not slot_cpus(self.slot) <= os.sched_getaffinity(0):
             return f'slot: slot {self.slot.index}\'s cpus {self.slot.cpus} are not all CPUs this runner may use'
         return ''
 
@@ -1291,14 +1322,28 @@ class Executor:
         hold: locks.HostLock | None = None  # the host lock, held for the whole command (design §5.5 item 3)
         rec['lock'] = lock
         try:
+            if a.workers is not None:
+                public_gpu = cls == 'gpu' and self.env.get('RUNNER_NAME', '').startswith(
+                    f'{self.inv.this}{inventory.PUBLIC_HOST_SUFFIX}')
+                if cls == slurmpart.CLASS or public_gpu:
+                    runner = 'Slurm' if cls == slurmpart.CLASS else 'public GPU'
+                    ex = worker_exit(record, a.workers, f'no slot worker limit on {runner} runners', final=True)
+                    return self._end(record, rec, a, ex=ex)
             free = shutil.disk_usage(h['data']).free / (1 << 30)
             if free < h['disk_min_gib']:
                 return self._end(record, rec, a, unavailable=f'low disk: {free:.0f} GiB free under the data directory')
             if cls == slurmpart.CLASS:  # one batch job on a Slurm cluster (decision 14.3)
                 return self._slurm(a, proj, memory, record, rec, work, lock)
             why = self.gate(a, cls, lock)
-            if why:
+            if why and not (a.workers is not None and why.startswith('slot: ')):
                 return self._end(record, rec, a, unavailable=why)
+            worker_spec = None
+            if a.workers is not None:
+                if self.slot is None:
+                    detail = f' ({why})' if why else ''
+                    ex = worker_exit(record, a.workers, f'this runner has no verifiable slot worker limit{detail}')
+                    return self._end(record, rec, a, ex=ex)
+                worker_spec = (a.workers, self.slot.workers, sorted(slot_cpus(self.slot)))
             if self.slot is not None:  # its pin, cap and timeout below are the slot's (16.2)
                 memory = slot_memory(self.slot, a.memory, proj.memory_max)
                 rec['runner_slot'] = {**self.slot.record(), 'memory': memory,
@@ -1434,16 +1479,22 @@ class Executor:
                            results=results, cards=cards,
                            cpus=cpus, files=h['files'], slot=slot_path, resume=a.resume,
                            held=hold.mode if hold else '', runner=self.slot)
-            inner = command_argv(a.command, cpus=pin, nice=0 if cls == 'compile' else 10)
+            # With an override, the in-scope supervisor pins itself and the command inherits its mask.
+            inner = command_argv(a.command, cpus=pin if worker_spec is None else '', nice=0 if cls == 'compile' else 10)
             cap = registry.memory_bytes(memory) if self.caps_memory() else 0
             p2p = self.p2p if cls in P2P_CLASSES else []
             # the inner timeout: the plan's minutes, times the slot's speed on a runner with one (16.2)
             timeout = a.timeout_minutes * 60 if self.slot is None else a.timeout_minutes * 60 * self.slot.speed
+            supervisor_args = json.dumps(p2p)
+            supervisor_call = 'json.loads(sys.argv[4])))'
+            if worker_spec is not None:
+                supervisor_args = json.dumps([p2p, worker_spec])
+                supervisor_call = '*json.loads(sys.argv[4])))'
             sup = [sys.executable, '-I', '-c', 'import json, sys; sys.path.insert(0, sys.argv.pop(1)); '
                    'from ci_runners.part import supervise; '
                    'sys.exit(supervise(sys.argv[1], float(sys.argv[2]), sys.argv[5:], int(sys.argv[3]), '
-                   'json.loads(sys.argv[4])))',
-                   self.release, record, str(timeout), str(cap), json.dumps(p2p), *inner]
+                   + supervisor_call,
+                   self.release, record, str(timeout), str(cap), supervisor_args, *inner]
             run_id = f'{os.path.basename(os.path.dirname(record))}-{attempt}'
             self.unit = unit_name(self.env.get('RUNNER_NAME', ''), a.id, run_id) if self.scope else ''
             rec['unit'] = self.unit

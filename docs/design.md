@@ -5116,3 +5116,68 @@ produces a structured `unavailable` result, leaves the user command
 unstarted, and does not increment the automatic drain count. Cover final
 refusals on public hosted, public GPU and Slurm paths, and preservation
 and revalidation on retry even when the first record is lost.
+
+## Proposed decision: fixed CPU slots with per-part affinity
+
+This proposal extends the sized CPU pools and per-part worker count decisions.
+It needs lead approval before implementation. A participating host uses one
+generic CPU pool with multiple runners. Each runner keeps its fixed,
+non-overlapping slot CPU set. A part cannot span slots, and other parts do
+not reuse CPUs left unused within its slot. Keep the shared task-slot queue,
+project caps, slot memory and speed, and existing queue and run time limits.
+
+- **Opt in by capability.** The participating pool advertises both
+  `ci-cpu` and `ci-cpu-dynamic`. No runner is registered per width.
+  Keep existing `ci-cpu-N` pools as a compatibility path: if live capacity
+  proves an exact-width pool serves a request, preserve that route and its
+  queue behavior. Otherwise use the dynamic capability if live capacity
+  proves it is served and the requested width fits. On unreadable or stale
+  capacity, keep the old exact-width label. Never route an explicit width
+  to unconstrained generic CPU, public runners or Slurm.
+- **Advertise a safe maximum.** Advertise the minimum logical CPU count
+  across the pool's fixed slots because GitHub can choose any eligible
+  runner. For the pilot, all runners carrying the dynamic capability must
+  support the same maximum request size. Do not admit a host with a lower
+  maximum under the same label. The planner rejects a request above that
+  maximum when no exact pool serves it. Advertised capacity is not an
+  admission guarantee, so check the chosen slot and scope on each attempt.
+  Consumers do not name labels or hosts in their plans.
+- **Pin inside the scope.** For a positive integer `cores: N` on the
+  dynamic path, resolve the runner's fixed slot and take one shared task
+  slot. Inside the part scope, intersect the slot CPU set with the
+  effective CPU affinity and select the lowest N logical CPU IDs. Pin
+  before running the command and read back the affinity; require the
+  result to equal the selected N CPUs. Export the measured mask as
+  `CI_CPUS`. The policy does not promise distinct physical cores or
+  NUMA placement. If a slot or mask cannot be verified or cannot fit N,
+  report structured `unavailable` with `command_started: false`.
+  This refusal does not count toward infrastructure failure or drain.
+- **Defaults and retries.** Omitting `cores` preserves generic routing
+  and the full slot mask. Omitting both fields preserves the existing
+  worker default. On the dynamic path with explicit `cores` and omitted
+  `workers`, use the smaller of the slot worker default and actual width.
+  Explicit `workers` never affects routing or affinity; it must fit the
+  slot worker limit and actual width. Both explicit counts come from the
+  original plan on every attempt, including when the first record is lost.
+  Transport exact counts as decimal strings. Preserve the existing retry
+  limit and exact-width requirement; vary the chosen path only if it can
+  still satisfy that requirement.
+- **Private pilot.** Use PRO 6000 as the first opt-in host, with one
+  generic CPU pool and fixed slots. Choose the common maximum from the
+  actual slot layout at rollout. Do not assume the current trial masks,
+  slot count or worker limits are production values. Use a canary where
+  no eligible static pool shadows the intended dynamic route; confirm
+  the host in the result. Install matching workflow and executor support
+  before registering or relabelling any runners. Host changes and the
+  live canary require lead approval. This draft does not change the
+  pending release stamp.
+
+Acceptance: route 4, 6 and 8 logical CPU requests to the same dynamic
+capability in an offline fixture; reject a width above the advertised limit.
+Verify the existing exact-width route, unknown capacity and omitted cores.
+Run concurrent parts in disjoint slots and confirm neither borrows unused
+CPUs from the other. In a narrowed scope, fail before launch if fewer than
+N CPUs remain. Verify `CI_CPUS` against the measured mask; cover the worker
+default, a worker count that fits, and refusal above each bound. Compare
+routes with and without workers. After a lost first attempt, confirm the
+retry keeps and revalidates both counts.

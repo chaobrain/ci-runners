@@ -118,7 +118,7 @@ LOAD_SECONDS = 1.0  # s: the load sample of a slot's CPUs
 LOAD_ON, LOAD_OFF = 0.5, 0.25  # a slot's CPUs busy with others: holds at half of them, clears below a quarter
 HOLD = 77  # check's exit while a cause holds: ExecCondition= skips the start (1-254), and no other error maps to it
 LOST_HORIZON = 12 * 3600  # s: the part records read for a lost part (the longest part, 600 min, and its queue)
-SLOT_CLASSES = ('part', 'compile')  # the classes whose parts take one host CI slot (part.SLOT_CLASSES)
+SLOT_CLASSES = inventory.CI_SLOT_CLASSES
 EVERY_SLOT = 'nightly'  # the class whose part takes every slot (part.EVERY_SLOT)
 CARD_CLASSES = {'gpu', 'multi'}  # the classes whose runners lease cards: its own (gpu), every card (multi)
 TIMING = 'compile'  # the exclusive timing class (16.1 ci-timing)
@@ -570,7 +570,7 @@ def causes(inv: inventory.Inventory, rs: Sequence[Runner], f: Facts, units: Mapp
     out: dict[str, list[str]] = {}
     for r in rs:
         why = []
-        d = drain_mod.refusal(f.drain, h, r.cls)
+        d = drain_mod.refusal(f.drain, h, r.cls, r.pool)
         if d:
             why.append(d)
         if f.health:

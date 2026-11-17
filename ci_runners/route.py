@@ -83,7 +83,7 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 
-from ci_runners import capacity
+from ci_runners import capacity, inventory
 
 BASE = 'self-hosted'
 #: a need to its capability label (16.1)
@@ -103,7 +103,7 @@ LIGHT_MAX_MINUTES = 15
 NO_OVERFLOW = ('timing', 'light')
 MAX_PARTS = 256
 PART_KEYS = {'id': True, 'command': True, 'needs': True, 'minutes': True, 'memory_gib': False, 'results': False,
-             'queue_minutes': False, 'artifacts': False, 'history': False}
+             'queue_minutes': False, 'artifacts': False, 'history': False, 'cores': False}
 #: a plan's keys; ``schema`` and ``parts`` required (the rest the reusable workflow's, ``flow.load``)
 PLAN_KEYS = {'schema': True, 'parts': True, 'files': False, 'max_parallel': False}
 ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]*\Z')
@@ -128,6 +128,19 @@ class RouteError(ValueError):
 
 def _num(v: object) -> bool:
     return type(v) in (int, float) and math.isfinite(v)
+
+
+def _cores_error(part: Mapping) -> str:
+    if 'cores' not in part:
+        return ''
+    if part.get('needs') != 'cpu':
+        return 'cores is only allowed for needs cpu'
+    cores = part['cores']
+    return '' if type(cores) is int and cores > 0 else 'cores is a positive integer'
+
+
+def _capability(part: Mapping) -> str:
+    return f'ci-cpu-{part["cores"]}' if 'cores' in part else NEEDS[part['needs']]
 
 
 def load_plan(doc: object) -> list[dict]:
@@ -158,6 +171,8 @@ def load_plan(doc: object) -> list[dict]:
             errors.append(f'{name}: command is a non-empty string')
         if not isinstance(p['needs'], str) or p['needs'] not in NEEDS:
             errors.append(f'{name}: needs {p["needs"]!r} is not one of {", ".join(NEEDS)}')
+        if why := _cores_error(p):
+            errors.append(f'{name}: {why}')
         most = LIGHT_MAX_MINUTES if p['needs'] == 'light' else MAX_MINUTES
         if not _num(p['minutes']) or not 0 < p['minutes'] <= most:
             errors.append(f'{name}: minutes is a number in (0, {most}]' + (' for needs light' if most != MAX_MINUTES else ''))
@@ -177,7 +192,20 @@ def _hosts(rows: Sequence) -> list:
 
 
 def _has(r, labels: Sequence[str]) -> bool:
-    return all(r.runners.get(lb) is not None and r.runners[lb].registered > 0 for lb in labels)
+    if not all(r.runners.get(lb) is not None and r.runners[lb].registered > 0 for lb in labels):
+        return False
+    pools = _pools(r)
+    if pools is not None and any(_sized(p['labels']) for p in pools) and _cpu(labels[0]):
+        return any(set(labels) <= p['labels'] for p in pools)
+    return True
+
+
+def _sized(labels) -> bool:
+    return any(inventory.CPU_WIDTH_LABEL.fullmatch(label) for label in labels)
+
+
+def _cpu(label: str) -> bool:
+    return label == NEEDS['cpu'] or _sized([label])
 
 
 def _pools(r) -> list[dict] | None:
@@ -192,7 +220,9 @@ def _pools(r) -> list[dict] | None:
         if not isinstance(p, dict) or not isinstance(p.get('labels'), list):
             return None
         mem, speed, y = p.get('memory_gib'), p.get('speed', 1.0), p.get('yielded')
+        free = p.get('free')
         out.append({'labels': {str(x) for x in p['labels']},
+                    'free': free if type(free) is int and free >= 0 else None,
                     'memory_gib': mem if _num(mem) and mem > 0 else None,
                     'speed': speed if _num(speed) and speed > 0 else 1.0,
                     'yielded': y if type(y) is int and y > 0 else 0})
@@ -207,6 +237,8 @@ class _Facts:
         self.up = [r for r in _hosts(self.rows) if not r.down]
         self.unknown = [r for r in self.up if not r.runners]  # up, its runner table not read
         self.booked: dict[str, int] = {}  # capability label (or ci-slurm) -> runners booked by this plan
+        self.cpu_booked: dict[tuple[str, int], int] = {}
+        self.pool_cpu = any(_sized(r.runners) for r in self.up)
         self.jobs: dict[tuple[str, str], int] = {}  # (machine, partition) -> cluster jobs booked
 
     def serving(self, labels: Sequence[str]) -> list:
@@ -216,11 +248,36 @@ class _Facts:
         """Proven: no host that is up serves ``labels``, and none might."""
         return not self.serving(labels) and not self.unknown
 
+    def cpu_buckets(self, labels: Sequence[str]) -> list[tuple[bool, tuple[str, int], int | None]]:
+        # Old hosts only advertise generic capacity. On a sized host use the
+        # same pool bucket for either label so generic and sized work share it.
+        buckets = []
+        for r in self.serving(labels):
+            pools = _pools(r)
+            if pools is not None and any(_sized(p['labels']) for p in pools):
+                for i, p in enumerate(pools):
+                    if set(labels) <= p['labels']:
+                        free = p['free']
+                        buckets.append((_sized(p['labels']), (r.key, i),
+                                        None if free is None else free + p['yielded']))
+            else:
+                counts = [r.runners[lb].free for lb in labels]
+                free = None if None in counts or _sized(r.runners) else min(counts)
+                if free is not None:
+                    free += sum(p['yielded'] for p in pools or [] if set(labels) <= p['labels'])
+                buckets.append((False, (r.key, -1), free))
+        return buckets
+
     def free(self, labels: Sequence[str]) -> int | None:
         """The free runners of ``labels`` and the yielded ones (19.3) left after the
         bookings, or None where unknown."""
         if self.unknown:
             return None
+        if self.pool_cpu and _cpu(labels[0]):
+            buckets = self.cpu_buckets(labels)
+            if any(n is None for _, _, n in buckets):
+                return None
+            return sum(max(0, n - self.cpu_booked.get(k, 0)) for _, k, n in buckets)
         total = 0
         for r in self.serving(labels):
             counts = [r.runners[lb].free for lb in labels]
@@ -229,7 +286,16 @@ class _Facts:
             total += min(counts) + sum(p['yielded'] for p in _pools(r) or [] if set(labels) <= p['labels'])
         return max(0, total - self.booked.get(labels[0], 0))
 
-    def book(self, label: str) -> None:
+    def book(self, label: str, extras: Sequence[str] = ()) -> None:
+        if self.pool_cpu and _cpu(label):
+            # Prefer generic-only slots for generic work. This is planning
+            # accounting, not a reservation on GitHub's runner queue.
+            for _, key, free in sorted(self.cpu_buckets([label, *extras])):
+                used = self.cpu_booked.get(key, 0)
+                if free is not None and used < free:
+                    self.cpu_booked[key] = used + 1
+                    break
+            return
         self.booked[label] = self.booked.get(label, 0) + 1
 
     def slots(self, cap: str) -> list[dict] | None:
@@ -264,6 +330,8 @@ def _target_kind_fits(need: str, t) -> bool:
 def _overflow(f: _Facts, part: Mapping, labels: Sequence[str]) -> tuple[object, str]:
     """The cluster target a part overflows to, or (None, why not)."""
     need = part['needs']
+    if 'cores' in part:
+        return None, 'exact CPU width never overflows'
     if need in NO_OVERFLOW:
         return None, f'{need} never overflows'
     if not f.serving([SLURM]):
@@ -292,7 +360,7 @@ def _overflow(f: _Facts, part: Mapping, labels: Sequence[str]) -> tuple[object, 
 
 
 def _route_one(f: _Facts | None, part: Mapping, unread: str, errors: list[str]) -> dict:
-    cap = NEEDS[part['needs']]
+    cap = _capability(part)
     labels = [BASE, cap]
     out = {**part, 'labels': labels, 'where': 'host', 'target': '', 'timeout_minutes': _timeout(part['minutes'], 1.0)}
     if f is None:
@@ -327,13 +395,13 @@ def _route_one(f: _Facts | None, part: Mapping, unread: str, errors: list[str]) 
     out['timeout_minutes'] = _timeout(part['minutes'], f.speed(labels[1:]))
     free = f.free(labels[1:])
     if free is None or free > 0:
-        f.book(cap)
+        f.book(cap, labels[2:])
         notes.append('free runner unknown' if free is None else f'{free} free')
         out['why'] = '; '.join(notes)
         return out
     t, why = _overflow(f, part, labels)
     if t is None:
-        f.book(cap)
+        f.book(cap, labels[2:])
         out['why'] = '; '.join([*notes, f'0 free; {why}'])
         return out
     f.book(SLURM)
@@ -352,6 +420,7 @@ def route(parts: Sequence[Mapping], rows: Sequence | None, unread: str = '') -> 
     An unknown need raises ``PlanError``."""
     bad = [f'{p.get("id")}: needs {p.get("needs")!r} is not one of {", ".join(NEEDS)}'
            for p in parts if not isinstance(p.get('needs'), str) or p['needs'] not in NEEDS]
+    bad += [f'{p.get("id")}: {why}' for p in parts if (why := _cores_error(p))]
     if bad:
         raise PlanError('; '.join(bad))
     hosts = _hosts(rows or [])
@@ -399,7 +468,7 @@ def may_yield(rows: Sequence | None, host: str, cap: str) -> bool:
 def _host_labels(first: Mapping) -> list[str]:
     host = str(first.get('host') or '')
     own = [str(x) for x in first.get('pool_labels') or ()]
-    return [x for x in own if x not in SHARED and x != host and not re.fullmatch(r'.+-gpu\d+', x)] if host else []
+    return [x for x in own if x not in SHARED and not _sized([x]) and x != host and not re.fullmatch(r'.+-gpu\d+', x)] if host else []
 
 
 def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: str = '') -> dict:
@@ -417,7 +486,8 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
     host = str(first.get('host') or '')
 
     def yielding() -> bool:  # 19.3: the first attempt's host may be yielding to an earlier tier
-        return part.get('where') != 'slurm' and may_yield(rows, host, NEEDS.get(part.get('needs'), ''))
+        cap = _capability(part) if part.get('needs') in NEEDS else ''
+        return part.get('where') != 'slurm' and may_yield(rows, host, cap)
     if row == 'cool-card':
         card = first.get('cool_card')
         if host and type(card) is int and card >= 0 and part['needs'] == 'gpu' and not yielding():  # a card's runner: one card
@@ -432,10 +502,16 @@ def retry(part: Mapping, first: Mapping, rows: Sequence | None = None, unread: s
             return {**same, 'row': 'any', 'why': f'same host: {host} may be yielding to an earlier tier; '
                                                  'the part\'s labels again'}
         if own:
-            return {**same, 'labels': [BASE, *own], 'where': 'host', 'target': '', 'why': f'same host {host}'}
+            exact = []
+            if 'cores' in part:
+                exact = [_capability(part)]
+                if MEM_BIG in part['labels']:
+                    exact.append(MEM_BIG)
+            return {**same, 'labels': list(dict.fromkeys([BASE, *own, *exact])), 'where': 'host', 'target': '',
+                    'why': f'same host {host}'}
         return {**same, 'row': 'any', 'why': 'same host: its labels not recorded; the part\'s labels again'}
     if row == 'more-memory':
-        labels = [BASE, NEEDS[part['needs']]] if part.get('where') == 'slurm' else list(part['labels'])
+        labels = [BASE, _capability(part)] if part.get('where') == 'slurm' else list(part['labels'])
         labels += [] if MEM_BIG in labels else [MEM_BIG]
         if not rows or not _Facts(rows).serving(labels[1:]):  # unproven: mem-big would wait 24 h
             plain = [x for x in labels if x != MEM_BIG]

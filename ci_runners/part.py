@@ -57,7 +57,7 @@ ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 #: (design §4.3 ``record``): a retry on another host takes its attempt from the name (13.3)
 RECORD_REF = re.compile(r'[a-z0-9][a-z0-9-]{0,30}:[^/:]+/[^/:]+/[0-9]+-[0-9]+/'
                         r'(?P<id>[A-Za-z0-9][A-Za-z0-9_.-]{0,63})-(?P<n>[1-9][0-9]{0,2})')
-SLOT_CLASSES = ('part', 'compile')  # the classes whose parts take one host CI slot (design §4.3, §7)
+SLOT_CLASSES = inventory.CI_SLOT_CLASSES
 EVERY_SLOT = 'nightly'  # the class whose parts take every slot and every card lease (decision 12.8)
 LOCKS = ('none', 's', 'x', 'l')  # the ``lock`` input: hold the host lock for the command, or not
 #: what each class's ``part`` accepts (design §4.8): ``(least cards, most cards, locks,
@@ -308,6 +308,18 @@ class RunnerSlot:
         return out
 
 
+def runner_pool(host: Mapping[str, object], cls: str, env: Mapping[str, str]) -> tuple[str | None, str]:
+    """Resolve the setup-provided pool key, or use the unambiguous legacy class."""
+    key = env.get('CI_RUNNER_POOL')
+    if key is not None:
+        if key not in inventory.pools_of(host, cls):
+            return None, f'CI_RUNNER_POOL {key!r} is not a {cls} pool here'
+        return key, ''
+    if cls == 'part' and len(inventory.pools_of(host, cls)) > 1:
+        return None, 'CI_RUNNER_POOL is required on a host with multiple CPU pools'
+    return inventory.pool_of(host, cls), ''
+
+
 def runner_slot(host: Mapping[str, object], cls: str, env: Mapping[str, str]) -> tuple[RunnerSlot | None, str]:
     """The slot of the runner whose job environment is ``env`` and whose class is ``cls``
     (decision 16.2), as ``(slot, '')``; ``(None, '')`` where the runner has none (no
@@ -316,12 +328,16 @@ def runner_slot(host: Mapping[str, object], cls: str, env: Mapping[str, str]) ->
     without a ``slot`` table, out of the table's range, or on a per-card pool another
     card's slot than ``CI_RUNNER_CARD``'s. Never a fallback to the runner without a slot.
     Pure."""
+    pool, why = runner_pool(host, cls, env)
+    if why:
+        return None, why
     raw = env.get('CI_RUNNER_SLOT', '')
     if raw == '':
+        if pool and any(inventory.CPU_WIDTH_LABEL.fullmatch(label) for label in inventory.labels_of(host, pool) or []):
+            return None, 'CI_RUNNER_SLOT is required for a sized CPU pool'
         return None, ''
     if not SLOT_INDEX.fullmatch(raw):
         return None, f'CI_RUNNER_SLOT {raw!r} is no slot index'
-    pool = inventory.pool_of(host, cls)
     spec = host['pools'][pool] if pool else None
     table = spec.get('slot') if isinstance(spec, dict) else None
     if not table:
@@ -986,6 +1002,8 @@ def queue_capped(inv: inventory.Inventory, runner: str) -> bool:
     if runner not in names:
         return True
     pool = pools[names.index(runner)]
+    if len(inventory.pools_of(inv.host, 'part')) > 1 and inventory.pool_class(inv.host, pool) in SLOT_CLASSES:
+        return sum(inventory.pool_class(inv.host, key) in SLOT_CLASSES for key in pools) > int(inv.host['slots'])
     return pools.count(pool) > int(inv.host['slots'])
 
 
@@ -1256,8 +1274,10 @@ class Executor:
             'attempt': attempt, 'retries': proj.retries, 'fallback': fallback, 'inputs': dataclasses.asdict(a),
             'start_epoch': time.time(), 'boot_start': boot_id(), 'executor': os.getpid(),
             'release': self.release}
-        if inventory.pool_labels(self.inv, cls):
-            rec['pool_labels'] = inventory.pool_labels(self.inv, cls)
+        pool, _ = runner_pool(h, cls, self.env)
+        labels = inventory.labels_of(h, pool) if pool else None
+        if labels:
+            rec['pool_labels'] = labels
         _write_json(os.path.join(record, 'record.json'), rec)
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(sig, self._on_signal)
@@ -1292,7 +1312,7 @@ class Executor:
                 drain_mod.publish(str(h['data']))
             except OSError:
                 pass
-            why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # decision 13.1
+            why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls, pool)  # decision 13.1
             if why:
                 return self._away(record, rec, a, why, cls)
             why = self.busy(a, cls, proj.retries)  # decisions 13.2, 13.6
@@ -1431,7 +1451,7 @@ class Executor:
             argv = scope_argv(self.unit, proj.name, memory, sup, self.oom_policy()) if self.scope else sup
             if self.stopped:
                 return self._end(record, rec, a, stopped=True)
-            why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # drained while it waited (13.1)
+            why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls, pool)  # drained while it waited (13.1)
             if why:
                 return self._away(record, rec, a, why, cls)
             # the supervisor keeps the host lock with the slot: the command's own requests find it

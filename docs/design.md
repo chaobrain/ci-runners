@@ -4998,3 +4998,58 @@ uses until then.
     the runners.
     - *Follow-up for the lead:* tighten it later to `read`, with write granted by team.
       On Free that is the only way to protect each private repository's `main`.
+
+## Proposed decision: CPU slots by requested core count
+
+This proposal extends decisions 16.1–16.6 and 19. It requires lead approval
+before implementation.
+
+- Plans continue to use schema 1. A part with `needs: cpu` may include
+  `cores`, a positive JSON integer, to request exactly that many logical
+  CPUs. Reject zero, negative numbers, fractions, strings, booleans and
+  `cores` on other task types. Supported widths come from inventory; there
+  is no hard-coded list of sizes. Omitting `cores` preserves the existing
+  `ci-cpu` route, including its eligibility and Slurm overflow rules.
+- For `cores: N`, the plan on light emits `[self-hosted, ci-cpu-N]`, with
+  `mem-big` when selected by the existing memory rule. GitHub assigns the job
+  to a runner with all those labels. No larger or smaller width substitutes
+  for the requested one.
+- A host may keep its existing generic private `part` pool and add one
+  private `part` pool per configured width. A sized pool must carry exactly
+  one `ci-cpu-N` label (canonical decimal, with no leading zeros), a unique
+  host-local label for retries, and one `slot.cpus` entry of exactly N
+  logical CPUs per runner. Only a digits-only suffix is considered for
+  width validation; nonnumeric labels such as ci-cpu-avx512 retain their
+  meaning as custom labels. Existing cpuset overlap checks still apply.
+  If a host has a sized CPU pool, its shared slots must cover at least one
+  runner per private part or compile pool, so no pool is kept offline
+  indefinitely just because another pool has idle listeners.
+  `slot.workers` controls application parallelism, independently of affinity.
+  A sized pool joins the generic queue only if it also advertises `ci-cpu`.
+- Setup writes the exact inventory pool key into the runner environment.
+  The executor uses that key to resolve the slot index and record pool
+  labels. Legacy runners without the key retain single-pool behavior.
+  If the pool identity is unknown or ambiguous on a multi-pool host, the
+  executor fails instead of using an unrelated cpuset. Pool-specific drain,
+  presence and capacity reporting use the same identity; a class-wide CPU
+  drain still covers all CPU pools.
+- Capacity and tier decisions use the requested labels. A different width
+  cannot satisfy the request or cause a sized runner to yield. Count a
+  runner only once when earlier assignments in a plan draw from overlapping
+  generic and sized queues. All retry paths preserve `cores` and the width
+  constraint, including same-host, fallback and memory retries.
+- If matching pools are full, sized jobs wait on the same label. They do not
+  overflow to Slurm, which does not currently promise this exact width. A
+  readable snapshot with no eligible host uses the existing route error.
+  When capacity is unreadable, keep the exact width label and do not
+  overflow. Public repositories do not gain access to private CPU pools.
+- Deploy support before adding sized pools or using `cores`. The lead
+  applies host setup and registers the new labels. Existing pools,
+  workflows and default plans need no edits.
+
+Acceptance: one synthetic host offers 4-, 6-, and 8-CPU pools and reports all
+three in capacity. A mixed plan routes each sized part to the matching
+label. Index 0 resolves to a different cpuset in each pool. Cover invalid
+`cores` values, inventory with a mismatched width or overlapping cpusets,
+generic plans without `cores`, shared capacity accounting, width-preserving
+retries and tier decisions, and no Slurm fallback for a full sized pool.

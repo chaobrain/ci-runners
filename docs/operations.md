@@ -419,6 +419,31 @@ presence 让 GitHub 的队列只交给"现在就能开工"的 runner：某个 ru
 
 `ci-run drain on --pool home` 会被拒绝（drain 不停 home runner，部件也不读它的 drain）：要 drain 就 drain 整台主机或 light 池。回退：按 §3 的第 2、3、5 步停掉并注销 `<role>-home-1`、删掉它的目录，再从 inventory 删掉这一行。
 
+**同机提供多档 CPU 槽位**：保留原来的 CPU 池；在同一个主机的
+`[hosts.<role>.pools]` 里按需添加任意规格的私有 `part` 池。例如把
+`<role>` 替换成该主机的角色名，并选取互不重叠的 CPU 编号：
+
+```toml
+cpu4 = { class = "part", count = 1, labels = ["<role>-cpu4", "ci-cpu-4"], slot = { cpus = ["16-19"], workers = 4, memory = "16G", speed = 1.0 } }
+cpu6 = { class = "part", count = 1, labels = ["<role>-cpu6", "ci-cpu-6"], slot = { cpus = ["20-25"], workers = 6, memory = "16G", speed = 1.0 } }
+```
+
+每个 `slot.cpus` 要与标签核数一致。只有额外带 `ci-cpu` 的新池
+才会接普通 CPU 作业。主机的 `slots` 仍由所有 CPU 池和计时池共用；
+只要配置了指定核数的池，slots 至少要等于私有 part 和 compile 池的总数，
+否则 inventory 会拒绝加载，避免某个池一直没有 runner 上线。
+要让各池的 runner 都能同时接单，预留至少等于这些 runner 总数的槽位。
+非数字后缀（例如 ci-cpu-avx512）仍是普通自定义标签。
+如果原池没有自己的 `slot.cpus`，也要给它规划独立的 CPU 范围，
+否则普通 CPU 作业仍可能在新池的 CPU 上运行。
+
+所有读取 inventory 的 release 支持多池后，再改配置。用
+`setup/plan.sh <role>` 确认各 CPU runner 的 `CI_RUNNER_POOL` 和
+`CI_RUNNER_SLOT`，由负责人应用计划、办理注册和标签，并让已有 CPU
+runner 在空闲时重新加载环境。用 `ci-run pool status --fast --json`
+核对各池；用 `ci-run drain on --pool cpu6` 暂停一个池，或用
+`ci-run drain on --pool class:part` 暂停 CPU 类的所有池。
+
 **打开之前先观察**：以 CI 账户运行 `ci-run presence --dry-run`。它按"已经打开"的情况读本机，逐个 runner 打印状态、是否空闲、原因和这个 tick 会做什么（`stop`、`start`、`keep`、`never stopped`），以及 15 分钟内的基础设施失败数。它不写状态、不动任何单元、不 drain。
 
 **看日志**：每次停、启、`kept`、每个基础设施失败和每次自动 drain 都是 `<data>/ci-runners/logs/presence-<UTC 日期>.log` 里的一行 JSON（`runner`、`action`、`cause`，或 `infra`、`drain`），同时打到 `journalctl --user -u ci-presence.service`。reaper 14 天后删除这些文件。`state/presence.json` 里有每个 runner 的停、启次数（给 16.8 的统计）和两个 tick 的计数。

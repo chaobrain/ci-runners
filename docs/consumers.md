@@ -232,6 +232,7 @@ conda = { packages = ["cuda-nvcc=12.2"] }         # 可选：加到基础的 con
 | `parts[].command` | 非空字符串，最多 32 KiB，同 `part` 的 `command`（在 checkout 里 `bash -c`） | 是 | — | `<id>: command is a non-empty string`；`<id>: command is at most 32768 bytes` |
 | `parts[].needs` | `cpu`、`gpu`、`gpu2`、`timing`、`light` 之一（§4 的表）；`light`：跑在 `ci-light` 上，不占 slot、不用卡，`minutes` 最多 15，从不溢出到别的标签 | 是 | — | `<id>: needs 'tpu' is not one of cpu, gpu, gpu2, timing, light` |
 | `parts[].minutes` | 数，(0, 240]（`light` 为 (0, 15]）：参考主机上的时长 | 是 | — | `<id>: minutes is a number in (0, 240]`；`<id>: minutes is a number in (0, 15] for needs light` |
+| `parts[].cores` | 正整数；仅用于 `needs: cpu`。例如 `"cores": 6` 只匹配 6 个逻辑 CPU 的 `ci-cpu-6` 槽位；池满时排队，不转 Slurm | 否 | 省略时沿用 `ci-cpu` | `cores is only allowed for needs cpu`；`cores is a positive integer` |
 | `parts[].memory_gib` | 正数（GiB），最多 4096 | 否 | registry 的 `memory` | `<id>: memory_gib is a positive number`；`<id>: memory_gib is at most 4096` |
 | `parts[].results` | 字符串（`CI_RESULTS_DIR` 下 JUnit XML 的 glob） | 否 | 无 | `<id>: results is a string (a glob)` |
 | `parts[].queue_minutes` | 数，(0, 240]：一次尝试在主机上等 slot 或租约的上限（`part` 的 `queue-timeout-minutes`）；到了就是 `unavailable`，按重试的五行处理（同丢失的尝试一样换一台）；作业的 `timeout-minutes` 加上它 | 否 | 15 | `<id>: queue_minutes is a number in (0, 240]` |

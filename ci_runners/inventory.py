@@ -105,6 +105,9 @@ def _num(v: object) -> bool:
     return type(v) in (int, float) and math.isfinite(v) and v > 0
 
 
+CPU_WIDTH_LABEL = re.compile(r'ci-cpu-[1-9][0-9]*\Z')
+
+
 def cpu_ranges(v: object) -> list[tuple[int, int]] | None:
     """A cpuset list such as ``0-3,8-9`` as its ``(first, last)`` ranges, or None where it
     is not one (a range downwards, a CPU above MAX_CPU). Pure."""
@@ -305,6 +308,8 @@ def load(text: str) -> Inventory:
         if 'tunnel' in h:
             _check_table(f'hosts.{role}.tunnel', h['tunnel'], TUNNEL_KEYS)
         seen: dict[tuple[str, bool], str] = {}
+        widths: set[str] = set()
+        slot_ranges = []
         for pool, v in h['pools'].items():
             if isinstance(v, dict) and v.get('per_card') and not h['gpus']:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: per_card on a host without gpus')
@@ -320,14 +325,43 @@ def load(text: str) -> Inventory:
                 if pool.startswith('pub-gpu'):  # its runners' names would read as the public pool's (C2c)
                     raise InventoryError(f'hosts.{role}.pools.{pool}: a private pool\'s key starts with pub-gpu')
                 _check_private_labels(f'hosts.{role}.pools.{pool}', role, pool, v)
-            if (cls, pub) in seen and cls != HOME_CLASS:  # the home pool: _check_home
+            where = f'hosts.{role}.pools.{pool}'
+            labels = labels_of(h, pool) or []
+            sized = [label for label in labels if label.startswith('ci-cpu-')]
+            if sized:
+                cap = sized[0]
+                if len(sized) != 1 or not CPU_WIDTH_LABEL.fullmatch(cap) or cls != 'part' or pub:
+                    raise InventoryError(f'{where}: expected one ci-cpu-N label on a private part pool')
+                if cap in widths:
+                    raise InventoryError(f'{where}: duplicate CPU pool width {cap}')
+                widths.add(cap)
+                other = {label for key in h['pools'] if key != pool for label in labels_of(h, key) or []}
+                if not any(label.startswith(role + '-') and not label.startswith('ci-') and label not in other
+                           for label in labels):
+                    raise InventoryError(f'{where}: sized pool needs a unique host-local label')
+                if not v.get('slot') or any('ci-cpu-' + str(sum(hi - lo + 1 for lo, hi in cpu_ranges(c))) != cap
+                                            for c in v['slot']['cpus']):
+                    raise InventoryError(f'{where}: each slot.cpus entry must match {cap}')
+            if (cls, pub) in seen and cls != HOME_CLASS and not sized:  # the home pool: _check_home
                 raise InventoryError(f'hosts.{role}.pools.{pool}: class {cls} is also the class of {seen[cls, pub]}')
             if isinstance(v, dict) and 'slot' in v:  # one cpuset per runner (16.2)
                 n = len(h['gpus']) if v.get('per_card') else v['count']
                 if len(v['slot']['cpus']) != n:
                     raise InventoryError(f'hosts.{role}.pools.{pool}: slot.cpus has {len(v["slot"]["cpus"])} '
                                          f'cpusets for {n} runners')
-            seen[cls, pub] = pool
+                slot_ranges.extend((lo, hi, pool, bool(sized))
+                                   for c in v['slot']['cpus'] for lo, hi in cpu_ranges(c))
+            if not sized:
+                seen[cls, pub] = pool
+        if widths:
+            ranges = sorted(slot_ranges)
+            for i, (_, hi, pool, sized) in enumerate(ranges):
+                for j in range(i + 1, len(ranges)):
+                    lo, _, other, other_sized = ranges[j]
+                    if lo > hi:
+                        break
+                    if sized or other_sized:
+                        raise InventoryError(f'hosts.{role}.pools: overlapping slot CPUs in {pool} and {other}')
         _check_home(role, h)
         if any(pub for _, pub in seen) and ('gpu', False) not in seen:
             raise InventoryError(f'hosts.{role}: a public pool shares the cards of the host\'s own gpu pool: name one')
@@ -470,14 +504,16 @@ def pool_class(host: Mapping[str, object], pool: str) -> str:
     return _class(pool, host['pools'][pool])
 
 
+def pools_of(host: Mapping[str, object], cls: str) -> list[str]:
+    return [p for p, v in host['pools'].items() if _class(p, v) == cls]
+
+
 def pool_of(host: Mapping[str, object], cls: str) -> str | None:
-    """The pool of ``host`` whose runners have class ``cls``, or None: one at most, but for
-    class light beside the home pool (``home_pool``), where it is the light pool, the one
-    with a ``ci-`` label (issue #232). Pure."""
-    mine = [p for p, v in host['pools'].items() if _class(p, v) == cls]
-    if len(mine) > 1:
+    """The unique pool of this class, excluding the home pool when it shares light."""
+    mine = pools_of(host, cls)
+    if len(mine) > 1 and cls == HOME_CLASS:
         mine = [p for p in mine if p != home_pool(host)]
-    return mine[0] if mine else None
+    return mine[0] if len(mine) == 1 else None
 
 
 def probe_keys(v: object) -> list[str]:

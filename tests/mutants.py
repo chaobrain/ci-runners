@@ -151,6 +151,32 @@ SWW = '.github/workflows/sweep.yml'
 ASW = 'actions/sweep/action.yml'
 
 #: (file, snippet, replacement, tests that kill it)
+CPU_WIDTH = 'tests.test_cpu_width.SizedPools'
+CPU_WIDTH_MUTANTS = [
+    ('ci_runners/setup.py', "lines.append(f'CI_RUNNER_POOL={pool}')",
+     "lines.append('CI_RUNNER_POOL=part')", [f'{CPU_WIDTH}.test_same_host_routes_and_binds_distinct_slots']),
+    ('ci_runners/part.py', "        return key, ''\n    if cls == 'part' and len",
+     "        return 'cpu4', ''\n    if cls == 'part' and len", [f'{CPU_WIDTH}.test_same_host_routes_and_binds_distinct_slots']),
+    ('ci_runners/inventory.py', "for c in v['slot']['cpus']):\n                    raise InventoryError(f'{where}: each slot.cpus entry must match {cap}')",
+     "for c in []):\n                    raise InventoryError(f'{where}: each slot.cpus entry must match {cap}')", [f'{CPU_WIDTH}.test_inventory_rejects_wrong_width_duplicate_and_overlap']),
+    ('ci_runners/inventory.py', '                    if sized or other_sized:',
+     '                    if False:', [f'{CPU_WIDTH}.test_inventory_rejects_wrong_width_duplicate_and_overlap']),
+    ('ci_runners/route.py', 'type(cores) is int and cores > 0',
+     'isinstance(cores, int) and cores > 0', [f'{CPU_WIDTH}.test_rejects_invalid_cores_and_public_route']),
+    ('ci_runners/flow.py', '    bad += [f\'{p.get("id")}: cores is not supported for public repositories\' for p in parts if \'cores\' in p]\n',
+     '', [f'{CPU_WIDTH}.test_rejects_invalid_cores_and_public_route']),
+    ('ci_runners/route.py', 'self.cpu_booked[key] = used + 1',
+     'self.cpu_booked[key] = used', [f'{CPU_WIDTH}.test_shared_bookings_and_legacy_overflow']),
+    ('ci_runners/route.py', "    if 'cores' in part:\n        return None, 'exact CPU width never overflows'\n",
+     '', [f'{CPU_WIDTH}.test_shared_bookings_and_legacy_overflow']),
+    ('ci_runners/route.py', '                exact = [_capability(part)]',
+     '                exact = []', [f'{CPU_WIDTH}.test_retries_keep_width']),
+    ('ci_runners/presence.py', '            if caps <= labels:',
+     "            if {x for x in caps if not x.startswith('ci-cpu-')} <= labels:", [f'{CPU_WIDTH}.test_drain_and_tier_by_pool']),
+    ('ci_runners/drain.py', '    pool = pool or inventory.pool_of(host, cls)',
+     '    pool = inventory.pool_of(host, cls)', [f'{CPU_WIDTH}.test_drain_and_tier_by_pool']),
+]
+
 MUTANTS = [
     # §7 rule 2: max_waiting holds only on a pool with more runners than slots
     (PRT, "    return pools.count(pool) > int(inv.host['slots'])", "    return pools.count(pool) >= int(inv.host['slots'])",
@@ -759,8 +785,8 @@ MUTANTS = [
     (PRT, "        out: dict[str, object] = {'index': self.index, 'cpus': self.cpus, 'workers': self.workers,", "        out: dict[str, object] = {'index': 0, 'cpus': self.cpus, 'workers': self.workers,", ['tests.test_part_slots.Slots.test_the_record_keeps_the_slot']),
     (PRT, "                                  'memory': self.memory, 'speed': self.speed}", "                                  'memory': self.memory}", ['tests.test_part_slots.Slots.test_the_record_keeps_the_slot']),
     # a runner without a slot runs as before; a slot the inventory does not give is unavailable, never a fallback
-    (PRT, "    if raw == '':\n        return None, ''", "    if raw == '' or True:\n        return None, ''", ['tests.test_part_slots.Slots.test_each_slot_pins_its_part_and_sets_its_environment', 'tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
-    (PRT, "    if raw == '':\n        return None, ''", "    if False:\n        return None, ''", ['tests.test_part_slots.AsBefore.test_a_runner_without_a_slot_runs_as_before']),
+    (PRT, "    if raw == '':\n        if pool and any", "    if True:\n        if pool and any", ['tests.test_part_slots.Slots.test_each_slot_pins_its_part_and_sets_its_environment', 'tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
+    (PRT, "    if raw == '':\n        if pool and any", "    if False:\n        if pool and any", ['tests.test_part_slots.AsBefore.test_a_runner_without_a_slot_runs_as_before']),
     (PRT, "SLOT_INDEX = re.compile(r'0|[1-9][0-9]{0,4}')", "SLOT_INDEX = re.compile(r'[0-9]+')", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
     (PRT, "    if not table:\n        return None, f'CI_RUNNER_SLOT={raw}, but", "    if not table:\n        return None, ''\n        return None, f'CI_RUNNER_SLOT={raw}, but", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
     (PRT, "    if i >= len(cpus):", "    if i > len(cpus):", ['tests.test_part_slots.Slots.test_a_slot_the_inventory_does_not_give_is_unavailable']),
@@ -1791,7 +1817,7 @@ MUTANTS = [
     (PRT, "        retry_on = ['self-hosted', *own] if own else", "        retry_on =",
      [f'{TT}.Pure.test_a_pool_with_its_own_labels_retries_on_them']),
     (PRT, "['self-hosted', *(own or [cls])]", "['self-hosted', cls]", [f'{TT}.Pure.test_a_pool_with_its_own_labels_retries_on_them']),
-    (PRT, "        if inventory.pool_labels(self.inv, cls):\n            rec['pool_labels']",
+    (PRT, "        if labels:\n            rec['pool_labels']",
      "        if False:\n            rec['pool_labels']", [f'{TT}.Execute.test_a_labelled_pool_names_its_labels_in_the_record']),
     (LCH, '[[ $own =~ ^[a-z0-9][a-z0-9-]*(,[a-z0-9][a-z0-9-]*)*$ ]]', '[[ -n $own ]]',
      [f'{TA}.Launcher.test_a_missing_release_makes_a_part_unavailable']),
@@ -2212,7 +2238,7 @@ MUTANTS = [
      [f'{TI}.Load.test_pools_name_their_class', f'{TU}.Standalone.test_a_3090_host_s_runners']),
     (INV, "if isinstance(v, dict) and v.get('per_card') and cls not in PER_CARD_CLASSES:", "if False:",
      [f'{TI}.Load.test_pools_name_their_class']),
-    (INV, "            if (cls, pub) in seen and cls != HOME_CLASS:", "            if False:", [f'{TI}.Load.test_pools_name_their_class']),
+    (INV, "            if (cls, pub) in seen and cls != HOME_CLASS and not sized:", "            if False:", [f'{TI}.Load.test_pools_name_their_class']),
     (INV, "'compile_cpus': (lambda v: isinstance(v, str) and bool(_CPUS.match(v)), False)", "'compile_cpus': (lambda v: True, False)",
      [f'{TI}.Load.test_pools_name_their_class']),
     (INV, "'gpu', 'multi',\n                             'slurm'})", "'gpu',\n                             'slurm'})", [f'{TI}.Load.test_pools_name_their_class']),
@@ -2713,9 +2739,9 @@ MUTANTS = [
      [f'{TD}.State.test_on_and_off_for_the_host_and_a_pool']),
     (DRN, "    if name in pools:\n        return name", "    if False:\n        return name",
      [f'{TD}.State.test_a_pool_by_key_or_class']),
-    (PRT, "drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # decision 13.1", "''  # decision 13.1",
+    (PRT, "drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls, pool)  # decision 13.1", "''  # decision 13.1",
      [f'{TD}.Gate.test_the_gate_refuses_before_the_slot']),
-    (PRT, "drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls)  # drained while it waited (13.1)",
+    (PRT, "drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls, pool)  # drained while it waited (13.1)",
      "''  # drained while it waited (13.1)", [f'{TD}.Gate.test_drained_while_it_waited_for_its_slot']),
     (PRT, "        return self._end(record, rec, a, unavailable=why, retry_on=['self-hosted', *peer] if peer else [],",
      "        return self._end(record, rec, a, unavailable=why, retry_on=None,",
@@ -4099,8 +4125,8 @@ MUTANTS = [
      [f'{TRO}.Plan.test_each_fault_is_named']),
     (ROU, "        bad = sorted(set(p) - set(PART_KEYS))", "        bad = []", [f'{TRO}.Plan.test_each_fault_is_named']),
     # #228: a part's checkout depth from the plan's history; no credential kept
-    (ROU, "             'queue_minutes': False, 'artifacts': False, 'history': False}",
-     "             'queue_minutes': False, 'artifacts': False}",
+    (ROU, "             'queue_minutes': False, 'artifacts': False, 'history': False, 'cores': False}",
+     "             'queue_minutes': False, 'artifacts': False, 'cores': False}",
      [f'{TRO}.Labels.test_the_part_keeps_its_own_keys']),
     (ROU, "        if 'history' in p and not isinstance(p['history'], bool):",
      '        if False:',
@@ -4130,11 +4156,11 @@ MUTANTS = [
     (ROU, "        row = 'fallback'  # no cool card recorded", "        row = 'any'  # no cool card recorded", [f'{TRO}.Retry.test_cool_card']),
     (ROU, "        if part.get('where') == 'slurm':\n            return {**same, 'why': f'same target",
      "        if False:\n            return {**same, 'why': f'same target", [f'{TRO}.Retry.test_same_host']),
-    (ROU, "if x not in SHARED and x != host and not re.fullmatch(r'.+-gpu\\d+', x)]",
-     "if x not in SHARED and x != host]", [f'{TRO}.Retry.test_same_host']),
-    (ROU, "if x not in SHARED and x != host and", "if x != host and", [f'{TRO}.Retry.test_same_host']),
+    (ROU, "if x not in SHARED and not _sized([x]) and x != host and not re.fullmatch(r'.+-gpu\\d+', x)]",
+     "if x not in SHARED and not _sized([x]) and x != host]", [f'{TRO}.Retry.test_same_host']),
+    (ROU, "if x not in SHARED and not _sized([x]) and x != host and", "if not _sized([x]) and x != host and", [f'{TRO}.Retry.test_same_host']),
     (ROU, "        labels += [] if MEM_BIG in labels else [MEM_BIG]", "        labels += [MEM_BIG]", [f'{TRO}.Retry.test_more_memory']),
-    (ROU, "        labels = [BASE, NEEDS[part['needs']]] if part.get('where') == 'slurm' else list(part['labels'])",
+    (ROU, "        labels = [BASE, _capability(part)] if part.get('where') == 'slurm' else list(part['labels'])",
      "        labels = list(part['labels'])", [f'{TRO}.Retry.test_more_memory']),
     (ROU, "        if not rows or not _Facts(rows).serving(labels[1:]):", "        if False:", [f'{TRO}.Retry.test_more_memory']),
     (ROU, "'target': '', 'resume': True, 'why': 'oom: more memory'}", "'target': '', 'resume': False, 'why': 'oom: more memory'}",
@@ -4772,7 +4798,7 @@ MUTANTS = [
     (ASW, 'sweep "--workflow=$IN_WORKFLOW"', 'sweep "--workflow=${{ inputs.workflow }}"',
      [f'{TRU}.Sweep.test_no_head_code_no_artifact_and_no_expression_in_a_script']),
     # issue #232: the home pool beside the light pool, in the loader and every reader of a pool by class
-    (INV, " and cls != HOME_CLASS:  # the home pool", ":  # the home pool", [f'{TI}.Load.test_a_home_pool_beside_the_light_pool', f'{TPF}.HomeHold.test_a_job_on_the_home_runner_holds_its_host']),
+    (INV, " and cls != HOME_CLASS and not sized:  # the home pool", " and not sized:  # the home pool", [f'{TI}.Load.test_a_home_pool_beside_the_light_pool', f'{TPF}.HomeHold.test_a_job_on_the_home_runner_holds_its_host']),
     (INV, "        _check_home(role, h)\n", "", [f'{TI}.Load.test_a_home_pool_beside_the_light_pool']),
     (INV, "    if len(light) > 2:", "    if False:", [f'{TI}.Load.test_a_home_pool_beside_the_light_pool']),
     (INV, "    if len(capable) != 1:", "    if False:", [f'{TI}.Load.test_a_home_pool_beside_the_light_pool']),
@@ -5119,6 +5145,8 @@ MUTANTS = [
     (ART, "    if history:\n        return out\n", "",
      ['tests.test_artifacts.Reader.test_report_history_keeps_stale_attempts_and_directories_without_outcomes']),
 ]
+
+MUTANTS.extend(CPU_WIDTH_MUTANTS)
 
 
 def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:

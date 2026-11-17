@@ -290,6 +290,7 @@ def route_public(parts: Sequence[Mapping], repo: str) -> list[dict]:
     bad = [f'{p.get("id")}: needs {p.get("needs")!r}: a public repository runs cpu and light parts on '
            'hosted runners and gpu parts on its own pool only (decision 18.7)'
            for p in parts if p.get('needs') not in PUBLIC_LABELS]
+    bad += [f'{p.get("id")}: cores is not supported for public repositories' for p in parts if 'cores' in p]
     repo = repo.lower()
     if repo not in PUBLIC_CALLERS or repo == policy.SELF:
         bad += [f'{p.get("id")}: needs \'gpu\': {repo or "this repository"} is not opted in to the public GPU pool '

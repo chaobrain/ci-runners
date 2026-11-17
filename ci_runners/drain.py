@@ -88,14 +88,16 @@ def read_path(path: str) -> dict | None:
         return None
 
 
-def refusal(state: dict | None, host: Mapping[str, object], cls: str) -> str:
+def refusal(state: dict | None, host: Mapping[str, object], cls: str, pool: str | None = None) -> str:
     """Why a part of runner class ``cls`` may not start here, or empty: the host or the
     class's pool is drained, or the state is unreadable. Pure."""
     if state is None:
         return UNREADABLE
     if state['host'] is not None:
         return 'drained: host'
-    pool = inventory.pool_of(host, cls)
+    if f'class:{cls}' in state['pools']:
+        return f'drained: class {cls}'
+    pool = pool or inventory.pool_of(host, cls)
     if pool is not None and pool in state['pools']:
         return f'drained: pool {pool}'
     return ''
@@ -105,11 +107,15 @@ def pool_key(host: Mapping[str, object], name: str) -> str:
     """The inventory key of the pool ``name`` names, by key or by class; ValueError if
     none, or for the home pool, which no drain stops (issue #232). Pure."""
     pools = host['pools']
+    if name == 'class:part' and inventory.pools_of(host, 'part'):
+        return name
     if name in pools and name == inventory.home_pool(host):
         raise ValueError(f'{name} is the home pool: presence never stops it and no part reads its drain '
                          '(drain the host, or the light pool)')
     if name in pools:
         return name
+    if name == 'part' and len(inventory.pools_of(host, name)) > 1:
+        return 'class:part'
     key = inventory.pool_of(host, name)
     if key is None:
         raise ValueError(f'no pool or class {name!r} on this host (pools: {", ".join(sorted(pools))})')

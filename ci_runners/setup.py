@@ -356,6 +356,9 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
     own = inventory.labels_of(h, pool) if pool else inventory.pool_labels(inv, cls)
     if own:  # the launcher's retry-on when this host lacks the release
         lines.append(f'CI_RUNNER_POOL_LABELS={",".join(own)}')
+    if pool and cls == 'part' and (len(inventory.pools_of(h, cls)) > 1 or
+                                  any(inventory.CPU_WIDTH_LABEL.fullmatch(label) for label in own or [])):
+        lines.append(f'CI_RUNNER_POOL={pool}')
     if card is not None:
         lines.append(f'CI_RUNNER_CARD={card}')
     if slot is not None:

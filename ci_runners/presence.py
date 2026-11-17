@@ -570,7 +570,7 @@ def causes(inv: inventory.Inventory, rs: Sequence[Runner], f: Facts, units: Mapp
     out: dict[str, list[str]] = {}
     for r in rs:
         why = []
-        d = drain_mod.refusal(f.drain, h, r.cls)
+        d = drain_mod.refusal(f.drain, h, r.cls, r.pool)
         if d:
             why.append(d)
         if f.health:

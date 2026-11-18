@@ -1,0 +1,18 @@
+[Unit]
+Description=CI authorized CPU execution controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=@CI_DATA@/ci-runners/releases/hook/bin/ci-run executor-service serve
+Environment=CI_RUNNERS_ETC=@CI_ETC@
+Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+TimeoutStopSec=45
+KillMode=process
+
+[Install]
+WantedBy=default.target

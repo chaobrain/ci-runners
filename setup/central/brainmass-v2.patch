@@ -1,0 +1,81 @@
+--- a/.github/workflows/linux-coverage.yml
++++ b/.github/workflows/linux-coverage.yml
+@@ -12,10 +12,9 @@
+ jobs:
+   cpu:
+     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+-    uses: chaobrain/ci-runners/.github/workflows/ci.yml@v1
++    uses: chaobrain/ci-runners/.github/workflows/ci-v2.yml@v2.0.0
+     permissions:
+       contents: read
+-      statuses: write
+       actions: read
+       pull-requests: read
+     with:
+@@ -39,9 +38,12 @@
+               --junitxml="$CI_RESULTS_DIR/pytest.xml" \\
+               --cov=brainmass --cov-report=term-missing --cov-fail-under=90 brainmass/
+         """)
+-        print(json.dumps({"schema": 1, "parts": [{
++        print(json.dumps({"schema": 2, "parts": [{
+             "id": "linux-coverage",
+             "needs": "cpu",
++            "cores": 4,
++            "workers": 4,
++            "device": "",
+             "minutes": 10,
+             "command": command,
+             "results": "pytest.xml",
+--- a/.github/workflows/linux-coverage-8-core-canary.yml
++++ b/.github/workflows/linux-coverage-8-core-canary.yml
+@@ -10,9 +10,8 @@
+ jobs:
+   cpu:
+-    uses: chaobrain/ci-runners/.github/workflows/ci.yml@v1
++    uses: chaobrain/ci-runners/.github/workflows/ci-v2.yml@v2.0.0
+     permissions:
+       contents: read
+-      statuses: write
+       actions: read
+       pull-requests: read
+     with:
+@@ -37,10 +36,12 @@
+               --junitxml="$CI_RESULTS_DIR/pytest.xml" \\
+               --cov=brainmass --cov-report=term-missing --cov-fail-under=90 brainmass/
+         """)
+-        print(json.dumps({"schema": 1, "parts": [{
++        print(json.dumps({"schema": 2, "parts": [{
+             "id": "linux-coverage",
+             "needs": "cpu",
+             "cores": 8,
++            "workers": 8,
++            "device": "",
+             "minutes": 10,
+             "command": command,
+             "results": "pytest.xml",
+--- /dev/null
++++ b/.github/workflows/ci-execute.yml
+@@ -0,0 +1,23 @@
++# Install as .github/workflows/ci-execute.yml on the consumer's default branch.
++name: CPU execution
++run-name: ci-execute/${{ fromJSON(inputs.allocation_json).allocation_id }}
++on:
++  workflow_dispatch:
++    inputs:
++      runner_tag:
++        description: Unique runner tag assigned by the scheduler
++        type: string
++        required: true
++      allocation_json:
++        description: Scheduler authorization JSON
++        type: string
++        required: true
++jobs:
++  execute:
++    uses: chaobrain/ci-runners/.github/workflows/execute.yml@v2.0.0
++    permissions:
++      contents: read
++      actions: read
++    with:
++      runner_tag: ${{ inputs.runner_tag }}
++      allocation_json: ${{ inputs.allocation_json }}

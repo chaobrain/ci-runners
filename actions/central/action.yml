@@ -1,0 +1,85 @@
+name: Central CPU scheduling
+description: Submit a schema 2 plan or bridge an authorized allocation to the local executor.
+inputs:
+  command:
+    description: prepare, build, submit, failure, inspect, fetch or execute
+    required: true
+  project:
+    description: Project registry key
+    default: ''
+  context:
+    description: Final commit status context
+    default: ''
+  sha:
+    description: Original commit to test
+    default: ''
+  plan:
+    description: Command that prints a schema 2 plan
+    default: ''
+  plan-only:
+    description: Validate without dispatching tests
+    default: 'false'
+  cancel-in-progress:
+    description: Cancel the previous batch for the same source concurrency key
+    default: 'true'
+  files-artifact-id:
+    description: Uploaded plan files artifact
+    default: ''
+  allocation-json:
+    description: Scheduler-issued allocation with explicit CPU groups, RAM and workers
+    default: ''
+  token:
+    description: Read-only job token for the fetch operation only
+    default: ''
+outputs:
+  sha:
+    description: Authorized test SHA
+    value: ${{ steps.control.outputs.sha }}
+  project:
+    description: Registry project
+    value: ${{ steps.control.outputs.project }}
+  files:
+    description: Plan files directory
+    value: ${{ steps.control.outputs.files }}
+  batch_id:
+    description: Accepted batch identity
+    value: ${{ steps.control.outputs.batch_id }}
+  submission_state:
+    description: accepted or validated; not the final test result
+    value: ${{ steps.control.outputs.submission_state }}
+  allocation_id:
+    description: Allocation identity
+    value: ${{ steps.control.outputs.allocation_id }}
+  part_id:
+    description: Test part identity
+    value: ${{ steps.control.outputs.part_id }}
+  fetch_depth:
+    description: Checkout depth from the authorized task
+    value: ${{ steps.control.outputs.fetch_depth }}
+  state:
+    description: Local execution result
+    value: ${{ steps.control.outputs.state }}
+runs:
+  using: composite
+  steps:
+    - id: control
+      shell: bash
+      env:
+        IN_COMMAND: ${{ inputs.command }}
+        IN_PROJECT: ${{ inputs.project }}
+        IN_CONTEXT: ${{ inputs.context }}
+        IN_SHA: ${{ inputs.sha }}
+        IN_PLAN: ${{ inputs.plan }}
+        IN_PLAN_ONLY: ${{ inputs.plan-only }}
+        IN_CANCEL: ${{ inputs.cancel-in-progress }}
+        IN_FILES: ${{ inputs.files-artifact-id }}
+        IN_ALLOCATION: ${{ inputs.allocation-json }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        set --
+        if [ "$IN_PLAN_ONLY" = true ]; then set -- "$@" --plan-only; fi
+        if [ "$IN_CANCEL" = true ]; then set -- "$@" --cancel-in-progress; fi
+        exec "$GITHUB_ACTION_PATH/../lib/ci-run.sh" central "$IN_COMMAND" \
+          --project "$IN_PROJECT" --context "$IN_CONTEXT" --sha "$IN_SHA" \
+          --plan-command "$IN_PLAN" --files-artifact-id "$IN_FILES" \
+          --allocation-json "$IN_ALLOCATION" "$@"

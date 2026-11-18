@@ -369,3 +369,44 @@ jobs:
 **上限**：每次 sweep 最多 50 个请求（重试也算）、取消 10 个运行、8 分钟（作业的 `timeout-minutes` 是 10）；GitHub 回的 `X-RateLimit-Remaining` 低于 100 时也停（job token 每小时 1,000 次调用，和 `ci.yml` 自己的调用共用）。到了任一上限，已做的保留，作业以状态 1 结束（红）。只有剩下的请求够做完一整套（发状态、取消、可能的 `force-cancel`）才会动一个运行。GitHub 读不到、发状态失败时作业也是红的，那个运行不会被取消（没有 `error` 就不取消），下一次 sweep 再看。每次 sweep 在日志里每个处理过或留下的运行一行，summary 里一张表。
 
 **从哪个版本起**：`v1.18.0` 之后的第一个发布；`v1` 指向它之前，`sweep.yml@v1` 不存在，调用会失败。
+
+## v2 CPU 核心组调度（待发布、待部署）
+
+新入口是 `.github/workflows/ci-v2.yml`；旧 `ci.yml` 仍解释 schema 1。新入口只接受已准入的私有仓库 CPU plan。公开仓库和 GPU 流程继续使用原入口。
+
+先在被测仓库的默认分支加入 [ci-execute.yml 包装模板](../setup/consumer-ci-execute.yml)，由它调用 `execute.yml`。中央服务使用项目登记的 `execution_ref` 派发，并在执行器上显式 checkout 源 CI 的 SHA。调用方只声明逻辑设备，不直接填写编号 runner tag。
+
+```yaml
+jobs:
+  cpu:
+    uses: chaobrain/ci-runners/.github/workflows/ci-v2.yml@v2.0.0
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    with:
+      context: example/cpu
+      cancel-in-progress: true
+      plan: |
+        python - <<'PY'
+        import json
+        print(json.dumps({"schema": 2, "parts": [{
+            "id": "pytest", "needs": "cpu", "cores": 12, "workers": 6,
+            "device": "", "minutes": 600, "queue_minutes": 15,
+            "command": "python -m pytest -n \"$CI_WORKERS\" --junitxml=\"$CI_RESULTS_DIR/pytest.xml\"",
+            "results": "pytest.xml"
+        }]}))
+        PY
+```
+
+这个任务占 3 组、12 个逻辑 CPU、12 GiB RAM 和 1 个 runner。`workers` 必须显式给出，原样进入 `CI_WORKERS`，不被设备或核心数自动改写。`cores` 省略时为 4，否则必须是正的 4 的倍数；RAM 由组数计算，不是 plan 输入。
+
+`device` 可以省略或为空（自由调度），也可以是 `slurm`、`pro6000`、`3090a`、`3090b`、`h100`。指定后是硬约束，重试也保留。Slurm 仍需项目的 `devices`、`slurm_target` 和 policy 的 Slurm 权限全部允许。
+
+普通 CI 和 nightly 使用相同编号 runner；时长来自 `minutes`。执行 job 的 `ceil(minutes + queue_minutes + 30)` 必须不超过 1440 分钟，项目或 Slurm 目标可以进一步限制。`queue_minutes` 是所有尝试累计等待的预算，开始执行后的时长不计入等待。
+
+入口输出 `batch_id` 和 `submission_state`（`accepted` 或 `validated`）。源 workflow 成功表示提交完成，最终测试结论在源 SHA 的 `context` commit status 上。原先依赖 `needs.cpu` 或 `outputs.state` 等待全部测试的步骤必须改为等待该最终状态；必需检查也应使用最终 context。`plan-only: true` 使用独立的 `/plan-only` context，验证成功不派发。
+
+`files` 仍是 checkout 内的相对目录，执行端通过 `CI_PLAN_FILES` 访问。`artifacts` 是名称到 `RUNNER_TEMP` 相对路径的映射，`history: true` 要求完整 checkout。每次执行上传 `ci-allocation-<allocation_id>`，内含原 SHA、源 run、执行 run、资源授权、结果和测试文件。重试创建新的分配和执行 run，不依赖手动重跑旧执行 job。
+
+[brainmass 迁移补丁](../setup/central/brainmass-v2.patch) 对普通 coverage 给出 4 cores / 4 workers，对 canary 给出 8 cores / 8 workers，均采用自由调度；它只改两个 CPU plan 并加入包装入口，没有修改现有 hosted、多平台或 GPU 流程。实际部署 v2 和确认仓库准入之后再应用，完整边界见 [实施计划](central-scheduling-plan.md)。

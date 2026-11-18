@@ -1,0 +1,27 @@
+# Synthetic private CPU project; policy admission is still required separately.
+name = "example"
+repository = "example/project"
+context = "example/cpu"
+max_parallel = 16
+retries = 1
+max_minutes = 1000
+devices = ["3090a", "3090b", "pro6000", "h100", "slurm"]
+execution_ref = "main"
+execution_workflow = "ci-execute.yml"
+slurm_target = "example-site/cpu"
+
+[hosts.plan]
+memory_max = "8G"
+env = "/example/plan/env"
+[hosts.3090a]
+memory_max = "16G"
+env = "/example/3090a/env"
+[hosts.3090b]
+memory_max = "16G"
+env = "/example/3090b/env"
+[hosts.pro6000]
+memory_max = "80G"
+env = "/example/pro6000/env"
+[hosts.h100]
+memory_max = "40G"
+env = "/example/h100/env"

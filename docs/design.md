@@ -5187,3 +5187,100 @@ N CPUs remain. Verify `CI_CPUS` against the measured mask; cover the worker
 default, a worker count that fits, and refusal above each bound. Compare
 routes with and without workers. After a lost first attempt, confirm the
 retry keeps and revalidates both counts.
+
+## Decision: centralized CPU-group scheduling (v2, deployment pending)
+
+Implementation scope, naming, sequencing and acceptance are recorded in
+[the CPU-group scheduling plan](central-scheduling-plan.md). The current branch
+implements the next major contract; its local release stamp is v2.0.0. No deployed
+release link, service, runner registration or published tag has been changed.
+For v2 it replaces capability-based CPU dispatch, fixed runner slot widths, and
+the private light, home and nightly runner roles described above.
+
+- A single plan host builds consumer plans and owns persistent task and allocation
+  records. Each CPU group represents four logical CPUs and 4 GiB of task memory.
+  Groups belong to an execution resource pool, independently of the runner used.
+  A task reserves multiple groups and one runner atomically before dispatch;
+  acknowledgement converts the reservation into an allocation without another
+  decrement. Release follows local process cleanup, and runner availability is
+  tracked separately from released CPU groups.
+- Plan-building jobs submit a batch and then finish. A single active
+  `ci-plan.service` owns a local SQLite store through Python's `sqlite3` module;
+  group reservations, runner reservations and pending dispatch records commit in
+  one transaction. Network calls and file transfers run outside that transaction.
+  Executors cannot open the central database. Full logs and artifacts remain in
+  the existing result path; the scheduler records references and summaries.
+- Each physical execution host has one `ci-executor.service`, shared by its
+  numbered runners and any Slurm drivers it hosts. Local runner steps call it
+  through a Unix socket and wait for results; it reuses the existing task
+  supervisor rather than creating another independent launch path. The service
+  persists CPU mappings and events and initiates authenticated HTTPS requests to
+  plan for allocation validation, reporting and cancellation instructions. Local
+  and Slurm quotas remain separate. If plan is unavailable, existing work remains
+  locally supervised and reports are retained; new dispatch resumes only after
+  reconciliation. Deployment includes database backup and recovery procedures.
+- Plan runners are `plan-0`, `plan-1` initially, with shared label `ci-plan` and
+  their own unique labels. Local execution runners and unique labels are
+  `<device>-<zero-based-index>`. Slurm entries are explicitly `slurm0` through
+  `slurm19`. The execution pool sizes are 4, 4, 20, 10 and 20 groups/runners for
+  3090a, 3090b, pro6000, h100 and Slurm respectively. Execution jobs target only the
+  selected runner's unique label; generic CPU labels do not dispatch v2 work.
+  Device/driver/backend identity comes from the registry, not name parsing.
+- Consumer plan schema 2 adds optional `parts[].device`, absent or empty for free
+  scheduling, otherwise one of `slurm`, `pro6000`, `3090a`, `3090b`, `h100`. A named
+  device or resource pool is a hard constraint preserved on retries. Explicit
+  `slurm` requests do not fall back to local devices; both explicit and freely
+  scheduled Slurm work must satisfy backend enablement, authorization, budgets
+  and resource limits. The misspelling `slum` is rejected. `cores` defaults to 4 and is a positive multiple of
+  four. `workers` is explicit and forwarded unchanged. Allocated group count, RAM,
+  runner and allocation identity are scheduler outputs, not consumer authority.
+- Scheduled/nightly work uses ordinary numbered runners and plan `minutes`.
+  Time limits are checked against project, backend and platform bounds rather
+  than inferred from the runner class. The old nightly all-slot/all-card lease
+  is not implicit in a long duration. Dependent consumers must declare their
+  actual CPU needs and migrate any separate exclusivity requirements.
+- Private light and home runners are retired after their users migrate. A local
+  executor service provides reporting, process supervision, cleanup, recovery and
+  reconciliation without a GitHub runner. It selects non-overlapping CPU groups
+  among CI tasks; non-CI CPU use does not resize this quota. Drain prevents new
+  allocations without disabling recovery. Tier-based runner stopping and the
+  associated home hold path do not govern the new CPU pool.
+- Dispatch enters a workflow in the consumer repository, calling this repository's
+  reusable execution workflow. The self-hosted refusal for this repository's own
+  events remains. Source SHA/run identity, allocation validation, cancellation
+  propagation and the final source commit status must survive the independent
+  execution runs. The wrapper is installed on the consumer's default branch and
+  dispatched from a trusted workflow ref; execution explicitly checks out the
+  recorded test SHA rather than the dispatch event's SHA. Inputs are `runner_tag`
+  and `allocation_json`, displaying authorized groups, cores, RAM, workers and
+  duration. The executor validates these against the central allocation; the
+  dispatch actor does not replace the original event's admission identity.
+  The v2 submission outputs are `batch_id` and `submission_state`; they do not
+  represent final test success. The existing final status context stays pending
+  until the batch's effective attempts finish. Callers relying on `needs` or the
+  old final `state` output must migrate. Plan-only validation never allocates or
+  dispatches execution work and uses a separate status context.
+- GPU queues are reserved for a subsequent contract; public/private isolation
+  remains in force. Slurm keeps its remote gate, accounting and cancellation, but
+  uses the current allocation's CPU, memory, worker and time values. Old and new
+  dispatchers must never allocate the same CI CPU sets concurrently. Migrating
+  all callers and proving the replacement recovery path precedes removing old
+  labels or registrations. The implementation plan defines the staged checks.
+
+Implementation entry points are `ci-v2.yml` and `actions/central`; `ci.yml` keeps
+the schema 1 protocol for staged migration. Schema 1 entry points reject schema 2
+instead of routing it through the old matrix. The new source workflow reports
+submission only. The scheduler reports the final commit status after confirmed
+process cleanup and execution workflow completion, including artifact upload.
+
+`queue_minutes` is a cumulative waiting budget across attempts; execution time
+after allocation acknowledgement does not consume it. Each execution job allows
+`ceil(minutes + queue_minutes + 30)` minutes for waiting, execution and collection,
+bounded to 1440 minutes to fit the job credential lifetime. Project `max_minutes`
+and Slurm target limits can lower this bound. A retry receives the remaining queue
+budget and the original explicit worker count and device constraint.
+
+The plan service template is `setup/central/ci-plan.service`, installed under a
+separate service account. Setup installs `ci-executor.service` only on hosts with
+an executor pool. Public CPU execution and GPU allocation are outside schema 2;
+legacy GPU helpers must migrate before every light/home registration is retired.

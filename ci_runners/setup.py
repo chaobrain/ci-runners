@@ -69,7 +69,7 @@ RUNNER_URL = (f'https://github.com/actions/runner/releases/download/v{RUNNER_VER
 UNITS = ('ci-runner@.service', 'ci-tunnel.service', 'ci-reaper.service', 'ci-reaper.timer', 'ci-orgsync.service',
          'ci-orgsync.timer', 'ci-envrefresh.service', 'ci-envrefresh.timer', 'ci-hostload.service',
          'ci-hostload.timer', 'ci-hooks.service', 'ci.slice', 'ci-capacity.service', 'ci-capacity.timer',
-         'ci-presence.service', 'ci-presence.timer')
+         'ci-presence.service', 'ci-presence.timer', 'ci-executor.service')
 RUNNER_FILES = ('config.sh', 'run.sh', os.path.join('bin', 'Runner.Listener'))
 # what goes into a unit file: one word each, so nothing can add a line
 PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,39}')
@@ -112,6 +112,12 @@ def _runners(inv: inventory.Inventory) -> list[tuple[str, list[str], str, int | 
     for pool, v in inv.host['pools'].items():
         spec = v if isinstance(v, dict) else {'count': v}
         cls = inventory.pool_class(inv.host, pool)  # the pool's key unless it names its class (12.5)
+        if cls in ('plan', 'executor'):
+            from ci_runners import central
+            device = 'plan' if cls == 'plan' else spec['device']
+            for name in central.runner_names(device, spec['count'], spec.get('start', 0)):
+                out.append((name, [name, 'ci-plan'] if cls == 'plan' else [name], cls, None, None))
+            continue
         labels = inventory.labels_of(inv.host, pool) or list(dict.fromkeys([pool, inv.this]))  # by key: issue #232
         slotted = 'slot' in spec
         if spec.get('per_card'):
@@ -196,6 +202,7 @@ def wanted(h: dict, names: list[str]) -> list[tuple[str, str]]:
     out = [(t, 'timers.target') for t in timers(h)]
     out += [('ci-hooks.service', 'default.target')] if hookcopy.used(h) else []
     out += [('ci-tunnel.service', 'default.target')] if 'tunnel' in h else []
+    out += [('ci-executor.service', 'default.target')] if inventory.pools_of(h, 'executor') else []
     return out + [(f'ci-runner@{n}.service', 'default.target') for n in names]
 
 
@@ -356,6 +363,15 @@ def env_file(inv: inventory.Inventory, cls: str, etc: str, card: int | None = No
     own = inventory.labels_of(h, pool) if pool else inventory.pool_labels(inv, cls)
     if own:  # the launcher's retry-on when this host lacks the release
         lines.append(f'CI_RUNNER_POOL_LABELS={",".join(own)}')
+    if cls in ('plan', 'executor'):
+        control_socket = f'{h["data"]}/ci-runners/state/{"plan" if cls == "plan" else "executor"}.sock'
+        if cls == 'plan' and os.path.isfile(os.path.join(etc, 'central.toml')):
+            from ci_runners import control
+            control_socket = control.settings(etc).get('plan', {}).get('socket', control_socket)
+            if not PATH.fullmatch(control_socket):
+                raise ValueError('plan socket must be an absolute path without whitespace')
+        lines += [f'CI_RUNNER_POOL={pool}',
+                  f'CI_CONTROL_SOCKET={control_socket}']
     if pool and cls == 'part' and (len(inventory.pools_of(h, cls)) > 1 or
                                   any(inventory.CPU_WIDTH_LABEL.fullmatch(label) for label in own or [])):
         lines.append(f'CI_RUNNER_POOL={pool}')
@@ -950,7 +966,8 @@ def build(etc: str, adopt: bool = False) -> Plan:
     check_units(release)
     for name in UNITS:
         if (name.startswith('ci-orgsync') and not h.get('orgsync') or name == 'ci-tunnel.service' and 'tunnel' not in h
-                or name == 'ci-hooks.service' and not hookcopy.used(h)):
+                or name == 'ci-hooks.service' and not hookcopy.used(h)
+                or name == 'ci-executor.service' and not inventory.pools_of(h, 'executor')):
             continue
         with open(os.path.join(release, 'setup', 'units', name)) as f:
             unit(name, render(f.read(), subs))
@@ -1099,6 +1116,8 @@ def build(etc: str, adopt: bool = False) -> Plan:
             cmds.append(['systemctl', '--user', 'enable', '--now', 'ci-hooks.service'])
             if hooks_changed:  # a reload, not a restart: a runner starting meanwhile would fail its check
                 cmds.append(['systemctl', '--user', 'reload', 'ci-hooks.service'])
+        if inventory.pools_of(h, 'executor'):
+            cmds.append(['systemctl', '--user', 'enable', '--now', 'ci-executor.service'])
         cmds.append(['systemctl', '--user', 'enable', *[f'ci-runner@{r[0]}.service' for r in rs]])
         for c in cmds:
             plan.add(f'  run    {" ".join(c)}', kind='run', argv=c)

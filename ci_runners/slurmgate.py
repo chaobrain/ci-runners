@@ -92,6 +92,9 @@ RESERVED_PREFIXES = ('CI_', 'SLURM_', 'LD_', 'GITHUB_OUTPUT', 'GITHUB_ENV', 'GIT
 KEEP_VARS = ('CUDA_VISIBLE_DEVICES', 'GPU_DEVICE_ORDINAL', 'ROCR_VISIBLE_DEVICES')
 #: a request's keys: (check, required)
 REQUEST = {
+    'cores': (lambda v: type(v) is int and v > 0 and v % 4 == 0, False),
+    'workers': (lambda v: type(v) is int and v > 0, False),
+    'allocation': (lambda v: isinstance(v, dict), False),
     'project': (lambda v: isinstance(v, str) and bool(PROJECT.fullmatch(v)), True),
     'target': (lambda v: isinstance(v, str) and bool(NAME.fullmatch(v)), True),
     'cards': (lambda v: type(v) is int and 0 <= v <= 64, True),
@@ -236,6 +239,16 @@ def check_request(req: object, account: Mapping[str, object], base: str) -> dict
         raise GateError(f'cards {req["cards"]}: target {req["target"]} takes 1 to {t["max_cards"]}')
     if not gpu and req['cards']:
         raise GateError(f'cards {req["cards"]}: target {req["target"]} has no cards')
+    if {'allocation', 'cores', 'workers'} & set(req):
+        from ci_runners import central
+        try:
+            grant = central.validate_allocation(req.get('allocation'))
+        except ValueError as e:
+            raise GateError(f'allocation: {e}') from None
+        if (gpu or grant['backend'] != 'slurm' or req.get('cores') != grant['cores']
+                or req.get('workers') != grant['workers'] or req['memory'] != grant['RAM']
+                or req['minutes'] != grant['minutes'] or req['cores'] > int(t['cpus'])):
+            raise GateError('allocation exceeds the CPU target or differs from its authorized resources')
     if req['minutes'] > int(t['max_minutes']):
         raise GateError(f'minutes {req["minutes"]:g}: target {req["target"]} takes at most {t["max_minutes"]}')
     if _size_bytes(req['memory']) > _size_bytes(str(t['mem_per_node'])):
@@ -258,6 +271,8 @@ def render(account: Mapping[str, object], req: Mapping[str, object], key: str, d
     m = KEY.fullmatch(key)
     cards = int(req['cards'])
     cpus = cards * int(t['cpus_per_card']) if 'gpu_model' in t else int(t['cpus'])
+    if 'allocation' in req:
+        cpus = req['cores']
     lines = [f'--job-name=ci-{m["repo"]}-{m["id"]}-{m["n"]}', f'--account={account["slurm_account"]}',
              f'--partition={t["partition"]}']
     if t.get('nodes'):
@@ -370,6 +385,9 @@ def status(base: str, key: str, run: Callable = subprocess.run) -> dict:
             if by.strip():
                 out['by'] = 'us' if by.strip() == str(os.getuid()) else 'other'
     out['exit'] = _read_json(os.path.join(d, 'record', 'exit.json'))
+    ready = _read_json(os.path.join(d, 'record', 'allocation-ready.json'))
+    if ready:
+        out['allocation_ready'] = ready
     try:
         out['log_size'] = os.path.getsize(os.path.join(d, 'log'))
     except OSError:
@@ -632,10 +650,16 @@ def job(d: str) -> int:
                     'CI_RESUME': '1' if req['resume'] else '0', 'CI_SLURM_JOB': os.environ.get('SLURM_JOB_ID', '')})
         if not cards:
             env['CUDA_VISIBLE_DEVICES'] = ''
+        if 'allocation' in req and os.path.isdir(f'{d}/tmp/ci-plan-files'):
+            env['CI_PLAN_FILES'] = f'{d}/tmp/ci-plan-files'
         os.environ.clear()
         os.environ.update(env)
         os.chdir(os.path.join(d, 'ws'))
         release = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if 'allocation' in req:
+            from ci_runners import allocated_part
+            return allocated_part.supervise(os.path.join(d, 'record'), req['allocation'],
+                                            sorted(os.sched_getaffinity(0)), req['command'])
         return part.supervise(os.path.join(d, 'record'), float(req['minutes']) * 60,
                               part.command_argv(req['command']), _size_bytes(req['memory']),
                               part.p2p_argv(release) if cards >= 2 else [])

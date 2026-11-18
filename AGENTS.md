@@ -56,6 +56,10 @@ The contract is [docs/design.md](docs/design.md); onboarding is
 - **Self-hosted labels.** Consumers name capability labels (`ci-light`, `ci-cpu`,
   `ci-gpu`, ...; design 16.1), never a host label; host labels are for canaries,
   diagnosis and the reusable workflow's own legs.
+  Schema 2 CPU consumers instead name an optional logical `device` in their plan;
+  only the scheduler chooses the numbered runner label for `execute.yml`. The plan
+  entry uses `ci-plan`. Existing v1 and GPU workflows keep their current contracts
+  until their own migration (design: centralized CPU-group scheduling).
 
 ## High-impact actions go through the lead
 

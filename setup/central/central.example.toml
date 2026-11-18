@@ -1,0 +1,30 @@
+# Local-only configuration. The plan service account and runner account are different.
+schema = 1
+
+[plan]
+database = "/example/control/private/queue.sqlite"
+# Shared runtime directory: owned by service account; runner group may traverse.
+socket = "/example/control/runtime/plan.sock"
+runner_uids = [40001]                 # replace with the plan runner account's UID
+bind = "0.0.0.0"
+port = 18444
+tls_certificate = "/example/control/private/server.crt"
+tls_key = "/example/control/private/server.key"
+github_token_file = "/example/control/private/github-token"
+dispatch_actor = "example-service-bot"
+
+[hosts.3090a]
+token_file = "/example/control/private/3090a-token"
+[hosts.3090b]
+token_file = "/example/control/private/3090b-token"
+[hosts.pro6000]
+token_file = "/example/control/private/pro6000-token"
+[hosts.h100]
+token_file = "/example/control/private/h100-token"
+
+# On each executor: only this block is needed, plus schema = 1.
+[executor]
+url = "https://plan.example.invalid:18444"
+token_file = "/example/executor/private/host-token"
+ca_file = "/example/executor/private/ca.crt"
+# runner_uids defaults to the executor account's UID.

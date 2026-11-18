@@ -38,7 +38,7 @@ VAR = re.compile(r'[A-Z_][A-Z0-9_]{0,63}')
 RESERVED = re.compile(r'(CI_|GITHUB_|ACTIONS_|RUNNER_|LD_|PYTHON).*|CUDA_VISIBLE_DEVICES|CUDA_DEVICE_ORDER|PATH|'
                       r'BASH_ENV|ENV|HOME|USER|SHELL|IFS')
 TOP = {'name', 'repository', 'context', 'retries', 'gpu_mem_mib', 'memory', 'max_waiting', 'refresh', 'fallback', 'hosts',
-       'max_parallel'}
+       'max_parallel', 'max_minutes', 'devices', 'execution_ref', 'execution_workflow', 'slurm_target'}
 #: ``max_parallel``'s default and bound (16.6; GitHub's matrix holds at most 256 legs)
 MAX_PARALLEL, MAX_PARALLEL_BOUND = 16, 256
 HOST = {'memory_max', 'env', 'max_slots', 'variables'}
@@ -64,6 +64,11 @@ class Project:
     max_slots: int = 1  # this host's
     variables: Mapping[str, str] = dataclasses.field(default_factory=dict)  # this host's
     max_parallel: int = MAX_PARALLEL  # read by the reusable workflow's plan job only
+    max_minutes: int = 1440
+    devices: tuple[str, ...] = ('3090a', '3090b', 'pro6000', 'h100')
+    execution_ref: str = ''
+    execution_workflow: str = 'ci-execute.yml'
+    slurm_target: str = ''
 
 
 def _bytes(m: str) -> int:
@@ -100,6 +105,20 @@ def parse(doc: Mapping[str, object], role: str, stem: str = '') -> Project:
     gpu_mem = _int('gpu_mem_mib', doc.get('gpu_mem_mib', 0), 0, 1 << 20)
     max_waiting = _int('max_waiting', doc.get('max_waiting', 1), 1, 64)
     max_parallel = _int('max_parallel', doc.get('max_parallel', MAX_PARALLEL), 1, MAX_PARALLEL_BOUND)
+    max_minutes = _int('max_minutes', doc.get('max_minutes', 1440), 1, 1440)
+    from ci_runners import central
+    devices = doc.get('devices', ['3090a', '3090b', 'pro6000', 'h100'])
+    if not isinstance(devices, list) or not devices or any(not isinstance(d, str) or d not in central.DEVICES for d in devices) or len(set(devices)) != len(devices):
+        raise RegistryError('devices must list unique central CPU resource pools')
+    execution_ref = doc.get('execution_ref', '')
+    workflow = doc.get('execution_workflow', 'ci-execute.yml')
+    target = doc.get('slurm_target', '')
+    if not isinstance(execution_ref, str) or (execution_ref and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./-]{0,199}', execution_ref)):
+        raise RegistryError('execution_ref must be a trusted branch or tag')
+    if not isinstance(workflow, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*\.ya?ml', workflow):
+        raise RegistryError('execution_workflow must be a workflow file name')
+    if not isinstance(target, str) or (target and not re.fullmatch(r'[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9-]*', target)):
+        raise RegistryError('slurm_target must be site/target')
     refresh = doc.get('refresh', False)
     if type(refresh) is not bool:
         raise RegistryError('refresh must be true or false')
@@ -136,7 +155,7 @@ def parse(doc: Mapping[str, object], role: str, stem: str = '') -> Project:
             raise RegistryError(f'hosts.{role}.variables.{k} must be a one-line string')
     return Project(name, repo.lower(), context, retries, gpu_mem, memory, max_waiting, refresh,
                    {k: tuple(v) for k, v in fallback.items()}, memory_max, env, max_slots, dict(variables),
-                   max_parallel)
+                   max_parallel, max_minutes, tuple(devices), execution_ref, workflow, target)
 
 
 def load_file(etc: str, name: str, role: str) -> Project:

@@ -1,0 +1,69 @@
+# Synthetic schema 2 example. Replace paths/account/CPU IDs locally; never commit live inventory.
+# CPU groups are 4 logical CPUs and 4 GiB. Slurm drivers share pro6000 in this example.
+schema = 2
+this = "plan"
+
+[hosts.plan]
+account = "<ci account>"
+home = "/example/plan/home"
+data = "/example/plan/data"
+slots = 1
+memory_max = "16G"
+disk_min_gib = 20
+gpus = []
+max_temp_c = 80
+cpus = "0-7"
+pools = { plan = { class = "plan", count = 2 } }
+files = { slot_lock = "/example/plan/slot.lock", slot_queue = "/example/plan/slot.queue" }
+
+[hosts.3090a]
+account = "<ci account>"
+home = "/example/3090a/home"
+data = "/example/3090a/data"
+slots = 1
+memory_max = "24G"
+disk_min_gib = 20
+gpus = []
+max_temp_c = 80
+cpus = "0-15"
+pools = { cpu = { class = "executor", device = "3090a", count = 4 } }
+files = { slot_lock = "/example/3090a/slot.lock", slot_queue = "/example/3090a/slot.queue" }
+
+[hosts.3090b]
+account = "<ci account>"
+home = "/example/3090b/home"
+data = "/example/3090b/data"
+slots = 1
+memory_max = "24G"
+disk_min_gib = 20
+gpus = []
+max_temp_c = 80
+cpus = "0-15"
+pools = { cpu = { class = "executor", device = "3090b", count = 4 } }
+files = { slot_lock = "/example/3090b/slot.lock", slot_queue = "/example/3090b/slot.queue" }
+
+[hosts.pro6000]
+account = "<ci account>"
+home = "/example/pro6000/home"
+data = "/example/pro6000/data"
+slots = 1
+memory_max = "96G"
+disk_min_gib = 20
+gpus = []
+max_temp_c = 80
+cpus = "0-79"
+pools = { cpu = { class = "executor", device = "pro6000", count = 20 }, slurm = { class = "executor", device = "slurm", count = 20 } }
+files = { slot_lock = "/example/pro6000/slot.lock", slot_queue = "/example/pro6000/slot.queue" }
+
+[hosts.h100]
+account = "<ci account>"
+home = "/example/h100/home"
+data = "/example/h100/data"
+slots = 1
+memory_max = "48G"
+disk_min_gib = 20
+gpus = []
+max_temp_c = 80
+cpus = "0-39"
+pools = { cpu = { class = "executor", device = "h100", count = 10 } }
+files = { slot_lock = "/example/h100/slot.lock", slot_queue = "/example/h100/slot.queue" }

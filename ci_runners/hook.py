@@ -36,7 +36,7 @@ MAX_INVENTORY = 1 << 20
 START_BOUND, COMPLETE_BOUND = 60, 120
 #: the environment ``job-started`` reads, and all that ``job-started.sh`` passes it (C2c)
 ENV = ('GITHUB_ACTOR', 'GITHUB_EVENT_NAME', 'GITHUB_EVENT_PATH', 'GITHUB_REF_PROTECTED', 'GITHUB_REPOSITORY',
-       'GITHUB_REPOSITORY_ID', 'GITHUB_RUN_ID', 'GITHUB_TRIGGERING_ACTOR', 'RUNNER_NAME')
+       'GITHUB_REPOSITORY_ID', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_TRIGGERING_ACTOR', 'RUNNER_NAME')
 
 
 class _Timeout(Exception):
@@ -130,7 +130,10 @@ def started(env: dict[str, str]) -> tuple[int, str]:
                     except (OSError, ValueError, RecursionError) as e:
                         detail['error'] = f'event: {type(e).__name__}'
                         event = None
-                    d = policy.decide(pol, env, event)
+                    if facts[0] == 'executor':
+                        d = central_decision(etc, pol, env, event)
+                    else:
+                        d = policy.decide(pol, env, event)
     except _Timeout:
         d = policy.Decision(False, 'timeout')
     except Exception as e:  # noqa: BLE001 - any failure refuses
@@ -139,6 +142,36 @@ def started(env: dict[str, str]) -> tuple[int, str]:
     detail.update(accepted=d.accepted, reason=d.reason, policy=digest[:12], org=snap_digest[:12])
     _log(etc or '.', detail)
     return (0 if d.accepted else 1), policy.line(d, digest, snap_digest)
+
+
+def central_decision(etc, pol, env, event):
+    """A numbered runner must hold an authenticated allocation before checkout."""
+    from ci_runners import central, control, executor_service, inventory
+    repo = env.get('GITHUB_REPOSITORY', '').lower()
+    known = pol.repos.get(repo)
+    if repo == policy.SELF:
+        return policy.Decision(False, 'self')
+    if known is None or known.visibility != 'private' or known.paused:
+        return policy.Decision(False, 'repository')
+    if (env.get('GITHUB_REPOSITORY_ID') != str(known.id) or not isinstance(event, dict)
+            or not policy._repo_matches(event.get('repository'), known)):
+        return policy.Decision(False, 'repository-id')
+    if env.get('GITHUB_EVENT_NAME') != 'workflow_dispatch':
+        return policy.Decision(False, 'event')
+    if not env.get('GITHUB_RUN_ATTEMPT', '').isdigit():
+        return policy.Decision(False, 'payload')
+    try:
+        inputs = event['inputs']
+        grant = central.validate_allocation(json.loads(inputs['allocation_json']))
+        if inputs['runner_tag'] != env['RUNNER_NAME']:
+            return policy.Decision(False, 'runner')
+        inv = inventory.load(_read(os.path.join(etc, 'inventory.toml'), MAX_INVENTORY).decode())
+        allocation = control.Client(path=str(executor_service.paths(inv)[1])).call('admit', grant=grant, env=env)
+        admission = allocation['source']['admission']
+        original = {**admission['env'], 'CI_RUNNER_CLASS': 'slurm' if grant['backend'] == 'slurm' else 'plan'}
+        return policy.decide(pol, original, admission['event'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return policy.Decision(False, 'runner')
 
 
 def _job_scopes(env: dict[str, str]) -> list[str]:

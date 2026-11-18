@@ -1,0 +1,19 @@
+# Template for the separate scheduler account's user manager. Replace @...@ locally.
+# Never install this as a service of the plan runner account.
+[Unit]
+Description=CI CPU group scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=@CI_RELEASE@/bin/ci-run scheduler serve
+Environment=CI_RUNNERS_ETC=@CI_ETC@
+Environment=CI_RUNNERS_PYTHON=@CI_PYTHON@
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

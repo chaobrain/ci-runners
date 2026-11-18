@@ -7,6 +7,8 @@ org 里每个私有仓库都能在自己的工作流里组合这些 action，在
 - [docs/consumers.md](docs/consumers.md)：使用指南，讲管线、仓库如何接入、命令约定和常见问题（中文）
 - [docs/operations.md](docs/operations.md)：运维手册，讲增删机器、新项目、发布、网络、内存和排障（中文）
 - [docs/design.md](docs/design.md)：契约（英文）。文档之间有出入时以它为准
+- [docs/central-scheduling-plan.md](docs/central-scheduling-plan.md)：v2 CPU 核心组集中调度，含新命名、标签、实现范围和迁移顺序（代码已实现，未部署）
+- [docs/central-verification.md](docs/central-verification.md)：集中调度的离线验证与上线前待验收项目
 - [AGENTS.md](AGENTS.md)：本仓库的工作约定
 
 本仓库不存放任何主机清单，清单只留在主机上。

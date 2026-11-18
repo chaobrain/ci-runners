@@ -1,0 +1,87 @@
+name: CPU plan submission
+on:
+  workflow_call:
+    inputs:
+      context:
+        description: Final status context on the original test SHA
+        type: string
+        required: true
+      plan:
+        description: Command printing a schema 2 CPU plan with explicit workers
+        type: string
+        required: true
+      project:
+        description: Project registry key; defaults to the repository name
+        type: string
+        default: ''
+      sha:
+        description: Original test SHA; defaults to the event head
+        type: string
+        default: ''
+      plan-only:
+        description: Validate without dispatch; uses a separate status context
+        type: boolean
+        default: false
+      cancel-in-progress:
+        description: Cancel the previous unfinished batch for this PR or branch
+        type: boolean
+        default: true
+    outputs:
+      batch_id:
+        description: Central batch identity
+        value: ${{ jobs.plan.outputs.batch_id }}
+      submission_state:
+        description: Submission result; final tests are reported to the commit status
+        value: ${{ jobs.plan.outputs.submission_state }}
+jobs:
+  plan:
+    if: >-
+      github.event.repository.visibility != 'public' && github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, ci-plan]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      batch_id: ${{ steps.submit.outputs.batch_id }}
+      submission_state: ${{ steps.submit.outputs.submission_state }}
+    steps:
+      - id: prepare
+        uses: chaobrain/ci-runners/actions/central@v2.0.0
+        with:
+          command: prepare
+          project: ${{ inputs.project }}
+          context: ${{ inputs.context }}
+          sha: ${{ inputs.sha }}
+          plan-only: ${{ inputs.plan-only }}
+          cancel-in-progress: ${{ inputs.cancel-in-progress }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.prepare.outputs.sha }}
+          persist-credentials: false
+      - id: build
+        uses: chaobrain/ci-runners/actions/central@v2.0.0
+        with:
+          command: build
+          plan: ${{ inputs.plan }}
+      - id: files
+        if: steps.build.outputs.files != '' && !inputs.plan-only
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-plan-files-${{ github.run_attempt }}
+          path: ${{ steps.build.outputs.files }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - id: submit
+        uses: chaobrain/ci-runners/actions/central@v2.0.0
+        with:
+          command: submit
+          plan-only: ${{ inputs.plan-only }}
+          files-artifact-id: ${{ steps.files.outputs.artifact-id }}
+      - if: failure() && steps.prepare.outcome == 'success'
+        uses: chaobrain/ci-runners/actions/central@v2.0.0
+        with:
+          command: failure

@@ -523,3 +523,22 @@ GH_TOKEN=$(gh auth token) ci-run stats [--repo OWNER/NAME ...] [--since 24h|90m|
 
 **API 开销**：每次调用 30 秒、3 次尝试；一个仓库有 R 个 run、P 次推送、K 个 run 里共 N 个被重试的部件时，共 ceil(R/100) + R + ceil(P/100) + K + 2N 次请求（作业每页 100 个；下载是两次请求：GitHub 的重定向，再是不带登录的签名 URL）。2026-11-12 金丝雀一天 44 个 run 用了 77 次。超过 `--max-requests`（默认 2000）就拒绝出报告，不会出一份不全的；GitHub 的 run 搜索最多给 1000 个 run，第一页的 `total_count` 超过 1000 也拒绝；`Link` 指向 GitHub API 之外的地址时拒绝（登录不会发到别处）。退出码：0 报告；1 GitHub 读不到或到了上限；2 参数错误或没有登录。
 
+
+## v2 中央 CPU 服务的部署边界
+
+当前分支的 v2 代码和示例不会更新已部署 runner。现有安装使用 `<data>/ci-runners/releases/<版本>`，`releases/hook` 只有执行安装脚本时才切换；编辑工作区、运行单元测试和本地盖版本标记均不执行该安装。以下是待执行的部署步骤，真实清单、令牌、账号和路径只保留在主机上。
+
+1. 使用 [schema 2 清单示例](../setup/central/inventory.example.toml) 核对设备额度和实际 CPU ID。示例总计 58 个执行 runner、58 组，另有 2 个 plan runner；示例让 Slurm driver 与 pro6000 同机，它们的 CPU 额度分别计入集群和本机。保留的 GPU 流程使用的 CPU 集合要另行核对，不能与新 CPU 任务重叠。
+2. 按 [项目登记示例](../setup/central/project.example.toml) 配置设备范围、并行上限、可信执行 ref、Slurm 目标和各主机的环境、项目内存上限。Slurm policy、目标的 CPU/内存/时长上限、账户预算仍在 driver/gate 检查；默认的旧 CPU target 可能只有 8 核，需要按实际资源配置。
+3. 按 [控制服务配置](../setup/central/central.example.toml) 部署独立的 plan 服务账号。数据库、TLS 私钥、GitHub 服务凭据和各 host token 文件仅该服务账号可读；plan runner 的 UID 必须不同，服务启动会检查。共享 Unix socket 目录由服务账号拥有，仅通过组/ACL 给 plan runner 访问，`plan.socket` 由 setup 写入 plan runner 的环境；不要开放数据库或凭据目录。服务账号读取独立的 inventory、项目登记和 policy/组织快照。
+4. GitHub 服务凭据需要被测仓库 Actions 写、Commit statuses 写及准入核验所需的仓库/PR 读取权限。使用服务身份配置 `dispatch_actor`；凭据由运维定期续期并原子替换文件，服务每次请求重新读取，不依赖已结束 plan job 的 token。执行端使用各自主机的 HTTPS token，校验服务器证书，不能使用明文 HTTP 或转发凭据的重定向。
+5. plan 服务模板在 [setup/central/ci-plan.service](../setup/central/ci-plan.service)，由独立账号安装；`ci-executor.service` 由有 executor 池的主机 setup plan 列出，沿用该主机 CI 账号。先审核每台主机 `setup/plan.sh` 的实际结果，再由维护者执行 apply 和注册。新 CPU runner 只带唯一编号自定义标签；plan runner 额外带 `ci-plan`。
+6. 先合入被测仓库的包装 workflow，确认它在默认分支且 `execution_ref` 受信任，再切换 CPU 调用方到 `ci-v2.yml`。源 run 只负责提交，必需检查和后续依赖改用最终 commit status。所有有效尝试结束并上传完成后才报告 success；上传或执行 workflow 失败不会成为 success。
+7. 在与现有 CI 不重叠的 CPU 集合上做 canary：4/12/16 核混合、4 PR × 8 项任务、取消、断连、服务重启、迟到启动和报告，以及 Slurm 排队、取消、实际资源核对与 600 分钟任务。cgroup 必须实际落实 CPU 集合和聚合 RAM 上限；只具备旧版 RSS 采样的主机不能直接接入新 CPU 池。
+8. 正式切换前停止接收旧任务、排空或取消并清理旧任务、核对账本，再启用新配置。GPU 和其他辅助流程仍依赖 `light`、`home` 时保留相关旧注册，迁移全部依赖后才注销；新流程不使用 `light`、`home`、`homo`、`nightly` 标签。回退也必须先排空新分配，不能仅切回旧标签并清空数据库。
+
+在有 plan socket 访问权的账户中，`ci-run central capacity` 返回每个设备的总组数、预留组、已分配组、空闲组、runner 总数及空闲数；`runners_schedulable` 是按至少一组资源折算的最多可用 runner 数。`ci-run central batch --batch-id <id>` 查看任务、尝试、执行 run、artifact ID 和结果。
+
+设备断连、GitHub 请求超时或取消状态本身都不是资源已释放的证明。执行端先清理进程/远端 job，再通过持久回报队列释放；中央把 CPU 释放和 runner 上传完成分别记录。派发响应丢失时按 allocation ID 与 GitHub 核对，不能据超时清零。数据库放在 plan 主机本地磁盘，SQLite 的 WAL 与写锁负责单实例原子决策；备份使用 SQLite 一致性备份，不直接复制正在写入的单个数据库文件。
+
+尚未进行真实主机安装、GitHub 派发或 Slurm 提交，证据和待验收项见 [验证记录](central-verification.md)。

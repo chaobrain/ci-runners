@@ -1,0 +1,23 @@
+# Install as .github/workflows/ci-execute.yml on the consumer's default branch.
+name: CPU execution
+run-name: ci-execute/${{ fromJSON(inputs.allocation_json).allocation_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      runner_tag:
+        description: Unique runner tag assigned by the scheduler
+        type: string
+        required: true
+      allocation_json:
+        description: Scheduler authorization JSON
+        type: string
+        required: true
+jobs:
+  execute:
+    uses: chaobrain/ci-runners/.github/workflows/execute.yml@v2.0.0
+    permissions:
+      contents: read
+      actions: read
+    with:
+      runner_tag: ${{ inputs.runner_tag }}
+      allocation_json: ${{ inputs.allocation_json }}

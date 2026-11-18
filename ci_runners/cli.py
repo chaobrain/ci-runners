@@ -56,6 +56,15 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     cmd, args = argv[0], argv[1:]
+    if cmd == 'central':
+        from ci_runners import central_flow
+        return central_flow.main(args, load_inventory(), etc_dir())
+    if cmd in ('scheduler', 'executor-service'):
+        from ci_runners import scheduler, executor_service
+        if args != ['serve']:
+            print(f'usage: ci-run {cmd} serve', file=sys.stderr)
+            return 2
+        return (scheduler if cmd == 'scheduler' else executor_service).serve(load_inventory(), etc_dir())
     if cmd == 'role':
         print(load_inventory().this)
         return 0

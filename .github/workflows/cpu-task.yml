@@ -1,0 +1,91 @@
+name: Test task
+on:
+  workflow_call:
+    inputs:
+      batch_id:
+        type: string
+        required: true
+      task_id:
+        type: string
+        required: true
+      allocation_timeout_minutes:
+        type: number
+        required: true
+      gpu_lane:
+        description: GPU request lane selected by the scheduler
+        type: string
+        default: ''
+jobs:
+  allocate_first:
+    name: allocate/${{ inputs.task_id }}/1
+    runs-on: [self-hosted, "${{ inputs.gpu_lane == '' && 'ci-plan' || format('ci-gpu-wait-{0}', inputs.gpu_lane) }}"]
+    timeout-minutes: ${{ inputs.allocation_timeout_minutes }}
+    permissions:
+      contents: read
+    outputs:
+      runner_tag: ${{ steps.allocation.outputs.runner_tag }}
+      allocation_json: ${{ steps.allocation.outputs.allocation_json }}
+    steps:
+      - id: allocation
+        uses: chaobrain/ci-runners/actions/central@v2.1.0
+        with:
+          command: allocate
+          batch-id: ${{ inputs.batch_id }}
+          task-id: ${{ inputs.task_id }}
+          task-attempt: '1'
+
+  first:
+    needs: allocate_first
+    if: needs.allocate_first.outputs.allocation_json != ''
+    permissions:
+      contents: read
+      actions: read
+    uses: chaobrain/ci-runners/.github/workflows/execute.yml@v2.1.0
+    with:
+      runner_tag: ${{ needs.allocate_first.outputs.runner_tag }}
+      allocation_json: ${{ needs.allocate_first.outputs.allocation_json }}
+
+  allocate_retry:
+    name: allocate/${{ inputs.task_id }}/2
+    needs: [allocate_first, first]
+    if: always() && !cancelled() && needs.allocate_first.outputs.allocation_json != ''
+    runs-on: [self-hosted, "${{ inputs.gpu_lane == '' && 'ci-plan' || format('ci-gpu-wait-{0}', inputs.gpu_lane) }}"]
+    timeout-minutes: ${{ inputs.allocation_timeout_minutes }}
+    permissions:
+      contents: read
+    outputs:
+      runner_tag: ${{ steps.allocation.outputs.runner_tag }}
+      allocation_json: ${{ steps.allocation.outputs.allocation_json }}
+    steps:
+      - id: allocation
+        uses: chaobrain/ci-runners/actions/central@v2.1.0
+        with:
+          command: allocate
+          batch-id: ${{ inputs.batch_id }}
+          task-id: ${{ inputs.task_id }}
+          task-attempt: '2'
+
+  retry:
+    needs: allocate_retry
+    if: always() && !cancelled() && needs.allocate_retry.outputs.allocation_json != ''
+    permissions:
+      contents: read
+      actions: read
+    uses: chaobrain/ci-runners/.github/workflows/execute.yml@v2.1.0
+    with:
+      runner_tag: ${{ needs.allocate_retry.outputs.runner_tag }}
+      allocation_json: ${{ needs.allocate_retry.outputs.allocation_json }}
+
+  result:
+    needs: [allocate_first, first, allocate_retry, retry]
+    if: always() && !cancelled()
+    runs-on: [self-hosted, ci-plan]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: chaobrain/ci-runners/actions/central@v2.1.0
+        with:
+          command: task-result
+          batch-id: ${{ inputs.batch_id }}
+          task-id: ${{ inputs.task_id }}

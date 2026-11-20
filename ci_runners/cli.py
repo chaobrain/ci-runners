@@ -52,10 +52,23 @@ def load_inventory() -> inventory.Inventory:
 
 
 def main(argv: list[str]) -> int:
+    if argv in (['--version'], ['version']):
+        from ci_runners import __version__
+        print(__version__)
+        return 0
     if not argv:
         print(__doc__, file=sys.stderr)
         return 2
     cmd, args = argv[0], argv[1:]
+    if cmd == 'central':
+        from parallel import workflow_client
+        return workflow_client.main(args, load_inventory(), etc_dir())
+    if cmd in ('scheduler', 'executor-service'):
+        from parallel import scheduler, executor
+        if args != ['serve']:
+            print(f'usage: ci-run {cmd} serve', file=sys.stderr)
+            return 2
+        return (scheduler if cmd == 'scheduler' else executor).serve(load_inventory(), etc_dir())
     if cmd == 'role':
         print(load_inventory().this)
         return 0

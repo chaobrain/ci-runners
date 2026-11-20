@@ -107,8 +107,10 @@ def base_of(site: slurmsite.Site, alias: str) -> str:
 
 def release_files(release: str) -> list[str]:
     """The files of a release the cluster runs: the package and the gate's wrapper."""
-    pkg = os.path.join(release, 'ci_runners')
-    return [*(f'ci_runners/{n}' for n in sorted(os.listdir(pkg)) if n.endswith('.py')), 'bin/ci-slurm-gate']
+    files = [f'{package}/{name}' for package in ('ci_runners', 'parallel')
+             if os.path.isdir(os.path.join(release, package))
+             for name in sorted(os.listdir(os.path.join(release, package))) if name.endswith('.py')]
+    return files + ['bin/ci-slurm-gate'] + (['VERSION'] if os.path.isfile(os.path.join(release, 'VERSION')) else [])
 
 
 def release_digest(release: str, files: list[str]) -> str:

@@ -63,6 +63,7 @@ LOCKS = ('none', 's', 'x', 'l')  # the ``lock`` input: hold the host lock for th
 #: what each class's ``part`` accepts (design §4.8): ``(least cards, most cards, locks,
 #: longest timeout-minutes)``; most None: every card of the host
 ROWS: dict[str, tuple[int, int | None, tuple[str, ...], int]] = {
+    'plan': (0, 0, ('none',), 30),
     'light': (0, 0, ('none',), 30),
     'part': (0, 0, LOCKS, 240),
     'gpu': (1, 1, LOCKS, 240),
@@ -369,7 +370,7 @@ def slot_memory(slot: RunnerSlot, asked: str, memory_max: str) -> str:
 
 
 def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, part_dir: str, results: str,
-             cards: Sequence[int], cpus: str, files: Mapping[str, str], slot: str, resume: bool,
+             cards: Sequence[int | str], cpus: str, files: Mapping[str, str], slot: str, resume: bool,
              held: str = '', runner: RunnerSlot | None = None) -> dict[str, str]:
     """The command's environment (design §4.3): the job's without our ``CI_*`` names,
     then the project's variables, then ours, which nothing overrides. On a host with the
@@ -1642,6 +1643,13 @@ class Executor:
                         'run_url': f'https://github.com/{e.get("GITHUB_REPOSITORY", "")}/actions/runs/'
                                    f'{e.get("GITHUB_RUN_ID", "0")}/attempts/{e.get("GITHUB_RUN_ATTEMPT", "1")}',
                         'host': self.inv.this, 'resume': a.resume}}
+        if getattr(self, 'central_allocation', None) is not None:
+            plan['request']['allocation'] = self.central_allocation
+            plan['request']['cores'] = a.cores
+            plan['request']['workers'] = a.workers
+            plan['central'] = True
+            from parallel import layout
+            plan['central_fence'] = str(layout.executor_paths(self.inv)[0])
         _write_json(os.path.join(record, 'slurm-plan.json'), plan)
         drv = [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
                'from ci_runners.slurmpart import drive; sys.exit(drive(sys.argv[1]))', self.release, record]

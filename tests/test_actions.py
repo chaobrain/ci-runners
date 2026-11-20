@@ -63,12 +63,12 @@ class Actions(unittest.TestCase):
 
     def test_the_action_refs_follow_the_release_stamp(self):
         """Design §9: a canary pinning a workflow at @vX.Y.Z runs that release's actions only
-        if the workflow names them so. On main (stamp ``hook``) a workflow's refs read @v1; a
+        if the workflow names them so. On main (stamp ``hook``) a workflow's refs read @v2; a
         stamped release names itself (the reusable ``ci.yml`` and ``part.yml``, decision 16.6;
         ``ci.yml``'s ref to ``part.yml`` in ``tests/test_reusable.py``). The docs' examples
         always read @v1, the tag consumers pin."""
         stamp = (ROOT / 'actions' / 'RELEASE').read_text().strip()
-        want = 'v1' if stamp == 'hook' else stamp
+        want = 'v2' if stamp == 'hook' else stamp
         ref = re.compile(r'chaobrain/ci-runners/actions/([a-z]+)@(\S+)')
         refs = [(f.name, m.group(1), m.group(2), want) for f in sorted((ROOT / '.github' / 'workflows').glob('*.yml'))
                 for m in ref.finditer(f.read_text())]

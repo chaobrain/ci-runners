@@ -239,10 +239,10 @@ def order(site: slurmsite.Site, target: str, spent: Mapping[str, float], turn: i
 
 
 def budget_refusal(site: slurmsite.Site, account: str, target: str, cards: int, minutes: float,
-                   spent: Mapping[str, tuple[float, float]]) -> str:
+                   spent: Mapping[str, tuple[float, float]], cores: int | None = None) -> str:
     """Why a part's worst case would cross a cap (14.7): the site's daily or monthly, or
     the account's monthly; ``spent`` maps every account to ``(month, today)``. Pure."""
-    worst = site.worst_cost(target, cards, minutes)
+    worst = site.worst_cost(target, cards, minutes) if cores is None else site.hourly(target, cards, cores) * (minutes + slurmsite.TIME_MARGIN) / 60
     month = sum(m for m, _ in spent.values())
     day = sum(d for _, d in spent.values())
     if day + worst > float(site.site['daily_cap']):
@@ -285,6 +285,7 @@ class Gate:
         self.site, self.alias, self.ssh, self.rsync, self.run, self.sleep = site, alias, ssh, rsync, run, sleep
         self.redact = redact  # the error text it raises, redacted before it is cut
         self.key = os.path.join(etc, 'slurm', 'keys', alias)
+        self.ssh_config = os.path.join(etc, 'slurm', 'ssh_config')
         self.cm = os.path.join(state_dir(data, site.name), 'cm')
         self.sock = os.path.join(self.cm, hashlib.sha256(f'{alias}\0{os.getpid()}'.encode()).hexdigest()[:12])
 
@@ -293,7 +294,8 @@ class Gate:
             raise Unreachable(f'{self.alias}: the data root is too long for the ssh control socket '
                               f'({len(os.fsencode(self.sock))} bytes; at most {SUN_PATH - SSH_TMP - 1})')
         os.makedirs(self.cm, mode=0o700, exist_ok=True)
-        return [self.ssh, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', self.key, '-o', 'ControlMaster=auto',
+        config = ['-F', self.ssh_config] if os.path.isfile(self.ssh_config) else []
+        return [self.ssh, *config, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', self.key, '-o', 'ControlMaster=auto',
                 '-o', f'ControlPath={self.sock}', '-o', 'ControlPersist=60', '-o', 'ConnectTimeout=20',
                 '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4']
 
@@ -305,7 +307,8 @@ class Gate:
         """``ssh -G``'s ``hostname``, ``user`` and ``proxyjump`` of the account's alias (no
         connection), for the redactor; None if ssh cannot say the first two."""
         try:
-            r = self.run([self.ssh, '-G', self.host], capture_output=True, timeout=20)
+            config = ['-F', self.ssh_config] if os.path.isfile(self.ssh_config) else []
+            r = self.run([self.ssh, *config, '-G', self.host], capture_output=True, timeout=20)
         except (OSError, subprocess.SubprocessError):
             return None
         if r.returncode != 0:
@@ -613,6 +616,10 @@ class Driver:
 
     def drive(self) -> int:
         deadline = float(self.plan['deadline'])
+        if self.plan.get('central'):
+            from parallel.task_execution import check_fence
+            check_fence(self.plan['central_fence'], self.plan['request']['allocation'], [])
+            return self._drive(deadline)
         slot = self.take_slot(deadline)
         if slot is None:
             return self.finish({'rc': None, 'signalled': True} if self.stopping else
@@ -653,7 +660,7 @@ class Driver:
                 if alias in silent:
                     why.append(f'{target}@{alias}: the login host did not answer')
                     continue
-                refusal = budget_refusal(self.site, alias, target, p['cards'], p['minutes'], spent)
+                refusal = budget_refusal(self.site, alias, target, p['cards'], p['minutes'], spent, p['request'].get('cores'))
                 if refusal:
                     why.append(refusal)
                     continue
@@ -712,7 +719,7 @@ class Driver:
         tried: dict[str, object] = {'account': g.alias, 'target': target}
         self.block['tried'].append(tried)  # type: ignore[union-attr]
         self.block.update(account=g.alias, target=target, partition=self.site.targets[target].t['partition'],
-                          cards=p['cards'], cpus=self.site.targets[target].cpus(p['cards']))
+                          cards=p['cards'], cpus=p['request'].get('cores', self.site.targets[target].cpus(p['cards'])))
         try:
             self.stage(g)
         except (Unreachable, Refused) as e:
@@ -756,6 +763,11 @@ class Driver:
             except Refused as e:
                 st = {'state': 'UNKNOWN', 'why': str(e)}
             state = str(st.get('state', 'UNKNOWN'))
+            ready = st.get('allocation_ready')
+            if (p.get('central') and isinstance(ready, dict)
+                    and ready.get('allocation_id') == p['request']['allocation']['allocation_id']
+                    and not os.path.exists(os.path.join(self.record, 'allocation-ready.json'))):
+                _write_json(os.path.join(self.record, 'allocation-ready.json'), ready)
             self.node_seen(st)
             if state != self.block.get('state'):
                 self.block.update(state=state, node=st.get('node', ''))
@@ -888,6 +900,8 @@ def reap(data: str, etc: str, *, run: Callable = subprocess.run, ssh: str = '/us
         if isinstance(drv, list) and len(drv) == 2 and slots.alive(int(drv[0]), float(drv[1])):
             continue
         plan = _read_json(os.path.join(top, 'slurm-plan.json')) or {}
+        if plan.get('central'):
+            continue  # the durable executor service owns cleanup and the release report
         for alias, job in sorted(todo.items()):
             name = f'slurm reap: {os.path.relpath(top, root)}: job {job if job is not None else "?"} ({alias})'
             try:

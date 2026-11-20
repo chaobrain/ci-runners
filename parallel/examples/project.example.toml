@@ -1,0 +1,17 @@
+name = "example"
+repository = "chaobrain/example-private"
+context = "example/tests"
+actors = ["example-maintainer"]
+devices = ["3090a", "3090b", "pro6000", "h100"]
+gpu_mem_mib = 0 # Minimum free MiB a card must have for this project's GPU tasks.
+max_parallel = 16
+retries = 1
+max_minutes = 1000
+# The controller resolves repository_id with the PAT; export-host includes it.
+# To enable Slurm, add "slurm" to devices and slurm_target = "slurm1/cpu".
+
+[environment]
+mode = "build" # Controller builds from the trusted default branch's env spec.
+# export-host turns build into kept and exports the build record, without the PAT.
+# mode = "existing" uses hosts.<device>.env or the generated runtime env path.
+# mode = "kept" needs record = "environments/example.json" below ci-deploy-input.

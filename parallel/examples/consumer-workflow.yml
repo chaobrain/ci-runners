@@ -1,0 +1,23 @@
+# Copy into the consumer repository's .github/workflows/ directory after publishing v2.1.0.
+name: CI tests
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+jobs:
+  tests:
+    uses: chaobrain/ci-runners/.github/workflows/ci-v2.yml@v2.1.0
+    with:
+      project: example
+      context: example/tests
+      # Adapt the test paths. Omit device on a GPU part to use any eligible card.
+      plan: |
+        cat <<'JSON'
+        {"schema":2,"parts":[
+          {"id":"unit","needs":"cpu","gpu":false,"workers":1,"minutes":5,"command":"python -m pytest tests/unit"},
+          {"id":"cuda","needs":"cpu","gpu":true,"device":"3090a","workers":1,"minutes":10,"command":"python -m pytest tests/gpu"}
+        ]}
+        JSON

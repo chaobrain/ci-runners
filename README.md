@@ -2,11 +2,15 @@
 
 chaobrain 各项目共用的自托管 GitHub Actions runner：主机配置、执行器、pre-job hook，以及各项目调用的 action。
 
-org 里每个私有仓库都能在自己的工作流里组合这些 action，在 3090b 和 3090a 上跑 CPU、GPU、双卡等测试。成员和私有仓库的名单从 org 自动同步。
+v2.1.0 使用一个控制节点调度多个执行节点。私有仓库在 schema 2 测试任务中设置 `gpu: true`，即可申请一张物理卡及同机 CPU 组。控制器按逻辑设备约束从独立 GPU 队列分配。计划、测试和汇总在同一次 GitHub workflow run 中完成。
 
 - [docs/consumers.md](docs/consumers.md)：使用指南，讲管线、仓库如何接入、命令约定和常见问题（中文）
 - [docs/operations.md](docs/operations.md)：运维手册，讲增删机器、新项目、发布、网络、内存和排障（中文）
 - [docs/design.md](docs/design.md)：契约（英文）。文档之间有出入时以它为准
+- [从头部署手册](docs/v2-single-workflow-run-rebuild.md)：v2 在新设备上的首次部署，以及旧部署的停机、清理、重建和验收
+- [开发过程记录](docs/v2-single-workflow-run-development.md)：CPU 集中调度与单次 workflow run 的需求、实现、修复、测试证据和待办
 - [AGENTS.md](AGENTS.md)：本仓库的工作约定
 
 本仓库不存放任何主机清单，清单只留在主机上。
+
+新部署统一从 `./parallel/deploy.sh init --input ../ci-deploy-input` 开始，填写配置后执行 `check → plan → apply → status`。输入目录和运行目录放在源码目录外；源码不携带凭证、账本、runner 身份或测试环境。完整命令见从头部署手册。

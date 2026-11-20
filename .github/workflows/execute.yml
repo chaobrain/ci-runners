@@ -1,0 +1,52 @@
+name: Authorized test execution
+on:
+  workflow_call:
+    inputs:
+      runner_tag:
+        description: Unique runner label selected by the scheduler
+        type: string
+        required: true
+      allocation_json:
+        description: Authorized allocation, including groups, cores, RAM, workers, time limits and optional GPU UUID
+        type: string
+        required: true
+jobs:
+  execute:
+    name: execute/${{ fromJSON(inputs.allocation_json).task_id }}/${{ fromJSON(inputs.allocation_json).task_attempt }}
+    # The task verdict propagates final failure after the permitted infrastructure retry.
+    continue-on-error: true
+    runs-on: [self-hosted, "${{ inputs.runner_tag }}"]
+    timeout-minutes: ${{ fromJSON(inputs.allocation_json).job_timeout_minutes }}
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GIT_HTTP_LOW_SPEED_LIMIT: '1'
+      GIT_HTTP_LOW_SPEED_TIME: '60'
+    steps:
+      - id: allocation
+        uses: chaobrain/ci-runners/actions/central@v2.1.0
+        with:
+          command: inspect
+          allocation-json: ${{ inputs.allocation_json }}
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+        with:
+          ref: ${{ steps.allocation.outputs.sha }}
+          fetch-depth: ${{ steps.allocation.outputs.fetch_depth }}
+          persist-credentials: false
+      - uses: chaobrain/ci-runners/actions/central@v2.1.0
+        with:
+          command: fetch
+          token: ${{ github.token }}
+      - id: test
+        uses: chaobrain/ci-runners/actions/central@v2.1.0
+        with:
+          command: execute
+      - if: always() && steps.allocation.outputs.allocation_id != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-allocation-${{ steps.allocation.outputs.allocation_id }}
+          path: ${{ runner.temp }}/ci-allocation/${{ steps.allocation.outputs.allocation_id }}
+          retention-days: 7
+          if-no-files-found: warn

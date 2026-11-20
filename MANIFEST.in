@@ -1,0 +1,13 @@
+include VERSION
+recursive-include parallel *.py *.sh *.toml *.yml *.service
+include README.md AGENTS.md .gitignore
+recursive-include bin *
+recursive-include actions *
+recursive-include hooks *
+recursive-include setup *
+recursive-include docs *.md
+recursive-include tests *.py *.json *.toml *.sql *.sha256 *.sh *.csv *.md memory.events*
+recursive-include .github *.yml
+recursive-include experiments *.py *.md
+global-exclude *.pyc
+global-exclude __pycache__

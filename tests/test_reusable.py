@@ -17,11 +17,13 @@ from tests import yamlsub
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WF = ROOT / '.github' / 'workflows'
 REUSABLE = ('ci.yml', 'part.yml', 'sweep.yml', 'public.yml', 'public-part.yml')
+CENTRAL = ('ci-v2.yml', 'execute.yml', 'cpu-task.yml')
 #: a public caller's (decision 18.7): its jobs' labels, a hosted runner or its own pool only
 PUBLIC_WF = ('public.yml', 'public-part.yml')
 #: the reusable workflows the stamp rewrites, written out (never read from the stamp)
 STAMPED = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml',
-           '.github/workflows/public.yml', '.github/workflows/public-part.yml')
+           '.github/workflows/public.yml', '.github/workflows/public-part.yml',
+           '.github/workflows/ci-v2.yml', '.github/workflows/execute.yml', '.github/workflows/cpu-task.yml')
 POOL_OR_HOSTED = ("${{ fromJSON(inputs.part).gpus > 0 && fromJSON('[\"self-hosted\",\"ci-pub-gpu\"]') "
                   "|| 'ubuntu-latest' }}")
 #: the capability labels a job may name literally (16.1)
@@ -625,7 +627,7 @@ class Sweep(unittest.TestCase):
     def test_no_head_code_no_artifact_and_no_expression_in_a_script(self):
         steps_ = load('sweep.yml')['jobs']['sweep']['steps']
         self.assertEqual([st.get('uses') for st in steps_], ['chaobrain/ci-runners/actions/sweep@' + (
-            'v1' if (ROOT / 'actions' / 'RELEASE').read_text().strip() == 'hook'
+            'v2' if (ROOT / 'actions' / 'RELEASE').read_text().strip() == 'hook'
             else (ROOT / 'actions' / 'RELEASE').read_text().strip())])
         text = (WF / 'sweep.yml').read_text() + (ROOT / 'actions' / 'sweep' / 'action.yml').read_text()
         for bad in ('actions/checkout', 'download-artifact', 'upload-artifact', 'secrets'):
@@ -659,12 +661,12 @@ class Stamp(unittest.TestCase):
         return {str(p.relative_to(t)): p.read_text(errors='replace') for p in t.rglob('*')
                 if p.is_file() and '__pycache__' not in p.parts}
 
-    def test_main_names_v1_and_hook(self):
-        # main is `hook` with `@v1`; a stamp PR's tree (operations §5 step 2) is `vX.Y.Z` with `@vX.Y.Z`
+    def test_main_names_v2_and_hook(self):
+        # main is `hook` with `@v2`; a stamp PR's tree (operations §5 step 2) is `vX.Y.Z` with `@vX.Y.Z`
         release = (ROOT / 'actions' / 'RELEASE').read_text().strip()
         self.assertRegex(release, r'\Ahook\Z|\Av[0-9]+\.[0-9]+\.[0-9]+\Z')
-        ref = 'v1' if release == 'hook' else release
-        for name in REUSABLE:
+        ref = 'v2' if release == 'hook' else release
+        for name in REUSABLE + CENTRAL:
             got = stamp.refs((WF / name).read_text())
             self.assertTrue(got, name)
             self.assertEqual({r for _, r in got}, {ref}, name)
@@ -683,7 +685,7 @@ class Stamp(unittest.TestCase):
             after = self.files(t)
             changed = {k for k in before if before[k] != after[k]}
             self.assertEqual(changed, {'actions/RELEASE', *STAMPED})
-            self.assertEqual(set(STAMPED), {f'.github/workflows/{n}' for n in REUSABLE})
+            self.assertEqual(set(STAMPED), {f'.github/workflows/{n}' for n in REUSABLE + CENTRAL})
             self.assertEqual(after['actions/RELEASE'], 'v1.17.0\n')
             for rel in stamp.WORKFLOWS:
                 old, new = before[rel].splitlines(), after[rel].splitlines()
@@ -691,7 +693,7 @@ class Stamp(unittest.TestCase):
                 for a, b in zip(old, new):
                     if a != b:
                         self.assertEqual(stamp.rewrite(a, 'v1.17.0'), b)
-                        self.assertRegex(a, r'chaobrain/ci-runners/\S+@v1\b')
+                        self.assertRegex(a, r'chaobrain/ci-runners/\S+@v2\b')
                 # nothing left unpinned: every self-reference names the release, every other action a tag
                 self.assertEqual({ref for _, ref in stamp.refs(after[rel])}, {'v1.17.0'}, rel)
                 self.assertNotRegex(after[rel], r'chaobrain/ci-runners/\S+@(?!v1\.17\.0\b)')

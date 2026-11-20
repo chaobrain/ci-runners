@@ -150,6 +150,12 @@ def _capability(part: Mapping) -> str:
 
 def load_plan(doc: object) -> list[dict]:
     """The parts of a schema 1 plan (design §4.10), checked; ``PlanError`` names each fault."""
+    if isinstance(doc, dict) and type(doc.get('schema')) is int and doc['schema'] == 2:
+        from parallel import protocol
+        try:
+            return protocol.load_plan(doc)['parts']
+        except protocol.Error as e:
+            raise PlanError(f'schema 2: {e}') from None
     if not isinstance(doc, dict) or not {k for k, req in PLAN_KEYS.items() if req} <= set(doc) <= set(PLAN_KEYS):
         raise PlanError(f'a plan is an object with "schema" and "parts", and optionally {", ".join(k for k, req in PLAN_KEYS.items() if not req)}')
     if type(doc['schema']) is not int or doc['schema'] != 1:
@@ -585,7 +591,10 @@ def main(argv: Sequence[str], etc: str, stdin=None, stdout=None, stderr=None) ->
     ap.add_argument('--rows', default='', help='pool status --fast --json output to read instead of the capacity')
     a = ap.parse_args(list(argv))
     try:
-        parts = load_plan(json.load(stdin))
+        doc = json.load(stdin)
+        if isinstance(doc, dict) and doc.get('schema') == 2:
+            raise PlanError('schema 2 requires ci-v2.yml and the central scheduler')
+        parts = load_plan(doc)
     except (ValueError, PlanError) as e:
         print(f'route: the plan does not load: {e}', file=stderr)
         return EXIT_PLAN

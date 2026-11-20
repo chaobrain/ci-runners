@@ -10,7 +10,11 @@ dependencies = []
 dynamic = ["version"]
 
 [tool.setuptools]
-packages = ["ci_runners"]
+packages = ["ci_runners", "parallel"]
+include-package-data = false
 
 [tool.setuptools.dynamic]
-version = {attr = "ci_runners.__version__"}
+version = {file = ["VERSION"]}
+
+[tool.setuptools.package-data]
+parallel = ["deploy.sh", "examples/*.toml", "examples/*.yml", "units/*"]

@@ -47,7 +47,7 @@ RESERVED_LABELS = frozenset({'self-hosted', 'linux', 'x64', 'light', 'part', 'co
 #: not the pool's key (decision 12.5); from RUN-10's R1 (decision 16.3) also a pool's ``slot``
 #: (16.2) and ``audience`` (16.7), checked for shape and read by nothing but setup's inert
 #: ``CI_RUNNER_SLOT`` until R2 and P1, so that a host's inventory may gain them before then
-POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class', 'slot', 'audience'})
+POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class', 'slot', 'audience', 'device', 'start', 'gpu_waiters'})
 #: a pool's ``slot`` table (decision 16.2): key -> required
 SLOT_KEYS = {'cpus': True, 'workers': True, 'memory': True, 'speed': True, 'isa': False}
 #: the runner audiences (decision 16.7): every pool is ``private`` but the public pool's
@@ -162,6 +162,8 @@ def _pool(v: object) -> bool:
         return False
     if 'class' in v and not isinstance(v['class'], str):
         return False
+    if 'device' in v and not isinstance(v['device'], str) or 'start' in v and not _int(v['start']):
+        return False
     labels = v.get('labels', [])
     return (isinstance(labels, list) and len(labels) <= 8 and len(set(labels)) == len(labels)
             and all(isinstance(x, str) and LABEL.match(x) and x not in RESERVED_LABELS for x in labels) and ('labels' not in v or bool(labels)))
@@ -218,6 +220,7 @@ HOST_KEYS = {
     'memory_max': (lambda v: isinstance(v, str) and bool(_SIZE.match(v)), True),  # ci.slice
     'disk_min_gib': (_int, True),
     'gpus': (lambda v: isinstance(v, list) and all(_int(i) for i in v), True),
+    'gpu_uuids': (lambda v: isinstance(v, list), False),
     'max_temp_c': (lambda v: _int(v, 1), True),
     'cpus': (lambda v: isinstance(v, str) and bool(_CPUS.match(v)), False),  # taskset list
     'compile_cpus': (lambda v: isinstance(v, str) and bool(_CPUS.match(v)), False),  # compile parts' (12.7)
@@ -273,6 +276,7 @@ class Inventory:
     #: host's ``pools`` at load, so that setup, presence, the route and the executor, which
     #: read ``pools``, see the inventory they saw before the key existed (16.3)
     public: Mapping[str, Mapping[str, Mapping[str, object]]] = dataclasses.field(default_factory=dict)
+    schema: int = 1
 
     @property
     def host(self) -> Mapping[str, object]:
@@ -300,8 +304,8 @@ def load(text: str) -> Inventory:
         doc = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise InventoryError(f'inventory: not TOML: {e}') from None
-    if doc.get('schema') != SCHEMA:
-        raise InventoryError(f'inventory: schema {doc.get("schema")!r} is not {SCHEMA}')
+    if type(doc.get('schema')) is not int or doc['schema'] not in (1, 2):
+        raise InventoryError(f'inventory: schema {doc.get("schema")!r} is not 1 or 2')
     if set(doc) - {'schema', 'this', 'hosts'}:
         raise InventoryError(f'inventory: unknown keys {sorted(set(doc) - {"schema", "this", "hosts"})}')
     hosts = doc.get('hosts')
@@ -321,6 +325,26 @@ def load(text: str) -> Inventory:
             if isinstance(v, dict) and v.get('per_card') and not h['gpus']:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: per_card on a host without gpus')
             cls = _class(pool, v)
+            if doc['schema'] == 1 and (cls in ('plan', 'executor') or isinstance(v, dict) and {'device', 'start'} & set(v)):
+                raise InventoryError('central runner pools require inventory schema 2')
+            if doc['schema'] == 2 and cls in ('light', 'part', 'compile', 'nightly', 'slurm'):
+                raise InventoryError('schema 2 CPU pools use plan/executor roles; drain legacy CPU pools first')
+            if isinstance(v, dict) and 'gpu_waiters' in v and cls != 'plan':
+                raise InventoryError('GPU request lanes belong to the plan pool')
+            if cls in ('plan', 'executor'):
+                from parallel import protocol
+                if not isinstance(v, dict) or set(v) - {'count', 'class', 'device', 'start', 'gpu_waiters'}:
+                    raise InventoryError('unknown central pool option')
+                if 'gpu_waiters' in v and (v['gpu_waiters'] is not True or v.get('start', 0)
+                                          or v.get('count') != 1 + len(protocol.GPU_WAIT_LANES)):
+                    raise InventoryError('GPU waiters require one plan runner and one runner per GPU lane')
+                device = 'plan' if cls == 'plan' else v.get('device')
+                try:
+                    protocol.runner_names(device, v.get('count'), v.get('start', 0))
+                except (ValueError, TypeError):
+                    raise InventoryError('invalid central runner range') from None
+                if cls == 'plan' and 'device' in v or cls == 'executor' and device not in protocol.DEVICES:
+                    raise InventoryError('invalid central device')
             if cls not in CLASSES:
                 raise InventoryError(f'hosts.{role}.pools.{pool}: no runner class {cls!r}: name one in its class')
             if isinstance(v, dict) and v.get('per_card') and cls not in PER_CARD_CLASSES:
@@ -355,7 +379,7 @@ def load(text: str) -> Inventory:
                 if not v.get('slot') or any('ci-cpu-' + str(sum(hi - lo + 1 for lo, hi in cpu_ranges(c))) != cap
                                             for c in v['slot']['cpus']):
                     raise InventoryError(f'{where}: each slot.cpus entry must match {cap}')
-            if (cls, pub) in seen and cls != HOME_CLASS and not sized:  # the home pool: _check_home
+            if (cls, pub) in seen and cls not in (HOME_CLASS, 'executor') and not sized:  # the home pool: _check_home
                 raise InventoryError(f'hosts.{role}.pools.{pool}: class {cls} is also the class of {seen[cls, pub]}')
             if isinstance(v, dict) and 'slot' in v:  # one cpuset per runner (16.2)
                 n = len(h['gpus']) if v.get('per_card') else v['count']
@@ -379,6 +403,19 @@ def load(text: str) -> Inventory:
                     if sized or other_sized:
                         raise InventoryError(f'hosts.{role}.pools: overlapping slot CPUs in {pool} and {other}')
         _check_home(role, h)
+        if 'gpu_uuids' in h and doc['schema'] != 2:
+            raise InventoryError('central GPU UUIDs require schema 2')
+        if doc['schema'] == 2:
+            from parallel import protocol
+            local = [v for p, v in h['pools'].items() if _class(p, v) == 'executor' and v['device'] != 'slurm']
+            if len(local) > 1:
+                raise InventoryError('a physical host has at most one local CPU resource pool')
+            try:
+                protocol.validate_gpu_list(local[0]['device'] if local else '', h.get('gpu_uuids', []))
+            except protocol.Error as error:
+                raise InventoryError(str(error)) from None
+            if h.get('gpu_uuids') and (h['gpus'] or any(_class(p, v) in ('gpu', 'multi') for p, v in h['pools'].items())):
+                raise InventoryError('retire legacy GPU pools before transferring cards')
         if any(pub for _, pub in seen) and ('gpu', False) not in seen:
             raise InventoryError(f'hosts.{role}: a public pool shares the cards of the host\'s own gpu pool: name one')
         if any(pub for _, pub in seen) and 'isolation' not in h:
@@ -396,7 +433,16 @@ def load(text: str) -> Inventory:
         if pub:
             public[role] = pub
             h['pools'] = {k: v for k, v in h['pools'].items() if k not in pub}
-    return Inventory(this, hosts, public)
+    inv = Inventory(this, hosts, public, doc['schema'])
+    if doc['schema'] == 2:
+        from ci_runners import setup
+        cards = [card for host in hosts.values() for card in host.get('gpu_uuids', [])]
+        if len(cards) != len(set(cards)):
+            raise InventoryError('a physical GPU UUID can belong to only one host')
+        names = [n for role in hosts for n, _, _ in setup.runners(dataclasses.replace(inv, this=role))]
+        if len(names) != len(set(names)):
+            raise InventoryError('runner names must be unique across physical hosts')
+    return inv
 
 
 def _public(v: object) -> bool:
@@ -564,7 +610,7 @@ def labels_of(host: Mapping[str, object], pool: str) -> list[str] | None:
 #: string values that are not inventory: they appear in the design already. Every other string value of the inventory and the policy is denied.
 PUBLIC_KEYS = frozenset({'this', 'memory_max', 'cpus', 'compile_cpus', 'host_lock', 'slot_lock', 'slot_queue', 'bot',
                          'visibility', 'extra_events', 'labels', 'default_project', 'class', 'classes',
-                         'peer_labels', 'memory', 'isa', 'audience', 'isolation'})
+                         'peer_labels', 'memory', 'isa', 'audience', 'isolation', 'device'})
 #: ``tunnel.direct`` values the repository holds (the example, the tests): public, so not
 #: denied. Every other ``direct`` value is denied, as any inventory value is.
 #: the policy's ``[org] name`` is the org's, public as the repository is.

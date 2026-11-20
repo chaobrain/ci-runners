@@ -1,0 +1,49 @@
+schema = 1
+
+[github]
+organization = "chaobrain"
+runner_group = "ci-v2" # An existing organization runner group with selected repository access.
+
+[controller]
+url = "https://controller.example.invalid:18444"
+bind = "controller.example.invalid"
+
+# Replace every placeholder with maintained host facts. CPU quotas are explicit;
+# these examples are not hardware discovery. Remove hosts not being enrolled.
+[hosts.3090a]
+roles = ["controller", "executor"]
+# Fill with the full UUIDs of up to two transferred cards from nvidia-smi.
+gpu_uuids = []
+account = "replace-account"
+home = "/example/controller-home"
+runtime = "/example/controller-runtime"
+cpu_count = 16
+memory_max = "24G"
+slurm_runners = 0 # Set to 20 only after supplying the Slurm site and CI key.
+
+[hosts.3090b]
+roles = ["executor"]
+gpu_uuids = [] # Up to two physical cards.
+account = "replace-account"
+home = "/example/executor-a-home"
+runtime = "/example/executor-a-runtime"
+cpu_count = 16
+memory_max = "24G"
+
+[hosts.pro6000]
+roles = ["executor"]
+gpu_uuids = [] # Up to three physical cards.
+account = "replace-account"
+home = "/example/executor-b-home"
+runtime = "/example/executor-b-runtime"
+cpu_count = 80
+memory_max = "96G"
+
+[hosts.h100]
+roles = ["executor"]
+gpu_uuids = [] # Up to three physical cards.
+account = "replace-account"
+home = "/example/executor-c-home"
+runtime = "/example/executor-c-runtime"
+cpu_count = 40
+memory_max = "48G"

@@ -1,0 +1,27 @@
+schema = 2
+mode = "organization"
+
+[github]
+organization = "chaobrain"
+runner_group = "ci-v2" # An existing organization runner group with selected repository access.
+
+[controller]
+url = "https://controller.example.invalid:18444"
+bind = "controller.example.invalid"
+
+# Replace every placeholder with maintained host facts. This file contains only the local host.
+# For an executor-only input, use host-executor-organization.example.toml.
+[hosts.3090a]
+roles = ["controller", "executor"]
+# Fill with the full UUIDs of up to two transferred cards from nvidia-smi.
+gpu_uuids = []
+account = "replace-account"
+home = "/example/controller-home"
+runtime = "/example/controller-runtime"
+cpu_count = 16
+runner_count = 4
+priority = 10
+slurm_runners = 0 # Set a driver count after preparing the CPU target and its repository allowlist.
+memory_max = "24G"
+env_cache = "/example/controller-runtime/ci-runners/environment-cache"
+# conda = "/example/miniforge/bin/conda" # Set when conda is outside the service PATH.

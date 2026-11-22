@@ -1,0 +1,5 @@
+# Controller limits shared by every eligible private repository in this organization.
+max_parallel = 16
+max_minutes = 1440
+retries = 1
+gpu_mem_mib = 0

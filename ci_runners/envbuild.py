@@ -204,6 +204,11 @@ def parse_spec(text: str) -> Spec:
         doc = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise SpecError(f'{SPEC}: not TOML: {e}') from None
+    return parse_document(doc, text)
+
+
+def parse_document(doc: dict, text: str = '') -> Spec:
+    """Validate an environment specification after parsing its document."""
     if doc.get('schema') != 1:
         raise SpecError(f'{SPEC}: schema must be 1')
     unknown = set(doc) - {'schema', 'python', 'requirements', 'install', 'upstream', 'variables', 'conda', 'variant',
@@ -318,7 +323,13 @@ def steps(spec: Spec, *, project: str, envs: str, stamp: str, reqdir: str, conda
     requirement files at their repository paths; ``scope`` prefixes the heavy commands (a
     memory scope). ``constraints`` (:func:`constraints` of those files) also bind each
     upstream's editable install, so an upstream's dependency floor cannot move a pin. Pure."""
-    d = build_dir(envs, project, stamp, variant)
+    return prefix_steps(spec, build_dir(envs, project, stamp, variant), reqdir=reqdir,
+                        conda=conda, scope=scope, constraints=constraints)
+
+
+def prefix_steps(spec: Spec, d: str, *, reqdir: str, conda: str,
+                 scope: tuple[str, ...] = (), constraints: Sequence[str] = ()) -> list[list[str]]:
+    """Conda creation and pip installation at the final physical prefix."""
     py = os.path.join(d, 'bin', 'python')
     pip = [*scope, py, '-m', 'pip', 'install', '--no-input', '--disable-pip-version-check']
     channels = [a for c in spec.conda.channels for a in ('-c', c)]

@@ -5187,3 +5187,345 @@ N CPUs remain. Verify `CI_CPUS` against the measured mask; cover the worker
 default, a worker count that fits, and refusal above each bound. Compare
 routes with and without workers. After a lost first attempt, confirm the
 retry keeps and revalidates both counts.
+
+## Decision: centralized CPU-group scheduling (v2)
+
+### Release 2.0.2: portable installation
+
+The release keeps one controller and plan runner, organization-scoped runners,
+and executor-only hosts. New scheduling, transport and deployment code lives in
+the root `parallel` package. Existing action/CLI/workflow contracts and the Slurm
+submission interface remain available. Plan and execution jobs share one run.
+
+`parallel/deploy.sh` owns the v2 init/check/plan/apply/export-host/status workflow.
+Its external input directory holds topology, project admission/environment specs,
+Slurm configuration and private credentials. No real inventory enters this repo.
+An installation uses `ci-runners` for releases, hooks, project environments and
+legacy execution records, and `parallel` for control configuration, private files,
+databases, sockets and deployment receipts, below its configured runtime root.
+Only the controller holds the GitHub PAT and server private key; each executor
+receives its own control token and CA. Both `init` and `export-host` create
+private credential subdirectories under the external input. Operators fill
+`credentials/pat/github-pat` on the controller and
+`credentials/runner/runner_token` on each host that needs to register runners.
+Only registration reads the organization token value. An executor export leaves
+both manual files empty. The controller retains its automatically issued TLS
+identity in `credentials/tls/issued/` and per-executor tokens in
+`credentials/hosts/<host>`. An export carries the target token at the same
+relative path and the CA in `credentials/tls/ca.crt`. Services continue to read
+their installed runtime copies. A registration token refresh or the first
+issuance of control identities preserves the reviewed plan.
+
+When multiple project profiles name the same private repository, its hook policy
+uses their common repository ID and enables Slurm if any profile requests it.
+Each project still declares its own devices. Conflicting repository IDs prevent
+plan generation.
+
+Apply rechecks the reviewed plan and records successful steps for safe retries.
+It preserves runner identities and ledgers, rejects foreign units and different
+contents under an existing version, and never adopts the running trial implicitly.
+Installation and resource checks run as the ordinary user; no cpuset delegation or sudo is required. Linger is a separate system prerequisite for unattended service startup.
+Health distinguishes controller connectivity, listener processes and GitHub state.
+Disconnects retain reservations and reports; recovery precedes new allocation.
+Version and content fingerprints identify code without automatically pulling main.
+
+Implementation scope, naming, sequencing and acceptance are recorded in
+[the v2 development record](v2-single-workflow-run-development.md). The current branch
+implements the schema 2 contract; the portable release version is 2.0.2.
+Preparing this release does not migrate existing services or registrations.
+For v2 it replaces capability-based CPU dispatch, fixed runner slot widths, and
+the private light, home and nightly runner roles described above.
+
+- A single plan host builds consumer plans and owns persistent task and allocation
+  records. Each CPU group represents four logical CPUs and 4 GiB of task memory.
+  Groups belong to an execution resource pool, independently of the runner used.
+  A task reserves multiple groups and one runner atomically before dispatch;
+  acknowledgement converts the reservation into an allocation without another
+  decrement. Release follows local process cleanup, and runner availability is
+  tracked separately from released CPU groups.
+- Plan-building jobs submit a batch and output a task matrix in the same workflow
+  run. Each matrix branch requests an allocation before its execution job starts.
+  Only requested tasks may reserve resources; building the matrix never waits for
+  the entire batch to fit at once. A single active
+  `ci-plan.service` owns a local SQLite store through Python's `sqlite3` module;
+  group reservations, runner reservations and task requests commit in
+  one transaction. Network calls and file transfers run outside that transaction.
+  Executors cannot open the central database. Full logs and artifacts remain in
+  the existing result path; the scheduler records references and summaries.
+- Each physical execution host has one `ci-executor.service`, shared by its
+  numbered runners and any Slurm drivers it hosts. Local runner steps call it
+  through a Unix socket and wait for results; it reuses the existing task
+  supervisor rather than creating another independent launch path. The service
+  persists CPU group reservations and events and initiates authenticated HTTPS requests to
+  plan for allocation validation, reporting and cancellation instructions. Local
+  and Slurm quotas remain separate. If plan is unavailable, existing work remains
+  locally supervised and reports are retained; new dispatch resumes only after
+  reconciliation. Deployment includes database backup and recovery procedures.
+- The initial plan runner is `plan-0` on 3090a, with labels `plan-0` and
+  `ci-plan`. Local execution runners and unique labels are
+  `<device>-<zero-based-index>`. Slurm entries are explicitly `slurm0` through
+  `slurm19` and are initially hosted on 3090a alongside its four local execution
+  runners. The execution pool sizes are 4, 4, 20, 10 and 20 groups/runners for
+  3090a, 3090b, pro6000, h100 and Slurm respectively. Execution jobs target only the
+  selected runner's unique label; generic CPU labels do not dispatch v2 work.
+  Device/driver/backend identity comes from the registry, not name parsing.
+- Consumer plan schema 2 adds optional `parts[].device`, absent or empty for free
+  scheduling, otherwise one of `slurm`, `pro6000`, `3090a`, `3090b`, `h100`. A named
+  device or resource pool is a hard constraint preserved on retries. Explicit
+  `slurm` requests do not fall back to local devices; both explicit and freely
+  scheduled Slurm work must satisfy backend enablement, authorization, budgets
+  and resource limits. The misspelling `slum` is rejected. `cores` defaults to 4 and is a positive multiple of
+  four. `workers` is explicit and forwarded unchanged. Allocated group count, RAM,
+  runner and allocation identity are scheduler outputs, not consumer authority.
+- Scheduled/nightly work uses ordinary numbered runners and plan `minutes`.
+  Time limits are checked against project, backend and platform bounds rather
+  than inferred from the runner class. The old nightly all-slot/all-card lease
+  is not implicit in a long duration. Dependent consumers must declare their
+  actual CPU needs and migrate any separate exclusivity requirements.
+- Private light and home runners are retired after their users migrate. A local
+  executor service provides reporting, process supervision, cleanup, recovery and
+  reconciliation without a GitHub runner. It reserves CPU groups as quantities
+  among CI tasks; non-CI CPU use does not resize this quota. Drain prevents new
+  allocations without disabling recovery. Tier-based runner stopping and the
+  associated home hold path do not govern the new CPU pool.
+- The consumer's original workflow run contains plan, all matrix task attempts,
+  and a final verdict. No allocation starts a separate workflow run. A task
+  workflow requests its allocation on `ci-plan`, then calls `execute.yml` with
+  `runner_tag` and `allocation_json`. Tests explicitly check out the recorded SHA.
+  The pre-job hook resolves the numbered runner's allocation through the executor
+  service and verifies the original run/attempt and the matching GitHub job.
+  Source event admission and the self-hosted refusal for this repository remain.
+  The scheduler records the numeric execution job ID, separately from the source
+  run ID and task attempt. CPU cleanup and completion of that job (including
+  artifact upload) are separate requirements. Individual allocation timeouts do
+  not cancel the shared run. Source cancellation cancels its batch.
+  The v2 outputs are `batch_id`, `submission_state`, and final `state`; the verdict
+  fails unless all required tasks succeed. Matrix fail-fast is disabled. At most
+  one infrastructure retry is declared in the same run; assertion failures never
+  become success. Plan-only validation allocates nothing and uses a separate
+  status context. Empty plans succeed without expanding a matrix. Full reruns
+  submit a new batch for the new run attempt; reusing an earlier attempt's batch
+  in a failed-jobs-only rerun is refused with a full-rerun instruction.
+- Release 2.0.2 covers private CPU groups. The 2.1.0 GPU contract follows below.
+  Slurm keeps its remote gate, accounting and cancellation, but
+  uses the current allocation's CPU, memory, worker and time values. Slurm CPU
+  limits are supplied by the cluster; the executor verifies a CPU quota or a
+  cgroup CPU-set width no larger than the allocation, including on hybrid hosts.
+  It does not set CPU affinity. Its existing
+  supervisor enforces the allocated RAM by summing the command tree's anonymous
+  resident memory every two seconds and reporting an over-limit kill as OOM;
+  this is a monitored limit, not an instantaneous kernel memory ceiling. Local
+  execution still requires a kernel memory limit. Allocation-ready records name
+  the memory enforcement method. Old and new
+  dispatchers must not use the same host capacity concurrently. Migrating
+  all callers and proving the replacement recovery path precedes removing old
+  labels or registrations. The implementation plan defines the staged checks.
+
+Implementation entry points are `ci-v2.yml` and `actions/central`; `ci.yml` keeps
+the schema 1 protocol for staged migration. Schema 1 entry points reject schema 2
+instead of routing it through the old matrix. The source workflow and its commit
+status report the same final test result after confirmed cleanup and execution
+job completion, including artifact upload. The implementation sequence and
+acceptance are in [the v2 development record](v2-single-workflow-run-development.md).
+Scheduler database upgrades require all old batches and allocations to finish;
+old independent-run records must never be interpreted as same-run job records.
+
+`queue_minutes` is a cumulative waiting budget across attempts; execution time
+after allocation acknowledgement does not consume it. Each execution job allows
+`ceil(minutes + queue_minutes + 30)` minutes for waiting, execution and collection,
+bounded to 1440 minutes to fit the job credential lifetime. Project `max_minutes`
+and Slurm target limits can lower this bound. A retry receives the remaining queue
+budget and the original explicit worker count and device constraint.
+
+The managed plan service template is `parallel/units/ci-parallel-scheduler.service`. The scheduler can
+also run in the foreground with `python3 -m ci_runners.cli scheduler serve`.
+A separate service account is recommended to isolate the scheduler's credentials
+and state from runner jobs. When sharing an account in staging, use only trusted
+jobs, a dedicated repository, staging credentials and a staging database.
+Setup installs `ci-executor.service` only on hosts with
+an executor pool. Release 2.0.2 handles private CPU execution. Legacy GPU
+helpers must migrate before every light/home registration is retired.
+
+### CPU quantity limits for schema 2
+
+Host deployment input uses `cpu_count`, a positive multiple of four, rather than
+CPU numbers. Existing `cpus` input remains accepted solely to derive its count;
+it is not used to select processors. The local ledger reserves group quantities
+and must be drained before upgrading from CPU-number mappings. Each local task
+runs in an ordinary user systemd scope with `CPUQuota=100%` per allocated logical
+CPU and `MemoryMax` equal to its allocated RAM. Before acknowledging or starting
+the command, the supervisor checks effective ancestor CPU quota and memory limits.
+Missing or ineffective controls fail closed. CPU quota limits aggregate CPU time;
+it does not reserve particular cores or prevent workloads from sharing cores with
+other processes. `CI_CORES` carries the authorized quantity, `CI_WORKERS` keeps
+the requested worker count, and `CI_CPUS` describes inherited affinity only.
+The deployment check probes these limits without `AllowedCPUs` or cpuset
+delegation. Existing Slurm site scheduling and memory supervision remain in use.
+
+### Release 2.1.0: single-card GPU scheduling
+
+Private schema 2 tasks keep `needs: "cpu"` and may set a boolean `gpu`
+(default false). A GPU task reserves one whole card, its usual CPU groups and
+one numbered runner on the same local host. The project device list and
+explicit task device apply to every attempt. Slurm provides CPU allocations.
+Plan-only validates the configured possibilities without reserving anything.
+
+The external host input lists full physical `gpu_uuids` in transfer order.
+The quotas are pro6000 3, 3090a 2, 3090b 2 and h100 3. Missing lists
+describe CPU-only installations. The controller maintains a durable FIFO of
+cards. It reserves the earliest eligible card with a healthy capability
+heartbeat, sufficient CPU groups and an available runner in one transaction.
+Authenticated executor heartbeats report observations of the configured cards.
+An unhealthy, missing or stale card stops admitting work. Its active lease
+survives. Resource cleanup returns a card to the tail exactly once. GitHub job
+completion separately releases the runner.
+
+GPU grants use allocation schema 2 with a full `gpu_uuid`. CPU grants retain
+allocation schema 1. The executor durably holds the granted UUID and CPU
+groups together and checks the grant again before acknowledging the scope.
+The test's `CUDA_VISIBLE_DEVICES` is the single authorized UUID or empty for
+CPU. Restart, cancellation and duplicate events preserve that ownership.
+
+The controller hosts a private allocation-request runner for each of the four
+explicit devices and one for automatic GPU selection. Each carries its own
+`ci-gpu-wait-<device-or-auto>` label. Initial and retry requests use the same
+lane. CPU requests, plan and verdict use `ci-plan`. GPU requests can enter
+their lanes independently. Both task matrices share the ledger's batch
+concurrency limit and produce one source-run verdict.
+
+Database upgrades require drained batches, completed runner jobs and cleared
+local executions. At cutover, stop all old runners on the physical host,
+confirm their workers, scopes, card leases and any remote Slurm jobs are
+idle, then transfer and verify each UUID before activating the new runners.
+
+
+## 2.1.1 repository admission, executor registration, and output views
+
+### Deployment inputs
+
+Schema 2 deployment inputs describe one machine. `host.toml` keeps `[github]`,
+`[controller]` and one `[hosts.<local-name>]` table. Only a controller sets
+`controller.bind`. An executor sets `runner_count` and `priority` in its own
+host entry. The existing one-runner-per-four-logical-CPU group and supported
+device, GPU and Slurm limits apply. A host can have both roles. Project files
+still declare repository, status context, devices, resources and environment.
+The controller resolves each repository's ID using GitHub. Executor-only
+nodes prepare projects with the existing environment or kept environment
+record.
+
+The controller reads `device-admission.toml` in its input directory.
+`[devices.<device-id>].token_file` references a private per-device credential,
+relative to that input directory. The executor receives its own credential and
+the controller CA through the existing credential layout. GitHub organization
+runner registration continues to use the separate registration token. Schema
+1 inputs retain their original static deployment behavior.
+
+### Repository admission and control
+
+For schema 2 deployments the registered repository's GitHub collaborators are
+the source of user admission. The controller reads each relevant actor's
+effective permission through GitHub. Read, write and admin repository access
+all qualify. A missing or unverified identity or API result refuses the job.
+Repository identity, private-pool, same-repository event and runner allocation
+checks apply before execution. The controller checks CI plan admission and
+rechecks user access when the allocation is claimed. Project inputs can omit
+the former static actors list. The controller keeps its GitHub credential on
+the controller.
+
+### Device registration and scheduling
+
+An executor verifies the controller's TLS identity and registers over the
+existing authenticated control connection. The controller binds the
+authenticated ID to the announced device and validates CPU, memory, GPU UUIDs,
+runner count and priority against the supported resource model. The
+controller preserves this registration in its scheduler database. Retries of
+the same registration preserve existing allocations. New registrations update
+their own entries transactionally and preserve other devices' current
+observations. The controller considers eligible online runners, capacity,
+project environment readiness and drain state before preferring the highest
+device priority. Equal-priority pools use the existing ordering. Queued tasks
+can use a subsequently ready device permitted by their project. The workflow
+still routes the allocation by its numbered runner label. A stale heartbeat
+prevents new allocations; existing reservations follow the established
+cleanup protocol.
+
+### Concentrated inspection output
+
+Each host exposes a view in its runtime's `output/` directory. Its files use
+the existing formats and names: `inventory.toml`, `policy.toml`,
+`projects/<name>.toml`, `deployment.json`, and the scheduler or executor SQLite
+and health files for its roles. Successful apply and `deploy output` refresh
+the available files. SQLite copies use its backup interface and files are
+replaced atomically. Only the listed files are eligible for copying.
+Services use the existing authoritative runtime paths.
+
+The scheduler generates `output/devices.json` using `schema = 1` and a
+`devices` object keyed by device ID. Each entry describes CPU, memory and GPU
+parameters, runner count and tags, priority, online state, and last heartbeat.
+The scheduler refreshes this view on registration and updates to heartbeat
+state, including expiry. The same scheduler ledger remains authoritative.
+
+### Private organization deployment mode
+
+Schema 2 hosts can select `mode = "organization"` in `host.toml`. The
+controller also reads `organization.toml` for the shared plan limits and
+`device-admission.toml` for executor access. Each executor reads its own host
+configuration. With `env_root` set on the host, local tasks use the
+preinstalled environment at `<env_root>/<lowercase repository name>`.
+A host's optional `env_aliases` table maps verified full repository names
+to stable directory names under that same root. Plan commands use the
+repository environment on the plan host. The existing single `env` setting
+remains available for deployments using a shared environment.
+The plan workflow supplies the test command and status context as before.
+Projects in this mode are bound to the verified GitHub repository ID at
+runtime. The controller/driver can additionally enable Slurm CPU execution
+with its site configuration and a private `slurm-allowlist.json`. Schema 1
+of this JSON has a `repositories` array. Each entry contains `repository_id`,
+`repository`, `slurm_project` and `slurm_target` (`site/target`). GitHub's
+verified private repository identity determines admission. Each entry binds
+the identity to an existing cluster project environment and CPU target.
+In v2.1.2 the controller checks current permission at reservation and claim, including
+retries. Missing or invalid authorization closes Slurm admission.
+
+Organization tasks with no explicit device take the first eligible, available
+pool in this order: `h100`, `pro6000`, `3090b`, `3090a`, `slurm`. Only
+authorized CPU tasks can reach the final pool. GPU tasks use the same local
+ordering. Explicit devices remain binding across attempts. Public workflows
+and project-based deployments retain their existing scheduling rules.
+
+Plan admission, submission and allocation claims verify current GitHub
+repository ownership, private visibility and repository ID. Existing event,
+same-repository PR, run and runner checks apply at their respective stages.
+GitHub Actions controls who may start a workflow. The organization mode has
+no application-level actor or collaborator check.
+
+The controller publishes `output/repositories.json` at startup and every ten
+minutes, with `schema`, `organization`, `fetched_at` and `repositories`.
+Each record has the GitHub repository `id`, `full_name` and `visibility`.
+All repositories visible to the controller credential are included. A failed
+fetch leaves the last complete snapshot in place. Admission uses live GitHub
+checks independently of this view. Organization executors register over the
+same authenticated connection. In the preinstalled `env_root` mode a heartbeat
+reports the full repository names whose local environments have an executable
+`bin/python`. Each heartbeat replaces the previous list. The controller
+selects a local device with the matching environment, including on retries.
+A controller using `env_root` requires that evidence even from older devices.
+The worker resolves its own environment again before execution. Slurm uses
+the existing authorized remote project and target. Only admitted, ready
+devices with current capacity and online runners can receive allocations.
+
+#### Organization jobs with a YAML environment cache
+
+An organization deployment can set a host-local `env_cache` directory. The
+controller pins the trusted repository environment specification
+(`.github/ci-environment.yml`), its recursive requirement and constraint
+inputs and the resolved upstream commits for one plan and all its tasks.
+The plan runner prepares the default environment before collecting tests.
+Each independent pytest case belongs to one shard in its resource class.
+The plan carries no inventory of installed environments. Selection and retry
+use resource capacity, device pins and existing admission rules, irrespective
+of whether a cache is warm. Workers with cache support materialize the pinned
+recipe on receipt. Build once per compatible key, publish only a complete
+prefix, preserve concurrent users, and report preparation failures. Slurm
+keeps its private CPU allowlist and prepares on the cluster side. Shared
+and preinstalled deployments retain their existing configuration contracts.

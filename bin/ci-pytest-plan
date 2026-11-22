@@ -1,0 +1,10 @@
+#!/usr/bin/env python
+"""Run the sharding helper with the project Python selected for the plan."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from parallel.pytest_plan import main
+
+if __name__ == '__main__':
+    raise SystemExit(main())

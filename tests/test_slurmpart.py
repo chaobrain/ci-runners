@@ -220,19 +220,23 @@ class Pure(unittest.TestCase):
     def test_the_control_socket_fits_a_long_data_root(self):
         import tempfile
         with tempfile.TemporaryDirectory() as t:
-            def gate(alias, cm_len):
-                rest = len(sp.state_dir('x', 'cluster1')) - 1 + len('/cm')  # what the data root's length is under
+            def gate(alias, cm_len, *, site_directory=False):
+                rest = len('/ci-runners/run/cm')
+                if site_directory:
+                    rest = len(sp.state_dir('x', self.site.name)) - 1 + len('/cm')
                 data = os.path.join(t, 'd' * (cm_len - len(t) - 1 - rest))
                 g = sp.Gate('/e', data, self.site, alias)
-                self.assertEqual(len(g.cm), cm_len)
                 return g
-            g = gate('acct1', 60)  # ssh's %C (40) and its temporary suffix (17) would make 118 bytes
+            g = gate('acct1', 60, site_directory=True)  # ssh's %C (40) and its temporary suffix (17) would make 118 bytes
             sock = next(a for a in g.ssh_argv() if a.startswith('ControlPath=')).removeprefix('ControlPath=')
-            self.assertEqual(os.path.dirname(sock), g.cm)
+            self.assertEqual(len(os.path.dirname(sock)), 60)
             self.assertRegex(os.path.basename(sock), r'\A[0-9a-f]{12}\Z')  # a name, not a token ssh expands
             self.assertLess(len(sock) + sp.SSH_TMP, sp.SUN_PATH)
-            self.assertNotEqual(gate('acct2', 60).sock, g.sock)  # one master per account
-            self.assertTrue(gate('acct1', 77).ssh_argv())  # 77 + 13 + 17 = 107: the longest that fits
+            self.assertNotEqual(gate('acct2', 60, site_directory=True).sock, g.sock)  # one master per account
+            longer = gate('acct1', 77)
+            self.assertEqual(os.path.dirname(longer.sock), os.path.join(longer.data, 'ci-runners', 'run', 'cm'))
+            self.assertNotEqual(sp.control_socket_path(longer.data, 'another-site', 'acct1'), longer.sock)
+            self.assertTrue(longer.ssh_argv())  # 77 + 13 + 17 = 107: the longest that fits
             with self.assertRaisesRegex(sp.Unreachable, 'too long for the ssh control socket'):
                 gate('acct1', 78).ssh_argv()
 

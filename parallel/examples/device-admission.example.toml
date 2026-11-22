@@ -1,0 +1,6 @@
+# Controller input. Token paths are relative to this directory.
+[devices]
+# [devices.3090a]
+# token_file = "credentials/hosts/3090a"
+# [devices.3090b]
+# token_file = "credentials/hosts/3090b"

@@ -57,12 +57,13 @@ from collections.abc import Callable, Mapping, Sequence
 #: the end of a command's error text the gate passes on: far more than the driver keeps
 #: (``slurmpart.Gate``: 300), so that the driver redacts a name whole before it cuts
 ERR_KEEP = 4000
-VERBS = ('stage', 'fetch', 'submit', 'status', 'log', 'cancel', 'ledger', 'nodes', 'reap', 'check', 'capacity')
+VERBS = ('stage', 'fetch', 'submit', 'status', 'log', 'cancel', 'ledger', 'nodes', 'reap', 'check', 'capacity', 'cache-ready')
 TIME_MARGIN = 5  # min of a job's --time over the part's timeout (14.3; slurmsite.TIME_MARGIN)
 WARN_SECONDS = 120  # the warning TERM before the time limit
 LOG_CHUNK = 1 << 20
 WORK_DAYS = 3  # a part directory's life on the cluster
-MAX_REQUEST = 256 << 10
+MAX_LEGACY_REQUEST = 256 << 10
+MAX_REQUEST = 1 << 20  # bounded recipe plus the command and allocation
 MAX_QUEUE_MINUTES = 24 * 60
 #: a part's key below ``work/``
 KEY = re.compile(r'(?P<owner>[a-z0-9][a-z0-9_.-]{0,38})/(?P<repo>[a-z0-9][a-z0-9_.-]{0,99})/[0-9]{1,20}-[0-9]{1,4}/'
@@ -92,6 +93,10 @@ RESERVED_PREFIXES = ('CI_', 'SLURM_', 'LD_', 'GITHUB_OUTPUT', 'GITHUB_ENV', 'GIT
 KEEP_VARS = ('CUDA_VISIBLE_DEVICES', 'GPU_DEVICE_ORDINAL', 'ROCR_VISIBLE_DEVICES')
 #: a request's keys: (check, required)
 REQUEST = {
+    'cores': (lambda v: type(v) is int and v > 0 and v % 4 == 0, False),
+    'workers': (lambda v: type(v) is int and v > 0, False),
+    'allocation': (lambda v: isinstance(v, dict), False),
+    'environment_recipe': (lambda v: isinstance(v, dict), False),
     'project': (lambda v: isinstance(v, str) and bool(PROJECT.fullmatch(v)), True),
     'target': (lambda v: isinstance(v, str) and bool(NAME.fullmatch(v)), True),
     'cards': (lambda v: type(v) is int and 0 <= v <= 64, True),
@@ -236,11 +241,24 @@ def check_request(req: object, account: Mapping[str, object], base: str) -> dict
         raise GateError(f'cards {req["cards"]}: target {req["target"]} takes 1 to {t["max_cards"]}')
     if not gpu and req['cards']:
         raise GateError(f'cards {req["cards"]}: target {req["target"]} has no cards')
+    if {'allocation', 'cores', 'workers'} & set(req):
+        from parallel import protocol
+        try:
+            grant = protocol.validate_allocation(req.get('allocation'))
+        except ValueError as e:
+            raise GateError(f'allocation: {e}') from None
+        if (gpu or grant['backend'] != 'slurm' or req.get('cores') != grant['cores']
+                or req.get('workers') != grant['workers'] or req['memory'] != grant['RAM']
+                or req['minutes'] != grant['minutes'] or req['cores'] > int(t['cpus'])):
+            raise GateError('allocation exceeds the CPU target or differs from its authorized resources')
     if req['minutes'] > int(t['max_minutes']):
         raise GateError(f'minutes {req["minutes"]:g}: target {req["target"]} takes at most {t["max_minutes"]}')
     if _size_bytes(req['memory']) > _size_bytes(str(t['mem_per_node'])):
         raise GateError(f'memory {req["memory"]}: target {req["target"]} has {t["mem_per_node"]} a node')
-    if not os.path.isdir(env_dir(base, req['project'], str(t['variant']))):
+    if 'environment_recipe' in req:
+        from ci_runners import slurmcache
+        slurmcache.check(account, req)
+    elif not os.path.isdir(env_dir(base, req['project'], str(t['variant']))):
         raise GateError(f'no env {req["project"]}-{t["variant"]} here: run ci-run slurm env')
     return req
 
@@ -258,6 +276,8 @@ def render(account: Mapping[str, object], req: Mapping[str, object], key: str, d
     m = KEY.fullmatch(key)
     cards = int(req['cards'])
     cpus = cards * int(t['cpus_per_card']) if 'gpu_model' in t else int(t['cpus'])
+    if 'allocation' in req:
+        cpus = req['cores']
     lines = [f'--job-name=ci-{m["repo"]}-{m["id"]}-{m["n"]}', f'--account={account["slurm_account"]}',
              f'--partition={t["partition"]}']
     if t.get('nodes'):
@@ -295,7 +315,12 @@ def submit(base: str, release: str, key: str, data: bytes, run: Callable = subpr
         req = json.loads(data.decode('utf-8'))
     except (UnicodeDecodeError, ValueError):
         raise GateError('the request is not JSON') from None
+    if isinstance(req, dict) and 'environment_recipe' not in req and len(data) > MAX_LEGACY_REQUEST:
+        raise GateError('the request is too long')
     check_request(req, account, base)
+    if 'environment_recipe' in req:
+        from ci_runners import slurmcache
+        slurmcache.check_key(key, req)
     d = part_dir(base, key, create=True)
     prev = _read_json(os.path.join(d, 'job.json'))
     if prev is not None:  # a part tries the next target with the same key: only once its job is gone
@@ -370,6 +395,9 @@ def status(base: str, key: str, run: Callable = subprocess.run) -> dict:
             if by.strip():
                 out['by'] = 'us' if by.strip() == str(os.getuid()) else 'other'
     out['exit'] = _read_json(os.path.join(d, 'record', 'exit.json'))
+    ready = _read_json(os.path.join(d, 'record', 'allocation-ready.json'))
+    if ready:
+        out['allocation_ready'] = ready
     try:
         out['log_size'] = os.path.getsize(os.path.join(d, 'log'))
     except OSError:
@@ -632,10 +660,33 @@ def job(d: str) -> int:
                     'CI_RESUME': '1' if req['resume'] else '0', 'CI_SLURM_JOB': os.environ.get('SLURM_JOB_ID', '')})
         if not cards:
             env['CUDA_VISIBLE_DEVICES'] = ''
+        if 'allocation' in req and os.path.isdir(f'{d}/tmp/ci-plan-files'):
+            env['CI_PLAN_FILES'] = f'{d}/tmp/ci-plan-files'
         os.environ.clear()
         os.environ.update(env)
         os.chdir(os.path.join(d, 'ws'))
         release = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if 'allocation' in req:
+            from parallel import task_execution
+            if 'environment_recipe' in req:
+                # Prepare under the same timeout, cancellation and RAM monitor as the test.
+                call = 'import sys; sys.path.insert(0,sys.argv.pop(1)); from ci_runners.slurmcache import execute; sys.exit(execute(sys.argv[1]))'
+                record = os.path.join(d, 'record')
+                failure = os.path.join(record, 'environment-failure.json')
+                try:
+                    os.unlink(failure)
+                except FileNotFoundError:
+                    pass
+                rc = task_execution.supervise(record, req['allocation'], [], req['command'],
+                                              launch_argv=[str(account['login_python']), '-I', '-c', call, release, d])
+                reason = _read_json(failure) if rc == 2 else None
+                if reason and isinstance(reason.get('reason'), str):
+                    exit_file = os.path.join(record, 'exit.json')
+                    result = _read_json(exit_file) or {}
+                    _write_json(exit_file, {**result, 'rc': None, 'unavailable': reason['reason']})
+                return rc
+            return task_execution.supervise(os.path.join(d, 'record'), req['allocation'],
+                                            [], req['command'])
         return part.supervise(os.path.join(d, 'record'), float(req['minutes']) * 60,
                               part.command_argv(req['command']), _size_bytes(req['memory']),
                               part.p2p_argv(release) if cards >= 2 else [])
@@ -679,6 +730,9 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
             return 0
         if verb == 'submit' and len(args) == 1:
             res: object = submit(base, release, args[0], stdin.read(MAX_REQUEST + 1), run)
+        elif verb == 'cache-ready' and len(args) == 1:
+            from ci_runners import slurmcache
+            res = slurmcache.probe(base, args[0], stdin.read(MAX_REQUEST + 1))
         elif verb == 'status' and len(args) == 1:
             res = status(base, args[0], run)
         elif verb == 'cancel' and len(args) == 1:

@@ -80,8 +80,8 @@ def _path(v: object) -> bool:
 
 
 def _list(v: object, rx: re.Pattern, *, empty: bool = False) -> bool:
-    return (isinstance(v, list) and (empty or bool(v)) and len(set(v)) == len(v)
-            and all(isinstance(x, str) and rx.fullmatch(x) for x in v))
+    return (isinstance(v, list) and (empty or bool(v))
+            and all(isinstance(x, str) and rx.fullmatch(x) for x in v) and len(set(v)) == len(v))
 
 
 def _submit_args(v: object) -> bool:
@@ -99,6 +99,7 @@ SITE_KEYS = {
     'submit_args': (_submit_args, False),
     'login_python': (_path, True),
     'egress': (lambda v: v in EGRESS, True),
+    'cache_tunnel_port': (lambda v: type(v) is int and 1 <= v <= 65535, False),
     'proxy': (lambda v: isinstance(v, str) and bool(re.fullmatch(r'https?://[A-Za-z0-9_.:@/-]{1,200}', v)), False),
     'max_parts': (_int, True),          # running cluster parts per driver host
     'pending_minutes': (_num, True),    # a target's pending bound, unless it sets its own
@@ -131,6 +132,7 @@ TARGET_KEYS = {
 GPU_ONLY = ('cards_per_node', 'max_cards', 'cpus_per_card')
 ACCOUNT_KEYS = {
     'ssh': (lambda v: isinstance(v, str) and bool(SSH_ALIAS.fullmatch(v)), True),
+    'cache_build_via': (lambda v: isinstance(v, str) and bool(SSH_ALIAS.fullmatch(v)), False),
     'root': (_path, True),             # on the shared file system; ci-runners lives below it
     'slurm_account': (lambda v: isinstance(v, str) and bool(SLURM_NAME.fullmatch(v)), True),
     'targets': (lambda v: _list(v, NAME), True),
@@ -327,6 +329,9 @@ def account_entry(site: Site, alias: str) -> dict[str, object]:
         'schema': SCHEMA, 'site': site.name, 'account': alias, 'slurm_account': a.a['slurm_account'],
         'root': a.a['root'], 'gpu_request': site.site['gpu_request'],
         'submit_args': list(site.site.get('submit_args', [])), 'login_python': site.site['login_python'],
+        'cache_egress': site.site['egress'],
+        **({'cache_proxy': site.site['proxy']} if site.site['egress'] == 'proxy' else {}),
+        'cache_projects': {n: site.targets[n].t.get('enabled', False) for n in a.a['targets']},
         'targets': {n: {k: v for k, v in site.targets[n].t.items() if k in keep} for n in a.a['targets']},
     }
 
@@ -457,6 +462,8 @@ class Redactor:
                 self.add_path(os.path.dirname(root), '<home>')
             self.add(str(a.a['slurm_account']), '<account>')
             self.add(str(a.a['ssh']), '<host>')
+            if a.a.get('cache_build_via'):
+                self.add(str(a.a['cache_build_via']), '<host>')
         for t in site.targets.values():
             self.add(str(t.t['partition']), '<partition>')
             for n in [*t.t.get('nodes', []), *t.t.get('exclude', [])]:

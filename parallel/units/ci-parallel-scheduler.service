@@ -1,0 +1,18 @@
+[Unit]
+Description=CI central CPU scheduler
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=@RELEASE@/bin/ci-run scheduler serve
+Environment=CI_RUNNERS_ETC=@ETC@
+Environment=CI_RUNNERS_PYTHON=@PYTHON@
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

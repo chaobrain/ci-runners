@@ -523,3 +523,11 @@ GH_TOKEN=$(gh auth token) ci-run stats [--repo OWNER/NAME ...] [--since 24h|90m|
 
 **API 开销**：每次调用 30 秒、3 次尝试；一个仓库有 R 个 run、P 次推送、K 个 run 里共 N 个被重试的部件时，共 ceil(R/100) + R + ceil(P/100) + K + 2N 次请求（作业每页 100 个；下载是两次请求：GitHub 的重定向，再是不带登录的签名 URL）。2026-11-12 金丝雀一天 44 个 run 用了 77 次。超过 `--max-requests`（默认 2000）就拒绝出报告，不会出一份不全的；GitHub 的 run 搜索最多给 1000 个 run，第一页的 `total_count` 超过 1000 也拒绝；`Link` 指向 GitHub API 之外的地址时拒绝（登录不会发到别处）。退出码：0 报告；1 GitHub 读不到或到了上限；2 参数错误或没有登录。
 
+
+## v2 中央 CPU 服务
+
+v2 从头部署的停机、清理、配置、启动和现场验收统一维护在 [从头部署手册](v2-single-workflow-run-rebuild.md)。中央调度、单次 workflow run 的实现过程与历史测试证据统一维护在 [开发过程记录](v2-single-workflow-run-development.md)。
+
+标准安装使用独立版本目录；当前 staging 的 release 曾直接链接开发目录，因此源码修改可能立即影响后续 hook，常驻服务仍需重新启动。按部署手册改用固定版本目录，保持工作流、action、scheduler、executor 和 hook 的版本一致。
+
+执行前核对实际服务名单与任务归属。CPU 清理、GitHub job 收尾和 Slurm 远端清理分别确认；停止服务本身不能证明资源已释放。真实主机清单、账号路径、凭据和终止清单只保留在主机上。

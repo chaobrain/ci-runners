@@ -1878,6 +1878,15 @@ def bundle(root: str, files: Iterable[str], pkg: str | None = None, git: str = '
             for n in sorted(os.listdir(pkg)):
                 if n.endswith('.py'):
                     tar.add(os.path.join(pkg, n), arcname=f'pkg/ci_runners/{n}', recursive=False)
+            release = os.path.dirname(pkg)
+            parallel = os.path.join(release, 'parallel')
+            if os.path.isdir(parallel):
+                for name in sorted(os.listdir(parallel)):
+                    if name.endswith('.py'):
+                        tar.add(os.path.join(parallel, name), arcname=f'pkg/parallel/{name}', recursive=False)
+            version_file = os.path.join(release, 'VERSION')
+            if os.path.isfile(version_file):
+                tar.add(version_file, arcname='pkg/VERSION', recursive=False)
     return buf.getvalue()
 
 

@@ -1,0 +1,19 @@
+schema = 2
+
+[github]
+organization = "chaobrain"
+runner_group = "ci-v2"
+
+[controller]
+url = "https://controller.example.invalid:18444"
+
+[hosts.3090b]
+roles = ["executor"]
+account = "replace-account"
+home = "/example/executor-home"
+runtime = "/example/executor-runtime"
+cpu_count = 16
+memory_max = "24G"
+gpu_uuids = []
+runner_count = 4
+priority = 10

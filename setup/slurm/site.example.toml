@@ -13,6 +13,7 @@ gpu_request = "--gpus={n}"        # the site's one working GPU request, {n} the 
 submit_args = []                  # site-wide extra sbatch arguments, e.g. ["--qos=<qos>"]
 login_python = "/usr/bin/python3" # the gate's and the cluster supervisor's interpreter, 3.11 or later
 egress = "tunnel"                 # env builds: direct | proxy | tunnel | push (14.9)
+# cache_tunnel_port = 8890         # local allowlisted HTTP proxy for automatic tunnel builds
 # proxy = "http://<proxy>:<port>" # egress = "proxy" only
 max_parts = 4                     # running cluster parts per driver host
 pending_minutes = 3               # a target's pending bound, then the next account or target (14.3)
@@ -57,6 +58,7 @@ max_minutes = 60
 enabled = false
 
 [accounts.acct1]                  # an alias of ours, never the account's own name
+# cache_build_via = "cache-builder" # trusted SSH alias of the same account for cache misses with tunnel egress
 ssh = "cluster1-acct1"            # an ssh alias of the CI account's ssh config
 root = "/shared/fs/acct1"         # on the file system the login host shares with the nodes
 slurm_account = "lab-acct1"

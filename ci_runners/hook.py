@@ -2,7 +2,8 @@
 
 Run by ``hooks/job-started.sh`` and ``hooks/job-completed.sh`` with the system Python,
 isolated (``-I``). ``job-started`` reads only local files (the policy, with a schema 2
-policy the org snapshot ``org.json``, the inventory and ``GITHUB_EVENT_PATH``), does no network I/O, bounds itself at 60 s and prints one line,
+policy the org snapshot ``org.json``, the inventory and ``GITHUB_EVENT_PATH``) and uses local control sockets for
+schema 2 admission. It bounds itself at 60 s and prints one line,
 ``ci-runners: accepted|refused <reason> policy=<hash>``, by the runner's class and audience
 (design §6.3). Both are the inventory's for the runner's name (``RUNNER_NAME``, which no
 workflow can set; decision 18.7, C2c), never the environment's: ``job-started.sh`` starts the
@@ -36,7 +37,7 @@ MAX_INVENTORY = 1 << 20
 START_BOUND, COMPLETE_BOUND = 60, 120
 #: the environment ``job-started`` reads, and all that ``job-started.sh`` passes it (C2c)
 ENV = ('GITHUB_ACTOR', 'GITHUB_EVENT_NAME', 'GITHUB_EVENT_PATH', 'GITHUB_REF_PROTECTED', 'GITHUB_REPOSITORY',
-       'GITHUB_REPOSITORY_ID', 'GITHUB_RUN_ID', 'GITHUB_TRIGGERING_ACTOR', 'RUNNER_NAME')
+       'GITHUB_REPOSITORY_ID', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_TRIGGERING_ACTOR', 'RUNNER_NAME')
 
 
 class _Timeout(Exception):
@@ -130,7 +131,7 @@ def started(env: dict[str, str]) -> tuple[int, str]:
                     except (OSError, ValueError, RecursionError) as e:
                         detail['error'] = f'event: {type(e).__name__}'
                         event = None
-                    d = policy.decide(pol, env, event)
+                    d = _started_decision(etc, pol, env, event)
     except _Timeout:
         d = policy.Decision(False, 'timeout')
     except Exception as e:  # noqa: BLE001 - any failure refuses
@@ -139,6 +140,132 @@ def started(env: dict[str, str]) -> tuple[int, str]:
     detail.update(accepted=d.accepted, reason=d.reason, policy=digest[:12], org=snap_digest[:12])
     _log(etc or '.', detail)
     return (0 if d.accepted else 1), policy.line(d, digest, snap_digest)
+
+
+def _started_decision(etc, pol, env, event):
+    cls = env['CI_RUNNER_CLASS']
+    if cls not in ('plan', 'executor'):
+        return policy.decide(pol, env, event)
+    from parallel import transport
+    try:
+        settings = transport.settings(etc)
+    except FileNotFoundError:
+        settings = {}
+    except (OSError, ValueError):
+        return policy.Decision(False, 'policy')
+    repository_members = settings.get('repository_members', False)
+    if type(repository_members) is not bool:
+        return policy.Decision(False, 'policy')
+    organization = settings.get('organization')
+    if organization is not None:
+        name = organization.get('name') if isinstance(organization, dict) else None
+        organization = policy._ascii_lower(name, policy._ORG)
+        if organization is None:
+            return policy.Decision(False, 'policy')
+    if cls == 'executor':
+        return central_decision(etc, pol, env, event, repository_members=repository_members,
+                                organization=organization)
+    if repository_members or organization is not None:
+        return plan_decision(pol, env, event, settings.get('plan', {}).get('socket'), organization=organization)
+    return policy.decide(pol, env, event)
+
+
+def plan_decision(pol, env, event, socket, *, organization=None):
+    """Ask the local controller to verify the trusted runner event before any steps."""
+    from parallel import transport
+    identity_fields = (
+        'GITHUB_EVENT_NAME', 'GITHUB_REF_PROTECTED', 'GITHUB_REPOSITORY', 'GITHUB_REPOSITORY_ID',
+        'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'CI_RUNNER_CLASS', 'CI_RUNNER_AUDIENCE',
+    )
+    evidence_fields = ('repository', 'pull_request')
+    if organization is None:
+        context = policy.check_context(pol, env, event)
+        if not context.accepted:
+            return context
+        identity_fields += ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR')
+        evidence_fields += ('sender', 'pusher')
+    elif not isinstance(event, dict):
+        return policy.Decision(False, 'payload')
+    if not isinstance(socket, str) or not socket:
+        return policy.Decision(False, 'policy')
+    identity = {k: env[k] for k in identity_fields if k in env}
+    evidence = {k: event[k] for k in evidence_fields if k in event}
+    try:
+        decision = transport.Client(path=socket).call('admit_plan', env=identity, event=evidence)
+    except (OSError, ValueError, TypeError):
+        return policy.Decision(False, 'policy')
+    if not isinstance(decision, dict):
+        return policy.Decision(False, 'policy')
+    accepted, reason = decision.get('accepted'), decision.get('reason')
+    if type(accepted) is not bool or reason not in policy.REASONS or accepted != (reason == 'ok'):
+        return policy.Decision(False, 'policy')
+    return policy.Decision(accepted, reason)
+
+
+def _verified_repository_claim(allocation, original, admission, env, event, repo, organization):
+    """Bind the controller's repository check to the local GitHub job."""
+    marker = 'repository_members_verified'
+    if organization is not None:
+        marker = 'organization_repository_verified'
+        if repo.split('/')[0] != organization:
+            return policy.Decision(False, 'repository')
+        if original['CI_RUNNER_CLASS'] == 'slurm' and allocation.get('organization_slurm_verified') is not True:
+            return policy.Decision(False, 'runner-class')
+    if allocation.get(marker) is not True:
+        return policy.Decision(False, 'policy')
+    verified = admission['event']['repository']
+    repository_id = verified['id']
+    if type(repository_id) is not int or repository_id <= 0:
+        return policy.Decision(False, 'repository-id')
+    classes = frozenset({'slurm'}) if original['CI_RUNNER_CLASS'] == 'slurm' else frozenset()
+    known = policy.Repo(repo, repository_id, 'private', classes=classes)
+    if env.get('GITHUB_REPOSITORY_ID') != str(repository_id):
+        return policy.Decision(False, 'repository-id')
+    has_repository = 'repository' in event
+    if has_repository or organization is None or env['GITHUB_EVENT_NAME'] != 'schedule':
+        if not policy._repo_matches(event.get('repository'), known):
+            return policy.Decision(False, 'repository-id')
+    return policy.check_context(policy.Policy(frozenset(), {repo: known}), original, admission['event'])
+
+
+def central_decision(etc, pol, env, event, *, repository_members=False, organization=None):
+    """A numbered runner must hold an authenticated allocation before checkout."""
+    from ci_runners import inventory
+    from parallel import transport, executor
+    repo = env.get('GITHUB_REPOSITORY', '').lower()
+    known = pol.repos.get(repo)
+    if repo == policy.SELF:
+        return policy.Decision(False, 'self')
+    if organization is None and not repository_members:
+        if known is None or known.visibility != 'private' or known.paused:
+            return policy.Decision(False, 'repository')
+        if (env.get('GITHUB_REPOSITORY_ID') != str(known.id) or not isinstance(event, dict)
+                or not policy._repo_matches(event.get('repository'), known)):
+            return policy.Decision(False, 'repository-id')
+    elif not isinstance(event, dict):
+        return policy.Decision(False, 'repository-id')
+    if env.get('GITHUB_EVENT_NAME') not in ('pull_request', 'push', 'schedule', 'workflow_dispatch'):
+        return policy.Decision(False, 'event')
+    if not env.get('GITHUB_RUN_ATTEMPT', '').isdigit():
+        return policy.Decision(False, 'payload')
+    try:
+        inv = inventory.load(_read(os.path.join(etc, 'inventory.toml'), MAX_INVENTORY).decode())
+        allocation = transport.Client(path=str(executor.paths(inv)[1])).call('admit', env=env)
+        grant = allocation['grant']
+        source = allocation['source']
+        if (grant['runner_tag'] != env['RUNNER_NAME'] or source['repository'].lower() != repo
+                or source['run_id'] != int(env['GITHUB_RUN_ID'])
+                or source['run_attempt'] != int(env['GITHUB_RUN_ATTEMPT'])):
+            return policy.Decision(False, 'runner')
+        admission = allocation['source']['admission']
+        if env['GITHUB_EVENT_NAME'] != admission['env']['GITHUB_EVENT_NAME']:
+            return policy.Decision(False, 'event')
+        original = {**admission['env'], 'CI_RUNNER_CLASS': 'slurm' if grant['backend'] == 'slurm' else 'plan'}
+        if repository_members or organization is not None:
+            return _verified_repository_claim(allocation, original, admission, env, event, repo, organization)
+        return policy.decide(pol, original, admission['event'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return policy.Decision(False, 'runner')
 
 
 def _job_scopes(env: dict[str, str]) -> list[str]:

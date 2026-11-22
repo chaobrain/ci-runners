@@ -450,6 +450,8 @@ def _relpath(v: object) -> bool:
 def load(doc: object) -> tuple[list[dict], dict]:
     """The parts of a plan and its options (``files``, ``max_parallel``): ``route.load_plan``'s
     checks, then this workflow's own (§4.10). Raises ``route.PlanError`` naming each fault."""
+    if isinstance(doc, dict) and doc.get('schema') == 2:
+        raise rt.PlanError('schema 2 requires ci-v2.yml and the central scheduler')
     parts = rt.load_plan(doc)
     errors = []
     opts = {'files': doc.get('files', ''), 'max_parallel': doc.get('max_parallel')}

@@ -1,0 +1,3 @@
+#!/opt/ci-storage-pilot/venv/bin/python -I
+from ci_runners.storage_probe import main
+raise SystemExit(main())

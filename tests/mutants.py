@@ -5262,6 +5262,80 @@ BUNDLE_MUTANTS = [
 ]
 MUTANTS.extend(BUNDLE_MUTANTS)
 
+# The isolated P1 protocol has no production repository or host activation path.
+STP = 'ci_runners/storage_protocol.py'
+STA = 'ci_runners/storage_auth.py'
+STS = 'ci_runners/storage_store.py'
+STG = 'ci_runners/storage_gateway.py'
+STI = 'ci_runners/storage_issuer.py'
+STC = 'ci_runners/storage_probe.py'
+TST = 'tests.test_storage_pilot.Pilot'
+STORAGE_PILOT_MUTANTS = [
+    (STA, '    verify(raw, signature, allowed_signers, deadline=deadline)', '    pass',
+     [f'{TST}.test_real_signatures_reject_tamper_wrong_namespace_signer_and_client']),
+    (STP, "require((full['repository_id'], full['repository']) in REPOSITORIES", 'require(True',
+     [f'{TST}.test_synthetic_only_scope_expiry_types_and_operation_are_strict']),
+    (STP, "now < doc['exp']", 'True',
+     [f'{TST}.test_synthetic_only_scope_expiry_types_and_operation_are_strict']),
+    (STP, 'type(value) is int and lower <= value <= upper', 'isinstance(value, int) and lower <= value <= upper',
+     [f'{TST}.test_synthetic_only_scope_expiry_types_and_operation_are_strict']),
+    (STP, "digest(raw) == authorization['manifest_sha256']", 'True',
+     [f'{TST}.test_manifest_scope_bytes_and_expiry_after_wait_are_rechecked']),
+    (STP, "doc['sha256'] == authorization['payload_sha256'] == digest(payload)", 'True',
+     [f'{TST}.test_conflict_corruption_and_missing_completion_never_use_old_objects']),
+    (STP, "doc['identity'] == authorization['identity']", 'True',
+     [f'{TST}.test_manifest_scope_bytes_and_expiry_after_wait_are_rechecked']),
+    (STS, "            if run == grant['identity']:", '            if True:',
+     [f'{TST}.test_publish_read_and_scoped_list_preserve_exact_bytes']),
+    (STS, 'row[0] == fingerprint and row[1] < 3', 'row[1] < 3',
+     [f'{TST}.test_replay_and_changed_scope_are_durable_across_store_instances']),
+    (STS, 'row[0] == fingerprint and row[1] < 3', 'row[0] == fingerprint and row[1] < 4',
+     [f'{TST}.test_replay_and_changed_scope_are_durable_across_store_instances']),
+    (STS, '        return total', '        return 0',
+     [f'{TST}.test_capacity_counts_staging_and_disk_floor_fails_closed']),
+    (STS, 'shutil.disk_usage(self.root).free >= self.free_floor + reservation', 'True',
+     [f'{TST}.test_capacity_counts_staging_and_disk_floor_fails_closed']),
+    (STS, 'for n in range(4):', 'for n in range(5):',
+     [f'{TST}.test_concurrent_publish_is_immutable_and_slots_are_cross_process']),
+    (STS, 'found_manifest == manifest and found_payload == payload', 'True',
+     [f'{TST}.test_conflict_corruption_and_missing_completion_never_use_old_objects']),
+    (STS, 'os.rename(staged, target)', 'shutil.rmtree(staged)',
+     [f'{TST}.test_atomic_publication_failure_and_lost_response_retry']),
+    (STS, '            db.commit()  # A crash', '            db.rollback()  # A crash',
+     [f'{TST}.test_replay_and_changed_scope_are_durable_across_store_instances']),
+    (STS, 'count < 4096', 'count < 4097',
+     [f'{TST}.test_grant_ledger_is_bounded_without_automatic_deletion']),
+    (STA, '(not info.st_mode & 0o022 or sticky_root)', 'True',
+     [f'{TST}.test_protected_paths_reject_writable_files_links_and_parent_replacement']),
+    (STA, "{option.split('=', 1)[0] for option in options[1:]} == {'from', 'command'}", 'True',
+     [f'{TST}.test_single_key_policy_rejects_relaxations_and_duplicate_keys']),
+    (STC, 'StrictHostKeyChecking=yes', 'StrictHostKeyChecking=no',
+     [f'{TST}.test_entrypoint_refuses_shell_and_client_pins_ssh_policy']),
+    (STC, "error.code not in ('transport', 'truncated', 'busy', 'timeout')", 'False',
+     [f'{TST}.test_client_retries_only_transport_and_validates_server_results']),
+    (STP, "os.read(fd, 1) == b''", 'True',
+     [f'{TST}.test_wire_bounds_truncation_trailing_and_idle_deadline']),
+    (STP, 'payload <= PAYLOAD_MAX', 'True',
+     [f'{TST}.test_wire_bounds_truncation_trailing_and_idle_deadline']),
+    (STI, 'os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW', 'os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW',
+     [f'{TST}.test_issuer_audit_is_exclusive_and_rejects_production_scope']),
+    (STG, "os.environ.get('SSH_ORIGINAL_COMMAND') == p.AUDIENCE", 'True',
+     [f'{TST}.test_entrypoint_refuses_shell_and_client_pins_ssh_policy']),
+    (STS, "            p.grant(p.canonical(grant), client=grant['client'])\n            if grant['operation'] == 'list':",
+     "            if grant['operation'] == 'list':",
+     [f'{TST}.test_manifest_scope_bytes_and_expiry_after_wait_are_rechecked']),
+    (STG, '            store.admit(grant, deadline=deadline)', '            pass',
+     [f'{TST}.test_authenticated_truncated_uploads_consume_replay_budget']),
+    (STG, 'grant = auth.authorize(header, client=client, allowed_signers=allowed_signers, deadline=deadline)',
+     "grant = p.grant(p.unb64(header['grant']), client=client)",
+     [f'{TST}.test_wire_subprocess_large_upload_download_and_bad_signature']),
+    (STC, '        os.rmdir(target)\n        raise\n    finally:', '        pass\n        raise\n    finally:',
+     [f'{TST}.test_local_results_are_fresh_and_failed_writes_leave_no_completion']),
+    (STA, "prefix='ci-storage-verify-', dir='/tmp'", "prefix='ci-storage-verify-'",
+     [f'{TST}.test_real_signatures_reject_tamper_wrong_namespace_signer_and_client']),
+]
+MUTANTS.extend(STORAGE_PILOT_MUTANTS)
+
 
 
 def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:

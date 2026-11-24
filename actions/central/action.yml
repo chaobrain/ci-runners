@@ -2,7 +2,7 @@ name: Central test scheduling
 description: Submit a schema 2 plan or bridge an authorized allocation to the local executor.
 inputs:
   command:
-    description: prepare, build, submit, failure, allocate, inspect, fetch, execute, task-result or batch-result
+    description: prepare, build, submit, failure, allocate, inspect, fetch, execute, publish-plan, publish-result, task-result or batch-result
     required: true
   project:
     description: Project registry key
@@ -25,6 +25,9 @@ inputs:
   files-artifact-id:
     description: Uploaded plan files artifact
     default: ''
+  files-bundle:
+    description: Completed internal plan bundle reference, mutually exclusive with files-artifact-id
+    default: ''
   allocation-json:
     description: Scheduler grant with CPU groups, RAM, workers and an optional GPU UUID
     default: ''
@@ -44,6 +47,15 @@ inputs:
     description: Submission outcome for plan-only validation
     default: ''
 outputs:
+  storage_backend:
+    description: Pinned file backend, github or ssh
+    value: ${{ steps.control.outputs.storage_backend }}
+  files_bundle:
+    description: Completed plan bundle reference
+    value: ${{ steps.control.outputs.files_bundle }}
+  result_bundle:
+    description: Completed allocation result bundle reference
+    value: ${{ steps.control.outputs.result_bundle }}
   sha:
     description: Authorized test SHA
     value: ${{ steps.control.outputs.sha }}
@@ -112,6 +124,7 @@ runs:
         IN_PLAN_ONLY: ${{ inputs.plan-only }}
         IN_CANCEL: ${{ inputs.cancel-in-progress }}
         IN_FILES: ${{ inputs.files-artifact-id }}
+        IN_FILES_BUNDLE: ${{ inputs.files-bundle }}
         IN_ALLOCATION: ${{ inputs.allocation-json }}
         IN_BATCH: ${{ inputs.batch-id }}
         IN_TASK: ${{ inputs.task-id }}
@@ -124,6 +137,6 @@ runs:
         if [ "$IN_CANCEL" = true ]; then set -- "$@" --cancel-in-progress; fi
         exec "$GITHUB_ACTION_PATH/../lib/ci-run.sh" central "$IN_COMMAND" \
           --project "$IN_PROJECT" --context "$IN_CONTEXT" --sha "$IN_SHA" \
-          --plan-command "$IN_PLAN" --files-artifact-id "$IN_FILES" \
+          --plan-command "$IN_PLAN" --files-artifact-id "$IN_FILES" --files-bundle "$IN_FILES_BUNDLE" \
           --allocation-json "$IN_ALLOCATION" --batch-id "$IN_BATCH" --task-id "$IN_TASK" \
           --task-attempt "$IN_TASK_ATTEMPT" --submission-state "$IN_SUBMISSION" "$@"

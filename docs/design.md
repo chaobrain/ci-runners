@@ -5532,10 +5532,13 @@ and preinstalled deployments retain their existing configuration contracts.
 
 ## Proposed decision: optional SSH storage for internal CI files
 
-Status: P0 draft, pending lead approval before implementation. The implementation
+Status: contract approved by the maintainer on 2026-11-24 in PR #292. The implementation
 base is `gpu-q-2.1.2` at `d7a0191a7aa7aaf0038ca8a4a7169cf0d84aba1b`.
 This decision extends both the schema 2 centralized execution path and the
 schema 1 artifact readers. It does not approve host deployment or a release.
+The initial implementation delivers the schema 2 path. Schema 1 remains on
+GitHub and explicitly refuses SSH opt-in until its paired adapters arrive.
+Destructive cleanup and consumer rollout remain later stages.
 
 ### Scope and backend selection
 
@@ -5556,7 +5559,7 @@ policy are outside it. The new store never uses dataset or model directories.
 `storage.toml` below `CI_RUNNERS_ETC` is a separate private configuration file,
 not an extension of `inventory.toml` or `central.toml`. The proposed format is
 in `parallel/examples/storage.example.toml`. Its schema, defaults and limits
-are part of this draft; the current release does not read it. An absent file
+are part of this contract; the implementation reads it, released 2.1.2 does not. An absent file
 means GitHub. An invalid configured file refuses the operation. The controller
 resolves the repository override from the verified repository identity and
 durably pins backend, logical store ID and storage protocol schema to each

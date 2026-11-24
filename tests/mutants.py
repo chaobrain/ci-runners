@@ -1587,7 +1587,7 @@ MUTANTS = [
     (PRT, "        return 'memory' in read(", "        return 'cpu' in read(", [f'{TT}.Pure.test_where_systemd_enforces_memory']),
     (PRT, "    return found.get('v1') or found.get('v2', '')", "    return found.get('v2') or found.get('v1', '')",
      [f'{TT}.Pure.test_the_scope_procs_file']),
-    (PRT, "SCOPE = re.compile(r'ci-part-[^/]*\\.scope')", "SCOPE = re.compile(r'[^/]*\\.scope')",
+    (PRT, "SCOPE = re.compile(r'(?:ci|civ2)-part-[^/]*\\.scope')", "SCOPE = re.compile(r'[^/]*\\.scope')",
      [f'{TT}.Pure.test_the_scope_procs_file']),
     (PRT, "        if not self.killed and self.used(pids) > self.cap:", "        if False:",
      [f'{TT}.OwnCap.test_a_part_over_its_memory_ends_oom']),
@@ -5222,6 +5222,8 @@ from parallel.tests.central_mutants import CASES as CENTRAL_MUTANTS
 MUTANTS.extend(CENTRAL_MUTANTS)
 from parallel.tests.deployment_mutants import CASES as DEPLOYMENT_MUTANTS
 MUTANTS.extend(DEPLOYMENT_MUTANTS)
+from parallel.tests.storage_mutants import CASES as STORAGE_MUTANTS
+MUTANTS.extend(STORAGE_MUTANTS)
 # Existing workflow mutations follow the major stamp just as the workflow does.
 MUTANTS = [(rel, stamp.rewrite(old, stamp.MAJOR), stamp.rewrite(new, stamp.MAJOR), cases)
            if rel in stamp.WORKFLOWS else (rel, old, new, cases) for rel, old, new, cases in MUTANTS]

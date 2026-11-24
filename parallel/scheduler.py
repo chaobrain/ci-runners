@@ -14,8 +14,8 @@ from pathlib import Path
 from parallel import health, layout, organization
 from ci_runners import __version__
 
-from ci_runners import github, inventory, policy, registry, setup
-from parallel import deployment_files, protocol, transport, github_coordinator, scheduler_store
+from ci_runners import github, inventory, policy, registry, setup, storage
+from parallel import bundles, deployment_files, protocol, transport, github_coordinator, scheduler_store
 
 
 REPOSITORY_SYNC_INTERVAL = 10 * 60
@@ -127,7 +127,7 @@ class Scheduler:
         if self.organization_config is not None:
             organization_name = self.organization_config['name']
             fields = ('repository', 'sha', 'run_id', 'run_attempt', 'context', 'concurrency_key',
-                      'cancel_in_progress', 'files_artifact_id')
+                      'cancel_in_progress', 'files_artifact_id', 'files_bundle', 'storage')
             request = {key: requested[key] for key in fields if key in requested}
             source = self.api.source({**request, 'project': 'organization'}, None, organization=organization_name)
             repository_id = source['admission']['event']['repository']['id']
@@ -178,14 +178,42 @@ class Scheduler:
             recipe = self.store.prepared_environment(source, candidate)
         source['environment_recipe'] = recipe
 
+    def bind_storage(self, source, *, create=False):
+        cfg = storage.read_config(self.etc)
+        selected = storage.select(cfg, source['repository'])
+        if ('repository_id' not in source and
+                'id' not in source.get('admission', {}).get('event', {}).get('repository', {})):
+            if selected['backend'] == 'github' and 'storage' not in source:
+                return
+            raise storage.Error('identity')
+        previous = self.store.prepared_storage(source)
+        # Older GitHub callers can submit directly; new prepares pin even GitHub.
+        if previous is None and not create and selected['backend'] == 'github' and 'storage' not in source:
+            return
+        pinned = previous or (self.store.prepared_storage(source, selected) if create else None)
+        if pinned is None or 'storage' in source and source['storage'] != pinned:
+            raise storage.Error('configuration')
+        if pinned['backend'] == 'ssh' and pinned['store'] not in cfg['stores']:
+            raise storage.Error('configuration')
+        source['storage'] = pinned
+
     def submit(self, requested, raw_plan, *, plan_only=False):
         source, project, pol = self.prepare(requested)
+        self.bind_storage(source)
         self.bind_environment(source)
         if 'environment_recipe' in source and requested.get('environment_digest') != protocol.fingerprint(source['environment_recipe']):
             raise protocol.Error('submitted plan does not match its prepared environment')
         plan = protocol.load_plan(raw_plan, max_minutes=project.max_minutes)
         files = plan['files']
-        if files and not plan_only:
+        if source.get('files_artifact_id') and source.get('files_bundle'):
+            raise storage.Error('identity')
+        if bundles.backend(source)['backend'] == 'ssh' and source.get('files_artifact_id'):
+            raise storage.Error('identity')
+        if bundles.backend(source)['backend'] == 'github' and source.get('files_bundle'):
+            raise storage.Error('identity')
+        if files and not plan_only and bundles.backend(source)['backend'] == 'ssh':
+            bundles.verify_plan(self.etc, source, source.get('files_bundle'))
+        if files and not plan_only and bundles.backend(source)['backend'] == 'github':
             artifact = source.get('files_artifact_id')
             if not protocol.positive(artifact):
                 raise protocol.Error('plan files must be uploaded before submission')
@@ -339,6 +367,7 @@ class Scheduler:
                 return {'accepted': decision.accepted, 'reason': decision.reason}
             if method == 'prepare':
                 source, _, _ = self.prepare(params['source'])
+                self.bind_storage(source, create=True)
                 self.store.notice(source, 'pending', 'Building test plan')
                 try:
                     self.bind_environment(source, create=True)
@@ -349,6 +378,8 @@ class Scheduler:
                 if self.organization_config is not None:
                     keys += ('repository_id', 'organization_profile')
                 prepared = {key: source[key] for key in keys}
+                if source.get('storage', {}).get('backend') == 'ssh':
+                    prepared.update(storage=source['storage'], repository_id=bundles.repository_id(source))
                 if self.organization_config is not None and 'env_root' in self.organization_config:
                     prepared['repository_environment'] = True
                 if 'environment_recipe' in source:
@@ -432,7 +463,7 @@ def serve(inv, etc):
         app = Scheduler(inv, etc, store, api, device_admission_file=p.get('device_admission_file'),
                         repository_members=cfg.get('repository_members', False),
                         organization_config=cfg.get('organization'))
-        coordinator = github_coordinator.WorkflowCoordinator(store, api)
+        coordinator = github_coordinator.WorkflowCoordinator(store, api, storage_etc=etc)
         servers = [transport.unix_server(p['socket'], app.call, uids=uids),
                    transport.https_server(p, cfg.get('hosts', {}), app.call)]
         stopped = threading.Event()

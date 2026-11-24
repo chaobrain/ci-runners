@@ -13,8 +13,8 @@ import threading
 from pathlib import Path
 from parallel import layout
 
-from ci_runners import client, flow, part, registry
-from parallel import executor, organization, protocol, transport
+from ci_runners import client, flow, part, registry, storage
+from parallel import bundles, executor, organization, protocol, transport
 
 
 def output(values, env):
@@ -171,12 +171,13 @@ def inspect(args, inv, env):
     allocation = connection.call('inspect', grant=grant, env=job_env(env))
     part._write_json(str(state_file(env, 'allocation')), allocation)
     output({'sha': allocation['source']['sha'], 'project': allocation['source']['project'],
+            'storage_backend': bundles.backend(allocation['source'])['backend'],
             'part_id': allocation['part']['id'], 'fetch_depth': '0' if allocation['part'].get('history') else '1',
             'allocation_id': grant['allocation_id']}, env)
     return 0
 
 
-def fetch(env):
+def fetch(env, etc=None):
     a = json.loads(state_file(env, 'allocation').read_text())
     if not flow.check_checkout(env['GITHUB_WORKSPACE'], env):
         raise protocol.Error('checkout retained credentials')
@@ -185,6 +186,20 @@ def fetch(env):
                             cwd=env['GITHUB_WORKSPACE'], capture_output=True, text=True, check=True).stdout.strip()
     if actual != a['source']['sha']:
         raise protocol.Error('checkout is not the authorized test SHA')
+    bound = bundles.backend(a['source'])
+    if bound['backend'] == 'ssh':
+        ref = a['source'].get('files_bundle')
+        if a['part'] is not None and ref:
+            ident = bundles.plan_identity(a['source'])
+            client_store = bundles.plan_limits(storage.client(etc, bound))
+            destination = Path(env['RUNNER_TEMP'])/'ci-plan-files'
+            client_store.read_bundle(ref, ident, destination)
+            why = flow.check_files(env['RUNNER_TEMP'], 'ci-plan-files')
+            if why:
+                raise storage.Error('corrupt')
+        elif a['source'].get('files_artifact_id'):
+            raise storage.Error('identity')
+        return 0
     aid = a['source'].get('files_artifact_id')
     if aid:
         with client.Client() as http:
@@ -241,6 +256,36 @@ def collect_allocation_results(inv, allocation, env, result):
     output({'allocation_id': allocation_id, 'part_id': part_id, 'state': result['state']}, env)
 
 
+def publish_plan(etc, env):
+    src = json.loads(state_file(env, 'source').read_text())
+    doc = json.loads(state_file(env, 'plan').read_text())
+    bound = bundles.backend(src)
+    if bound['backend'] != 'ssh' or not doc['files']:
+        raise storage.Error('configuration')
+    why = flow.check_files(env['GITHUB_WORKSPACE'], doc['files'])
+    if why:
+        raise storage.Error('corrupt')
+    client_store = bundles.plan_limits(storage.client(etc, bound))
+    ref = client_store.publish_bundle(bundles.plan_identity(src), Path(env['GITHUB_WORKSPACE'])/doc['files'], 'run')
+    src['files_bundle'] = ref
+    part._write_json(str(state_file(env, 'source')), src)
+    output({'files_bundle': protocol.dumps(ref)}, env)
+    return 0
+
+
+def publish_result(etc, env):
+    allocation = json.loads(state_file(env, 'allocation').read_text())
+    bound = bundles.backend(allocation['source'])
+    ident = bundles.result_identity(allocation)
+    source_dir = Path(env['RUNNER_TEMP'])/'ci-allocation'/allocation['id']
+    for name in ('outcome.json', 'summary.md', 'allocation-result.json'):
+        if not (source_dir/name).is_file():
+            raise storage.Error('missing')
+    ref = storage.client(etc, bound).publish_bundle(ident, source_dir)
+    output({'result_bundle': protocol.dumps(ref)}, env)
+    return 0
+
+
 def request_execution_stop(stop_event, _signal, _frame):
     stop_event.set()
 
@@ -271,7 +316,7 @@ def execute(inv, env):
 def main(argv, inv, etc, env=None):
     env = dict(os.environ if env is None else env)
     parser = argparse.ArgumentParser(prog='ci-run central')
-    parser.add_argument('operation', choices=('prepare', 'build', 'submit', 'failure', 'inspect', 'fetch', 'execute', 'allocate', 'task-result', 'batch-result', 'capacity', 'batch'))
+    parser.add_argument('operation', choices=('prepare', 'build', 'submit', 'failure', 'inspect', 'fetch', 'execute', 'allocate', 'task-result', 'batch-result', 'capacity', 'batch', 'publish-plan', 'publish-result'))
     parser.add_argument('--project', default='')
     parser.add_argument('--context', default='')
     parser.add_argument('--sha', default='')
@@ -279,6 +324,7 @@ def main(argv, inv, etc, env=None):
     parser.add_argument('--plan-only', action='store_true')
     parser.add_argument('--cancel-in-progress', action='store_true')
     parser.add_argument('--files-artifact-id', default='')
+    parser.add_argument('--files-bundle', default='')
     parser.add_argument('--allocation-json', default='')
     parser.add_argument('--batch-id', default='')
     parser.add_argument('--task-id', default='')
@@ -292,6 +338,8 @@ def main(argv, inv, etc, env=None):
             organization_mode = 'organization' in settings
             src = source(args, env, organization_mode=organization_mode)
             approved = connection.call('prepare', source=src)
+            if 'storage' in approved:
+                src.update(storage=storage.binding(approved['storage']), repository_id=approved['repository_id'])
             repository_environment = 'env_root' in settings.get('organization', {})
             if approved.get('repository_environment') is True and not repository_environment:
                 raise protocol.Error('the plan runner needs env_root for this controller')
@@ -307,7 +355,8 @@ def main(argv, inv, etc, env=None):
                     src['repository_environment'] = True
                 approved = {field: approved[field] for field in ('sha', 'project')}
             part._write_json(str(state_file(env, 'source')), src)
-            output(approved, env)
+            output({**{key: value for key, value in approved.items() if key != 'storage'},
+                    'storage_backend': bundles.backend(src)['backend']}, env)
         elif args.operation == 'build':
             return build(args, inv, etc, env)
         elif args.operation in ('submit', 'failure'):
@@ -316,6 +365,8 @@ def main(argv, inv, etc, env=None):
                 connection.call('failure', source=src)
             else:
                 src['files_artifact_id'] = int(args.files_artifact_id) if args.files_artifact_id else None
+                if args.files_bundle:
+                    src['files_bundle'] = json.loads(args.files_bundle)
                 doc = json.loads(state_file(env, 'plan').read_text())
                 result = connection.call('submit', source=src, plan=doc, plan_only=args.plan_only)
                 output(result, env)
@@ -330,7 +381,11 @@ def main(argv, inv, etc, env=None):
         elif args.operation == 'inspect':
             return inspect(args, inv, env)
         elif args.operation == 'fetch':
-            return fetch(env)
+            return fetch(env, etc)
+        elif args.operation == 'publish-plan':
+            return publish_plan(etc, env)
+        elif args.operation == 'publish-result':
+            return publish_result(etc, env)
         elif args.operation == 'execute':
             return execute(inv, env)
         elif args.operation == 'capacity':

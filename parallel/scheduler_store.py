@@ -64,6 +64,10 @@ CREATE TABLE IF NOT EXISTS repository_environment_allocations(
 CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, allocation TEXT NOT NULL, digest TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS prepared_environments(
  id TEXT PRIMARY KEY, repository_id INTEGER NOT NULL, sha TEXT NOT NULL, recipe TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS source_storage(
+ id TEXT PRIMARY KEY, repository_id INTEGER NOT NULL, sha TEXT NOT NULL, binding TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS allocation_storage(
+ allocation TEXT PRIMARY KEY REFERENCES allocations(id), reference TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS notices(id TEXT PRIMARY KEY, source TEXT NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox(
  id INTEGER PRIMARY KEY AUTOINCREMENT, dedupe TEXT UNIQUE NOT NULL, kind TEXT NOT NULL,
@@ -135,6 +139,29 @@ class Store:
             if row['repository_id'] != source['repository_id'] or row['sha'] != source['sha']:
                 raise protocol.Error('prepared environment belongs to another repository or test commit')
             return json.loads(row['recipe'])
+
+    def prepared_storage(self, source, candidate=None):
+        """One backend per verified repository/run attempt, shared by all contexts."""
+        from ci_runners import storage
+        from parallel import bundles
+        rid = bundles.repository_id(source)
+        ident = protocol.fingerprint([rid, source['run_id'], source['run_attempt']])
+        with self.transaction() as db:
+            if candidate is not None:
+                candidate = storage.binding(candidate)
+                db.execute('INSERT OR IGNORE INTO source_storage VALUES(?,?,?,?)',
+                           (ident, rid, source['sha'], protocol.dumps(candidate)))
+            row = db.execute('SELECT * FROM source_storage WHERE id=?', (ident,)).fetchone()
+            if row is None:
+                return None
+            if row['repository_id'] != rid or row['sha'] != source['sha']:
+                raise storage.Error('identity')
+            return storage.binding(json.loads(row['binding']))
+
+    def storage_reference(self, allocation):
+        with self.lock:
+            row = self.db.execute('SELECT reference FROM allocation_storage WHERE allocation=?', (allocation,)).fetchone()
+            return json.loads(row['reference']) if row else None
 
     def close(self):
         self.db.close()
@@ -675,7 +702,7 @@ class Store:
             self._finish(db, aid)
 
     def runner_finished(self, aid: str, run_id: int, run_attempt: int, *, job_id: int | None,
-                        conclusion='success', artifacts=()):
+                        conclusion='success', artifacts=(), storage_reference=None):
         """Trusted reconciliation supplies a completed job or proof the source ended."""
         with self.transaction() as database:
             allocation = self._allocation(database, aid)
@@ -685,6 +712,11 @@ class Store:
                 raise protocol.Error('completion is for another execution job')
             if allocation['runner_done']:
                 return
+            if storage_reference is not None:
+                from ci_runners import storage
+                storage.reference(storage_reference)
+                database.execute('INSERT INTO allocation_storage VALUES(?,?)',
+                                 (aid, protocol.dumps(storage_reference)))
             database.execute('UPDATE allocations SET job_id=?,runner_done=1,updated=?,conclusion=?,artifacts=? WHERE id=?',
                              (job_id, self.clock(), conclusion, protocol.dumps(list(artifacts)), aid))
             self._finish(database, aid)
@@ -762,6 +794,10 @@ class Store:
         if t['state'] in protocol.TERMINAL or t['state'] == 'queued' or t['attempts'] != a['task_attempt']:
             return
         result = dict(a['result'])
+        source = json.loads(db.execute('SELECT source FROM batches WHERE id=?', (t['batch'],)).fetchone()[0])
+        if (source.get('storage', {}).get('backend') == 'ssh' and result.get('state') == 'success'
+                and db.execute('SELECT 1 FROM allocation_storage WHERE allocation=?', (aid,)).fetchone() is None):
+            result = {**result, 'state': 'error', 'reason': 'required internal result not verified', 'retryable': False}
         if a['conclusion'] and a['conclusion'] != 'success' and result['state'] == 'success':
             result = {**result, 'state': 'error', 'reason': 'execution job or artifact upload failed', 'retryable': False}
         if a['cancelled']:

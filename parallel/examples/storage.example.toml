@@ -1,5 +1,6 @@
-# Proposed P0 format. Release 2.1.2 does not load this file.
-# After implementation, install privately as CI_RUNNERS_ETC/storage.toml.
+# Schema 2 internal file storage. Published release 2.1.2 does not load this file.
+# Install matching code before privately enabling CI_RUNNERS_ETC/storage.toml.
+# Legacy schema 1 commands refuse SSH opt-in until their paired migration.
 # Every address and path below is a placeholder, never live inventory.
 schema = 1
 default_backend = "github"

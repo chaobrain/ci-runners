@@ -5194,6 +5194,15 @@ retry keeps and revalidates both counts.
 
 ## Proposed decision: internal CI bundle storage (P0)
 
+Account-policy revision (2026-11-24): isolation concerns trusted roles and
+permissions, not a mandatory count of new Linux accounts. Prefer reuse of an
+existing maintenance identity where it is distinct from checkout execution,
+restricted to trusted maintenance/services, and protected from CI writes.
+[storage-account-reuse.md](storage-account-reuse.md) records the evidence,
+candidate restricted gateway/proxy boundaries and remaining acceptance gates.
+It supersedes the three-new-account deployment candidate; existing synthetic
+protocol/code remains evidence, not an approved reuse deployment.
+
 Status: proposed, 2026-11-24. This section requires lead review before any
 implementation of the new transport or changes to workflows or hosts. It does
 not amend approved behavior until accepted. The implementation checklist and

@@ -1,5 +1,8 @@
 # CI 内部存储实施核对
 
+账户选择已修订：优先按 [现有账户与通道复用评估](storage-account-reuse.md)
+推进，保留原计划的隔离目标；旧三账户方案只是实现候选，不是计划书硬性要求。
+
 状态：P0 设计评审材料，2026-11-24。契约草案见
 [design.md](design.md#proposed-decision-internal-ci-bundle-storage-p0)。本文中的操作是
 后续获准部署时的检查步骤，不表示服务器、认证或数据已发生变更。

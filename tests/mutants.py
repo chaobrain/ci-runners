@@ -5221,6 +5221,47 @@ DYNAMIC_MUTANTS = [
 ]
 MUTANTS.extend(DYNAMIC_MUTANTS)
 
+# Offline internal bundle boundary. These fixtures do not authorize a backend.
+BDL = 'ci_runners/bundles.py'
+TBD = 'tests.test_bundles.PartBundles'
+BUNDLE_MUTANTS = [
+    (BDL, 'return type(value) is int and value > 0', 'return isinstance(value, int) and value > 0',
+     [f'{TBD}.test_identity_validation_rejects_boolean_attempts_and_unsafe_ids']),
+    (BDL, "actual == reference.identity", 'True',
+     [f'{TBD}.test_exact_reference_rejects_other_repositories_runs_attempts_parts_and_shas']),
+    (BDL, 'len(raw) <= MAX_MANIFEST', 'True',
+     [f'{TBD}.test_manifest_digest_and_control_size_are_required']),
+    (BDL, '_hash(raw) == reference.manifest_sha256', 'True',
+     [f'{TBD}.test_manifest_digest_and_control_size_are_required']),
+    (BDL, "doc['status'] == 'complete'", 'True',
+     [f'{TBD}.test_manifest_schema_and_completion_are_not_inferred']),
+    (BDL, '            if key in out:', '            if False:',
+     [f'{TBD}.test_ambiguous_or_malformed_json_is_rejected']),
+    (BDL, ' and name not in names', '',
+     [f'{TBD}.test_manifest_file_list_is_bounded_and_exact']),
+    (BDL, "_hash(payload) == doc['sha256']", 'True',
+     [f'{TBD}.test_payload_sizes_and_both_levels_of_digest_are_checked']),
+    (BDL, "_hash(raw) == file['sha256']", 'True',
+     [f'{TBD}.test_payload_sizes_and_both_levels_of_digest_are_checked']),
+    (BDL, 'kind in (0, stat.S_IFREG)', 'True',
+     [f'{TBD}.test_archive_members_must_be_unique_regular_files']),
+    (BDL, 'info.orig_filename == info.filename and ', '',
+     [f'{TBD}.test_archive_members_must_be_unique_regular_files']),
+    (BDL, "raise BundleError('archive', 'bundle archive cannot be read') from None",
+     "return ({'outcome': 'pass'}, '')",
+     [f'{TBD}.test_bad_zip_and_crc_are_terminal']),
+    (BDL, "outcome['run-attempt'] == reference.identity.run_attempt", 'True',
+     [f'{TBD}.test_invalid_outcome_and_old_run_attempt_never_pass']),
+    (BDL, 'for name, raw in sorted(snapshots.items()):', 'for name, raw in snapshots.items():',
+     [f'{TBD}.test_byte_snapshots_are_deterministic_and_summary_is_optional']),
+    (BDL, 'and all(isinstance(name, str) and name in FILES for name in snapshots)', 'and True',
+     [f'{TBD}.test_producer_rejects_unsupported_files_and_oversize_bytes']),
+    (BDL, "got = artifacts.members(f'ci-part-{reference.identity.part_id}-{reference.identity.part_attempt}', payload)",
+     "got = ({'outcome': 'pass'}, '')",
+     [f'{TBD}.test_round_trip_uses_existing_parser_and_keeps_red']),
+]
+MUTANTS.extend(BUNDLE_MUTANTS)
+
 
 
 def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:

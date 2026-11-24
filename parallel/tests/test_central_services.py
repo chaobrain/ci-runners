@@ -128,7 +128,7 @@ class Rpc(unittest.TestCase):
     def test_socket_authentication_and_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp)/'control.sock')
-            app = lambda method, params, identity: [method, params, identity]
+            app = mock.Mock(side_effect=lambda method, params, identity: [method, params, identity])
             server = transport.unix_server(path, app)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -140,12 +140,17 @@ class Rpc(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join()
+            app.reset_mock()
             denied = transport.unix_server(path, app, uids=[])
             thread = threading.Thread(target=denied.serve_forever, daemon=True)
             thread.start()
             try:
-                with self.assertRaisesRegex(protocol.Error, 'not authorized'):
+                # An early credential refusal can close before the client sends its body.
+                with self.assertRaises((protocol.Error, BrokenPipeError, ConnectionResetError)) as refusal:
                     transport.Client(path=path).call('capacity')
+                if isinstance(refusal.exception, protocol.Error):
+                    self.assertIn('not authorized', str(refusal.exception))
+                app.assert_not_called()
             finally:
                 denied.shutdown()
                 denied.server_close()

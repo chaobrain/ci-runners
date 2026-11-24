@@ -6,6 +6,10 @@
 
 ## 1. 拓扑
 
+共享存储改造目前处于 P0 草案阶段，尚未部署或启用。评审入口见
+[CI 内部存储实施核对](storage-p0.md)，包括私有配置示例、访问边界、部署
+dry-run 交付要求及回滚限制；其中拟议接口不能作为当前命令使用。
+
 | 角色 | 跑什么 | 以谁的身份 |
 |---|---|---|
 | **3090b**、**3090a** | 各自的 runner 池（`<host>-light`、`-cpu`、`-gpu<N>`、`-multi`，3090b 另有 `-compile`，3090a 另有 `-nightly`，design §5.1）；`ci-tunnel.service`（到 egress 的 ssh 转发）；`ci-reaper.timer`、`ci-envrefresh.timer` | 专用 CI 账户的 systemd user 单元，文件都在 `<data>` 下 |

@@ -1,0 +1,24 @@
+# P0 proposal only. No current command loads this file.
+# Copy only after the storage contract and implementation are approved.
+# Endpoints, identities, credentials and real paths belong in private host config.
+schema = 1
+backend = "github"  # default; proposed alternative: "internal"
+
+[internal]
+transport = "ssh-gateway"
+endpoint_config = ""  # private absolute path; required when backend = "internal"
+authorization_config = ""  # private broker config; never a reusable job-wide key
+request_timeout_seconds = 45
+total_timeout_seconds = 300
+max_attempts = 3
+max_bundle_bytes = 8388608  # compressed standard part bundle: artifacts.MAX_ZIP
+max_plan_bytes = 69206016  # compressed plan files: flow.MAX_FILES_ZIP
+# Project reports need a separately approved bounded policy before migration.
+
+[retention]
+cleanup_enabled = false
+temporary_days = 3
+diagnostic_days = 7
+mapping_days = 14
+# Expiry alone does not authorize deletion: active runs, retry grace, rerun
+# references and map dependency pins override these candidate horizons.

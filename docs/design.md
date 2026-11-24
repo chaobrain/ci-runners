@@ -5198,6 +5198,10 @@ Status: proposed, 2026-11-24. This section requires lead review before any
 implementation of the new transport or changes to workflows or hosts. It does
 not amend approved behavior until accepted. The implementation checklist and
 deployment evidence requirements are in [storage-p0.md](storage-p0.md).
+The candidate two-host procedure is [storage-p1-deployment.md](storage-p1-deployment.md):
+separate storage, issuer and probe identities, a protected pilot root, a forced
+SSH entry plus narrowly signed grants, synthetic data only and no CI cutover.
+It remains a proposal, not authorization to create those host resources.
 
 ### Scope and backend selection
 

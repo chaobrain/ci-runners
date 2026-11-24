@@ -5230,14 +5230,14 @@ MUTANTS = [(rel, stamp.rewrite(old, stamp.MAJOR), stamp.rewrite(new, stamp.MAJOR
 
 
 
-def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:
+def run(tree: pathlib.Path, tests: list[str], hang: float = HANG, *, quiet: bool = True) -> int:
     """The tests' status: 124 for a hang, 125 when a process of the run outlived it
     (``tests/leaks.py``). Either way every process of the run is killed, in a new
     session or not, so no mutant leaves one behind."""
     # -B: a stale .pyc of an earlier mutant of the same size and second would be used.
     # No pipes: a holder a mutant leaves behind must not keep the run waiting.
     code, left = leaks.run([sys.executable, '-B', '-m', 'unittest', '-q', *tests], cwd=tree, timeout=hang,
-                           quiet=True)
+                           quiet=quiet)
     return 125 if code == 0 and left else code
 
 
@@ -5291,7 +5291,7 @@ def main(argv: list[str] | None = None) -> int:
             trees.put(tree)
         every = sorted({t for _, (*_, ts) in mine for t in ts})
         tree0 = trees.get()
-        if run(tree0, every, hang=600):
+        if run(tree0, every, hang=600, quiet=False):
             print('the unmutated tree fails its tests or leaves a process behind', file=sys.stderr)
             return 2
         trees.put(tree0)

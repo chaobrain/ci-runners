@@ -27,6 +27,10 @@ Guides, in Chinese: [consumers.md](consumers.md) for the repositories that use t
 [operations.md](operations.md) for the maintainer of the hosts. This file is the contract;
 where a guide and this file disagree, this file holds.
 
+Pending proposal: [internal CI bundle storage](#proposed-decision-internal-ci-bundle-storage-p0)
+defines an opt-in transport. It is not approved or implemented; existing artifact
+contracts remain in force until the lead approves the proposal and its rollout.
+
 This repository is public (D1). Hosts appear here under role names: **h100** (retired by 12.17, back with 15.8), **3090b**,
 **3090a**, the **egress host** and the maintainer's **workstation**. Real host names and ssh aliases,
 accounts, paths under a home directory, addresses and allowlists are inventory and stay
@@ -5187,3 +5191,222 @@ N CPUs remain. Verify `CI_CPUS` against the measured mask; cover the worker
 default, a worker count that fits, and refusal above each bound. Compare
 routes with and without workers. After a lost first attempt, confirm the
 retry keeps and revalidates both counts.
+
+## Proposed decision: internal CI bundle storage (P0)
+
+Status: proposed, 2026-11-24. This section requires lead review before any
+implementation of the new transport or changes to workflows or hosts. It does
+not amend approved behavior until accepted. The implementation checklist and
+deployment evidence requirements are in [storage-p0.md](storage-p0.md).
+
+### Scope and backend selection
+
+Move internal plan files, part outcomes, summaries and explicitly migrated
+project reports to a central private store, with temporary copies on runners.
+GitHub artifacts remain the default. Git LFS, package caches, PyPI, release
+assets, existing model/dataset mounts and the separately delivered document
+artifact policy are outside this change. No existing CI data is deleted.
+
+Propose a restricted SSH file gateway on a dedicated CI directory, with 3090a
+and 3090b as the initial dedicated-host pilot. This is a candidate, not an
+authorized deployment. If it cannot enforce repository/run boundaries, use an
+authenticated internal object service instead. NFS requires a separate identity
+and mount review; it must not reuse the dataset or model directories.
+
+One backend is selected before a run starts and recorded in an immutable run
+descriptor, keyed by repository and run id. Every job, retry, salvage and later
+GitHub run attempt verifies that descriptor. Selection changes apply only to
+new run ids. An unavailable selected backend fails visibly; it never silently
+switches to GitHub or reads from another backend. A quota-permitting dual-write
+pilot must name one authoritative backend; comparison reads do not decide CI.
+
+### Proposed interfaces and private configuration
+
+These are logical interfaces, not existing CLI commands or action inputs:
+
+- `publish_bundle(identity, manifest, source)` validates and stages bytes, checks
+  hashes and atomically commits the completed manifest; returns its immutable
+  reference. A duplicate identity with equal hashes is idempotent. Different
+  bytes for that identity are a conflict, including concurrent writers.
+- `read_bundle(reference, destination)` authorizes the exact identity, reads only
+  committed objects, verifies manifest and bytes, and safely unpacks into a new
+  directory. A refusal removes partial local output and never substitutes an
+  older object. The reference includes the expected manifest digest.
+- `list_completed(run_scope)` lists only authorized committed manifests, with
+  bounded pagination; pagination exhaustion or failure is an explicit error,
+  not an apparently complete partial list. Listing alone is not final verdict
+  completeness: readers compare against the expected parts from the routed plan.
+- `plan_cleanup(scope, now)` emits candidate immutable references, reasons and
+  protected references. `apply_cleanup(approved_plan)` is operator-only, rechecks
+  pins and run state under a lease, and refuses changed or newly protected data.
+  Cleanup apply is disabled until P5 approval.
+
+Proposed host file: `$CI_RUNNERS_ETC/storage.toml`, schema 1; absent means
+`backend = "github"`. A malformed file or unknown backend is an error, not a
+default. [storage.proposed.example.toml](../setup/storage.proposed.example.toml)
+names the candidate fields; no existing loader reads it. Endpoint and
+authorization configuration are private absolute paths. A credential broker
+must live outside untrusted job code's identity. Configuration is injected by
+the trusted launcher, never accepted from a plan or a checked-out repository.
+The proposed file has no effect on the current release.
+
+Proposed defaults: 45 seconds per request, 300 seconds total operation deadline,
+at most three attempts including the first, with bounded backoff inside that
+deadline. Retry transient transport errors only. Authorization, identity,
+format, digest, unsafe archive, conflict and size errors are terminal. A lost
+publish response is retried using the same identity/digest, not a new object.
+Control JSON is at most 1 MiB. Standard part ZIPs retain `artifacts.MAX_ZIP`
+(8 MiB) and `MAX_FILE` (1 MiB per outcome or summary); plan ZIPs retain
+`flow.MAX_FILES_ZIP` (66 MiB), at most 1000 entries and 64 MiB uncompressed.
+Other report classes need explicit bounded limits before migration.
+
+### Identity, manifest and atomic publication
+
+The logical namespace is repository / run_id / run_attempt / part_id /
+part_attempt / filename. Repository identity is the authenticated GitHub
+repository id plus owner/name, not a caller-supplied path. Run ids and both
+attempts are positive integers (booleans refused); part ids retain `part.ID`
+and the part-attempt bound retains `artifacts.MAX_ATTEMPT`. Use reserved
+`plan` for plan bundles, never a colliding user part. Paths are canonical
+relative UTF-8 components; reject traversal, separators inside components,
+absolute paths, links and platform-specific escape forms at both ends.
+
+Manifest schema 1 binds backend/run descriptor, repository id and name,
+run_id, run_attempt, part_id, part_attempt, commit SHA, bundle class, producer,
+creation/expiry UTC times, status and a bounded file list. Each file has its
+relative name, actual byte count and SHA-256; the bundle has compressed size
+and SHA-256. A manifest's identity must match the authorization and requested
+reference. Payload run-attempt must match its manifest. Completion says only
+that transport is complete; a complete bundle may contain a red test result.
+
+Stage uploads outside the readable namespace. Validate declared and measured
+size/digest, persist bytes, then publish the manifest using an atomic
+create-if-absent operation. Readers never infer completion from a directory or
+blob's existence. A committed manifest with missing bytes is corrupt. Staging
+objects are invisible to readers; abandoned uploads have a separate cleanup
+grace and cannot be mistaken for completed data. Crash/concurrency tests must
+prove the selected server/filesystem provides these atomicity guarantees.
+
+Manifest hashes detect corruption, not a malicious authorized writer. The
+gateway therefore authenticates and authorizes every operation, confines
+storage paths and prevents one producer from replacing another's completed
+result. No shell command, arbitrary path, forwarding or arbitrary rsync target
+is accepted. Client and server validate requests independently.
+
+### Authorization boundaries
+
+Authorization is issued by a trusted controller that independently verifies
+repository, workflow admission, event, run/attempt and producer identity. A
+job's requested scope or environment is not proof of entitlement. Bind grants
+to operation, repository, run and attempts, with expiry and bounded size.
+Signing/issuer credentials and cleanup authority never enter job processes.
+
+- Producer: write only its assigned part attempt and read only explicitly
+  granted plan/dependency references; cannot list another run or delete data.
+- Retry: read its named predecessor and plan references, write only its newly
+  allocated part attempt. Cannot change an old result or choose another repo.
+- Salvage: read its authorized run and publish a separately authorized recovery
+  revision in a separate recovery namespace backed by the exact local record;
+  cannot overwrite a committed
+  producer bundle. The resolver exposes one logical attempt to existing readers.
+- Verdict: read the expected references of its repository/run, including
+  explicitly pinned unchanged parts on a failed-jobs re-run; cannot publish
+  test outcomes or delete objects. Posting a GitHub status uses separate rights.
+- Mapping reader: read a separately authorized repository-scoped mapping index
+  and its referenced objects only. It receives no general cross-run listing.
+- Operator: explicit approved scope for dry-run/cleanup. A service identity
+  may maintain objects but is never available to checkout code.
+- Shared accounts, public fork PRs and GitHub-hosted jobs: no internal grants
+  in this pilot. They keep their existing artifact path and quota limitations.
+
+Dedicated CI accounts alone do not isolate repositories: any job with the same
+OS identity can read that account's files. A forced-command key with unrestricted
+repository scope is therefore insufficient, even on dedicated hosts. P1 must
+show a broker/proxy or isolated per-job channel whose authority cannot be
+reused for a different scope. Short lifetime alone does not solve this. The
+shared account receives no persistent general storage key; any future trusted
+relay or shared-account support requires its own security review.
+
+### Re-runs, salvage and existing result semantics
+
+Reuse `artifacts.members`, `current` and name/attempt validation, and retain
+GitHub `newest` behavior on its default path. Internal objects are resolved
+from exact references, then normalized into the existing reader representation;
+there is no looser second outcome parser. Keep `flow.check_files`,
+`check_checkout` and `unpack_files` protections, including duplicate names,
+file/directory conflicts, `.git`, forbidden names, CRC, entry/byte bounds and
+fresh destinations. Validate actual stream size as well as declared size.
+
+A run-attempt descriptor records the expected part set and exact source
+references. A failed-jobs re-run may pin unchanged successful parts from an
+earlier run attempt of the same run and SHA, as existing GitHub behavior allows.
+This inheritance must be explicit and auditable; parts being re-run cannot
+inherit their own older result if the new publication fails. Preserve the
+`current` rule that discards an older run attempt's retry after a newer first
+attempt. Reject references to another run or SHA. Never search for the newest
+available old object to fill a hole. The controller seals the descriptor before
+the verdict; missing/unsealed descriptors fail, and no producer can edit them.
+
+Salvage may recover a publication failure from the exact local record using
+existing run identity and wait rules. If a producer committed the same bytes,
+reuse its reference. A changed recovered outcome (for example a stopped record)
+is a distinct immutable recovery revision with provenance and a controller
+authorized compare-and-set resolution record; it cannot silently replace bytes
+under an existing digest. Producer/salvage races, multiple salvage hosts and
+repeated recovery must resolve deterministically or fail with conflict. No
+recovery reference from a different run attempt may be inferred implicitly.
+
+Transport errors are reported separately from the command outcome and retain
+their diagnostic class. Keep `verdict.decide`: any red part fails, all expected
+parts must pass for success, otherwise infrastructure error. Listing failure,
+missing data, incomplete markers, corruption or unresolved conflicts cannot
+produce success. Existing authorized local-record salvage may recover a
+missing publication; integrity/authorization failures remain explicit errors
+until investigated, even if another readable copy exists. A genuine red result
+must remain visible when a transport error also occurs. Preserve outcome,
+summary, retry hints, part outputs and `upload=false` behavior; the existing
+`uploaded` output means successful authoritative publication in opt-in mode.
+
+### Cross-run maps and retention
+
+Test-map/impact-map indexes are separate from same-run bundles. Entries bind
+repository, branch, SHA, source run/attempt, mapping schema and immutable digest.
+Only validated complete map producers may add entries. Keep each consumer's
+existing branch and commit-ancestry filters, multi-map merge rules and missing-map
+fallback. A failed Nightly does not invalidate every map it produced. P4 must
+document and test each consumer's selection algorithm before switching it.
+
+Proposed retention candidates: temporary bundles three days after run end
+(within the plan's one-to-three-day range), diagnostics seven days, mappings
+fourteen days initially. Expiry is a candidate horizon, not permission to delete.
+Active runs, retry grace, inherited re-run references, dependent runs and the
+full map set required by consumer algorithms are pinned. Pins and leases must
+be server-authorized; unknown run state or an unavailable index protects data.
+Deletion revalidates references under the same concurrency boundary as new
+pins. A fourteen-day horizon must not become a latest-only or successful-only
+map policy. Never apply this TTL to existing GitHub data in this proposal.
+
+### Compatibility and acceptance gates
+
+This design is additive only if omitted backend configuration keeps existing
+inputs, outputs, labels, retry and verdict behavior. Allocate a release version
+after the contract is accepted; do not stamp one now. An incompatible change
+requires a new major version under the repository's versioning rules (§9).
+
+P0 delivers this draft, a private-config example, an authorization matrix in
+role form and a deployment dry-run checklist. Protocol/issuer selection and
+real-host evidence remain pending lead review. P1 requires separate approval
+for keys, accounts, authorized_keys, directories, services or timers. P2 follows
+accepted design and a verified channel, and covers the full part/plan/fetch/
+retry/locate/salvage/verdict chain with unit, regression and mutation evidence.
+P3 migrates one trusted brainmass CPU workflow with matched producers and
+consumers. P4 migrates braincell then brainspike including project readers,
+GPU, Nightly and a re-run. P5 approves cleanup dry-run before enabling TTL and
+measures seven days of bytes, retention and actual disk use.
+
+Stop rollout for unauthorized access, hash failure, stale/cross-run reads or
+changed verdicts. Rollback drains or invalidates the current pilot and switches
+only new runs; in-flight runs finish with their original backend. GitHub quota
+may still prevent fallback uploads: pause affected jobs if no working path is
+available. No automatic deletion, billing changes, runner registration,
+organization settings, release tags or major-tag moves are authorized here.

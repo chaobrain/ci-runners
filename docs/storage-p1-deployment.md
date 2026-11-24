@@ -82,6 +82,10 @@ OpenSSH 的 forced command 与 `restrict` 必须配套；限制选项及 SSH 有
 `sshd -T -C` 分别核对存储身份、维护者和现有 runner 的有效策略。Include 顺序
 或已有 Match 可能影响结果，发现冲突即停止。通过后仅按批准计划 reload，
 保留现有维护连接；不 restart、不覆盖其他 authorized_keys。
+有效策略还须确认 `PermitUserEnvironment` 未开启、`AcceptEnv` 仅接受经审核的
+语言/区域设置；不得接收 LD_*、PYTHON*、PATH、ENV、BASH_ENV 等可改变执行入口
+的变量。`-I` 不能替代动态加载器启动前的环境限制。若现有全局策略无法满足，
+停止试点并另行评审 SSH 隔离方案，不擅自改变其他账户的全局配置。
 
 ## 授权与传输协议草案
 

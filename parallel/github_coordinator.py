@@ -5,8 +5,8 @@ import dataclasses
 import time
 from pathlib import Path
 
-from ci_runners import client, github, policy
-from parallel import protocol, transport
+from ci_runners import client, github, policy, storage
+from parallel import bundles, protocol, transport
 
 
 _SOURCE_EVENTS = frozenset({'pull_request', 'push', 'workflow_dispatch', 'schedule'})
@@ -241,8 +241,9 @@ def validate_execution_job(allocation, job):
 
 
 class WorkflowCoordinator:
-    def __init__(self, store, api: GitHub, *, clock=time.time):
+    def __init__(self, store, api: GitHub, *, clock=time.time, storage_etc=None):
         self.store, self.api, self.clock = store, api, clock
+        self.storage_etc = storage_etc
         self.last_write = 0.
 
     def publish_status(self, source, state, description):
@@ -304,7 +305,18 @@ class WorkflowCoordinator:
                 continue
             conclusion = job.get('conclusion') or 'error'
             references = []
-            if conclusion == 'success':
+            receipt = None
+            if bundles.backend(source)['backend'] == 'ssh':
+                if not allocation['released']:
+                    continue
+                try:
+                    if self.storage_etc is None:
+                        raise storage.Error('configuration')
+                    receipt = bundles.verify_result(self.storage_etc, allocation, job['id'])
+                except storage.Error:
+                    if conclusion == 'success':
+                        conclusion = 'error'
+            elif conclusion == 'success':
                 if artifacts is None:
                     artifacts = self.api.artifacts(source)
                 references = [{'id': item['id'], 'name': item['name']} for item in artifacts
@@ -312,7 +324,7 @@ class WorkflowCoordinator:
                 if not references:
                     conclusion = 'error'
             self.store.runner_finished(allocation['id'], source['run_id'], source['run_attempt'],
-                                       job_id=job['id'], conclusion=conclusion, artifacts=references)
+                                       job_id=job['id'], conclusion=conclusion, artifacts=references, storage_reference=receipt)
 
     def reconcile_task_requests(self, batch, jobs):
         for task in batch['tasks']:

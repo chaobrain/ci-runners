@@ -43,10 +43,14 @@ jobs:
         uses: chaobrain/ci-runners/actions/central@v2.1.2
         with:
           command: execute
-      - if: always() && steps.allocation.outputs.allocation_id != ''
+      - if: always() && steps.allocation.outputs.allocation_id != '' && steps.allocation.outputs.storage_backend != 'ssh'
         uses: actions/upload-artifact@v4
         with:
           name: ci-allocation-${{ steps.allocation.outputs.allocation_id }}
           path: ${{ runner.temp }}/ci-allocation/${{ steps.allocation.outputs.allocation_id }}
           retention-days: 7
           if-no-files-found: warn
+      - if: always() && steps.allocation.outputs.allocation_id != '' && steps.allocation.outputs.storage_backend == 'ssh'
+        uses: chaobrain/ci-runners/actions/central@v2.1.2
+        with:
+          command: publish-result

@@ -1,0 +1,36 @@
+# Schema 2 internal file storage. Published release 2.1.2 does not load this file.
+# Install matching code before privately enabling CI_RUNNERS_ETC/storage.toml.
+# Legacy schema 1 commands refuse SSH opt-in until their paired migration.
+# Every address and path below is a placeholder, never live inventory.
+schema = 1
+default_backend = "github"
+
+[repositories."example/project"]
+backend = "ssh"
+store = "pilot"
+
+[stores.pilot]
+# Provision this alias and its known-hosts entry outside the repository.
+ssh_alias = "storage.example.invalid"
+identity_file = "/example/private/storage-key"
+known_hosts_file = "/example/private/storage-known-hosts"
+root = "/example/ci-storage"
+helper = "/example/releases/storage/bin/ci-storage-helper"
+
+[limits]
+connect_seconds = 10
+operation_seconds = 120
+attempts = 3
+manifest_bytes = 1048576
+compressed_bytes = 1073741824
+unpacked_bytes = 2147483648
+entries = 10000
+manifests_per_page = 1024
+manifests_per_run = 10000
+
+[retention]
+# Minimum ages after completion; reachability/holds can protect files longer.
+run_days = 3
+diagnostic_days = 7
+mapping_days = 14
+cleanup_dry_run = true

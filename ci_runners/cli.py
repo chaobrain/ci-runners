@@ -60,6 +60,17 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     cmd, args = argv[0], argv[1:]
+    if cmd in ('part', 'flow', 'verdict', 'salvage') and os.environ.get('GITHUB_REPOSITORY'):
+        from ci_runners import storage
+        try:
+            selected = storage.select(storage.read_config(etc_dir()), os.environ['GITHUB_REPOSITORY'])
+            if selected['backend'] == 'ssh':
+                print('ci-run: internal storage requires the schema 2 central workflow; migrate producers and readers together',
+                      file=sys.stderr)
+                return 2
+        except storage.Error as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     if cmd == 'central':
         from parallel import workflow_client
         return workflow_client.main(args, load_inventory(), etc_dir())

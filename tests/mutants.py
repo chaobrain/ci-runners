@@ -1587,7 +1587,7 @@ MUTANTS = [
     (PRT, "        return 'memory' in read(", "        return 'cpu' in read(", [f'{TT}.Pure.test_where_systemd_enforces_memory']),
     (PRT, "    return found.get('v1') or found.get('v2', '')", "    return found.get('v2') or found.get('v1', '')",
      [f'{TT}.Pure.test_the_scope_procs_file']),
-    (PRT, "SCOPE = re.compile(r'ci-part-[^/]*\\.scope')", "SCOPE = re.compile(r'[^/]*\\.scope')",
+    (PRT, "SCOPE = re.compile(r'(?:ci|civ2)-part-[^/]*\\.scope')", "SCOPE = re.compile(r'[^/]*\\.scope')",
      [f'{TT}.Pure.test_the_scope_procs_file']),
     (PRT, "        if not self.killed and self.used(pids) > self.cap:", "        if False:",
      [f'{TT}.OwnCap.test_a_part_over_its_memory_ends_oom']),
@@ -5222,20 +5222,22 @@ from parallel.tests.central_mutants import CASES as CENTRAL_MUTANTS
 MUTANTS.extend(CENTRAL_MUTANTS)
 from parallel.tests.deployment_mutants import CASES as DEPLOYMENT_MUTANTS
 MUTANTS.extend(DEPLOYMENT_MUTANTS)
+from parallel.tests.storage_mutants import CASES as STORAGE_MUTANTS
+MUTANTS.extend(STORAGE_MUTANTS)
 # Existing workflow mutations follow the major stamp just as the workflow does.
 MUTANTS = [(rel, stamp.rewrite(old, stamp.MAJOR), stamp.rewrite(new, stamp.MAJOR), cases)
            if rel in stamp.WORKFLOWS else (rel, old, new, cases) for rel, old, new, cases in MUTANTS]
 
 
 
-def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:
+def run(tree: pathlib.Path, tests: list[str], hang: float = HANG, *, quiet: bool = True) -> int:
     """The tests' status: 124 for a hang, 125 when a process of the run outlived it
     (``tests/leaks.py``). Either way every process of the run is killed, in a new
     session or not, so no mutant leaves one behind."""
     # -B: a stale .pyc of an earlier mutant of the same size and second would be used.
     # No pipes: a holder a mutant leaves behind must not keep the run waiting.
     code, left = leaks.run([sys.executable, '-B', '-m', 'unittest', '-q', *tests], cwd=tree, timeout=hang,
-                           quiet=True)
+                           quiet=quiet)
     return 125 if code == 0 and left else code
 
 
@@ -5289,7 +5291,7 @@ def main(argv: list[str] | None = None) -> int:
             trees.put(tree)
         every = sorted({t for _, (*_, ts) in mine for t in ts})
         tree0 = trees.get()
-        if run(tree0, every, hang=600):
+        if run(tree0, every, hang=600, quiet=False):
             print('the unmutated tree fails its tests or leaves a process behind', file=sys.stderr)
             return 2
         trees.put(tree0)

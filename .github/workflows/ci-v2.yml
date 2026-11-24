@@ -79,7 +79,7 @@ jobs:
           command: build
           plan: ${{ inputs.plan }}
       - id: files
-        if: steps.build.outputs.files != '' && !inputs.plan-only
+        if: steps.build.outputs.files != '' && !inputs.plan-only && steps.prepare.outputs.storage_backend != 'ssh'
         uses: actions/upload-artifact@v4
         with:
           name: ci-plan-files-${{ github.run_attempt }}
@@ -87,12 +87,18 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
+      - id: bundle
+        if: steps.build.outputs.files != '' && !inputs.plan-only && steps.prepare.outputs.storage_backend == 'ssh'
+        uses: chaobrain/ci-runners/actions/central@v2.1.2
+        with:
+          command: publish-plan
       - id: submit
         uses: chaobrain/ci-runners/actions/central@v2.1.2
         with:
           command: submit
           plan-only: ${{ inputs.plan-only }}
           files-artifact-id: ${{ steps.files.outputs.artifact-id }}
+          files-bundle: ${{ steps.bundle.outputs.files_bundle }}
       - if: failure() && steps.prepare.outcome == 'success'
         uses: chaobrain/ci-runners/actions/central@v2.1.2
         with:

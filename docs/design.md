@@ -5529,3 +5529,230 @@ recipe on receipt. Build once per compatible key, publish only a complete
 prefix, preserve concurrent users, and report preparation failures. Slurm
 keeps its private CPU allowlist and prepares on the cluster side. Shared
 and preinstalled deployments retain their existing configuration contracts.
+
+## Proposed decision: optional SSH storage for internal CI files
+
+Status: contract approved by the maintainer on 2026-11-24 in PR #292. The implementation
+base is `gpu-q-2.1.2` at `d7a0191a7aa7aaf0038ca8a4a7169cf0d84aba1b`.
+This decision extends both the schema 2 centralized execution path and the
+schema 1 artifact readers. It does not approve host deployment or a release.
+The initial implementation delivers the schema 2 path. Schema 1 remains on
+GitHub and explicitly refuses SSH opt-in until its paired adapters arrive.
+Destructive cleanup and consumer rollout remain later stages.
+
+### Scope and backend selection
+
+Use a dedicated CI directory on the storage role `3090a` for the first pilot,
+with ordinary SSH file transfer from `3090b`. Other local executors follow
+after the pilot. GitHub artifacts remain the default. Internal storage is
+explicitly enabled for a trusted repository through host-private configuration;
+public, fork and GitHub-hosted jobs retain their existing path. No workstation
+relay, NFS mount, object service, new account system or short-lived credential
+service is required. Existing shared CI accounts and ordinary persistent SSH
+keys are acceptable under their current trust boundary.
+
+Plan files, part outcomes, allocation results, project reports and cross-run
+test/impact maps are in scope. Git LFS, dependency/environment caches, published
+packages, Release assets and the separately deployed documentation retention
+policy are outside it. The new store never uses dataset or model directories.
+
+`storage.toml` below `CI_RUNNERS_ETC` is a separate private configuration file,
+not an extension of `inventory.toml` or `central.toml`. The proposed format is
+in `parallel/examples/storage.example.toml`. Its schema, defaults and limits
+are part of this contract; the implementation reads it, released 2.1.2 does not. An absent file
+means GitHub. An invalid configured file refuses the operation. The controller
+resolves the repository override from the verified repository identity and
+durably pins backend, logical store ID and storage protocol schema to each
+source run attempt before its first publication. Repeated preparation must
+agree with that binding. A changed setting affects a new run attempt only.
+Executors resolve the logical ID against their local private configuration;
+requests cannot supply endpoints, accounts, paths or command-line SSH options.
+
+For schema 1, the plan/producer and every consumer must carry and verify the
+same pinned run binding before opt-in is allowed. A partial migration refuses
+to start. Backend failure never selects GitHub or an older internal object.
+An explicitly approved comparison may dual-publish when artifact quota allows,
+but reads and verdicts still use exactly one bound backend. Public output may
+contain a logical reference and sanitized error code, never transport details.
+
+### Identity and publication protocol
+
+An object key is a tuple, not an arbitrary path: verified repository ID and
+canonical owner/name, run ID, run attempt, kind, part ID, part attempt and
+bundle name. Plan files use reserved part `plan` and part attempt 1. Schema 2
+result manifests additionally bind batch ID, task ID, task attempt, allocation
+ID and execution job ID to the scheduler's existing records. `part_attempt`
+is the schema 2 task attempt, distinct from GitHub's `run_attempt`.
+Schema 2 plan bundle names contain the existing `protocol.source_key` and
+result bundle names contain the allocation ID, so two central workflow calls
+in the same run cannot collide on a reused part ID. The manifest binds their
+status context as well. Schema 1 retains its run-wide unique part-ID rule.
+Components are validated and encoded below one configured root. A rename of
+a repository cannot permit a different repository ID to read its objects.
+
+A completed bundle has a bounded schema 1 JSON manifest and a ZIP payload.
+The manifest binds the complete key, original test SHA, payload byte count and
+SHA-256, member names, individual sizes and SHA-256 digests, completion state,
+creation time and requested retention class. The manifest is at most 1 MiB.
+There is no completion manifest until all declared bytes have been verified.
+References contain only schema, store ID, complete key and manifest digest;
+they contain no real server layout. The authorized source and allocation,
+rather than values claimed in a ZIP, determine the expected identity.
+
+The proposed internal Python interface has four operations:
+
+- `publish_bundle(identity, source, retention)` validates local regular files,
+  writes a unique staging directory, uploads the ZIP and candidate manifest,
+  verifies remote sizes and digests, and publishes the completed directory by
+  an atomic rename on that filesystem. It returns the verified reference.
+- `read_bundle(reference, expected_identity, destination)` validates the
+  manifest and ZIP against both the reference and authorized identity, checks
+  limits and digests, and installs a new local directory only after safe unpack.
+- `list_completed(run_identity)` returns bounded manifest references below
+  that repository/run binding only. It never scans another repository or
+  chooses a run on behalf of the caller. It cannot substitute for the
+  scheduler's expected task set.
+- `cleanup(scope, now, dry_run=True)` lists eligible objects with protection
+  reasons. Destructive mode is a separate operator action after dry-run review.
+  Scope is constrained to the configured CI root, never a caller-supplied path.
+
+SFTP transfers payloads; a small installed Python helper performs bounded
+verification, publication and cleanup on the storage host. Helper requests
+are validated JSON on stdin, never interpolated shell commands. Ordinary SSH
+authentication is sufficient. Use a per-key lock and no-replace publication;
+concurrent different digests are a conflict. Repeating the same identity and
+content after a lost acknowledgement returns the same reference. Readers
+ignore staging directories. Files and directories in the store cannot be
+symlinks. A partially published transfer is never a completed bundle.
+
+The pilot requires a local filesystem with working same-filesystem atomic
+rename and locking. Data and manifest are flushed before publication; their
+parent directory is flushed afterward. A failure to establish durability is
+a failed publication. This is not a guarantee against storage hardware loss;
+the lead assigns capacity, backup and recovery responsibility before rollout.
+
+### Transport limits and failure semantics
+
+SSH is noninteractive, uses the configured identity only, disables agent and
+port forwarding, and requires a provisioned known-hosts entry. It never
+disables host-key verification or prints raw SSH stderr in public logs.
+Private diagnostic files may retain that stderr. The pilot proposes a 10 s
+connection timeout, 120 s total operation budget including all attempts and
+backoff, at most three attempts, at most 1 GiB compressed and 2 GiB unpacked
+per general bundle, and at most 10,000 entries. Operators may lower limits;
+raising them requires a reviewed configuration change. Manifest/listing reads
+are bounded independently (1 MiB per manifest and 1,024 manifests per page,
+10,000 per run); excess is an error, never a truncated successful listing.
+
+Existing tighter limits hold: plan files keep `flow.check_files` and
+`flow.unpack_files` constraints (1,000 entries and 64 MiB unpacked, plus the
+existing compressed limit); standard outcomes keep `artifacts.MAX_ZIP` and
+`artifacts.MAX_FILE`. Reject absolute paths, traversal, duplicate members,
+links, nonregular files, file/directory collisions and unsafe ZIP entries.
+Readers leave no partial destination. An existing destination is not merged.
+
+Classify errors as configuration, authentication, host-key, permission,
+timeout, transport, missing, corrupt, identity, conflict, limit or capacity.
+Retry only transient transport/timeouts within the shared deadline; resolve
+an uncertain publish by checking that exact key and digest. A malformed,
+corrupt or conflicting object never falls back to an earlier object or run.
+Missing data stays missing; transport failure cannot become test success.
+Keep the existing outcome kinds and retry budgets. A genuine test assertion
+failure remains failure even if result publication also fails. An otherwise
+successful command with a required publication/read failure produces an
+infrastructure error and retains local evidence.
+
+### Integration with 2.1.2 and schema 1
+
+For schema 2, `ci-v2.yml` and `actions/central` select the pinned backend
+before publishing plan files. Add an optional `files-bundle` reference beside
+`files-artifact-id`; the two are mutually exclusive. The controller's
+`prepare` filtering and source persistence must retain and validate storage
+bindings in organization and project modes. `submit` independently verifies
+the completed plan bundle against repository, run attempt and SHA before
+accepting tasks. `workflow_client.fetch` obtains that exact reference after
+its existing checkout/SHA checks. Plan-only validation publishes nothing and
+allocates nothing. A plan publication failure submits no tasks.
+
+`workflow_client.collect_allocation_results` retains the existing outcome,
+summary, results and `allocation-result.json` payload. Publish it to the
+pinned backend after execution; the required publication step runs even
+after a failed command when an authorized allocation exists. A missing
+required file is an error, never an empty successful upload. A stored bundle
+does not release CPU groups, GPU cards or the runner. Existing cleanup and
+GitHub execution-job completion evidence remain independent prerequisites.
+
+The coordinator currently requires `ci-allocation-<id>` in the GitHub artifact
+listing. For SSH-bound runs it instead independently reads and verifies the
+allocation bundle, cross-checks its identity/result with the durable executor
+event, and persists its verified reference alongside the allocation. An
+executor's bare claim that upload succeeded is insufficient. GitHub job
+completion still comes from the GitHub API. A non-success execution job
+cannot turn a passing executor result green. A successful job without its
+required completed bundle is `error`; a real failed test remains failure.
+Use a versioned durable reference field, preserving old GitHub references;
+do not reinterpret a logical storage key as a GitHub artifact ID. Any store
+upgrade follows the existing drain, backup and recovery procedure.
+
+For schema 1, adapt `part` upload, `artifacts`/`verdict` reads, `flow` plan
+files/fetch/retry/locate and the per-host salvage action together. Reuse
+`artifacts.current`, `run_attempt`, `members` and the existing salvage
+selection rules; do not introduce a separate permissive outcome reader.
+Partial GitHub reruns preserve their established selection of earlier
+unrerun parts through explicit validated references, rather than broad store
+searches. Schema 2 continues to require a full rerun for a new run attempt.
+Salvage republishes only the authorized run's local records; an unreachable
+host or missing record cannot be replaced with an older passing result.
+
+Project-specific readers must migrate with producers: plan data, coverage,
+reports, footprints, test maps and impact maps. Cross-run mapping uses a
+separate repository-bound index of complete bundle references, with the
+existing branch, ancestor and multi-map merge rules. Overall nightly failure
+alone does not invalidate a usable impact map. Readers never choose merely
+the newest file, newest successful run or one global latest map.
+
+### Retention rollout and acceptance
+
+Proposed defaults are three days after run completion for run-local files,
+seven days for diagnostics and fourteen days initially for cross-run maps.
+These are minimum eligibility ages, not unconditional deletion deadlines.
+Protect active/prepared runs, allocations, recovery reports, retry grace,
+unexpired read leases, explicit holds and the entire map set required by
+consumers. Cleanup computes reachability under the same publication/index
+locks; inability to establish terminal state or map dependencies skips
+deletion. Index updates precede reclamation. Interrupted staging objects
+need a separate reviewed orphan policy. Cleanup is dry-run only by default;
+this proposal does not authorize deleting GitHub artifacts or CI data.
+
+P1 proves direct upload/download, digest equality and atomic publication on
+two hosts, including concurrent publishers, disconnect/acknowledgement loss,
+unwritable directory, bad host key, disk pressure and bounded large transfers.
+P2 supplies fixtures and mutants for identity isolation, stale attempts,
+digest mismatch, missing completion, conflict, traversal, size limits,
+recovery and mapping protection. Cover schema 2 coordinator reconciliation,
+plan-only, GPU ownership, organization admission, Slurm CPU and schema 1
+compatibility. Pair each new test with the mutant it kills.
+
+P3 uses one trusted BrainMass CPU workflow on the selected branch; record
+the same commit, dependencies, collected/passed/failed/skipped tests and
+duration. Prove successful execution, real test failure, publish/read failure,
+infrastructure retry and full rerun, with zero GitHub artifact requests for
+the migrated internal file paths. P4 migrates BrainCell then BrainSpike,
+including project readers, a complete nightly and a rerun. Public jobs keep
+their current route. P5 reviews cleanup dry-run, then explicitly enables TTL
+and measures seven days of actual bytes and retention. No fixed saving or
+test count is promised.
+
+Install protocol support on all participating hosts before opt-in. Keep the
+release stamp and published tags unchanged in the design PR. Additive opt-in
+can retain existing interfaces; a removal or changed consumer-visible meaning
+requires a new major version under section 9. Rollback stops new opt-ins,
+lets existing bindings finish or explicitly cancels them, and changes only
+new runs back to GitHub when quota permits. Otherwise pause affected work and
+preserve evidence. An in-flight run never changes its backend.
+
+Before code, the lead approves this contract, store role/root and private
+access plan in the draft PR. Before deployment, the lead approves SSH key or
+`authorized_keys` changes, any service/timer setup plan, capacity and recovery
+ownership, pilot consumer and rollout window. The detailed preparation and
+acceptance checklist is in [shared-storage-pilot.md](shared-storage-pilot.md).

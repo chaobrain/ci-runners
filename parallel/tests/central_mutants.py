@@ -178,7 +178,7 @@ GPU_CASES = [
      [f'{GPU_TESTS}.Contracts.test_gpu_is_boolean_and_grants_identify_one_local_physical_card']),
     ('parallel/scheduler.py', "protocol.gpu_wait_label(task['device']) not in job.get('labels', [])", 'False',
      [f'{GPU_TESTS}.Contracts.test_split_matrices_device_admission_and_waiter_job_identity']),
-    ('parallel/deployment_steps.py', 'if units.returncode or units.stdout.strip():', 'if units.returncode:',
+    ('parallel/deployment_steps.py', 'elif not same_install and conflicting_units(config, run=run):', 'elif False:',
      [f'{GPU_TESTS}.Deployment.test_first_cutover_refuses_old_parallel_runner_units']),
     ('ci_runners/setup.py', 'protocol.gpu_wait_label(protocol.GPU_WAIT_LANES[index - 1])', "protocol.gpu_wait_label('auto')",
      [f'{GPU_TESTS}.Deployment.test_inventory_only_and_five_waiters_without_registration']),

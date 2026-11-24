@@ -98,6 +98,7 @@ class SSHStore:
                     raise storage.Error('timeout') from exc
                 time.sleep(min(2 ** n, remaining))
 
+    @storage.safe_errors
     def publish_bundle(self, ident, source, retention='diagnostic'):
         deadline = time.monotonic() + self.limits['operation_seconds']
         ident = storage.identity(ident)
@@ -121,6 +122,7 @@ class SSHStore:
                 return ref
             return self.attempt(publish, deadline)
 
+    @storage.safe_errors
     def read_bundle(self, ref, expected, destination):
         storage.reference(ref, expected, self.store)
 

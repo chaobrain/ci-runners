@@ -112,15 +112,25 @@ class BundleFiles(unittest.TestCase):
                 storage.reference(reference, {**ident(), field: value})
 
     def test_limits_and_symlink_inputs_are_rejected(self):
-        with self.assertRaises(storage.Error):
+        with self.assertRaisesRegex(storage.Error, '^CI storage: limit$'):
             storage.pack(self.files, self.root/'limited.zip', ident(), {**storage.DEFAULTS, 'unpacked_bytes': 1})
         (self.files/'link').symlink_to(self.files/'outcome.json')
-        with self.assertRaises(storage.Error):
+        with self.assertRaisesRegex(storage.Error, '^CI storage: corrupt$'):
             storage.pack(self.files, self.root/'linked.zip', ident(), storage.DEFAULTS)
 
     def test_packing_deadline_is_inside_the_operation_budget(self):
         with self.assertRaisesRegex(storage.Error, 'timeout'):
             storage.pack(self.files, self.root/'expired.zip', ident(), storage.DEFAULTS, deadline=time.monotonic()-1)
+
+    def test_zip64_publication_and_local_failures_keep_the_contract(self):
+        # Lower the ZIP64 boundary to exercise large-file encoding with a tiny fixture.
+        with mock.patch.object(zipfile, 'ZIP64_LIMIT', 16):
+            reference = self.transport.publish_bundle(ident(), self.files)
+            self.transport.read_bundle(reference, ident(), self.root/'zip64')
+        self.assertEqual((self.root/'zip64/nested/data').read_bytes(), b'\0bytes\xff')
+        with mock.patch.object(storage.os, 'open', side_effect=PermissionError(13, 'denied', '/private-endpoint/file')):
+            with self.assertRaisesRegex(storage.Error, '^CI storage: permission$'):
+                storage.pack(self.files, self.root/'denied.zip', ident(), storage.DEFAULTS)
 
     def test_zip_traversal_duplicates_and_links_are_rejected(self):
         for names, mode in [(['../escape'], stat.S_IFREG), (['/escape'], stat.S_IFREG),
@@ -152,7 +162,7 @@ class BundleFiles(unittest.TestCase):
         destination = self.root/'existing'
         destination.mkdir()
         (destination/'sentinel').write_text('keep')
-        with self.assertRaises(storage.Error):
+        with self.assertRaisesRegex(storage.Error, '^CI storage: conflict$'):
             self.transport.read_bundle(reference, ident(), destination)
         self.assertEqual((destination/'sentinel').read_text(), 'keep')
 

@@ -5,6 +5,11 @@ H = 'ci_runners/storage_host.py'
 S = 'ci_runners/storage_ssh.py'
 C = 'parallel/github_coordinator.py'
 CASES = [
+    (F, "archive.open(info, 'w', force_zip64=True)", "archive.open(info, 'w')",
+     [T+'BundleFiles.test_zip64_publication_and_local_failures_keep_the_contract']),
+    (F, '        except OSError as exc:\n            code = {errno.EACCES:',
+     '        except BrokenPipeError as exc:\n            code = {errno.EACCES:',
+     [T+'BundleFiles.test_zip64_publication_and_local_failures_keep_the_contract']),
     (S, '                            os.killpg(process.pid, signal.SIGKILL)', '                            pass',
      [T+'Transport.test_timeout_kills_the_transport_session_and_waits_for_it']),
     (F, '    if deadline is not None and time.monotonic() >= deadline:', '    if False:',

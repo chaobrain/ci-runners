@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import errno
+import functools
 import json
 import math
 import os
@@ -28,6 +30,23 @@ class Error(ValueError):
     def __init__(self, code):
         self.code = code
         super().__init__('CI storage: ' + code)
+
+
+def safe_errors(operation):
+    """Keep local filenames out of public storage errors as well as SSH failures."""
+    @functools.wraps(operation)
+    def call(*args, **kwargs):
+        try:
+            return operation(*args, **kwargs)
+        except Error:
+            raise
+        except OSError as exc:
+            code = {errno.EACCES: 'permission', errno.EPERM: 'permission', errno.ENOENT: 'missing',
+                    errno.ENOSPC: 'capacity'}.get(exc.errno, 'transport')
+            raise Error(code) from None
+        except (ValueError, TypeError, KeyError, RuntimeError, zipfile.BadZipFile) as exc:
+            raise Error('corrupt') from None
+    return call
 
 
 def dumps(value):
@@ -103,6 +122,7 @@ def binding(value):
     return dict(value)
 
 
+@safe_errors
 def read_config(etc):
     path = Path(etc) / 'storage.toml'
     if not path.exists() and not path.is_symlink():
@@ -173,14 +193,21 @@ def member_name(name):
     return name
 
 
+@safe_errors
 def pack(source, destination, ident, limits, retention='diagnostic', deadline=None):
     ident = identity(ident)
     source = Path(source)
     if source.is_symlink() or not source.is_dir():
         raise Error('missing')
     members, total, entries = [], 0, set()
+    paths = []
+    for path in source.rglob('*'):
+        check_deadline(deadline)
+        paths.append(path)
+        if len(paths) > limits['entries']:
+            raise Error('limit')
     with zipfile.ZipFile(destination, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(source.rglob('*')):
+        for path in sorted(paths):
             check_deadline(deadline)
             mode = path.lstat().st_mode
             if stat.S_ISLNK(mode) or not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
@@ -198,7 +225,7 @@ def pack(source, destination, ident, limits, retention='diagnostic', deadline=No
             info.external_attr = (stat.S_IFREG | 0o600) << 16
             value, size = hashlib.sha256(), 0
             descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-            with os.fdopen(descriptor, 'rb') as src, archive.open(info, 'w') as out:
+            with os.fdopen(descriptor, 'rb') as src, archive.open(info, 'w', force_zip64=True) as out:
                 if not stat.S_ISREG(os.fstat(src.fileno()).st_mode):
                     raise Error('corrupt')
                 while True:
@@ -274,6 +301,7 @@ def verify(manifest, payload, expected, limits, manifest_sha256=None, deadline=N
         raise Error('corrupt') from exc
 
 
+@safe_errors
 def unpack(manifest, payload, expected, destination, limits, manifest_sha256=None, deadline=None):
     doc = verify(manifest, payload, expected, limits, manifest_sha256, deadline)
     destination = Path(destination)
@@ -302,6 +330,7 @@ def unpack(manifest, payload, expected, destination, limits, manifest_sha256=Non
     return doc
 
 
+@safe_errors
 def client(etc, pinned):
     pinned = binding(pinned)
     if pinned['backend'] != 'ssh':

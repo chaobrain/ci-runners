@@ -268,13 +268,14 @@ def central_decision(etc, pol, env, event, *, repository_members=False, organiza
         return policy.Decision(False, 'runner')
 
 
-def _job_scopes(env: dict[str, str]) -> list[str]:
+def _job_scopes(env: dict[str, str], *, organization: bool = False) -> list[str]:
     """The part scopes the executor started for this runner's current job."""
     runner = env.get('RUNNER_NAME', '')
-    if not runner:
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+', runner):
         return []
+    prefix = 'civ2-part' if organization else 'ci-part'
     r = subprocess.run(['systemctl', '--user', 'list-units', '--type=scope', '--plain', '--no-legend',
-                        f'ci-part-{runner}-*'], capture_output=True, text=True, timeout=30)
+                        f'{prefix}-{runner}-*'], capture_output=True, text=True, timeout=30)
     return [line.split()[0] for line in r.stdout.splitlines() if line.strip()]
 
 
@@ -327,7 +328,7 @@ def cancel_parts(env: dict[str, str], alive=None) -> list[str]:
     return out
 
 
-def completed(env: dict[str, str]) -> int:
+def completed(env: dict[str, str], *, organization: bool = False) -> int:
     """Mark the job's parts its end cancelled (``cancel_parts``), then stop the job's part
     scopes (their processes die with the cgroup, so their slots and leases go too). Always
     0: a failed cleanup is the reaper's to finish."""
@@ -337,7 +338,7 @@ def completed(env: dict[str, str]) -> int:
     except Exception as e:  # noqa: BLE001 - the scopes are stopped all the same
         _log(env.get('CI_RUNNERS_ETC', '.'), {'hook': 'job-completed', 'error': type(e).__name__})
     try:
-        scopes = _job_scopes(env)
+        scopes = _job_scopes(env, organization=organization)
         if scopes:
             subprocess.run(['systemctl', '--user', 'stop', *scopes], capture_output=True, timeout=90)
             stopped = scopes
@@ -369,10 +370,10 @@ def main(argv: list[str]) -> int:
             signal.alarm(0)
         print(out, flush=True)
         return code
-    if argv == ['job-completed']:
+    if argv in (['job-completed'], ['job-completed', '--organization']):
         signal.alarm(COMPLETE_BOUND)
         try:
-            return completed(env)
+            return completed(env, organization=('--organization' in argv))
         finally:
             signal.alarm(0)
     print('usage: hook job-started|job-completed', file=sys.stderr)

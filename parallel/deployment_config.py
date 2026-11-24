@@ -80,6 +80,14 @@ class DeploymentConfig:
         return self.document.get('mode') == 'organization'
 
     @property
+    def organization_executor(self):
+        return self.organization_mode and not self.is_controller
+
+    @property
+    def verify_resource_limits(self):
+        return self.host.get('verify_resource_limits', True)
+
+    @property
     def organization_settings(self):
         settings = {'name': self.document['github']['organization']}
         if 'env_cache' in self.host:
@@ -203,7 +211,7 @@ def cpu_count(host):
 
 def validate_host(name, host, *, schema=1, organization_mode=False):
     allowed = {'roles', 'account', 'home', 'runtime', 'cpus', 'cpu_count', 'memory_max',
-               'slurm_runners', 'disk_min_gib', 'python', 'conda', 'gpu_uuids'}
+               'slurm_runners', 'disk_min_gib', 'python', 'conda', 'gpu_uuids', 'verify_resource_limits'}
     if schema == 2:
         allowed.update(('runner_count', 'priority'))
     if organization_mode:
@@ -215,6 +223,8 @@ def validate_host(name, host, *, schema=1, organization_mode=False):
     if (not isinstance(roles, list) or not roles or
             any(role not in ('controller', 'executor') for role in roles) or len(set(roles)) != len(roles)):
         raise ValueError(f'host {name}: roles must contain controller and/or executor')
+    if 'verify_resource_limits' in host and (type(host['verify_resource_limits']) is not bool or 'executor' not in roles):
+        raise ValueError(f'host {name}: verify_resource_limits must be a boolean executor setting')
     protocol.validate_gpu_list(name if 'executor' in roles else '', host.get('gpu_uuids', []))
     if not isinstance(host['account'], str) or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}', host['account']):
         raise ValueError(f'host {name}: invalid account')
@@ -401,7 +411,8 @@ def runtime_files(config, repository_ids, release):
                                 for name, host in config.document['hosts'].items() if 'executor' in host['roles']}
     if 'executor' in config.host['roles']:
         control['executor'] = {'url': config.document['controller']['url'], 'token_file': str(config.private/'host-token'),
-                               'ca_file': str(config.private/'ca.crt'), 'runner_uids': [uid]}
+                               'ca_file': str(config.private/'ca.crt'), 'runner_uids': [uid],
+                               'verify_resource_limits': config.verify_resource_limits}
         if config.repository_members:
             host = config.host
             control['executor']['registration'] = dict(
@@ -410,6 +421,8 @@ def runtime_files(config, repository_ids, release):
     add(config.control/'etc/central.toml', toml_document(control))
     for name in ('job-started.sh', 'job-completed.sh'):
         text = (release/'hooks'/name).read_text()
+        if name == 'job-completed.sh' and config.organization_executor:
+            text = text.replace('"$root" job-completed\n', '"$root" job-completed --organization\n')
         add(config.runtime/'ci-runners/hooks'/name, setup.hook_text(text, setup.python_of(inv), str(config.etc.parent), str(config.etc)), 0o755)
     for name, labels, role in config.runner_specs():
         pool = 'plan' if role == 'plan' else 'slurm' if name.startswith('slurm') else 'cpu'

@@ -105,7 +105,12 @@ class ExecutorService:
             raise protocol.Error('unknown local allocation')
         who = identity(params)
         e = row['metadata'].get('env', {})
-        if (row['grant']['runner_tag'] != who['runner'] or e.get('GITHUB_REPOSITORY') != who['repository']
+        stored_repository = e.get('GITHUB_REPOSITORY')
+        caller_repository = who['repository']
+        if (row['grant']['runner_tag'] != who['runner']
+                or not isinstance(stored_repository, str) or not isinstance(caller_repository, str)
+                or not protocol.REPO.fullmatch(caller_repository)
+                or stored_repository.lower() != caller_repository.lower()
                 or str(who['run_id']) != e.get('GITHUB_RUN_ID') or str(who['run_attempt']) != e.get('GITHUB_RUN_ATTEMPT')):
             raise protocol.Error('allocation belongs to another GitHub job')
         return row
@@ -181,14 +186,17 @@ class ExecutorService:
     def stop_scope(self, row, *, stop=False):
         rec = part._read_json(os.path.join(row['record'], 'record.json')) or {}
         unit = rec.get('unit')
+        organization_mode = organization.standalone_executor(self.settings)
         if not unit:
             env = row['metadata'].get('env', {})
             p = row['metadata'].get('part', {})
             if not env:
                 return True
             attempt = row['grant'].get('task_attempt', 1)
-            unit = part.unit_name(row['grant']['runner_tag'], p['id'], f'{env["GITHUB_RUN_ID"]}-{env["GITHUB_RUN_ATTEMPT"]}-{attempt}')
-        if not part.SCOPE.fullmatch(unit):
+            unit = part.unit_name(row['grant']['runner_tag'], p['id'], f'{env["GITHUB_RUN_ID"]}-{env["GITHUB_RUN_ATTEMPT"]}-{attempt}',
+                                  organization=organization_mode)
+        prefix = 'civ2-part-' if organization_mode else 'ci-part-'
+        if not part.SCOPE.fullmatch(unit) or not unit.startswith(prefix):
             raise protocol.Error('invalid recorded task scope')
         if stop:
             self.run(['systemctl', '--user', '--no-block', 'stop', unit], capture_output=True, timeout=10)

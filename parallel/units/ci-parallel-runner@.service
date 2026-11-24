@@ -13,7 +13,7 @@ UMask=0077
 NoNewPrivileges=yes
 TimeoutStopSec=5min
 KillMode=mixed
-Slice=ci.slice
+Slice=@SLICE@
 
 [Install]
 WantedBy=default.target

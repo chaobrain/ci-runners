@@ -143,6 +143,56 @@ def wait_ready(config, *, timeout=90, sleep=time.sleep):
     raise ValueError('services did not become control-ready; inspect deploy status and the user journal')
 
 
+def conflicting_units(config, *, run=subprocess.run):
+    """Identify running CI resources that share this installation's scope."""
+    patterns = ['ci-parallel-*.service', 'actions.runner.*.service',
+                'civ2-part-*.scope' if config.organization_executor else 'ci-part-*.scope']
+    if not config.organization_executor:
+        patterns.append('civ2-part-*.scope')
+    result = run_checked(['systemctl', '--user', 'list-units', '--state=active,activating,deactivating',
+                          '--plain', '--no-legend', *patterns], run=run, text=True)
+    conflicts = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        unit = line.split()[0]
+        if config.organization_executor and unit.startswith('actions.runner.'):
+            directory = run_checked(['systemctl', '--user', 'show', unit, '-p', 'WorkingDirectory', '--value'],
+                                    run=run, text=True).stdout.strip()
+            if Path(directory).is_absolute() and directory != '/' and not Path(directory).resolve().is_relative_to(config.runtime):
+                continue
+        conflicts.append(unit)
+    return conflicts
+
+
+def inspect_executor_units(config, receipt, *, run=subprocess.run):
+    """Check the effective systemd identities, including system-wide templates."""
+    owned = set(receipt.get('files', {})) | set(receipt.get('pending_files', {}))
+    runner_template = 'ci-parallel-runner@.service'
+    slice_name = 'civ2.slice'
+    executor = 'ci-parallel-executor.service'
+    names = {executor: executor, slice_name: slice_name}
+    names.update({f'ci-parallel-runner@{name}.service': runner_template for name, _, _ in config.runner_specs()})
+    active_owned = set()
+    for unit, filename in names.items():
+        result = run_checked(['systemctl', '--user', 'show', unit, '-p', 'LoadState', '-p', 'ActiveState',
+                              '-p', 'FragmentPath', '-p', 'DropInPaths'], run=run, text=True)
+        props = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        fragment = props.get('FragmentPath')
+        if props.get('LoadState') == 'not-found':
+            continue
+        if (unit == slice_name and not fragment and props.get('ActiveState') == 'inactive'
+                and not props.get('DropInPaths')):
+            continue  # systemd synthesizes empty, inactive slices on lookup
+        local = str(config.unit_dir/filename)
+        overrides = {unit+'.d', filename+'.d'}
+        if (props.get('LoadState') != 'loaded' or fragment != local or local not in owned
+                or any(Path(path).parent.name in overrides for path in props.get('DropInPaths', '').split())):
+            raise ValueError(f'unit conflicts with an existing installation: {unit}')
+        active_owned.add(unit)
+    return active_owned
+
+
 def apply(config, plan, *, source=deployment_plan.SOURCE, run=subprocess.run, preflight=deployment_plan.check_host, readiness=wait_ready):
     receipt = deployment_plan.validate(plan, config, source=source)
     problems = preflight(config, run=run)
@@ -154,12 +204,15 @@ def apply(config, plan, *, source=deployment_plan.SOURCE, run=subprocess.run, pr
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         receipt = deployment_plan.validate(plan, config, source=source)
         ensure_idle(config)
-        if receipt.get('input_digest') != plan['input_digest'] or receipt.get('version') != __version__:
-            units = run(['systemctl', '--user', 'list-units', '--state=active,activating,deactivating', '--plain',
-                         '--no-legend', 'ci-parallel-*.service', 'ci-part-*.scope', 'actions.runner.*.service'],
-                        capture_output=True, text=True, timeout=15)
-            if units.returncode or units.stdout.strip():
-                raise ValueError('stop old control services and runners and drain task scopes before cutover')
+        same_install = receipt.get('input_digest') == plan['input_digest'] and receipt.get('version') == __version__
+        if config.organization_executor:
+            owned = inspect_executor_units(config, receipt, run=run)
+            allowed = owned if same_install else set()
+            conflicts = set(conflicting_units(config, run=run)) - allowed
+            if conflicts:
+                raise ValueError('conflicting CI units: '+', '.join(sorted(conflicts)))
+        elif not same_install and conflicting_units(config, run=run):
+            raise ValueError('stop old control services and runners and drain task scopes before cutover')
         receipt.update(schema=1, version=__version__, host=config.host_name, runtime=str(config.runtime),
                        plan_digest=plan['digest'], input_digest=plan['input_digest'], source_digest=plan['source_digest'],
                        repository_ids=plan['repository_ids'], status='applying')

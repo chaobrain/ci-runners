@@ -31,7 +31,8 @@ def service_names(config):
 
 
 def unit_files(config, source=SOURCE):
-    replacements = {'RELEASE': str(release_path(config)), 'ETC': str(config.etc),
+    slice_name = 'civ2.slice' if config.organization_executor else 'ci.slice'
+    replacements = {'SLICE': slice_name, 'RELEASE': str(release_path(config)), 'ETC': str(config.etc),
                     'PYTHON': config.host.get('python', '/usr/bin/python3'), 'RUNTIME': str(config.runtime),
                     'CONTROL_UNITS': ' '.join(service_names(config))}
     rendered = {}
@@ -40,7 +41,7 @@ def unit_files(config, source=SOURCE):
         for key, value in replacements.items():
             text = text.replace('@'+key+'@', value)
         rendered[str(config.unit_dir/name)] = {'content': text, 'mode': 0o644}
-    rendered[str(config.unit_dir/'ci.slice')] = {'content': '[Slice]\nMemoryMax='+config.host['memory_max']+'\nMemorySwapMax=0\n', 'mode': 0o644}
+    rendered[str(config.unit_dir/slice_name)] = {'content': '[Slice]\nMemoryMax='+config.host['memory_max']+'\nMemorySwapMax=0\n', 'mode': 0o644}
     for name in config.projects:
         memory = config.project_document(name)['hosts'][config.host_name]['memory_max']
         rendered[str(config.unit_dir/f'ci-{name}.slice')] = {'content': '[Slice]\nMemoryMax='+memory+'\nMemorySwapMax=0\n', 'mode': 0o644}
@@ -131,22 +132,23 @@ def check_host(config, *, run=subprocess.run, network=True):
         count = deployment_config.cpu_count(config.host)
         if count > len(os.sched_getaffinity(0)):
             problems.append('configured CPU count exceeds the CPUs available to this account')
-        probe = ('import sys;sys.path.insert(0,sys.argv[1]);from parallel.task_execution import resource_limits,check_limits;'
-                 'quota,memory=resource_limits();check_limits({"cores":1,"RAM":"64M"},quota,memory)')
-        command = ['systemd-run', '--user', '--scope', '--quiet', '-p', 'CPUQuota=100%',
-                   '-p', 'MemoryMax=64M', '-p', 'MemorySwapMax=0',
-                   config.host.get('python', '/usr/bin/python3'), '-I', '-c', probe, str(SOURCE)]
-        try:
-            if run(command, capture_output=True, timeout=30).returncode:
-                problems.append('effective CPU quota or memory limit is unavailable to the user systemd manager')
-        except (OSError, subprocess.SubprocessError):
-            problems.append('cannot probe user systemd resource limits')
+        if config.verify_resource_limits:
+            probe = ('import sys;sys.path.insert(0,sys.argv[1]);from parallel.task_execution import resource_limits,check_limits;'
+                     'quota,memory=resource_limits();check_limits({"cores":1,"RAM":"64M"},quota,memory)')
+            command = ['systemd-run', '--user', '--scope', '--quiet', '-p', 'CPUQuota=100%',
+                       '-p', 'MemoryMax=64M', '-p', 'MemorySwapMax=0',
+                       config.host.get('python', '/usr/bin/python3'), '-I', '-c', probe, str(SOURCE)]
+            try:
+                if run(command, capture_output=True, timeout=30).returncode:
+                    problems.append('effective CPU quota or memory limit is unavailable to the user systemd manager')
+            except (OSError, subprocess.SubprocessError):
+                problems.append('cannot probe user systemd resource limits')
     try:
         result = run(['systemctl', '--user', 'list-units', '--state=active', '--plain', '--no-legend',
                       'ci-staging-*', 'ci-runner@*', 'ci-executor.service', 'ci-plan.service'], capture_output=True, text=True, timeout=15)
         if result.returncode:
             problems.append('user systemd manager is unavailable')
-        elif result.stdout.strip():
+        elif result.stdout.strip() and not config.organization_executor:
             problems.append('legacy/trial CI services are active; drain and retire them before activating this runtime')
     except (OSError, subprocess.SubprocessError):
         problems.append('cannot inspect conflicting CI services')

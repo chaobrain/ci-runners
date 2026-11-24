@@ -127,14 +127,16 @@ def check_fence(path, grant, cpus):
         db.close()
 
 
-def supervise(record, grant, cpus, command, fence=None, max_temp_c=80, gpu_mem_mib=0, *, launch_argv=None):
-    """Prove resource enforcement before acknowledging or starting any test process."""
+def supervise(record, grant, cpus, command, fence=None, max_temp_c=80, gpu_mem_mib=0, *, launch_argv=None,
+              verify_resource_limits=True):
+    """Verify configured resource limits before acknowledging or starting a task."""
     try:
-        quota, memory = resource_limits()
         is_slurm = grant.get('backend') == 'slurm'
         supervisor_memory_cap = registry.memory_bytes(grant['RAM']) if is_slurm else 0
-        width = slurm_cpu_width() if is_slurm else None
-        check_limits(grant, quota, memory, slurm_width=width, supervisor_memory_cap=supervisor_memory_cap)
+        if is_slurm or verify_resource_limits:
+            quota, memory = resource_limits()
+            width = slurm_cpu_width() if is_slurm else None
+            check_limits(grant, quota, memory, slurm_width=width, supervisor_memory_cap=supervisor_memory_cap)
         card = grant.get('gpu_uuid', '')
         if card and gpu_resources.available([card], max_temp_c).get(card, -1) < gpu_mem_mib:
             raise protocol.Error('authorized GPU is no longer available')
@@ -145,7 +147,8 @@ def supervise(record, grant, cpus, command, fence=None, max_temp_c=80, gpu_mem_m
                           CI_CPU_GROUPS=str(grant['cpu_groups']), CI_RAM=grant['RAM'])
         part._write_json(os.path.join(record, 'allocation-ready.json'), {'allocation_id': grant['allocation_id'],
                          'cores': grant['cores'], 'RAM': grant['RAM'], 'workers': grant['workers'], 'gpu_uuid': card,
-                         'memory_enforcement': 'process-tree' if supervisor_memory_cap else 'cgroup'})
+                         'memory_enforcement': ('process-tree' if supervisor_memory_cap else
+                                                'cgroup' if verify_resource_limits else 'unverified')})
     except (OSError, ValueError, KeyError, sqlite3.Error) as e:
         part._write_json(os.path.join(record, 'exit.json'), {'rc': None, 'unavailable': f'resources: {type(e).__name__}',
                          'end_epoch': time.time(), 'boot_end': part.boot_id()})
@@ -158,6 +161,9 @@ def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subpro
     grant = protocol.validate_allocation(allocation['grant'])
     source, task = allocation['source'], allocation['part']
     settings = transport.settings(etc) if layout.settings_path(etc).is_file() else {}
+    verify_resource_limits = settings.get('executor', {}).get('verify_resource_limits', True)
+    if type(verify_resource_limits) is not bool:
+        raise protocol.Error('executor resource verification setting must be boolean')
     if allocation.get('repository_environment') is True and 'env_root' not in settings.get('organization', {}):
         raise protocol.Error('repository environment mode changed on the execution host')
     cache_mode = 'env_cache' in settings.get('organization', {})
@@ -165,6 +171,7 @@ def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subpro
             allocation.get('environment_cache') is True and not cache_mode):
         raise protocol.Error('environment cache mode changed on the execution host')
     organization_mode = 'organization' in settings
+    isolated_scope = organization.standalone_executor(settings)
     organization_slurm = organization_mode and grant['backend'] == 'slurm'
     if organization_mode:
         if allocation.get('organization_repository_verified') is not True:
@@ -231,6 +238,7 @@ def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subpro
             proj = dataclasses.replace(proj, variables=environment_cache.validate(recipe).variables)
             options['environment_recipe'] = recipe
         return engine._slurm(args, proj, grant['RAM'], record, rec, work, 'none',
+                             isolated_scope=isolated_scope,
                              organization_slurm_project=source['slurm_project'] if organization_mode else None, **options)
     if cpus:
         raise protocol.Error('CPU-number allocations must be drained before upgrading')
@@ -250,7 +258,8 @@ def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subpro
             command_env.pop(name, None)
         if source.get('files_artifact_id'):
             command_env['CI_PLAN_FILES'] = str(Path(env['RUNNER_TEMP'])/'ci-plan-files')
-        call = 'import json,sys; sys.path.insert(0,sys.argv.pop(1)); from parallel.task_execution import supervise; sys.exit(supervise(*json.loads(sys.argv[1])))'
+        call = ('import json,sys; sys.path.insert(0,sys.argv.pop(1)); from parallel.task_execution import supervise; '
+            'a=json.loads(sys.argv[1]); sys.exit(supervise(*a[:-1], verify_resource_limits=a[-1]))')
         fence = str(layout.executor_paths(inv)[0])
         args_for_scope = [record, grant, cpus, task['command'], fence, inv.host['max_temp_c'], proj.gpu_mem_mib]
         if cache_mode:
@@ -262,12 +271,14 @@ def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subpro
             args_for_scope.append(launch)
             call = ('import json,sys; sys.path.insert(0,sys.argv.pop(1)); '
                     'from parallel.task_execution import supervise; a=json.loads(sys.argv[1]); '
-                    'sys.exit(supervise(*a[:-1], launch_argv=a[-1]))')
+                    'sys.exit(supervise(*a[:-2], launch_argv=a[-2], verify_resource_limits=a[-1]))')
+        args_for_scope.append(verify_resource_limits)
         inner = [sys.executable, '-I', '-c', call, release, protocol.dumps(args_for_scope)]
-        engine.unit = part.unit_name(grant['runner_tag'], task['id'], f'{env["GITHUB_RUN_ID"]}-{env["GITHUB_RUN_ATTEMPT"]}-{task_attempt}')
+        engine.unit = part.unit_name(grant['runner_tag'], task['id'], f'{env["GITHUB_RUN_ID"]}-{env["GITHUB_RUN_ATTEMPT"]}-{task_attempt}',
+                                     organization=isolated_scope)
         rec.update(unit=engine.unit, run_epoch=time.time(), queue_seconds=0)
         part._write_json(os.path.join(record, 'record.json'), rec)
-        slice_options = {'slice_name': 'ci.slice'} if organization_mode else {}
+        slice_options = {'slice_name': 'civ2.slice' if isolated_scope else 'ci.slice'} if organization_mode else {}
         argv = part.scope_argv(engine.unit, proj.name, grant['RAM'], [], engine.oom_policy(), **slice_options)
         argv += ['-p', f'CPUQuota={grant["cores"] * 100}%', *inner]
         engine.proc = spawn(argv, cwd=env['GITHUB_WORKSPACE'], env=command_env, pass_fds=() if fd is None else (fd,))

@@ -79,7 +79,7 @@ KILL_GRACE = 30  # s between TERM and KILL at the inner timeout
 RELAY_DRAIN = 5  # s the relay may still copy once the command has ended
 CAP_POLL = 2.0  # s between the supervisor's memory readings, where it enforces the cap
 OOM_POLICY_SYSTEMD = 253  # the first systemd that takes OOMPolicy on a scope
-SCOPE = re.compile(r'ci-part-[^/]*\.scope')  # a part's scope, the only cgroup the cap kills in
+SCOPE = re.compile(r'(?:ci|civ2)-part-[^/]*\.scope')  # a part's scope, the only cgroup the cap kills in
 _LEASE_TICKET = re.compile(r'([0-9]{12})\.json\Z')  # a lease ticket in ``state/leases/queue``
 #: the step's own files: the command must not write the part's outputs or the job's env
 STEP_FILES = frozenset({'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'GITHUB_ENV', 'GITHUB_PATH', 'GITHUB_STATE'})
@@ -120,11 +120,12 @@ def _read_json(path: str) -> dict | None:
         return None
 
 
-def unit_name(runner: str, part_id: str, run: str) -> str:
+def unit_name(runner: str, part_id: str, run: str, *, organization: bool = False) -> str:
     """The scope's name, unique per run and attempt; ``job-completed`` stops
-    ``ci-part-<runner>-*``. Pure."""
+    scopes in the matching runner namespace. Pure."""
     safe = re.sub(r'[^A-Za-z0-9_.-]', '_', runner) or 'runner'
-    return f'ci-part-{safe}-{part_id}-{run}.scope'
+    prefix = 'civ2-part' if organization else 'ci-part'
+    return f'{prefix}-{safe}-{part_id}-{run}.scope'
 
 
 #: what ``systemd-run --user`` needs to reach the user manager (a slurm part's minimal
@@ -1621,7 +1622,7 @@ class Executor:
                     or not inventory.peer_labels(self.inv, cls))
 
     def _slurm(self, a: Inputs, proj: registry.Project, memory: str, record: str, rec: dict[str, object], work: str,
-               lock: str, *, organization_slurm_project: str | None = None,
+               lock: str, *, organization_slurm_project: str | None = None, isolated_scope: bool = False,
                environment_recipe: dict | None = None) -> tuple[int, dict[str, object]]:
         """A ``slurm`` part (decision 14.3): the drain, the class row per target, then
         ``slurmpart.drive`` in the part's scope, as a supervisor; its ``exit.json`` and
@@ -1685,13 +1686,13 @@ class Executor:
         drv = [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
                'from ci_runners.slurmpart import drive; sys.exit(drive(sys.argv[1]))', self.release, record]
         run_id = f'{os.path.basename(os.path.dirname(record))}-{rec["attempt"]}'
-        self.unit = unit_name(e.get('RUNNER_NAME', ''), a.id, run_id) if self.scope else ''
+        self.unit = unit_name(e.get('RUNNER_NAME', ''), a.id, run_id, organization=isolated_scope) if self.scope else ''
         rec.update(unit=self.unit, cards=[], targets=targets)
         _write_json(os.path.join(record, 'record.json'), rec)
         argv = drv
         if self.scope:
             argv = scope_argv(self.unit, proj.name, slurmpart.DRIVER_MEMORY, drv, self.oom_policy(),
-                              slice_name='ci.slice' if organization_slurm_project else None)
+                              slice_name=('civ2.slice' if isolated_scope else 'ci.slice') if organization_slurm_project else None)
         if self.stopped:
             return self._end(record, rec, a, stopped=True)
         env = {'HOME': e.get('HOME') or os.path.expanduser('~'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',

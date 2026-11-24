@@ -1,11 +1,13 @@
 """Organization deployments and their optional controller-side Slurm CPU drivers."""
 from __future__ import annotations
 
+import fnmatch
+import subprocess
 import tomllib
 from unittest import mock
 
-from ci_runners import registry
-from parallel import deploy, deployment_config, deployment_output, deployment_plan, organization, protocol
+from ci_runners import drain, hook, part, registry
+from parallel import deploy, deployment_config, deployment_output, deployment_plan, deployment_steps, organization, protocol
 from parallel import deployment_files as files
 from parallel.tests.test_deployment import DeploymentFixture
 
@@ -38,6 +40,92 @@ class OrganizationDeployment(DeploymentFixture):
         control = tomllib.loads(plan['files'][str(config.control/'etc/central.toml')]['content'])
         return plan, control
 
+    def test_legacy_preflight_and_busy_host(self):
+        self.organization_host(executor=True)
+        config = self.config(self.host_name)
+        def units(command, **kwargs):
+            if 'list-units' in command:
+                return subprocess.CompletedProcess(command, 0, 'ci-runner@legacy.service loaded active running')
+            return self.fake_run(command, **kwargs)
+        def blocked():
+            return any('legacy/trial' in m for m in deployment_plan.check_host(config, run=units, network=False))
+        self.assertFalse(blocked())
+        config.host['roles'].append('controller')
+        self.assertTrue(blocked())
+
+    def test_cutover_checks_only_matching_resources(self):
+        self.organization_host(executor=True)
+        config = self.config(self.host_name)
+        active = {'ci-runner@old.service', 'ci-part-old-1.scope', 'actions.runner.other.service',
+                  'actions.runner.same.service', 'civ2-part-new-1.scope', 'ci-parallel-executor.service'}
+        def units(command, **kwargs):
+            if 'list-units' in command:
+                rows = [u+' loaded active running' for u in active if any(fnmatch.fnmatchcase(u, p) for p in command)]
+                return subprocess.CompletedProcess(command, 0, '\n'.join(rows))
+            directory = config.runtime/'actions-runner/other' if 'actions.runner.same.service' in command else self.root/'legacy'
+            return subprocess.CompletedProcess(command, 0, str(directory))
+        self.assertEqual(set(deployment_steps.conflicting_units(config, run=units)),
+                         {'actions.runner.same.service', 'civ2-part-new-1.scope', 'ci-parallel-executor.service'})
+
+    def test_full_registration_with_another_runner_still_active(self):
+        self.organization_host(executor=True)
+        cfg = self.config(self.host_name)
+        plan = deployment_plan.build(cfg)
+        fake = self.fake_run
+        def coexist(command, **kwargs):
+            if 'list-units' in command:
+                return subprocess.CompletedProcess(command, 0, 'actions.runner.other.service active')
+            if 'WorkingDirectory' in command:
+                return subprocess.CompletedProcess(command, 0, str(self.root/'legacy/runner'))
+            if 'FragmentPath' in command:
+                return subprocess.CompletedProcess(command, 0, 'LoadState=not-found')
+            return fake(command, **kwargs)
+        self.fake_run = coexist
+        self.assertEqual(self.apply(plan, cfg)['status'], 'installed')
+        self.assertEqual(self.registrations, ['3090b-0'])
+        self.assertFalse(any('stop' in c for c in self.calls))
+
+    def test_foreign_unit_is_not_adopted(self):
+        self.organization_host(executor=True)
+        cfg = self.config(self.host_name)
+        foreign = subprocess.CompletedProcess([], 0, 'LoadState=loaded\nFragmentPath=/opt/another/executor.service')
+        with self.assertRaisesRegex(ValueError, 'unit conflicts'):
+            deployment_steps.inspect_executor_units(cfg, {}, run=mock.Mock(return_value=foreign))
+
+    def test_executor_resource_verification_defaults_on_and_can_be_disabled(self):
+        host = self.organization_host(executor=True)
+        for option in (None, False):
+            with self.subTest(option=option):
+                if option is not None:
+                    host['verify_resource_limits'] = option
+                    self.write_inputs()
+                config = self.config(self.host_name)
+                _, control = self.read_plan(config)
+                self.assertIs(control['executor']['verify_resource_limits'], option is not False)
+                self.calls.clear()
+                deployment_plan.check_host(config, run=self.fake_run, network=False)
+                self.assertEqual(any(command[0] == 'systemd-run' for command in self.calls), option is not False)
+        host['verify_resource_limits'] = 'false'
+        self.write_inputs()
+        with self.assertRaisesRegex(ValueError, 'verify_resource_limits'):
+            self.config(self.host_name)
+
+    def test_task_scopes_and_completion_use_the_same_isolated_namespace(self):
+        self.organization_host(executor=True)
+        cfg = self.config(self.host_name)
+        plan = deployment_plan.build(cfg)
+        text = plan['files'][str(cfg.runtime/'ci-runners/hooks/job-completed.sh')]['content']
+        self.assertIn('"$root" job-completed --organization', text)
+        for org, prefix in ((True, 'civ2-part'), (False, 'ci-part')):
+            unit = part.unit_name('node-0', 'tests', '123', organization=org)
+            self.assertTrue(part.SCOPE.fullmatch(unit))
+            self.assertTrue(unit.startswith(prefix+'-node-0-'))
+            with mock.patch.object(hook.subprocess, 'run', return_value=mock.Mock(stdout='')) as run:
+                hook._job_scopes({'RUNNER_NAME': 'node-0'}, organization=org)
+                self.assertEqual(run.call_args.args[0][-1], prefix+'-node-0-*')
+                drain.running_scopes(run, organization=org)
+                self.assertEqual(run.call_args.args[0][-1], prefix+'-*')
+
     def test_controller_plan_binds_shared_environment_and_profile_without_projects(self):
         self.organization_host()
         # Existing manual inputs need not be removed before changing modes.
@@ -58,7 +146,9 @@ class OrganizationDeployment(DeploymentFixture):
         policy = tomllib.loads(plan['files'][str(config.etc/'policy.toml')]['content'])
         self.assertEqual(policy, {'schema': 2, 'actors': [], 'repositories': {}})
         self.assertFalse(any('/projects/' in name or '/slurm/' in name for name in plan['files']))
+        self.assertNotIn(str(config.unit_dir/'civ2.slice'), plan['files'])
         self.assertIn(str(config.unit_dir/'ci.slice'), plan['files'])
+        self.assertIn('Slice=ci.slice', plan['files'][str(config.unit_dir/'ci-parallel-runner@.service')]['content'])
         self.assertFalse(any('ci-example.slice' in name for name in plan['files']))
         files.atomic_write(self.input/'organization.toml', 'max_parallel = 9\n')
         self.assertNotEqual(deployment_plan.input_fingerprint(self.config()), old_fingerprint)
@@ -74,7 +164,9 @@ class OrganizationDeployment(DeploymentFixture):
         self.assertEqual(control['organization'], {'name': 'example', 'env': host['env']})
         self.assertEqual(control['executor']['registration']['device'], self.host_name)
         self.assertNotIn('plan', control)
-        self.assertIn(str(config.unit_dir/'ci.slice'), plan['files'])
+        self.assertNotIn(str(config.unit_dir/'ci.slice'), plan['files'])
+        self.assertIn(str(config.unit_dir/'civ2.slice'), plan['files'])
+        self.assertIn('Slice=civ2.slice', plan['files'][str(config.unit_dir/'ci-parallel-runner@.service')]['content'])
         self.assertEqual(set(deployment_plan.secret_fingerprints(config)), {'host-token', 'ca.crt'})
 
     def test_controller_renders_repository_environments_and_resolves_verified_source(self):

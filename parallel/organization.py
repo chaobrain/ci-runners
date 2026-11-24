@@ -82,6 +82,10 @@ def validate_environment(config, name, *, require_path):
         config['env_aliases'] = aliases
 
 
+def standalone_executor(settings):
+    return 'organization' in settings and 'plan' not in settings
+
+
 def validate_settings(config, *, controller):
     """Validate the organization table rendered for this host's control service."""
     expected = {'name', 'profile'} if controller else {'name'}

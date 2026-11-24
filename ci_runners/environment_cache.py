@@ -271,6 +271,40 @@ def _legacy(prefix, recipe, spec, variant, repository):
     return None
 
 
+def _pip_environment(root, env, files):
+    policy = root / 'pip-index-url'
+    if not policy.exists():
+        return env
+    url = policy.read_text(encoding='ascii').strip()
+    index = urllib.parse.urlsplit(url)
+    if (index.scheme not in ('http', 'https') or not index.hostname or index.username is not None
+            or index.query or index.fragment or not index.path.endswith('/+simple/')
+            or any(c.isspace() for c in url)):
+        raise ERROR('invalid host pip-index-url; expected a devpi Simple URL without credentials')
+    for name, content in files.items():
+        for line in re.sub(r'\\\r?\n', '', content).splitlines():
+            directive = re.sub(r'\s+#.*$', '', line).strip()
+            if not directive or directive.startswith('#') or _INCLUDE.fullmatch(directive):
+                continue
+            if directive in ('--prefer-binary', '--require-hashes') or re.fullmatch(
+                    r'--(?:only-binary|no-binary)(?:\s+|=)[\w.:,-]+', directive):
+                continue
+            if directive.startswith('-') or re.search(r'(?:[a-zA-Z][\w+.-]*://|\$\{)', directive):
+                raise ERROR(f'{name}: use named packages from the host pip index')
+    credentials = root / 'pip-reader.netrc'
+    try:
+        mode = credentials.lstat().st_mode
+    except FileNotFoundError:
+        raise ERROR('missing host pip-reader.netrc for the configured devpi index') from None
+    if not stat.S_ISREG(mode) or mode & 0o077:
+        raise ERROR('host pip-reader.netrc must be a private regular file (mode 0600)')
+    direct = ','.join(filter(None, (env.get('no_proxy', env.get('NO_PROXY')), index.hostname)))
+    pip_env = dict(env, PIP_INDEX_URL=url, NETRC=str(credentials), no_proxy=direct, NO_PROXY=direct)
+    if index.scheme == 'http':
+        pip_env['PIP_TRUSTED_HOST'] = index.netloc
+    return pip_env
+
+
 def _build(prefix, spec, recipe, *, root, tmp, conda, scope, build_env, run, deadline):
     inputs = tmp / 'requirements'
     inputs.mkdir()
@@ -288,13 +322,14 @@ def _build(prefix, spec, recipe, *, root, tmp, conda, scope, build_env, run, dea
                PYTHONNOUSERSITE='1', PIP_CONFIG_FILE=os.devnull)
     _, constraints = _files(spec, recipe['files'].get)
     steps = envbuild.prefix_steps(spec, str(prefix), reqdir=str(inputs), conda=conda, constraints=constraints)
+    pip_env = _pip_environment(root, env, recipe['files']) if len(steps) > 1 else env
 
-    def execute(argv, label):
+    def execute(argv, label, command_env=env):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ERROR('environment preparation exceeded its time limit')
         try:
-            result = run([*scope, *argv], cwd=str(tmp), env=env, timeout=remaining, check=False,
+            result = run([*scope, *argv], cwd=str(tmp), env=command_env, timeout=remaining, check=False,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ERROR(f'environment build {label}: {exc.__class__.__name__}') from exc
@@ -313,8 +348,10 @@ def _build(prefix, spec, recipe, *, root, tmp, conda, scope, build_env, run, dea
             execute(['git', '-C', dest, 'fetch', '--quiet', '--depth=1', source_url, commit],
                     f'fetch pinned {upstream.repository} (private sources require a configured mirror)')
             execute(['git', '-C', dest, 'checkout', '--quiet', '--detach', commit], f'checkout {name}')
+        elif step is steps[0]:
+            execute(step, 'conda create')
         else:
-            execute(step, 'conda create' if step is steps[0] else 'pip install')
+            execute(step, 'pip install', pip_env)
     if not _has_python(prefix):
         raise ERROR('environment build finished without an executable bin/python')
 

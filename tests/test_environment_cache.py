@@ -40,6 +40,40 @@ def fake(argv, **kw):
 
 
 class EnvironmentCacheTests(unittest.TestCase):
+    def test_fixed_host_index_only_for_pip_steps(self):
+        recipe = source(BASE + f"install: [pytest]\nupstream: [{{repository: example/up, ref: '{SHA}'}}]\n")
+        url = 'http://packages.internal:3141/root/stable/+simple/'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'pip-index-url').write_text(url)
+            with self.assertRaisesRegex(ValueError, 'missing host pip-reader'):
+                cache.ensure(root, recipe, run=lambda *a, **kw: self.fail())
+            auth = root / 'pip-reader.netrc'
+            auth.touch(mode=0o600)
+            pip_calls = []
+
+            def build(argv, **kw):
+                env = kw['env']
+                if argv[1:4] == ['-m', 'pip', 'install']:
+                    self.assertEqual(env['PIP_INDEX_URL'], url)
+                    self.assertEqual(env['PIP_TRUSTED_HOST'], 'packages.internal:3141')
+                    self.assertEqual(env['NETRC'], str(auth))
+                    self.assertEqual(env['no_proxy'], 'localhost,packages.internal')
+                    self.assertNotIn('PIP_EXTRA_INDEX_URL', env)
+                    pip_calls.append(argv)
+                else:
+                    self.assertNotIn('NETRC', env)
+                    self.assertNotIn('PIP_INDEX_URL', env)
+                return fake(argv, **kw)
+
+            cache.ensure(root, recipe, run=build, build_env={'no_proxy': 'localhost', 'PIP_EXTRA_INDEX_URL': 'bad'})
+            self.assertEqual(len(pip_calls), 2)
+            for line in ('--extra-index-url https://other/simple', '--only-binary=:all: -i other',
+                         'pkg @ https://other/pkg.whl'):
+                override = source(BASE + 'requirements: [r.txt]\n', {'r.txt': line})
+                with self.subTest(line=line), self.assertRaisesRegex(ValueError, 'host pip index'):
+                    cache.ensure(root, override, run=lambda *a, **kw: self.fail())
+
     def test_pinned_file_closure_and_changed_requirements_or_upstream_invalidate(self):
         doc = BASE + ('requirements: [dev.txt]\nupstream:\n  - repository: example/up\n'
                       '    ref: origin/work/branch\nvariant:\n  cpu:\n    install: [numpy]\n')

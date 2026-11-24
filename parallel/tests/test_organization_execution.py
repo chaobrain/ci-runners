@@ -164,11 +164,11 @@ class OrganizationWorkflow(unittest.TestCase):
         self.assertEqual(driver['targets'], ['cpu'])
         self.assertEqual(driver['request']['allocation'], grant)
         self.assertEqual(driver['request']['variables']['GITHUB_REPOSITORY'], env['GITHUB_REPOSITORY'])
-        self.assertIn('--slice=ci.slice', spawn.call_args.args[0])
+        self.assertIn('--slice=civ2.slice', spawn.call_args.args[0])
 
     def test_organization_scope_keeps_per_job_memory_limit_and_host_slice(self):
-        arguments = part.scope_argv('job.scope', 'repo-42', '4G', [], False, slice_name='ci.slice')
-        self.assertIn('--slice=ci.slice', arguments)
+        arguments = part.scope_argv('job.scope', 'repo-42', '4G', [], False, slice_name='civ2.slice')
+        self.assertIn('--slice=civ2.slice', arguments)
         self.assertIn('MemoryMax=4G', arguments)
         self.assertIn('MemorySwapMax=0', arguments)
         self.assertIn('--slice=ci-repo-42.slice', part.scope_argv('job.scope', 'repo-42', '4G', []))
@@ -267,6 +267,28 @@ class RepositoryEnvironments(unittest.TestCase):
         with mock.patch.object(executor.organization, 'environment_ready', side_effect=AssertionError('inspected prefix')):
             self.assertEqual(self.app.call('admit', {'env': env}), allocation)
         self.assertTrue(self.remote.call.call_args.kwargs['environment_cache'])
+
+    def test_allocation_ownership_accepts_mixed_case_repository_names(self):
+        self.environment('alpha')
+        claim = self.claim('example/staging')
+        self.remote.call.return_value = claim
+        env = dict(self.env, GITHUB_REPOSITORY='Example/Staging')
+        with mock.patch.object(self.app, 'launch'):
+            allocation = self.app.call('start', {'env': env, 'grant': claim['grant']})
+
+        request = dict(allocation, env=env)
+        self.assertEqual(self.app.call('poll', request)['state'], 'reserved')
+
+        mismatches = (('GITHUB_REPOSITORY', 'example/other'), ('GITHUB_REPOSITORY', None),
+                      ('RUNNER_NAME', '3090a-1'), ('GITHUB_RUN_ID', '2'), ('GITHUB_RUN_ATTEMPT', '2'))
+        for field, value in mismatches:
+            wrong = dict(request, env={**env, field: value})
+            with self.subTest(field=field, value=value):
+                for operation in ('poll', 'cancel'):
+                    with self.assertRaisesRegex(protocol.Error, 'allocation belongs to another GitHub job'):
+                        self.app.call(operation, wrong)
+
+        self.assertEqual(self.app.call('cancel', request), {'accepted': True})
 
     def test_plan_and_worker_use_the_same_named_environment_for_each_repository(self):
         engine_without_systemd = functools.partial(part.Executor, scope=False)

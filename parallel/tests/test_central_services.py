@@ -299,6 +299,17 @@ class GitHubProtocol(unittest.TestCase):
 
 
 class LocalExecution(unittest.TestCase):
+    def test_local_resource_verification_can_be_disabled(self):
+        grant = {'allocation_id': 'one', 'backend': 'local', 'cores': 4,
+                 'cpu_groups': 1, 'RAM': '4G', 'workers': 1, 'minutes': 1}
+        with (tempfile.TemporaryDirectory() as record, mock.patch.dict(os.environ),
+              mock.patch.object(task_execution, 'resource_limits', side_effect=AssertionError('unexpected resource check')),
+              mock.patch('ci_runners.part.supervise', return_value=0) as run):
+            self.assertEqual(task_execution.supervise(record, grant, [], 'true', verify_resource_limits=False), 0)
+            self.assertEqual(json.loads((Path(record)/'allocation-ready.json').read_text())['memory_enforcement'],
+                             'unverified')
+            run.assert_called_once()
+
     def test_resource_reader_distinguishes_unified_legacy_and_hybrid_cgroups(self):
         layouts = {
             'unified': ('0::/task/child\n', {

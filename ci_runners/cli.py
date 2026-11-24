@@ -139,7 +139,10 @@ def main(argv: list[str]) -> int:
         return hookcopy.main(args, load_inventory().host)
     if cmd == 'drain':
         from ci_runners import drain
-        return drain.main(args, load_inventory())
+        from parallel import layout, organization, transport
+        etc = etc_dir()
+        isolated = layout.settings_path(etc).is_file() and organization.standalone_executor(transport.settings(etc))
+        return drain.main(args, load_inventory(), organization=isolated)
     if cmd == 'slurm':
         from ci_runners import slurmsetup
         return slurmsetup.main(args, load_inventory(), etc_dir())

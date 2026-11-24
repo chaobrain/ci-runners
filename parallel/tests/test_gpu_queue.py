@@ -353,13 +353,17 @@ class Contracts(unittest.TestCase):
                     task_execution.execute(inv, tmp, env, allocation, [], spawn=spawn)
                 spawn.assert_not_called()
                 load_project.return_value = project
-                task_execution.execute(inv, tmp, env, allocation, [], spawn=spawn)
+                with (mock.patch.object(task_execution.layout, 'settings_path', return_value=Path(__file__)),
+                      mock.patch.object(task_execution.transport, 'settings',
+                                        return_value={'executor': {'verify_resource_limits': False}})):
+                    task_execution.execute(inv, tmp, env, allocation, [], spawn=spawn)
                 self.assertEqual(spawn.call_args.kwargs['env']['CUDA_VISIBLE_DEVICES'], card(1))
                 scope = spawn.call_args.args[0]
                 self.assertIn('CPUQuota=400%', scope)
                 self.assertFalse(any('AllowedCPUs' in item or item == 'taskset' for item in scope))
                 scope_args = json.loads(scope[-1])
                 self.assertEqual(scope_args[1]['gpu_uuid'], card(1))
+                self.assertIs(scope_args[-1], False)
                 record = json.loads((Path(scope_args[0])/'record.json').read_text())
                 self.assertEqual(record['cards'], [card(1)])
                 envuse.hold.assert_not_called()

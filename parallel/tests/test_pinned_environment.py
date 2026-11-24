@@ -106,7 +106,8 @@ class PinnedEnvironment(unittest.TestCase):
         (fx.workspace/'prefixes').unlink()
 
         def enter_scope(argv, **kwargs):
-            record, _, _, _, _, _, _, wrapper = json.loads(argv[-1])
+            record, _, _, _, _, _, _, wrapper, verify_limits = json.loads(argv[-1])
+            self.assertIs(verify_limits, True)
             result = subprocess.run(wrapper, **kwargs)
             part._write_json(str(Path(record)/'exit.json'), {'rc': result.returncode})
             return mock.Mock()

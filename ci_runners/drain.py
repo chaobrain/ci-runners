@@ -188,11 +188,11 @@ def _when(t: float) -> str:
     return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))
 
 
-def running_scopes(run: Callable = subprocess.run) -> list[str]:
+def running_scopes(run: Callable = subprocess.run, *, organization: bool = False) -> list[str]:
     """The part scopes of the account still active (``ci-part-*.scope``)."""
     try:
         r = run(['systemctl', '--user', 'list-units', '--type=scope', '--state=active', '--no-legend', '--plain',
-                 'ci-part-*'], capture_output=True, text=True, timeout=30)
+                 'civ2-part-*' if organization else 'ci-part-*'], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return []
     return sorted(line.split()[0] for line in (r.stdout or '').splitlines() if line.split())
@@ -210,7 +210,7 @@ def status_text(state: dict | None, scopes: list[str]) -> str:
     return '\n'.join(lines) + '\n'
 
 
-def main(argv: list[str], inv: inventory.Inventory, run: Callable = subprocess.run) -> int:
+def main(argv: list[str], inv: inventory.Inventory, run: Callable = subprocess.run, *, organization: bool = False) -> int:
     usage = 'usage: ci-run drain on|off [--pool P] | ci-run drain status'
     if not argv or argv[0] not in ('on', 'off', 'status'):
         print(usage, file=sys.stderr)
@@ -224,7 +224,7 @@ def main(argv: list[str], inv: inventory.Inventory, run: Callable = subprocess.r
             publish(data)
         except OSError as e:
             print(f'ci-run drain: the pool runs\' copy not written: {e}', file=sys.stderr)
-        sys.stdout.write(status_text(read(data), running_scopes(run)))
+        sys.stdout.write(status_text(read(data), running_scopes(run, organization=organization)))
         return 0
     rest = argv[1:]
     if rest not in ([],) and not (len(rest) == 2 and rest[0] == '--pool'):
@@ -240,5 +240,5 @@ def main(argv: list[str], inv: inventory.Inventory, run: Callable = subprocess.r
     except ValueError as e:
         print(f'ci-run drain: {e}', file=sys.stderr)
         return 1
-    sys.stdout.write(status_text(st, running_scopes(run)))
+    sys.stdout.write(status_text(st, running_scopes(run, organization=organization)))
     return 0

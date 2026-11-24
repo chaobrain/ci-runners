@@ -121,7 +121,9 @@ P1 synthetic probe 类只验证通道和存储隔离，不被 verdict 读取。�
 时停止接收新写入；容量计入完成对象、staging 和并发预约。这个预算是待实现的
 应用准入限额，不等同于文件系统 quota；日志另有限额，失败时不能吞掉磁盘满
 错误。服务会话在独立身份的资源边界内运行；探测服务建议
-MemoryMax 512 MiB、CPUQuota 100%、TasksMax 32、RuntimeMaxSec 300、UMask 0077。
+MemoryMax 512 MiB、CPUQuota 100%、TasksMax 32、TimeoutStartSec 300、UMask 0077。
+探测单元为 oneshot，须使用启动超时限制执行时间；不能依赖对此类型不生效的
+RuntimeMaxSec，参见 [systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)。
 存储侧会话建议聚合 MemoryMax 1 GiB、TasksMax 64；须实测每个会话确实进入
 新身份的受限 cgroup，不能仅创建一个未承载会话的 slice，也不能把 SSH
 MaxSessions 当作总并发限制。该单元的最终 UID 绑定和差异在创建账户后复核。

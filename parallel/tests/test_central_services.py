@@ -461,6 +461,7 @@ class SlurmResources(unittest.TestCase):
         task_execution.check_limits(grant, None, None, slurm_width=4, supervisor_memory_cap=4 << 30)
         task_execution.check_limits(grant, 4, None, supervisor_memory_cap=4 << 30)
         for backend, quota, width, cap in [('local', None, 4, 4 << 30),
+                                            ('local', 4, 4, 4 << 30),
                                             ('slurm', None, 5, 4 << 30),
                                             ('slurm', None, 4, 8 << 30)]:
             with self.subTest(backend=backend, quota=quota, width=width, cap=cap), self.assertRaises(protocol.Error):

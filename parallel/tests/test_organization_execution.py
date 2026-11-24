@@ -323,6 +323,32 @@ class RepositoryEnvironments(unittest.TestCase):
                 self.assertEqual(outcome['outcome'], 'pass')
                 self.assertEqual(prefixes.read_text().splitlines(), [str(build), str(build)])
 
+    def test_transferred_plan_files_reach_the_authorized_command(self):
+        self.environment('alpha')
+        files = Path(self.env['RUNNER_TEMP'])/'ci-plan-files'
+        files.mkdir()
+        (files/'nonce').write_text('transferred bytes')
+        env = {**self.env, 'GITHUB_REPOSITORY': 'example/staging'}
+
+        def local_scope(argv, **kwargs):
+            record, _, _, command, *_ = json.loads(argv[-1])
+            result = subprocess.run(['/bin/bash', '-ec', command], **kwargs)
+            part._write_json(str(Path(record)/'exit.json'), {'rc': result.returncode})
+            return mock.Mock()
+
+        for field, reference in [('files_bundle', {'schema': 1}), ('files_artifact_id', 17)]:
+            with self.subTest(field=field):
+                claim = self.claim('example/staging')
+                claim['source'][field] = reference
+                claim['part'].update(id='files-'+field.replace('_', '-'),
+                                     command='cat "$CI_PLAN_FILES/nonce" > transferred')
+                with mock.patch.object(part.signal, 'signal'):
+                    _, outcome = task_execution.execute(self.inv, str(self.etc), env, claim, [],
+                        run=mock.Mock(return_value=SimpleNamespace(stdout='')), spawn=local_scope)
+                self.assertEqual(outcome['outcome'], 'pass')
+                self.assertEqual((self.workspace/'transferred').read_text(), 'transferred bytes')
+                (self.workspace/'transferred').unlink()
+
     def test_claim_reports_stale_readiness_and_ignores_caller_mode(self):
         claim = self.claim('example/staging')
         env = {**self.env, 'GITHUB_REPOSITORY': 'example/staging'}

@@ -5,6 +5,9 @@ H = 'ci_runners/storage_host.py'
 S = 'ci_runners/storage_ssh.py'
 C = 'parallel/github_coordinator.py'
 CASES = [
+    ('parallel/task_execution.py', "source.get('files_artifact_id') or source.get('files_bundle')",
+     "source.get('files_artifact_id')",
+     ['parallel.tests.test_organization_execution.RepositoryEnvironments.test_transferred_plan_files_reach_the_authorized_command']),
     (S, "elif b'permission denied' in private_error:", 'elif False:',
      [T+'Transport.test_ssh_is_noninteractive_pinned_and_does_not_expose_stderr']),
     (F, "archive.open(info, 'w', force_zip64=True)", "archive.open(info, 'w')",

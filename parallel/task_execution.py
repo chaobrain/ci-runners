@@ -256,7 +256,7 @@ def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subpro
         # v2 never re-enters the legacy CPU slot or host-load protocol.
         for name in ('CI_SLOT_LOCK', 'CI_SLOT_QUEUE', 'CI_SLOT_HELD', 'CI_HOST_LOCK', 'LOCAL_CI_HOST_LOCK'):
             command_env.pop(name, None)
-        if source.get('files_artifact_id'):
+        if source.get('files_artifact_id') or source.get('files_bundle'):
             command_env['CI_PLAN_FILES'] = str(Path(env['RUNNER_TEMP'])/'ci-plan-files')
         call = ('import json,sys; sys.path.insert(0,sys.argv.pop(1)); from parallel.task_execution import supervise; '
             'a=json.loads(sys.argv[1]); sys.exit(supervise(*a[:-1], verify_resource_limits=a[-1]))')

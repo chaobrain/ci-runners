@@ -196,6 +196,12 @@ class Transport(unittest.TestCase):
         with mock.patch.object(storage_ssh.subprocess, 'Popen', side_effect=refused):
             with self.assertRaisesRegex(storage.Error, '^CI storage: authentication$'):
                 self.client.run(['ssh'], b'', time.monotonic()+10)
+        def unwritable(argv, **options):
+            options['stderr'].write(b'private-endpoint: remote open /private/file: Permission denied')
+            return mock.Mock(returncode=1)
+        with mock.patch.object(storage_ssh.subprocess, 'Popen', side_effect=unwritable):
+            with self.assertRaisesRegex(storage.Error, '^CI storage: permission$'):
+                self.client.run(['sftp'], b'', time.monotonic()+10)
 
     def test_timeout_kills_the_transport_session_and_waits_for_it(self):
         process = mock.Mock(pid=123)

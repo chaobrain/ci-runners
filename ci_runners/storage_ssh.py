@@ -62,6 +62,8 @@ class SSHStore:
                             code = 'host-key'
                         elif b'permission denied (publickey' in private_error:
                             code = 'authentication'
+                        elif b'permission denied' in private_error:
+                            code = 'permission'
                     if code not in ('configuration', 'identity', 'corrupt', 'missing', 'limit', 'conflict', 'permission',
                                     'host-key', 'authentication', 'capacity'):
                         code = 'transport'

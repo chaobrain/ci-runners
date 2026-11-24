@@ -5,6 +5,8 @@ H = 'ci_runners/storage_host.py'
 S = 'ci_runners/storage_ssh.py'
 C = 'parallel/github_coordinator.py'
 CASES = [
+    (S, "elif b'permission denied' in private_error:", 'elif False:',
+     [T+'Transport.test_ssh_is_noninteractive_pinned_and_does_not_expose_stderr']),
     (F, "archive.open(info, 'w', force_zip64=True)", "archive.open(info, 'w')",
      [T+'BundleFiles.test_zip64_publication_and_local_failures_keep_the_contract']),
     (F, '        except OSError as exc:\n            code = {errno.EACCES:',

@@ -197,7 +197,7 @@ def fetch(env, etc=None):
             why = flow.check_files(env['RUNNER_TEMP'], 'ci-plan-files')
             if why:
                 raise storage.Error('corrupt')
-        elif a['source'].get('files_artifact_id'):
+        elif a['source'].get('files_required') or a['source'].get('files_artifact_id'):
             raise storage.Error('identity')
         return 0
     aid = a['source'].get('files_artifact_id')

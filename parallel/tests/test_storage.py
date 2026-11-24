@@ -306,6 +306,8 @@ class ProductionBridge(unittest.TestCase):
             app.bind_environment = mock.Mock()
             project = SimpleNamespace(max_minutes=1440, max_parallel=4, retries=1, gpu_mem_mib=0)
             app.prepare = lambda request: (dict(request), project, None)
+            with self.assertRaises(storage.Error):
+                app.submit(published, {**doc, 'files': ''})
             bad = {**published, 'files_bundle': {**published['files_bundle'],
                     'identity': {**published['files_bundle']['identity'], 'run_attempt': 2}}}
             with self.assertRaises(storage.Error):

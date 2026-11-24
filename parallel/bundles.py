@@ -84,6 +84,8 @@ def verify_result(etc, allocation, job_id):
             doc = json.loads(metadata.read_bytes())
         except (ValueError, OSError) as exc:
             raise storage.Error('corrupt') from exc
+        if not isinstance(doc, dict):
+            raise storage.Error('corrupt')
         if (doc.get('allocation') != allocation['grant'] or doc.get('result') != allocation['result']
                 or doc.get('source_repository') != ident['repository'] or doc.get('source_sha') != ident['sha']
                 or doc.get('source_run_id') != ident['run_id'] or doc.get('source_run_attempt') != ident['run_attempt']

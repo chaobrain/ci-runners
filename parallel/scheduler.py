@@ -205,6 +205,8 @@ class Scheduler:
             raise protocol.Error('submitted plan does not match its prepared environment')
         plan = protocol.load_plan(raw_plan, max_minutes=project.max_minutes)
         files = plan['files']
+        if not files and (source.get('files_artifact_id') or source.get('files_bundle')):
+            raise storage.Error('identity')
         if source.get('files_artifact_id') and source.get('files_bundle'):
             raise storage.Error('identity')
         if bundles.backend(source)['backend'] == 'ssh' and source.get('files_artifact_id'):
@@ -213,6 +215,8 @@ class Scheduler:
             raise storage.Error('identity')
         if files and not plan_only and bundles.backend(source)['backend'] == 'ssh':
             bundles.verify_plan(self.etc, source, source.get('files_bundle'))
+        if bundles.backend(source)['backend'] == 'ssh':
+            source['files_required'] = bool(files)
         if files and not plan_only and bundles.backend(source)['backend'] == 'github':
             artifact = source.get('files_artifact_id')
             if not protocol.positive(artifact):

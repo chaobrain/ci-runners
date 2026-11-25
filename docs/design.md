@@ -1,5 +1,155 @@
 # ci-runners: design (contract)
 
+## Proposed decision: central BrainSpike GPU capability parity
+
+**Draft; lead review required before implementation.** Preparing this proposal is
+authorized. Implementation, release, deployment, runner or service changes are
+not authorized by that preparation request. This addendum describes an additive
+extension to the deployed central schema 2 contract on `gpu-q-2.1.2`, not a claim
+that its implementation is already on `main`. Reconcile the pending independent
+memory and context-isolation changes before choosing an implementation base.
+The existing release stamp and all legacy schema 1 behavior remain unchanged.
+
+### Problem and preserved consumer behavior
+
+BrainSpike's full private CI requires one-card tasks, two-card tasks with a P2P
+eligibility gate, quiet compile gates and GPU Slurm architecture/acceptance
+tasks. Its Nightly requires complete rows, coverage, architecture reports and
+impact-map ancestry. GitHub artifact quota failures are transport failures, not
+evidence that model tests ran. Moving just CPU tasks to the central controller
+must not satisfy the full `brainspike/ci` context or omit unsupported parts.
+
+The reviewed central implementation currently accepts `needs: cpu`, explicit
+cores/workers, a boolean single-card `gpu`, independent memory, device selection
+and CPU Slurm. It rejects a GPU request on Slurm and cannot issue a two-card
+grant. Existing organization admission already accepts the precise private,
+same-repository Dependabot case. This proposal does not change admission, grant
+other bots access, relax fork/public routing or alter a hook allowlist.
+
+### Plan and allocation extension
+
+1. Add optional `parts[].gpu_count` to schema 2. It is an exact JSON integer in
+   `{0, 1, 2}`, never a boolean, string, null or fractional number. Omission keeps
+   the current normalized count: one for `gpu: true`, otherwise zero. If the
+   field is present, it must agree with `gpu` (positive counts require
+   `gpu: true`, zero requires false or omission). Reject contradictions before
+   submitting a batch. Do not infer two-card demand from command text, workers,
+   environment variables or a consumer artifact.
+2. The scheduler must select all requested cards on one eligible local device,
+   or reserve none. Cards must be distinct full UUIDs within that device's
+   registered quota. A two-card task cannot take one card and wait while holding
+   it, borrow another device's card, fall back to CPU or silently become one-card.
+   Preserve queue deadlines, project fairness, CPU-group and memory accounting;
+   make CPU/RAM/card reservations one durable allocation transaction.
+3. The signed grant carries requested/effective count and the complete ordered
+   UUID list. Each executor validates its signature, source/task/attempt/job,
+   local device ownership, live allocation and uniqueness before launch. Export
+   `CUDA_VISIBLE_DEVICES` from the verified list alone. Preserve the old single
+   UUID representation only for existing one-card envelopes; a two-card grant
+   must never be accepted by a runtime that verifies only the first UUID. Publish
+   compatible request/grant versions or an explicit capability negotiation so
+   old executors fail closed instead of truncating a new grant.
+4. Two-card execution retains the existing consumer P2P eligibility semantics.
+   Probe the granted pair before starting model commands; a pair which cannot
+   meet the required P2P contract is a capacity refusal with command unstarted,
+   not a model failure or a successful skipped test. Retry only within the
+   existing infrastructure/capacity policy and original deadline. Do not require
+   P2P for existing one-card consumers.
+5. Release every granted card, CPU group and memory reservation on success,
+   test failure, capacity refusal, timeout, cancellation, executor restart and
+   authoritative reconciliation of lost jobs. Separate the end of execution
+   from runner completion and verified result publication. Missing or conflicting
+   evidence cannot release a live execution early or leave a terminal allocation
+   indefinitely reserved; recovery must be idempotent and attempt-specific.
+
+### GPU Slurm target authorization
+
+The local UUID extension alone does not authorize a remote GPU job. Extend the
+central Slurm path separately, preserving the existing CPU-only default:
+
+- Permit an optional logical `cluster_target` only with `device: slurm`. Resolve
+  it against controller-owned, repository-ID-bound site/target configuration.
+  A target's enabled state, GPU capability, card type/count, CUDA variant, CPU,
+  memory, runtime and concurrency limits must all match the request. Omission
+  retains the existing CPU Slurm binding. Reject a GPU request without an
+  explicitly authorized GPU target; never redirect a local request to Slurm.
+- Target names are bounded logical identifiers. Plans cannot supply SSH hosts,
+  paths, accounts, keys, partitions, raw `sbatch` flags or a replacement site
+  configuration. Credentials and inventory remain host-owned. An organization
+  admission decision is not a GPU-cluster authorization decision.
+- Sign the resolved target identity and exact resource request. Derive submission
+  flags from the authorized target; keep the existing clean environment/export
+  boundary. Validate the resulting job belongs to the expected site, account,
+  source run/attempt and allocation before monitoring or cancelling it. Verify
+  assigned cards against the scheduler's GPU allocation on the compute node;
+  record actual GPU model/count and the selected environment variant in results.
+- Cancellation, timeout, controller loss, job rejection and node loss must have
+  bounded, independently verifiable cleanup. Do not report resources released
+  merely because an SSH client exited. Preserve the original failed test outcome
+  when result transport also fails. Retry only the permitted infrastructure
+  cases; never rerun a genuine failed test until it appears green.
+
+This is a design of the authorization boundary, not approval of any concrete
+site binding or setup application. Supply that private deployment packet for
+lead review after the contract and implementation have been accepted.
+
+### Timing, environment and file completeness
+
+- Preserve BrainSpike's compile-gate affinity and quiet-host requirement. First
+  assess whether reserving all registered CPU groups excludes every concurrent
+  central GPU/CPU task and whether the measured affinity contains the original
+  required mask. Reconcile the existing consumer host lock and non-central work.
+  If that cannot prove the same isolation, propose an explicit exclusive-device
+  capability before routing timing tasks. A generic four-core task is insufficient.
+- Preserve explicit original workers, CPU, independent memory, time/queue limits,
+  NEST and CUDA variant requirements. Record actual affinity, worker count,
+  memory and visible cards so parity can be checked against the frozen consumer
+  baseline. No new global CPU/RAM defaults or lowered coverage gates are proposed.
+- The controller pins its trusted default-branch environment recipe. The consumer
+  must additionally test PR dependency changes in allocation-local isolated
+  environments and publish installed versions plus `pip check` and source
+  provenance. The trusted base recipe alone is not evidence of Dependabot's new
+  dependencies. Preserve live NEST and both supported CUDA variants.
+- Keep immutable repository/source/run/attempt/allocation-bound SSH bundles and
+  the authoritative read-side backend binding. Successful execution without
+  required plan, rows, JUnit, coverage, architecture or map evidence cannot yield
+  a successful production verdict. No fallback to exhausted GitHub artifacts on
+  a new SSH run. Existing pre-cutover history keeps its recorded backend.
+
+### Acceptance and rollout gate
+
+Before implementation approval, settle grant version/capability negotiation,
+P2P refusal/retry evidence, GPU cluster target schema and timing isolation.
+Then require the following evidence with the final implementation PR:
+
+1. Backward compatibility for omitted fields, ordinary CPU, one-card and CPU
+   Slurm plans. Invalid counts, contradictions, unregistered pairs, forged or
+   truncated grants and unauthorized cluster targets fail before command launch.
+2. Concurrent one/two-card queue fixtures prove atomic allocation without partial
+   holds, duplicate UUIDs, quota oversubscription or CPU/RAM reuse. Fault tests
+   cover transaction interruption, stale grants, restart and idempotent release.
+3. Real two-card execution proves the visible pair matches its grant and P2P gate;
+   intentional test failure stays red. A pair that fails P2P never starts the
+   model command. Exercise cancellation and lost-runner recovery without leaking
+   either card or terminating unrelated work.
+4. An approved GPU cluster canary proves target/variant/resource identity and
+   independent terminal cleanup for pass, test failure, queue rejection, timeout,
+   cancellation and loss. CPU-only targets reject GPU requests.
+5. BrainSpike transport cases include plan-only, success, test failure, missing
+   required report, corruption, rerun, cancellation and cross-run reads. Verify
+   independent SSH receipts, zero GitHub artifacts and final-status honesty.
+6. Run the original complete PR/Main/Nightly and GPU-cluster acceptance, with
+   NEST, two-card/P2P, timing and coverage retained. Exercise an actual admitted
+   Dependabot PR with its updated dependencies and retained full required tasks.
+   Transport smoke tests use separate contexts throughout this rollout.
+
+Install support on every eligible controller/executor/reader before enabling a
+production consumer route. Provide the existing setup dry-run, immutable version
+and digest locks, private host inventory, capacity/disk checks, bounded bundle
+limits and rollback plan. Only then request deployment/activation approval.
+Do not change runner labels/groups, accounts, keys, services, settings, allowlists
+or release tags under approval of this design text alone.
+
 Status: approved by the lead on 2026-11-05 (#1). Decision 11 (2026-11-06) made h100 a
 standard test CI for every private chaobrain repository (RUN-5, live since `v1.2.0`).
 Decision 11.12 (2026-11-06) retired the first path: the 3090b runners that served

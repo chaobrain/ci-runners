@@ -1,6 +1,6 @@
 # Central consumer orchestration: proposed additive contract
 
-Status: draft, not implementation approval. Keep deployed commit `0a4fa2b`
+Status: implementation approved by the lead on 2026-11-25. Keep deployed commit `0a4fa2b`
 unchanged. This proposal completes the consumer migration after the approved
 GPU contract; it does not replace its resource, P2P, source or cleanup guards.
 
@@ -212,8 +212,7 @@ does not permit forwarding credentials into dependency installation.
 
 ## Acceptance and deployment order
 
-Before implementation approval, the next code change is this contract only.
-After approval, implement with stdlib fixtures and focused safety mutants:
+Implement the approved contract with stdlib fixtures and focused safety mutants:
 
 1. Unchanged strict run-head sources; authorized PR dispatch and historical
    replay; wrong/fork/moved PR head, read-only/bot override actor, false run head,

@@ -5222,6 +5222,10 @@ MUTANTS.append(('parallel/workflow_client.py',
                 "protocol.fingerprint(src['context'])[:24]", "'shared'",
                 ['parallel.tests.test_plan_contexts.PlanContexts.test_distinct_contexts_execute_and_same_context_cannot_reexecute']))
 
+MUTANTS.append((PRT,
+                "(a.id == 'plan-v2' or a.id.startswith('plan-v2-'))", "a.id == 'plan-v2'",
+                ['parallel.tests.test_plan_contexts.PlanContexts.test_distinct_contexts_execute_and_same_context_cannot_reexecute']))
+
 from parallel.tests.central_mutants import CASES as CENTRAL_MUTANTS
 from parallel.tests.memory_mutants import CASES as MEMORY_MUTANTS
 MUTANTS.extend(CENTRAL_MUTANTS)

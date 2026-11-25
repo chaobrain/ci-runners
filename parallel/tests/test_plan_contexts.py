@@ -27,7 +27,7 @@ class PlanContexts(unittest.TestCase):
             for name in ('first', 'second'):
                 context = {**origin, 'context': 'test/ci/' + name}
                 workflow_client.state_file(env, 'source').write_text(json.dumps(context))
-                args = SimpleNamespace(plan_command='echo ' + name + ' >> executed; cat requested-plan.json')
+                args = SimpleNamespace(plan_command='test -x "$CI_PYTEST_PLAN" && echo ' + name + ' >> executed && cat requested-plan.json')
                 self.assertEqual(workflow_client.build(args, fixture.inv, str(fixture.etc), env), 0)
             with self.assertRaisesRegex(part.Refused, 'already ran'):
                 workflow_client.build(args, fixture.inv, str(fixture.etc), env)

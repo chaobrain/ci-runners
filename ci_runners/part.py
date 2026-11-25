@@ -1543,7 +1543,7 @@ class Executor:
                            held=hold.mode if hold else '', runner=self.slot)
             # With an override, the in-scope supervisor pins itself and the command inherits its mask.
             inner = command_argv(a.command, cpus=pin if worker_spec is None and core_spec is None else '', nice=0 if cls == 'compile' else 10)
-            if a.id == 'plan-v2' and cls == 'plan':
+            if (a.id == 'plan-v2' or a.id.startswith('plan-v2-')) and cls == 'plan':
                 env['CI_PYTEST_PLAN'] = os.path.join(self.release, 'bin', 'ci-pytest-plan')
             if environment_request is not None:
                 from parallel import job_environment

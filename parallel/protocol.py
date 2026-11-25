@@ -101,7 +101,7 @@ def load_plan(doc: object, *, max_minutes: float = MAX_MINUTES) -> dict:
     if not isinstance(files, str) or files and not relative(files):
         raise Error('files must be a relative directory below the checkout')
     out, seen = [], set()
-    keys = {'id', 'needs', 'device', 'gpu', 'cores', 'workers', 'minutes', 'queue_minutes',
+    keys = {'id', 'needs', 'device', 'gpu', 'cores', 'workers', 'minutes', 'queue_minutes', 'memory_gib',
             'command', 'results', 'artifacts', 'history'}
     for p in parts:
         if not isinstance(p, dict) or set(p) - keys:
@@ -127,6 +127,8 @@ def load_plan(doc: object, *, max_minutes: float = MAX_MINUTES) -> dict:
             raise Error(f'{name}: cores exceeds the requested device capacity')
         if not positive(p.get('workers')):
             raise Error(f'{name}: workers must be an explicit positive integer')
+        if 'memory_gib' in p and (not positive(p['memory_gib']) or p['memory_gib'] > (1 << 20)):
+            raise Error(f'{name}: memory_gib must be a positive integer no greater than 1048576')
         if not number(p.get('minutes'), min(max_minutes, MAX_MINUTES)):
             raise Error(f'{name}: minutes exceeds the project or platform limit')
         queue = p.get('queue_minutes', 15)
@@ -150,6 +152,11 @@ def load_plan(doc: object, *, max_minutes: float = MAX_MINUTES) -> dict:
             raise Error(f'{name}: history must be boolean')
         out.append({**p, 'device': device, 'cores': cores, 'queue_minutes': queue})
     return {'schema': 2, 'parts': out, 'files': files, 'max_parallel': maximum}
+
+
+def part_memory_gib(part: Mapping) -> int:
+    """RAM requested independently, or the unchanged one-GiB-per-core default."""
+    return part.get('memory_gib', part['cores'])
 
 
 def source_key(source: Mapping) -> str:
@@ -209,7 +216,8 @@ def validate_allocation(value: object) -> dict:
         raise Error('invalid allocation group count')
     if type(value.get('cores')) is not int or value['cores'] != groups * GROUP_CPUS:
         raise Error('allocation core count does not match groups')
-    if value.get('RAM') != f'{groups * GROUP_GIB}G':
+    memory = value.get('memory_gib', groups * GROUP_GIB)
+    if not positive(memory) or memory > (1 << 20) or value.get('RAM') != f'{memory}G':
         raise Error('allocation RAM does not match groups')
     if not positive(value.get('workers')) or not number(value.get('minutes'), MAX_MINUTES):
         raise Error('invalid allocation workers or minutes')

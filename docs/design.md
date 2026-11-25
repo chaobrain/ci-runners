@@ -5757,7 +5757,11 @@ access plan in the draft PR. Before deployment, the lead approves SSH key or
 ownership, pilot consumer and rollout window. The detailed preparation and
 acceptance checklist is in [shared-storage-pilot.md](shared-storage-pilot.md).
 
-### Consumer migration: independent RAM request (proposed)
+### Consumer migration: independent RAM request
+
+The maintainer approved this additive contract on 2026-11-25 in the consumer
+migration discussion after reviewing PR #294. Runtime deployment still needs
+its concrete installation diff and rollback review.
 
 BrainCell's existing CPU parts request 4/8/12/40 GiB independently of their
 CPU slot. The schema 2 default of one GiB per core cannot preserve that

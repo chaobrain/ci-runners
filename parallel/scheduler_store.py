@@ -483,7 +483,7 @@ class Store:
         priorities = {}
         if allowed_devices is not None:
             compatible = {}
-            required_memory = groups_required * protocol.GROUP_GIB * (1 << 30)
+            required_memory = protocol.part_memory_gib(part) * (1 << 30)
             if organization:
                 cache_devices = {r[0] for r in database.execute('SELECT device FROM organization_cache_devices')}
                 env_hosts = cache_devices if cached_recipe else self._organization_environment_hosts(
@@ -537,6 +537,22 @@ class Store:
                 ORDER BY r.tag LIMIT 1''', (device, fresh_after, fresh_after)).fetchone()
             if runner is None or (allowed_devices is not None and device not in compatible.get(runner['host'], ())):
                 continue
+            if device != 'slurm':
+                registration = database.execute('SELECT profile FROM device_registrations WHERE device=?',
+                                                (runner['host'],)).fetchone()
+                if registration:
+                    memory_limit = registry.memory_bytes(json.loads(registration['profile'])['memory_max'])
+                else:
+                    # A static pool has only its original core-derived capacity as evidence.
+                    # Do not infer extra host RAM for an explicit request.
+                    memory_limit = pool['total'] * protocol.GROUP_GIB * (1 << 30)
+                occupied_parts = database.execute('''SELECT t.part FROM allocations a JOIN tasks t ON t.id=a.task
+                    WHERE a.host=? AND a.pool!='slurm' AND a.released=0''', (runner['host'],))
+                occupied_memory = sum(protocol.part_memory_gib(json.loads(row['part'])) * (1 << 30)
+                                      for row in occupied_parts)
+                requested_memory = protocol.part_memory_gib(part) * (1 << 30)
+                if occupied_memory + requested_memory > memory_limit:
+                    continue
             if organization and device == 'slurm' and (slurm_permitted is None or not slurm_permitted(source, part)):
                 continue
             return runner, groups_required, gpu_uuid
@@ -598,6 +614,8 @@ class Store:
                  'runner_tag': a['runner'], 'cpu_groups': a['groups'], 'cores': a['groups'] * 4, 'RAM': f'{a["groups"] * 4}G',
                  'workers': p['workers'], 'minutes': p['minutes'], 'queue_minutes': p['queue_minutes']}
         grant['job_timeout_minutes'] = math.ceil(p['minutes'] + p['queue_minutes'] + 30)
+        if 'memory_gib' in p:
+            grant.update(memory_gib=p['memory_gib'], RAM=f'{p["memory_gib"]}G')
         if a['gpu_uuid'] is not None:
             grant.update(allocation_schema=2, gpu_uuid=a['gpu_uuid'])
         return {**dict(a), 'grant': grant, 'part': p, 'source': source, 'batch_id': b['id'],

@@ -121,7 +121,7 @@ class Scheduler:
         target = organization.read_slurm_target(self.etc, binding)
         return (target is not None and task['cores'] <= target.cpus(0)
                 and task['minutes'] <= target.max_minutes
-                and task['cores'] * (1 << 30) <= registry.memory_bytes(target.t['mem_per_node']))
+                and protocol.part_memory_gib(task) * (1 << 30) <= registry.memory_bytes(target.t['mem_per_node']))
 
     def prepare(self, requested):
         if self.organization_config is not None:
@@ -255,7 +255,7 @@ class Scheduler:
     def eligible_task_devices(self, task, project, current_policy, source=None, *, allow_empty=False):
         eligible_devices = []
         requested_groups = task['cores'] // protocol.GROUP_CPUS
-        required_memory = task['cores'] * (1 << 30)
+        required_memory = protocol.part_memory_gib(task) * (1 << 30)
         for device in project.devices:
             if task['device'] and device != task['device']:
                 continue

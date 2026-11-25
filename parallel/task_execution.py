@@ -191,7 +191,8 @@ def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subpro
         raise protocol.Error('allocation exceeds the current project limits')
     if organization_mode and not organization_slurm and grant['device'] not in proj.devices:
         raise protocol.Error('allocation device is outside the organization project')
-    if grant['workers'] != task['workers'] or grant['cores'] != task['cores']:
+    if (grant['workers'] != task['workers'] or grant['cores'] != task['cores']
+            or grant['RAM'] != f'{protocol.part_memory_gib(task)}G'):
         raise protocol.Error('allocation changed the requested resources')
     card = grant.get('gpu_uuid')
     if (task.get('gpu', False) != (card is not None)

@@ -119,7 +119,7 @@ class Registration(unittest.TestCase):
         self.assertIs(checkout['with']['persist-credentials'], False)
         self.assertIn('job_timeout_minutes', job['timeout-minutes'])
         self.assertFalse(entry['jobs']['parts']['strategy']['fail-fast'])
-        self.assertEqual(entry['jobs']['verdict']['needs'], ['plan', 'parts', 'gpu_parts'])
+        self.assertEqual(entry['jobs']['verdict']['needs'], ['plan', 'parts', 'gpu_parts', 'execution_result', 'verify_reports'])
         self.assertIn('task-result', str(task))
         self.assertFalse((ROOT/'setup/consumer-ci-execute.yml').exists())
 

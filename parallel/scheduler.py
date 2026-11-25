@@ -153,14 +153,20 @@ class Scheduler:
         if self.organization_config is not None:
             organization_name = self.organization_config['name']
             fields = ('repository', 'sha', 'run_id', 'run_attempt', 'context', 'concurrency_key',
-                      'cancel_in_progress', 'files_artifact_id', 'files_bundle', 'storage')
+                      'cancel_in_progress', 'files_artifact_id', 'files_bundle', 'storage', 'test_source', 'range_base', 'report_gate')
             request = {key: requested[key] for key in fields if key in requested}
-            source = self.api.source({**request, 'project': 'organization'}, None, organization=organization_name)
+            options = {}
+            if 'source_selectors_file' in self.organization_config:
+                from parallel import source_selection
+                options['source_selectors'] = source_selection.read_policy(self.organization_config['source_selectors_file'])
+            source = self.api.source({**request, 'project': 'organization'}, None, organization=organization_name, **options)
             repository_id = source['admission']['event']['repository']['id']
             if 'repository_id' in requested and requested['repository_id'] != repository_id:
                 raise protocol.Error('repository ID changed after plan preparation')
             source.update(project=f'repo-{repository_id}', repository_id=repository_id,
                           organization_profile=self.organization_config['profile'], slurm_target='')
+            from parallel import reporting
+            source = reporting.bind(source, reporting.read_policy(self.organization_config.get('report_gates_file')))
             binding = self.slurm_binding(source)
             if binding:
                 source.update(slurm_project=binding['slurm_project'], slurm_target=binding['slurm_target'])
@@ -177,7 +183,14 @@ class Scheduler:
         else:
             source = self.api.source(requested, pol)
         source['slurm_target'] = project.slurm_target
+        from parallel import reporting
+        source = reporting.bind(source, {})
         return source, project, pol
+
+    def timing_permitted(self, source, task):
+        from parallel import timing
+        config = self.organization_config or {}
+        return timing.permitted(config.get('timing_profiles_file'), source, task)
 
     def bind_environment(self, source, *, create=False):
         """Pin trusted inputs independently of anything supplied by the plan process."""
@@ -229,10 +242,20 @@ class Scheduler:
         source, project, pol = self.prepare(requested)
         self.bind_storage(source)
         self.bind_environment(source)
+        if source.get('report_gate') is True and bundles.backend(source)['backend'] != 'ssh':
+            raise protocol.Error('report-gated publication requires pinned SSH storage')
         if 'environment_recipe' in source and requested.get('environment_digest') != protocol.fingerprint(source['environment_recipe']):
             raise protocol.Error('submitted plan does not match its prepared environment')
         plan = protocol.load_plan(raw_plan, max_minutes=project.max_minutes)
+        if any(p.get('isolation') == 'timing' for p in plan['parts']):
+            from parallel import timing
+            source['timing_profiles'] = timing.snapshot((self.organization_config or {}).get('timing_profiles_file'), source)
+            for task in plan['parts']:
+                if task.get('isolation') == 'timing':
+                    timing.task_profile(source, task)
         files = plan['files']
+        if source.get('report_gate') is True and not files and not plan_only:
+            raise protocol.Error('report gate requires its complete immutable plan files')
         if not files and (source.get('files_artifact_id') or source.get('files_bundle')):
             raise storage.Error('identity')
         if source.get('files_artifact_id') and source.get('files_bundle'):
@@ -360,6 +383,8 @@ class Scheduler:
                         if self.repository_members else policy.decide(current_policy, source_env, admission['event']))
         if not decision.accepted:
             raise protocol.Error('original source is no longer admitted')
+        if allocation['part'].get('isolation') == 'timing' and not self.timing_permitted(allocation['source'], allocation['part']):
+            raise protocol.Error('timing profile is no longer admitted')
         job_id = self.api.verify_claim(allocation, params['run_id'], params['run_attempt'])
         if (self.organization_config is not None and allocation['pool'] == 'slurm'
                 and not self.slurm_permitted(allocation['source'], allocation['part'])):
@@ -430,6 +455,22 @@ class Scheduler:
                 return {'accepted': True}
             if method == 'submit':
                 return self.submit(params['source'], params['plan'], plan_only=params.get('plan_only', False))
+            if method == 'report':
+                from parallel import reporting
+                batch = self.checked_batch(params)
+                if not batch['report']:
+                    raise protocol.Error('batch has no report gate')
+                job = github_coordinator.find_job(self.api.jobs(batch['source']), reporting.job_name(batch['id']))
+                if (job is None or not protocol.positive(job.get('id')) or job.get('run_id') != batch['source']['run_id']
+                        or job.get('runner_name') != params.get('runner')
+                        or 'ci-plan' not in job.get('labels', [])
+                        or job.get('status') not in ('in_progress', 'completed')):
+                    raise protocol.Error('report submission is not from its authorized control job')
+                if job.get('status') == 'completed' and batch['report']['reference'] is None:
+                    raise protocol.Error('reporting job ended before submitting its receipt')
+                storage.reference(params['reference'], reporting.receipt_identity(batch), batch['source']['storage']['store'])
+                self.store.submit_report(batch['id'], params['reference'], job['id'])
+                return {'accepted': True}
             if method == 'batch':
                 return self.checked_batch(params) if 'source_identity' in params else self.store.batch(params['batch_id'])
             if method == 'request_allocation':
@@ -447,7 +488,7 @@ class Scheduler:
         if method == 'heartbeat':
             gpu_free_mib = params.get('gpu_free_mib')
             version = params.get('allocation_schema', 1)
-            gpu_capable = type(version) is int and version in (2, 3, 4)
+            gpu_capable = type(version) is int and version in (2, 3, 4, 5)
             if gpu_free_mib is not None and not gpu_capable:
                 raise protocol.Error('GPU observations require allocation schema 2')
             readiness = {'ready_projects': params.get('ready_projects')}
@@ -551,6 +592,7 @@ def serve(inv, etc):
                     if app.organization_config is not None:
                         app.store.reserve(allowed_devices=allowed_devices, organization=True,
                                           slurm_permitted=app.slurm_permitted, slurm_capacity=app.slurm_capacity,
+                                          timing_permitted=app.timing_permitted,
                                           require_repository_environment='env_root' in app.organization_config,
                                           require_environment_cache='env_cache' in app.organization_config)
                     else:

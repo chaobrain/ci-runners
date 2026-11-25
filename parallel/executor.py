@@ -318,7 +318,7 @@ class ExecutorService:
         ready = gpu_resources.available(cards, self.inv.host['max_temp_c'], run=self.run)
         try:
             allocations = self.remote.call('heartbeat', runners=[dict(tag=n, online=n in alive, busy=n in busy) for n in sorted(self.names)],
-                                           drained=drained, allocation_schema=4, gpu_free_mib=ready, **extra)
+                                           drained=drained, allocation_schema=5, gpu_free_mib=ready, **extra)
         except Exception:
             self.registered = False
             raise

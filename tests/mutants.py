@@ -5241,6 +5241,9 @@ for cases, prefix in ((MULTI_GPU_MUTANTS, 'parallel.tests.test_multi_gpu.'),
                       (GPU_SLURM_MUTANTS, 'parallel.tests.test_gpu_slurm.')):
     MUTANTS.extend((module.replace('.', '/') + '.py', old, new, [prefix + case])
                    for label, module, old, new, case in cases)
+from parallel.tests.orchestration_mutants import CASES as ORCHESTRATION_MUTANTS
+MUTANTS.extend((module if module.endswith('.yml') else module.replace('.', '/') + '.py', old, new, [case])
+               for label, module, old, new, case in ORCHESTRATION_MUTANTS)
 # Existing workflow mutations follow the major stamp just as the workflow does.
 MUTANTS = [(rel, stamp.rewrite(old, stamp.MAJOR), stamp.rewrite(new, stamp.MAJOR), cases)
            if rel in stamp.WORKFLOWS else (rel, old, new, cases) for rel, old, new, cases in MUTANTS]

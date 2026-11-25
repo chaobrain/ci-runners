@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import json
 import pwd
 import re
@@ -105,6 +106,15 @@ class DeploymentConfig:
             settings['profile'] = self.organization_profile
         if self.is_controller and self.host.get('slurm_runners', 0):
             settings['slurm_allowlist_file'] = str(self.input_dir / 'slurm-allowlist.json')
+        from parallel import reporting, source_selection, timing
+        for key, name, validate, controller_only in (
+                ('source_selectors_file', 'source-selectors.json', source_selection.read_policy, True),
+                ('report_gates_file', 'report-gates.json', reporting.read_policy, True),
+                ('timing_profiles_file', 'timing-profiles.json', timing.read_profiles, False)):
+            path = self.input_dir / name
+            if (self.is_controller or not controller_only) and path.exists():
+                validate(path)
+                settings[key] = str(path)
         return settings
 
     @property
@@ -142,6 +152,15 @@ class DeploymentConfig:
         inputs = {'host': self.host_name, 'topology': self.document, 'projects': self.projects, 'sites': self.sites}
         if self.organization_profile is not None:
             inputs['organization_profile'] = self.organization_profile
+        if self.organization_mode:
+            fingerprints = {}
+            for name in ('source-selectors.json', 'report-gates.json', 'timing-profiles.json'):
+                path = self.input_dir / name
+                if path.exists() and (self.is_controller or name == 'timing-profiles.json'):
+                    from parallel import deployment_files
+                    fingerprints[name] = hashlib.sha256(deployment_files.read_private(path)).hexdigest()
+            if fingerprints:
+                inputs['feature_policy_sha256'] = fingerprints
         return inputs
 
     def inventory_document(self):
@@ -164,6 +183,15 @@ class DeploymentConfig:
                                python=specification.get('python', '/usr/bin/python3'),
                                files={'slot_lock': runtime+'/ci-runners/state/slot.lock',
                                       'slot_queue': runtime+'/ci-runners/state/slot.queue'})
+            profile_file = self.input_dir/'timing-profiles.json'
+            if self.organization_mode and 'executor' in specification['roles'] and profile_file.exists():
+                from parallel import timing
+                profiles = [p for p in timing.read_profiles(profile_file).values() if p['device'] == name]
+                if profiles:
+                    if (any(p['cpu_count'] != cpu_count(specification) for p in profiles)
+                            or len({p['host_lock'] for p in profiles}) != 1):
+                        raise ValueError('timing profiles must bind the complete local CPU budget and one inventory lock')
+                    hosts[name]['files']['host_lock'] = profiles[0]['host_lock']
             if specification.get('gpu_uuids'):
                 hosts[name]['gpu_uuids'] = specification['gpu_uuids']
         return {'schema': 2, 'this': self.host_name, 'hosts': hosts}

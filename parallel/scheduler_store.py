@@ -73,6 +73,9 @@ CREATE TABLE IF NOT EXISTS outbox(
  id INTEGER PRIMARY KEY AUTOINCREMENT, dedupe TEXT UNIQUE NOT NULL, kind TEXT NOT NULL,
  payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
  available REAL NOT NULL, error TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS batch_reports(
+ batch TEXT PRIMARY KEY REFERENCES batches(id), reference TEXT, job_id INTEGER,
+ state TEXT NOT NULL DEFAULT 'pending', submitted REAL, source_ended REAL, reason TEXT NOT NULL DEFAULT '');
 """
 
 
@@ -99,13 +102,13 @@ class Store:
 
     def _upgrade_database(self):
         version = self.db.execute('SELECT version FROM meta').fetchone()[0]
-        if version == 4:
+        if version == 5:
             return
-        if version not in (1, 2, 3):
+        if version not in (1, 2, 3, 4):
             raise protocol.Error('unsupported scheduler database version')
         with self.transaction() as database:
             version = database.execute('SELECT version FROM meta').fetchone()[0]
-            if version == 4:
+            if version == 5:
                 return
             pending = database.execute("SELECT 1 FROM batches WHERE state='pending'").fetchone()
             active = database.execute('SELECT 1 FROM allocations WHERE released=0 OR runner_done=0').fetchone()
@@ -125,14 +128,15 @@ class Store:
                 database.execute('ALTER TABLE allocations ADD COLUMN gpu_uuid TEXT')
                 database.execute('''CREATE UNIQUE INDEX one_gpu_allocation ON allocations(gpu_uuid)
                                  WHERE gpu_uuid IS NOT NULL AND released=0''')
-            database.execute('''CREATE TABLE allocation_cards(
-                allocation TEXT NOT NULL REFERENCES allocations(id), uuid TEXT NOT NULL,
-                position INTEGER NOT NULL, PRIMARY KEY(allocation,uuid), UNIQUE(allocation,position))''')
-            database.execute('''INSERT INTO allocation_cards SELECT id,gpu_uuid,0 FROM allocations
-                                WHERE gpu_uuid IS NOT NULL''')
-            database.execute('''CREATE TABLE allocation_capabilities(
-                                host TEXT PRIMARY KEY REFERENCES hosts(name), schema INTEGER NOT NULL)''')
-            database.execute('UPDATE meta SET version=4')
+            if version < 4:
+                database.execute('''CREATE TABLE allocation_cards(
+                    allocation TEXT NOT NULL REFERENCES allocations(id), uuid TEXT NOT NULL,
+                    position INTEGER NOT NULL, PRIMARY KEY(allocation,uuid), UNIQUE(allocation,position))''')
+                database.execute('''INSERT INTO allocation_cards SELECT id,gpu_uuid,0 FROM allocations
+                                    WHERE gpu_uuid IS NOT NULL''')
+                database.execute('''CREATE TABLE allocation_capabilities(
+                                    host TEXT PRIMARY KEY REFERENCES hosts(name), schema INTEGER NOT NULL)''')
+            database.execute('UPDATE meta SET version=5')
 
     def prepared_environment(self, source, candidate=None):
         """The first trusted resolution for this source attempt wins across restarts."""
@@ -321,7 +325,7 @@ class Store:
             raise protocol.Error('invalid heartbeat')
         if allocation_schema is None:
             allocation_schema = 2 if gpu_free_mib is not None else 1
-        if type(allocation_schema) is not int or allocation_schema not in (1, 2, 3, 4):
+        if type(allocation_schema) is not int or allocation_schema not in (1, 2, 3, 4, 5):
             raise protocol.Error('invalid allocation capability')
         with self.transaction() as db:
             known = {r[0] for r in db.execute('SELECT tag FROM runners WHERE host=?', (host,))}
@@ -393,7 +397,7 @@ class Store:
                 # is checked independently when reserving and claiming, including for retries.
                 saved = json.loads(previous['source'])
                 source = dict(source)
-                for field in ('slurm_project', 'slurm_target', 'slurm_gpu_targets'):
+                for field in ('slurm_project', 'slurm_target', 'slurm_gpu_targets', 'timing_profiles'):
                     source.pop(field, None)
                     if field in saved:
                         source[field] = saved[field]
@@ -402,6 +406,9 @@ class Store:
             else:
                 for p in plan['parts']:
                     choices = eligible.get(p['id'], [])
+                    if p.get('isolation') == 'timing':
+                        from parallel import timing
+                        timing.task_profile(source, p)
                     if p.get('gpu') and p['device'] == 'slurm':
                         from parallel import organization as org
                         if not organization:
@@ -434,6 +441,8 @@ class Store:
                         older.append(row['id'])
             db.execute('INSERT INTO batches(id,source,digest,created,state,max_parallel,retries,cancel_key) VALUES(?,?,?,?,?,?,?,?)',
                        (key, protocol.dumps(source), digest, now, 'pending', min(max_parallel, plan['max_parallel']), retries, cancel_key))
+            if source.get('report_gate') is True:
+                db.execute('INSERT INTO batch_reports(batch) VALUES(?)', (key,))
             for p in plan['parts']:
                 task = protocol.fingerprint([key, p['id']])[:32]
                 db.execute('INSERT INTO tasks(id,batch,part,eligible,state,created,deadline,wait_remaining,gpu_mem_mib) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -448,7 +457,11 @@ class Store:
             self._batch_end(db, key)
         return key
 
-    def _cancel(self, db, batch):
+    def _cancel(self, db, batch, *, source_cancelled=False):
+        changed = db.execute("UPDATE batch_reports SET state='error',reason='source cancelled' WHERE batch=? AND state!='error' AND (state!='success' OR ?)",
+                             (batch, source_cancelled)).rowcount
+        if changed:
+            self._enqueue(db, f'report-cancel:{batch}', 'status', {'batch_id': batch})
         db.execute("UPDATE tasks SET state='cancelled',result=? WHERE batch=? AND state='queued'",
                    (protocol.dumps({'state': 'cancelled', 'reason': 'source cancelled'}), batch))
         for a in db.execute('SELECT a.* FROM allocations a JOIN tasks t ON a.task=t.id WHERE t.batch=? AND (a.released=0 OR a.runner_done=0)', (batch,)).fetchall():
@@ -459,7 +472,7 @@ class Store:
         with self.transaction() as db:
             if not db.execute('SELECT 1 FROM batches WHERE id=?', (batch,)).fetchone():
                 raise protocol.Error('unknown batch')
-            self._cancel(db, batch)
+            self._cancel(db, batch, source_cancelled=True)
 
     def request_task_allocation(self, batch_id: str, task_id: str, task_attempt: int) -> dict:
         if type(task_attempt) is not int or task_attempt not in (1, 2):
@@ -493,7 +506,8 @@ class Store:
         return {row[0] for row in rows}
 
     def _available_runner(self, database, task_record, source, heartbeat_ttl, allowed_devices, organization,
-                          slurm_permitted, require_repository_environment, require_environment_cache, slurm_capacity):
+                          slurm_permitted, require_repository_environment, require_environment_cache, slurm_capacity,
+                          timing_permitted):
         cached_recipe = 'environment_recipe' in source
         if (cached_recipe != require_environment_cache or
                 (organization and 'organization_profile' not in source)):
@@ -563,16 +577,19 @@ class Store:
                                         (device,)).fetchone()[0]
             if pool is None or pool['total'] - occupied < groups_required:
                 continue
+            if part.get('isolation') == 'timing' and (pool['total'] != groups_required or occupied
+                    or timing_permitted is None or not timing_permitted(source, part)):
+                continue
             runner = database.execute('''SELECT r.* FROM runners r JOIN hosts h ON r.host=h.name
                 WHERE r.pool=? AND r.online=1 AND r.busy=0 AND r.seen>? AND h.seen>? AND h.drained=0
                 AND NOT EXISTS(SELECT 1 FROM allocations a WHERE a.runner=r.tag AND a.runner_done=0)
                 ORDER BY r.tag LIMIT 1''', (device, fresh_after, fresh_after)).fetchone()
             if runner is None or (allowed_devices is not None and device not in compatible.get(runner['host'], ())):
                 continue
-            if len(gpu_uuids) == 2 or remote_gpu:
+            if len(gpu_uuids) == 2 or remote_gpu or part.get('isolation') == 'timing':
                 capability = database.execute('SELECT schema FROM allocation_capabilities WHERE host=?',
                                                (runner['host'],)).fetchone()
-                if capability is None or capability[0] < (4 if remote_gpu else 3):
+                if capability is None or capability[0] < (5 if part.get('isolation') == 'timing' else 4 if remote_gpu else 3):
                     continue
             if device != 'slurm':
                 registration = database.execute('SELECT profile FROM device_registrations WHERE device=?',
@@ -620,7 +637,7 @@ class Store:
 
     def reserve(self, *, heartbeat_ttl=HEARTBEAT_TTL, allowed_devices=None, organization=False,
                 slurm_permitted=None, slurm_capacity=None,
-                require_repository_environment=False, require_environment_cache=False) -> dict | None:
+                require_repository_environment=False, require_environment_cache=False, timing_permitted=None) -> dict | None:
         if organization and allowed_devices is None:
             raise protocol.Error('organization dispatch needs an authoritative device list')
         now = self.clock()
@@ -642,7 +659,8 @@ class Store:
                 for task_record in tasks:
                     selected = self._available_runner(database, task_record, source, heartbeat_ttl,
                                                       allowed_devices, organization, slurm_permitted,
-                                                      require_repository_environment, require_environment_cache, slurm_capacity)
+                                                      require_repository_environment, require_environment_cache, slurm_capacity,
+                                                      timing_permitted)
                     if selected is None:
                         continue
                     runner_record, groups_required, gpu_uuids = selected
@@ -684,6 +702,11 @@ class Store:
             from parallel import organization
             profile = organization.gpu_slurm_profile(source, p)
             grant.update(allocation_schema=4, gpu_count=protocol.gpu_count(p), cluster_target=p['cluster_target'], **profile)
+        elif p.get('isolation') == 'timing':
+            from parallel import timing
+            profile = timing.task_profile(source, p)
+            grant.update(allocation_schema=5, isolation='timing', timing_target=p['timing_target'],
+                         timing_profile_sha256=profile['profile_sha256'])
         elif a['gpu_uuid'] is not None:
             grant.update(allocation_schema=2, gpu_uuid=a['gpu_uuid'])
         else:
@@ -721,6 +744,10 @@ class Store:
             if (a['host'] != host or a['runner'] != runner or a['source']['repository'].lower() != repository.lower()
                     or a['cancelled'] or a['released'] or a['runner_done']):
                 raise protocol.Error('allocation is closed or bound to another executor')
+            if a['part'].get('isolation') == 'timing':
+                pool = db.execute('SELECT total FROM pools WHERE name=?', (a['pool'],)).fetchone()
+                if pool is None or pool['total'] != a['groups']:
+                    raise protocol.Error('timing no longer reserves the complete device')
             cached_recipe = 'environment_recipe' in a['source']
             if cached_recipe or require_environment_cache or environment_cache_confirmed:
                 if not (cached_recipe and require_environment_cache and environment_cache_confirmed):
@@ -824,8 +851,10 @@ class Store:
     def source_finished(self, batch_id: str, *, cancelled: bool):
         with self.transaction() as database:
             database.execute('UPDATE batches SET source_done=1 WHERE id=?', (batch_id,))
+            database.execute('UPDATE batch_reports SET source_ended=COALESCE(source_ended,?) WHERE batch=?',
+                             (self.clock(), batch_id))
             if cancelled:
-                self._cancel(database, batch_id)
+                self._cancel(database, batch_id, source_cancelled=True)
                 return
             database.execute("UPDATE tasks SET state='error',result=? WHERE batch=? AND state='queued'",
                              (protocol.dumps({'state': 'error', 'reason': 'source ended before task completion'}), batch_id))
@@ -917,13 +946,50 @@ class Store:
             b = self.db.execute('SELECT * FROM batches WHERE id=?', (key,)).fetchone()
             if not b:
                 raise protocol.Error('unknown batch')
-            return {**dict(b), 'source': json.loads(b['source']),
+            report = self.db.execute('SELECT * FROM batch_reports WHERE batch=?', (key,)).fetchone()
+            publication = b['state']
+            if report is not None and b['state'] == 'success':
+                publication = report['state'] if report['state'] in ('success', 'error') else 'pending'
+            return {**dict(b), 'source': json.loads(b['source']), 'publication_state': publication,
+                    'report': ({**dict(report), 'reference': json.loads(report['reference']) if report['reference'] else None}
+                               if report is not None else None),
                     'tasks': [{**dict(t), 'part': json.loads(t['part']), 'result': json.loads(t['result'])}
                               for t in self.db.execute('SELECT * FROM tasks WHERE batch=? ORDER BY id', (key,))],
                     'allocations': [{**dict(a), 'result': json.loads(a['result']), 'artifacts': json.loads(a['artifacts']),
                                      'grant': self._allocation(self.db, a['id'])['grant'],
                                      'storage_reference': self.storage_reference(a['id'])}
                                     for a in self.db.execute('SELECT a.* FROM allocations a JOIN tasks t ON a.task=t.id WHERE t.batch=? ORDER BY a.created,a.id', (key,))]}
+
+    def submit_report(self, batch_id, reference, job_id):
+        if not protocol.positive(job_id):
+            raise protocol.Error('invalid reporting job identity')
+        with self.transaction() as db:
+            batch = db.execute('SELECT state,source_done FROM batches WHERE id=?', (batch_id,)).fetchone()
+            row = db.execute('SELECT * FROM batch_reports WHERE batch=?', (batch_id,)).fetchone()
+            if batch is None or row is None or batch['state'] not in protocol.TERMINAL:
+                raise protocol.Error('report gate is not ready')
+            value = protocol.dumps(reference)
+            if row['reference'] is not None:
+                if row['reference'] != value or row['job_id'] != job_id:
+                    raise protocol.Error('conflicting immutable report submission')
+                return
+            if batch['source_done'] or row['state'] != 'pending':
+                raise protocol.Error('report gate is closed')
+            db.execute("UPDATE batch_reports SET reference=?,job_id=?,submitted=?,state='submitted' WHERE batch=?",
+                       (value, job_id, self.clock(), batch_id))
+
+    def finish_report(self, batch_id, *, success, reason=''):
+        if type(success) is not bool:
+            raise protocol.Error('invalid report decision')
+        with self.transaction() as db:
+            row = db.execute('SELECT * FROM batch_reports WHERE batch=?', (batch_id,)).fetchone()
+            if row is None or row['state'] in ('success', 'error'):
+                return
+            if success and row['reference'] is None:
+                raise protocol.Error('report success requires its immutable receipt')
+            db.execute('UPDATE batch_reports SET state=?,reason=? WHERE batch=?',
+                       ('success' if success else 'error', reason[:256], batch_id))
+            self._enqueue(db, f'report-final:{batch_id}', 'status', {'batch_id': batch_id})
 
     def capacity(self) -> list[dict]:
         with self.lock:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import contextlib
 import functools
 import json
 import os
@@ -128,9 +129,10 @@ def check_fence(path, grant, cpus):
         db.close()
 
 
-def supervise(record, grant, cpus, command, fence=None, max_temp_c=80, gpu_mem_mib=0, *, launch_argv=None,
+def supervise(record, grant, cpus, command, fence=None, max_temp_c=80, gpu_mem_mib=0, timing_request=None, *, launch_argv=None,
               verify_resource_limits=True):
     """Verify configured resource limits before acknowledging or starting a task."""
+    held = contextlib.ExitStack()
     try:
         is_slurm = grant.get('backend') == 'slurm'
         supervisor_memory_cap = registry.memory_bytes(grant['RAM']) if is_slurm else 0
@@ -146,12 +148,19 @@ def supervise(record, grant, cpus, command, fence=None, max_temp_c=80, gpu_mem_m
             raise protocol.Error('authorized GPU is no longer available')
         if fence is not None:
             check_fence(fence, grant, cpus)
+        timing_receipt = {}
+        if grant.get('allocation_schema') == 5:
+            from parallel import timing
+            timing_receipt = held.enter_context(timing.hold(grant, timing_request))
+            if fence is not None:
+                check_fence(fence, grant, cpus)
         os.environ.update(CUDA_VISIBLE_DEVICES=','.join(cards), CI_CPUS=part.cpu_list(os.sched_getaffinity(0)),
                           CI_CORES=str(grant['cores']), CI_WORKERS=str(grant['workers']),
                           CI_CPU_GROUPS=str(grant['cpu_groups']), CI_RAM=grant['RAM'])
         part._write_json(os.path.join(record, 'allocation-ready.json'), {'allocation_id': grant['allocation_id'],
                          'cores': grant['cores'], 'RAM': grant['RAM'], 'workers': grant['workers'],
                          'gpu_uuid': cards[0] if len(cards) == 1 else '', 'gpu_uuids': cards,
+                         **({'timing': timing_receipt} if timing_receipt else {}),
                          **({'cluster_target': grant['cluster_target'], 'variant': grant['variant'],
                              'gpu_model': grant['gpu_model'], 'gpu_models': [item[1] for item in remote_cards],
                              'slurm_job_id': os.environ['SLURM_JOB_ID']}
@@ -159,14 +168,18 @@ def supervise(record, grant, cpus, command, fence=None, max_temp_c=80, gpu_mem_m
                          'memory_enforcement': ('process-tree' if supervisor_memory_cap else
                                                 'cgroup' if verify_resource_limits else 'unverified')})
     except (OSError, ValueError, KeyError, sqlite3.Error) as e:
+        held.close()
         part._write_json(os.path.join(record, 'exit.json'), {'rc': None, 'unavailable': f'resources: {type(e).__name__}',
                          'end_epoch': time.time(), 'boot_end': part.boot_id()})
         return 2
-    argv = launch_argv if launch_argv is not None else part.command_argv(command, nice=10)
+    argv = launch_argv if launch_argv is not None else part.command_argv(command, nice=0 if timing_receipt else 10)
     options = {'cap': supervisor_memory_cap}
     if len(cards) == 2:
         options['p2p'] = part.p2p_argv(str(Path(__file__).resolve().parents[1]))
-    return part.supervise(record, grant['minutes']*60, argv, **options)
+    try:
+        return part.supervise(record, grant['minutes']*60, argv, **options)
+    finally:
+        held.close()
 
 
 def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subprocess.Popen):
@@ -280,12 +293,23 @@ def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subpro
         call = ('import json,sys; sys.path.insert(0,sys.argv.pop(1)); from parallel.task_execution import supervise; '
             'a=json.loads(sys.argv[1]); sys.exit(supervise(*a[:-1], verify_resource_limits=a[-1]))')
         fence = str(layout.executor_paths(inv)[0])
-        args_for_scope = [record, grant, cpus, task['command'], fence, inv.host['max_temp_c'], proj.gpu_mem_mib]
+        timing_request = None
+        if grant.get('allocation_schema') == 5:
+            from parallel import timing, executor
+            profile_file = settings.get('organization', {}).get('timing_profiles_file')
+            if not timing.permitted(profile_file, source, task):
+                raise protocol.Error('timing profile changed before execution scope')
+            timing_request = dict(profiles_file=profile_file,
+                                  source={key: source[key] for key in ('repository', 'repository_id')},
+                                  cpu_count=4*len(executor.groups(inv)), host_lock=inv.host['files'].get('host_lock'),
+                                  deadline=allocation['deadline'])
+        args_for_scope = [record, grant, cpus, task['command'], fence, inv.host['max_temp_c'], proj.gpu_mem_mib, timing_request]
         if cache_mode:
             from parallel import job_environment
             rec['uses_environment_cache'] = True
             preparation = job_environment.request(settings['organization'], inv, source)
-            launch = job_environment.wrap(record, preparation, release, part.command_argv(task['command'], nice=10))
+            launch = job_environment.wrap(record, preparation, release,
+                                          part.command_argv(task['command'], nice=0 if grant.get('allocation_schema') == 5 else 10))
             # The existing supervisor covers both cold builds and the subsequent test.
             args_for_scope.append(launch)
             call = ('import json,sys; sys.path.insert(0,sys.argv.pop(1)); '

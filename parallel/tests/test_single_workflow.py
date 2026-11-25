@@ -292,7 +292,7 @@ class WorkflowBridge(unittest.TestCase):
         execute = yamlsub.load((ROOT/'.github/workflows/execute.yml').read_text())
         self.assertEqual(workflow['jobs']['parts']['needs'], 'plan')
         self.assertFalse(workflow['jobs']['parts']['strategy']['fail-fast'])
-        self.assertEqual(workflow['jobs']['verdict']['needs'], ['plan', 'parts', 'gpu_parts'])
+        self.assertEqual(workflow['jobs']['verdict']['needs'], ['plan', 'parts', 'gpu_parts', 'execution_result', 'verify_reports'])
         self.assertIn('always()', workflow['jobs']['verdict']['if'])
         self.assertIn("task_count != '0'", workflow['jobs']['parts']['if'])
         self.assertNotIn('continue-on-error', workflow['jobs']['parts'])
@@ -334,7 +334,7 @@ class DatabaseUpgrade(unittest.TestCase):
             store = scheduler_store.Store(str(path))
             self.addCleanup(store.close)
             self.assertEqual(store.batch('old')['state'], 'success')
-            self.assertEqual(store.db.execute('SELECT version FROM meta').fetchone()[0], 4)
+            self.assertEqual(store.db.execute('SELECT version FROM meta').fetchone()[0], 5)
             self.assertTrue(store.batch('old')['source_done'])
 
 

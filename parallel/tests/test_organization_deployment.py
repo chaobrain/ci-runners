@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import subprocess
 import tomllib
 from unittest import mock
@@ -17,6 +18,46 @@ BINDING = dict(repository_id=42, repository='example/project', slurm_project='pr
 
 
 class OrganizationDeployment(DeploymentFixture):
+    def test_timing_profile_renders_one_inventory_lock_for_complete_local_budget(self):
+        self.organization_host(executor=True)
+        profile = dict(id='reference', device='3090b', cpu_count=4, cpus=[0, 1], cpu_model='example CPU',
+                       host_lock=str(self.root/'reference.lock'), enabled=False, reference_ready=False,
+                       repositories=[dict(id=17, repository='example/project')])
+        path = self.input/'timing-profiles.json'
+        files.atomic_write(path, json.dumps(dict(schema=1, targets=[profile])), 0o600)
+        cfg = self.config('3090b')
+        self.assertEqual(cfg.inventory_document()['hosts']['3090b']['files']['host_lock'], profile['host_lock'])
+        self.assertEqual(cfg.organization_settings['timing_profiles_file'], str(path))
+        profile['cpu_count'] = 8
+        files.atomic_write(path, json.dumps(dict(schema=1, targets=[profile])), 0o600)
+        with self.assertRaisesRegex(ValueError, 'complete local CPU budget'):
+            self.config('3090b')
+
+    def test_optional_feature_policies_are_role_scoped_private_and_plan_bound(self):
+        self.organization_host()
+        files.atomic_write(self.input/'organization.toml', '\n')
+        cfg = self.config()
+        policy = dict(schema=1, repositories=[dict(id=17, repository='example/project', kinds=['pull-request'])])
+        path = self.input/'source-selectors.json'
+        before = cfg.public_inputs()
+        files.atomic_write(path, json.dumps(policy), 0o600)
+        self.assertEqual(cfg.organization_settings['source_selectors_file'], str(path))
+        first = cfg.public_inputs()
+        self.assertNotEqual(before, first)
+        self.assertEqual(set(first['feature_policy_sha256']), {'source-selectors.json'})
+        policy['repositories'][0]['kinds'].append('commit-replay')
+        files.atomic_write(path, json.dumps(policy), 0o600)
+        self.assertNotEqual(first, cfg.public_inputs())
+        path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            cfg.organization_settings
+        with self.assertRaises(ValueError):
+            cfg.public_inputs()
+        path.chmod(0o600)
+        cfg.host['roles'] = ['executor']
+        self.assertNotIn('source_selectors_file', cfg.organization_settings)
+        self.assertNotIn('feature_policy_sha256', cfg.public_inputs())
+
     def organization_host(self, *, executor=False):
         self.document.update(schema=2, mode='organization')
         host = self.document['hosts']['3090a']

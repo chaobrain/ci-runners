@@ -2,7 +2,7 @@ name: Central test scheduling
 description: Submit a schema 2 plan or bridge an authorized allocation to the local executor.
 inputs:
   command:
-    description: prepare, build, submit, failure, allocate, inspect, fetch, execute, publish-plan, publish-result, task-result or batch-result
+    description: prepare, build, submit, failure, allocate, inspect, fetch, execute, publish-plan, publish-result, task-result, execution-result, report or batch-result
     required: true
   project:
     description: Project registry key
@@ -12,6 +12,18 @@ inputs:
     default: ''
   sha:
     description: Original commit to test
+    default: ''
+  test-source:
+    description: Explicit repository-authorized dispatch selector; empty retains strict run-head matching
+    default: ''
+  range-base:
+    description: Full ancestor SHA for an explicitly selected commit replay
+    default: ''
+  report-gate:
+    description: Require verified report publication before a successful primary status
+    default: 'false'
+  report-reference:
+    description: Immutable reporting-job receipt reference for the report operation
     default: ''
   plan:
     description: Command that prints a schema 2 plan
@@ -47,6 +59,9 @@ inputs:
     description: Submission outcome for plan-only validation
     default: ''
 outputs:
+  report_accepted:
+    description: Immutable receipt accepted; final success still requires reporting-job completion
+    value: ${{ steps.control.outputs.report_accepted }}
   storage_backend:
     description: Pinned file backend, github or ssh
     value: ${{ steps.control.outputs.storage_backend }}
@@ -120,6 +135,10 @@ runs:
         IN_PROJECT: ${{ inputs.project }}
         IN_CONTEXT: ${{ inputs.context }}
         IN_SHA: ${{ inputs.sha }}
+        IN_TEST_SOURCE: ${{ inputs.test-source }}
+        IN_RANGE_BASE: ${{ inputs.range-base }}
+        IN_REPORT_GATE: ${{ inputs.report-gate }}
+        IN_REPORT_REF: ${{ inputs.report-reference }}
         IN_PLAN: ${{ inputs.plan }}
         IN_PLAN_ONLY: ${{ inputs.plan-only }}
         IN_CANCEL: ${{ inputs.cancel-in-progress }}
@@ -135,6 +154,10 @@ runs:
         set --
         if [ "$IN_PLAN_ONLY" = true ]; then set -- "$@" --plan-only; fi
         if [ "$IN_CANCEL" = true ]; then set -- "$@" --cancel-in-progress; fi
+        if [ -n "$IN_TEST_SOURCE" ]; then set -- "$@" --test-source "$IN_TEST_SOURCE"; fi
+        if [ -n "$IN_RANGE_BASE" ]; then set -- "$@" --range-base "$IN_RANGE_BASE"; fi
+        if [ "$IN_REPORT_GATE" = true ]; then set -- "$@" --report-gate; fi
+        if [ -n "$IN_REPORT_REF" ]; then set -- "$@" --report-reference "$IN_REPORT_REF"; fi
         exec "$GITHUB_ACTION_PATH/../lib/ci-run.sh" central "$IN_COMMAND" \
           --project "$IN_PROJECT" --context "$IN_CONTEXT" --sha "$IN_SHA" \
           --plan-command "$IN_PLAN" --files-artifact-id "$IN_FILES" --files-bundle "$IN_FILES_BUNDLE" \

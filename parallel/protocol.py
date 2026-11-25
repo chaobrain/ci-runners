@@ -116,8 +116,8 @@ def load_plan(doc: object, *, max_minutes: float = MAX_MINUTES) -> dict:
     if not isinstance(files, str) or files and not relative(files):
         raise Error('files must be a relative directory below the checkout')
     out, seen = [], set()
-    keys = {'id', 'needs', 'device', 'gpu', 'gpu_count', 'cluster_target', 'cores', 'workers', 'minutes', 'queue_minutes', 'memory_gib',
-            'command', 'results', 'artifacts', 'history'}
+    keys = {'id', 'needs', 'device', 'gpu', 'gpu_count', 'cluster_target', 'isolation', 'timing_target', 'cores', 'workers', 'minutes', 'queue_minutes', 'memory_gib',
+            'command', 'results', 'artifacts', 'history', 'required_files'}
     for p in parts:
         if not isinstance(p, dict) or set(p) - keys:
             raise Error('part has unknown fields (RAM and cpu_groups are scheduler outputs)')
@@ -133,6 +133,15 @@ def load_plan(doc: object, *, max_minutes: float = MAX_MINUTES) -> dict:
         if type(p.get('gpu', False)) is not bool:
             raise Error(f'{name}: gpu must be boolean')
         gpu_count(p)
+        isolation = p.get('isolation', 'shared')
+        if isolation not in ('shared', 'timing') or not isinstance(isolation, str):
+            raise Error(f'{name}: invalid isolation mode')
+        if isolation == 'timing':
+            if (p.get('gpu') or device in ('', 'slurm') or not isinstance(p.get('timing_target'), str)
+                    or not ID.fullmatch(p['timing_target'])):
+                raise Error(f'{name}: timing requires a local CPU device and logical target')
+        elif 'timing_target' in p:
+            raise Error(f'{name}: timing_target requires timing isolation')
         if 'cluster_target' in p and (device != 'slurm' or not p.get('gpu')
                                      or not isinstance(p['cluster_target'], str) or not ID.fullmatch(p['cluster_target'])):
             raise Error(f'{name}: cluster_target is a logical GPU Slurm target identifier')
@@ -169,6 +178,9 @@ def load_plan(doc: object, *, max_minutes: float = MAX_MINUTES) -> dict:
             raise Error(f'{name}: command exceeds 64 KiB')
         if type(p.get('history', False)) is not bool:
             raise Error(f'{name}: history must be boolean')
+        if 'required_files' in p:
+            from parallel import reporting
+            reporting.requirements(p['required_files'])
         out.append({**p, 'device': device, 'cores': cores, 'queue_minutes': queue})
     return {'schema': 2, 'parts': out, 'files': files, 'max_parallel': maximum}
 
@@ -196,6 +208,8 @@ def source_key(source: Mapping) -> str:
         raise Error('invalid project')
     if type(source.get('cancel_in_progress', False)) is not bool:
         raise Error('cancel_in_progress must be boolean')
+    if type(source.get('report_gate', False)) is not bool:
+        raise Error('report_gate must be boolean')
     return fingerprint([repo.lower(), source['run_id'], source['run_attempt'], context])[:32]
 
 
@@ -213,7 +227,7 @@ def execution_job_name(task_id: str, task_attempt: int) -> str:
 
 
 def validate_allocation(value: object) -> dict:
-    if not isinstance(value, dict) or type(value.get('allocation_schema')) is not int or value['allocation_schema'] not in (1, 2, 3, 4):
+    if not isinstance(value, dict) or type(value.get('allocation_schema')) is not int or value['allocation_schema'] not in (1, 2, 3, 4, 5):
         raise Error('unknown allocation schema')
     for key in ('allocation_id', 'task_id', 'runner_tag', 'host'):
         if not isinstance(value.get(key), str) or not ID.fullmatch(value[key]):
@@ -247,8 +261,17 @@ def validate_allocation(value: object) -> dict:
                 or not isinstance(route, str) or len(route.split('/')) != 2
                 or any(not ID.fullmatch(s) for s in route.split('/'))):
             raise Error('GPU Slurm allocation requires its authorized target and exact resource profile')
+    elif value['allocation_schema'] == 5:
+        if (device == 'slurm' or value.get('isolation') != 'timing'
+                or not isinstance(value.get('timing_target'), str) or not ID.fullmatch(value['timing_target'])
+                or not isinstance(value.get('timing_profile_sha256'), str)
+                or not re.fullmatch('[0-9a-f]{64}', value['timing_profile_sha256'])
+                or any(k in value for k in ('gpu_uuid', 'gpu_uuids', 'gpu_count', 'cluster_target'))):
+            raise Error('timing allocation requires its complete local profile')
     elif any(k in value for k in ('gpu_uuid', 'gpu_uuids', 'gpu_count', 'cluster_target')):
         raise Error('CPU allocation cannot carry a GPU UUID')
+    if value['allocation_schema'] != 5 and any(k in value for k in ('isolation', 'timing_target', 'timing_profile_sha256')):
+        raise Error('old allocation cannot carry timing authority')
     groups = value.get('cpu_groups')
     if not positive(groups) or groups > DEVICE_GROUPS[device]:
         raise Error('invalid allocation group count')

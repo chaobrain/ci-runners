@@ -18,6 +18,22 @@ on:
         description: Original test SHA; defaults to the event head
         type: string
         default: ''
+      test-source:
+        description: Explicit private same-repository dispatch selector
+        type: string
+        default: ''
+      range-base:
+        description: Full ancestor SHA for commit replay
+        type: string
+        default: ''
+      report-gate:
+        description: Require independent report verification before primary success
+        type: boolean
+        default: false
+      report-command:
+        description: Read-only command from the workflow revision that projects and submits the report receipt
+        type: string
+        default: ''
       plan-only:
         description: Validate without executing tests; uses a separate status context
         type: boolean
@@ -66,6 +82,9 @@ jobs:
           project: ${{ inputs.project }}
           context: ${{ inputs.context }}
           sha: ${{ inputs.sha }}
+          test-source: ${{ inputs.test-source }}
+          range-base: ${{ inputs.range-base }}
+          report-gate: ${{ inputs.report-gate }}
           plan-only: ${{ inputs.plan-only }}
           cancel-in-progress: ${{ inputs.cancel-in-progress }}
       - uses: actions/checkout@v4
@@ -140,8 +159,52 @@ jobs:
       allocation_timeout_minutes: ${{ matrix.task.allocation_timeout_minutes }}
       gpu_lane: ${{ matrix.task.gpu_lane }}
 
-  verdict:
+  execution_result:
     needs: [plan, parts, gpu_parts]
+    if: always() && !cancelled() && inputs.report-gate && needs.plan.outputs.submission_state == 'accepted'
+    runs-on: [self-hosted, ci-plan]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      state: ${{ steps.result.outputs.state }}
+    steps:
+      - id: result
+        uses: chaobrain/ci-runners/actions/central@v2.1.2
+        with:
+          command: execution-result
+          batch-id: ${{ needs.plan.outputs.batch_id }}
+
+  verify_reports:
+    name: verify-reports/${{ needs.plan.outputs.batch_id }}
+    needs: [plan, execution_result]
+    if: always() && !cancelled() && inputs.report-gate && needs.plan.outputs.submission_state == 'accepted'
+    runs-on: [self-hosted, ci-plan]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Verify and project reports
+        shell: bash
+        env:
+          CI_BATCH_ID: ${{ needs.plan.outputs.batch_id }}
+          CI_EXECUTION_STATE: ${{ needs.execution_result.outputs.state }}
+          CI_REPORT_COMMAND: ${{ inputs.report-command }}
+        run: |
+          set -euo pipefail
+          test -n "$CI_REPORT_COMMAND"
+          test -n "$CI_EXECUTION_STATE"
+          unset GH_TOKEN GITHUB_TOKEN
+          bash --noprofile --norc -c "$CI_REPORT_COMMAND"
+
+  verdict:
+    needs: [plan, parts, gpu_parts, execution_result, verify_reports]
     if: always() && !cancelled() && needs.plan.result != 'skipped'
     runs-on: [self-hosted, ci-plan]
     timeout-minutes: 15

@@ -89,9 +89,9 @@ def standalone_executor(settings):
 def validate_settings(config, *, controller):
     """Validate the organization table rendered for this host's control service."""
     expected = {'name', 'profile'} if controller else {'name'}
-    optional = {'env', 'env_root', 'env_aliases', 'env_cache', 'conda', 'env_legacy_root', 'env_cache_variant'}
+    optional = {'env', 'env_root', 'env_aliases', 'env_cache', 'conda', 'env_legacy_root', 'env_cache_variant', 'timing_profiles_file'}
     if controller:
-        optional.add('slurm_allowlist_file')
+        optional.update({'slurm_allowlist_file', 'source_selectors_file', 'report_gates_file'})
     if not isinstance(config, dict) or not expected <= config.keys() <= expected | optional:
         raise protocol.Error('invalid organization service configuration')
     if not isinstance(config['name'], str) or not policy._ORG.fullmatch(config['name']):
@@ -103,10 +103,11 @@ def validate_settings(config, *, controller):
         raise protocol.Error('invalid organization cache conda executable')
     if controller and profile(config['profile']) != config['profile']:
         raise protocol.Error('organization service profile must include all limits')
-    if 'slurm_allowlist_file' in config:
-        path = config['slurm_allowlist_file']
-        if not isinstance(path, str) or not Path(path).is_absolute() or '..' in Path(path).parts or '\0' in path:
-            raise protocol.Error('invalid organization Slurm allowlist path')
+    for key in ('slurm_allowlist_file', 'source_selectors_file', 'timing_profiles_file', 'report_gates_file'):
+        if key in config:
+            path = config[key]
+            if not isinstance(path, str) or not Path(path).is_absolute() or '..' in Path(path).parts or '\0' in path:
+                raise protocol.Error('invalid organization policy file path')
 
 
 def validate_slurm_route(binding):

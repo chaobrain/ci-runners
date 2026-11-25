@@ -43,6 +43,14 @@ def source(args, env, *, organization_mode=False):
     data = dict(repository=env['GITHUB_REPOSITORY'], sha=sha, run_id=int(env['GITHUB_RUN_ID']),
                 run_attempt=int(env['GITHUB_RUN_ATTEMPT']), project=project,
                 context=context, concurrency_key='verified-by-service', cancel_in_progress=args.cancel_in_progress)
+    if getattr(args, 'test_source', ''):
+        data['test_source'] = json.loads(args.test_source)
+    if getattr(args, 'range_base', ''):
+        data['range_base'] = args.range_base
+    if getattr(args, 'report_gate', False):
+        data['report_gate'] = True
+    from parallel import source_selection
+    source_selection.selector(data)
     protocol.source_key(data)
     return data
 
@@ -136,10 +144,12 @@ def wait_for_task_allocation(args, connection, env):
         task = connection.call('task', **request)
 
 
-def wait_for_terminal_result(connection, operation, request, *, timeout_seconds=600):
+def wait_for_terminal_result(connection, operation, request, *, timeout_seconds=600, publication=False):
     timeout_at = time.monotonic() + timeout_seconds
     while True:
         record = connection.call(operation, **request)
+        if publication and 'publication_state' in record:
+            record = {**record, 'execution_state': record['state'], 'state': record['publication_state']}
         if record['state'] in protocol.TERMINAL:
             return record
         if time.monotonic() >= timeout_at:
@@ -152,7 +162,8 @@ def report_final_result(args, connection, env):
         record = wait_for_terminal_result(connection, 'task', task_request(args, env))
     elif args.batch_id:
         record = wait_for_terminal_result(connection, 'batch', {
-            'batch_id': args.batch_id, 'source_identity': source_identity(env)})
+            'batch_id': args.batch_id, 'source_identity': source_identity(env)},
+            publication=args.operation == 'batch-result')
     elif args.submission_state == 'validated':
         record = {'state': 'success'}
     else:
@@ -244,7 +255,7 @@ def collect_allocation_results(inv, allocation, env, result):
     for name in ('outcome.json', 'summary.md'):
         copy_tree(Path(record)/name, destination/name)
     ready = part._read_json(str(Path(record) / 'allocation-ready.json'))
-    if allocation['grant'].get('allocation_schema', 1) >= 3 and result['state'] == 'success':
+    if allocation['grant'].get('allocation_schema', 1) in (3, 4) and result['state'] == 'success':
         grant = allocation['grant']
         if (not isinstance(ready, dict) or any(ready.get(k) != grant.get(k)
                 for k in ('allocation_id', 'cores', 'RAM', 'workers'))
@@ -255,6 +266,17 @@ def collect_allocation_results(inv, allocation, env, result):
                 or grant['allocation_schema'] == 4 and (any(ready.get(k) != grant[k]
                    for k in ('cluster_target', 'gpu_model', 'variant')) or not ready.get('slurm_job_id'))):
             raise protocol.Error('successful GPU execution lacks its complete resource receipt')
+    if allocation['grant'].get('allocation_schema') == 5 and result['state'] == 'success':
+        grant = allocation['grant']
+        observed = (ready or {}).get('timing', {})
+        if (not isinstance(ready, dict) or any(ready.get(k) != grant.get(k) for k in ('allocation_id', 'cores', 'RAM', 'workers'))
+                or observed.get('target') != grant['timing_target']
+                or observed.get('profile_sha256') != grant['timing_profile_sha256']
+                or type(observed.get('nice')) is not int or observed['nice'] != 0
+                or observed.get('host_lock') != 'exclusive'
+                or not isinstance(observed.get('required_affinity'), list) or not observed['required_affinity']
+                or not set(observed['required_affinity']) <= set(observed.get('affinity', []))):
+            raise protocol.Error('successful timing execution lacks its complete isolation receipt')
     copy_tree(Path(record)/'allocation-ready.json', destination/'allocation-ready.json')
     preparation = part._read_json(str(Path(record) / 'environment-preparation.json')) or {}
     cached = 'environment_recipe' in allocation['source']
@@ -267,11 +289,14 @@ def collect_allocation_results(inv, allocation, env, result):
         if Path(env['RUNNER_TEMP']).resolve() not in origin.resolve().parents:
             raise protocol.Error('artifact path escapes RUNNER_TEMP')
         copy_tree(origin, destination/'artifacts'/name)
+    provenance = {k: allocation['source'][k] for k in ('run_head_sha', 'source_selection')
+                  if k in allocation['source']}
     part._write_json(str(destination/'allocation-result.json'), {
         'allocation': allocation['grant'], 'source_repository': allocation['source']['repository'],
         'source_sha': allocation['source']['sha'], 'source_run_id': allocation['source']['run_id'],
         'source_run_attempt': allocation['source']['run_attempt'], 'execution_job_id': allocation['job_id'],
-        'task_attempt': allocation['task_attempt'], 'result': result, 'environment_preparation': environment})
+        'task_attempt': allocation['task_attempt'], 'result': result, 'environment_preparation': environment,
+        **({'source_provenance': provenance} if provenance else {})})
     output({'allocation_id': allocation_id, 'part_id': part_id, 'state': result['state']}, env)
 
 
@@ -335,10 +360,14 @@ def execute(inv, env):
 def main(argv, inv, etc, env=None):
     env = dict(os.environ if env is None else env)
     parser = argparse.ArgumentParser(prog='ci-run central')
-    parser.add_argument('operation', choices=('prepare', 'build', 'submit', 'failure', 'inspect', 'fetch', 'execute', 'allocate', 'task-result', 'batch-result', 'capacity', 'batch', 'publish-plan', 'publish-result'))
+    parser.add_argument('operation', choices=('prepare', 'build', 'submit', 'failure', 'inspect', 'fetch', 'execute', 'allocate', 'task-result', 'batch-result', 'execution-result', 'report', 'capacity', 'batch', 'publish-plan', 'publish-result'))
     parser.add_argument('--project', default='')
     parser.add_argument('--context', default='')
     parser.add_argument('--sha', default='')
+    parser.add_argument('--test-source', default='')
+    parser.add_argument('--range-base', default='')
+    parser.add_argument('--report-gate', action='store_true')
+    parser.add_argument('--report-reference', default='')
     parser.add_argument('--plan-command', default='')
     parser.add_argument('--plan-only', action='store_true')
     parser.add_argument('--cancel-in-progress', action='store_true')
@@ -395,8 +424,12 @@ def main(argv, inv, etc, env=None):
                                 f'Tests and the final verdict continue in this workflow run.\n')
         elif args.operation == 'allocate':
             return wait_for_task_allocation(args, connection, env)
-        elif args.operation in ('task-result', 'batch-result'):
+        elif args.operation in ('task-result', 'batch-result', 'execution-result'):
             return report_final_result(args, connection, env)
+        elif args.operation == 'report':
+            result = connection.call('report', batch_id=args.batch_id, reference=json.loads(args.report_reference),
+                                     source_identity=source_identity(env), runner=env['RUNNER_NAME'])
+            output({'report_accepted': str(result['accepted']).lower()}, env)
         elif args.operation == 'inspect':
             return inspect(args, inv, env)
         elif args.operation == 'fetch':

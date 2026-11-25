@@ -1,4 +1,4 @@
-# Central consumer orchestration: proposed additive contract
+# Central consumer orchestration: approved additive contract
 
 Status: implementation approved by the lead on 2026-11-25. Keep deployed commit `0a4fa2b`
 unchanged. This proposal completes the consumer migration after the approved
@@ -233,3 +233,59 @@ host timing preflight. Changes to services, settings, runner labels, releases,
 budgets and Slurm bindings are not approved by this document or by the previous
 two-node GPU canary authorization. No production context is enabled until the
 complete consumer graph and formal PR/Main/Nightly/cluster acceptance pass.
+
+## Implementation handover (2026-11-25)
+
+The candidate now implements the three approved sections. `source_selection.py`
+keeps strict run-head matching as the default and resolves explicit selectors
+only through authoritative same-repository GitHub records and human write/admin
+permissions. Source provenance accompanies each native allocation result.
+
+`timing.py` pins the private reference affinity, nice zero and live exclusive
+lock. The controller reserves the complete device budget; reservation, claim and
+scope launch independently reject stale/revoked profiles. The executor advertises
+capability 5. A private timing profile also renders the matching inventory lock;
+it cannot silently bind a partial CPU budget or multiple lock identities.
+
+`reporting.py` compares immutable native and compatibility manifests, required
+files, producer metadata and seals. Compatibility project identities retain the
+source run's head SHA; the verified producer metadata separately binds the exact
+tested checkout SHA. Dispatch/replay therefore preserves the existing history
+reader's namespace without conflating the two revisions. The reporting job
+submits while running; only its authoritative successful completion can release
+a pending primary success. Cancellation withdraws that success; superseding a
+pending report closes it without overwriting completed historical results.
+
+Optional host-owned `source-selectors.json`, `report-gates.json` and
+`timing-profiles.json` inputs render absolute policy references. Source/report
+policy is controller-only; timing policy is also executor-local. Their contents
+are hashed into the reviewed deployment input. No actual policy, device, account
+or endpoint inventory is committed here, and no profile is enabled by omission.
+
+The scheduler database advances to schema 5 after a complete drain. Existing
+ungated history remains ungated. Deployment must back up the drained database
+and units, install matching candidate controller/executors and workflow/action
+revisions, verify compatibility, then opt in only the reviewed BrainSpike
+contexts. The reusable template's release references still require the normal
+matching-release procedure; new inputs must not be used with an older action or
+controller. No release tag or service entry was changed for this implementation.
+Do not restore an old database backup after unrelated consumers have resumed.
+
+Native Linux validation uses private exports on the existing second canary
+account, the shared host lock, a 2-GiB memory scope and two-CPU quota:
+
+- `python -m unittest discover -s parallel/tests -t . -p 'test_*.py' -q`:
+  318 passed.
+- `python parallel/tests/orchestration_mutants.py`: all 49 source/timing/report guards,
+  with each new behavioral test mapped to a killing mutation in that file.
+- `python parallel/tests/multi_gpu_mutants.py`: all 18 existing GPU/Slurm safety
+  mutations killed after updating their exact source targets for capability 5.
+- BrainSpike's converter, native receipt bridge, compatibility adapter and
+  original golden-plan reader: 115 passed, no skips, against this source export;
+  all 10 consumer conversion/report faults killed.
+
+These are implementation/codec/state-machine checks. Physical reference-machine
+comparison, deployed selector/report acceptance, allocation-local PR dependency
+isolation, the complete consumer graph, original RAM capacity and site-bound GPU
+Slurm/model acceptance remain outstanding. The running `0a4fa2b` canary remains
+unchanged; this handover is not production activation or full CI acceptance.

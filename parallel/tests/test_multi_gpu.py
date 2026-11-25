@@ -154,7 +154,7 @@ class Central(unittest.TestCase):
         self.store.db.execute('DROP TABLE allocation_cards')
         upgraded = self.open_store()
         self.assertEqual(upgraded.allocation(allocation['id'])['grant'], allocation['grant'])
-        self.assertEqual(upgraded.db.execute('SELECT version FROM meta').fetchone()[0], 4)
+        self.assertEqual(upgraded.db.execute('SELECT version FROM meta').fetchone()[0], 5)
 
 
 class Local(unittest.TestCase):

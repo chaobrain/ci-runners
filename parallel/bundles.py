@@ -91,4 +91,12 @@ def verify_result(etc, allocation, job_id):
                 or doc.get('source_run_id') != ident['run_id'] or doc.get('source_run_attempt') != ident['run_attempt']
                 or doc.get('execution_job_id') != job_id or doc.get('task_attempt') != ident['task_attempt']):
             raise storage.Error('identity')
+        provenance = {k: allocation['source'][k] for k in ('run_head_sha', 'source_selection')
+                      if k in allocation['source']}
+        if provenance and protocol.dumps(doc.get('source_provenance')) != protocol.dumps(provenance):
+            raise storage.Error('identity')
+        if allocation['result'].get('state') == 'success':
+            from parallel import reporting
+            reporting.require_members({p.relative_to(destination).as_posix(): ('', p.stat().st_size)
+                                       for p in destination.rglob('*') if p.is_file()}, allocation['part'].get('required_files', []))
     return ref

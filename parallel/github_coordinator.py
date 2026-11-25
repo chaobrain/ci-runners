@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from ci_runners import client, github, policy, storage
-from parallel import bundles, protocol, transport
+from parallel import bundles, protocol, source_selection, transport
 
 
 _SOURCE_EVENTS = frozenset({'pull_request', 'push', 'workflow_dispatch', 'schedule'})
@@ -131,8 +131,10 @@ class GitHub:
             return policy.Decision(False, 'policy')
         return decision
 
-    def source(self, requested: dict, pol: policy.Policy, *, repository_members=False, organization=None) -> dict:
+    def source(self, requested: dict, pol: policy.Policy, *, repository_members=False, organization=None,
+               source_selectors=None) -> dict:
         protocol.source_key(requested)
+        source_selection.selector(requested)
         repo = requested['repository'].lower()
         if organization is not None:
             known = self._private_organization_repository(repo, organization)
@@ -150,7 +152,10 @@ class GitHub:
         if event_name not in _SOURCE_EVENTS:
             raise protocol.Error('source event is not supported by schema 2')
         event = {'repository': run['repository']}
-        if event_name == 'pull_request':
+        selected = source_selection.resolve(self.api, known, run, requested, source_selectors or {})
+        if selected is not None:
+            selection, concurrency_key = selected
+        elif event_name == 'pull_request':
             matches = [p for p in run.get('pull_requests', []) if p.get('head', {}).get('sha') == requested['sha']]
             if not matches:
                 raise protocol.Error('test SHA is not the source pull request head')
@@ -178,7 +183,10 @@ class GitHub:
         if run.get('conclusion') == 'cancelled':
             raise protocol.Error('source run was cancelled')
         # Keep the original policy facts for the execution hook, not the service actor.
-        return {**requested, 'repository': repo, 'concurrency_key': concurrency_key,
+        provenance = ({'run_head_sha': selection['run_head_sha'], 'source_selection': selection}
+                      if selected is not None else {})
+        clean = {k: v for k, v in requested.items() if k not in ('run_head_sha', 'source_selection')}
+        return {**clean, **provenance, 'repository': repo, 'concurrency_key': concurrency_key,
                 'admission': {'env': env, 'event': event}}
 
     def run_attempt(self, source):
@@ -264,7 +272,8 @@ class WorkflowCoordinator:
     def publish_batch(self, batch_id):
         batch = self.store.batch(batch_id)
         if self.store.is_latest_status(batch):
-            self.publish_status(batch['source'], batch['state'], f'CI tests: {batch["state"]}; {len(batch["tasks"])} tasks')
+            state = batch['publication_state']
+            self.publish_status(batch['source'], state, f'CI tests: {state}; {len(batch["tasks"])} tasks')
 
     def send_one(self):
         if self.clock() - self.last_write < 1:
@@ -335,10 +344,36 @@ class WorkflowCoordinator:
             if job and job.get('status') == 'completed' and job.get('conclusion') != 'success':
                 self.store.task_request_failed(batch['id'], task['id'], task_attempt)
 
+    def reconcile_reports(self, batch, jobs, source_done):
+        report = batch['report']
+        if report is None or report['state'] in ('success', 'error') or batch['state'] not in protocol.TERMINAL:
+            return
+        from parallel import reporting
+        job = find_job(jobs, reporting.job_name(batch['id']))
+        if job and job.get('status') == 'completed':
+            if (job.get('conclusion') != 'success' or report['reference'] is None
+                    or job.get('id') != report['job_id'] or job.get('run_id') != batch['source']['run_id']
+                    or 'ci-plan' not in job.get('labels', [])):
+                self.store.finish_report(batch['id'], success=False, reason='reporting job did not complete verification')
+                return
+            try:
+                if self.storage_etc is None:
+                    raise storage.Error('configuration')
+                reporting.verify_receipt(self.storage_etc, batch, report['reference'])
+            except (OSError, ValueError, KeyError):
+                self.store.finish_report(batch['id'], success=False, reason='report receipt or projected files failed verification')
+            else:
+                self.store.finish_report(batch['id'], success=True)
+        elif source_done and report['source_ended'] is not None and self.clock()-report['source_ended'] >= 60:
+            self.store.finish_report(batch['id'], success=False, reason='source ended without its required report receipt')
+
     def reconcile(self):
         active_batches = {allocation['batch_id'] for allocation in self.store.allocations()}
-        for batch in self.store.batches():
-            if batch['state'] != 'pending' and batch['id'] not in active_batches:
+        for record in self.store.batches():
+            batch = self.store.batch(record['id'])
+            report_tracking = (batch['report'] is not None and
+                               (batch['report']['state'] not in ('success', 'error') or not batch['source_done']))
+            if batch['state'] != 'pending' and batch['id'] not in active_batches and not report_tracking:
                 continue
             run = self.api.run_attempt(batch['source'])
             source_done = run.get('status') == 'completed'
@@ -347,6 +382,7 @@ class WorkflowCoordinator:
             jobs = self.api.jobs(batch['source'])
             self.reconcile_execution_jobs(batch, jobs, source_done)
             self.reconcile_task_requests(self.store.batch(batch['id']), jobs)
+            self.reconcile_reports(self.store.batch(batch['id']), jobs, source_done)
         for notice in self.store.notices(pending=True):
             run = self.api.run_attempt(notice['source'])
             if run.get('status') == 'completed':

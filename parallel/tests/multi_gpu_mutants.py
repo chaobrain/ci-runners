@@ -10,7 +10,7 @@ MUTANTS = (
      'WHERE ac.uuid=c.uuid AND a.released=0)', 'WHERE ac.uuid=c.uuid AND a.released=1)',
      'Central.test_concurrent_pairs_have_disjoint_cards_and_preserve_memory_and_cpus'),
     ('old-executor-accepted', 'parallel.scheduler_store',
-     'if capability is None or capability[0] < (4 if remote_gpu else 3):', 'if False:',
+     "if capability is None or capability[0] < (5 if part.get('isolation') == 'timing' else 4 if remote_gpu else 3):", 'if False:',
      'Central.test_pair_does_not_span_devices_or_reach_old_executors'),
     ('duplicate-grant-cards', 'parallel.protocol',
      'validate_gpu_list(device, cards)\n    elif', 'pass\n    elif',

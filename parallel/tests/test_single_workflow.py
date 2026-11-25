@@ -334,7 +334,7 @@ class DatabaseUpgrade(unittest.TestCase):
             store = scheduler_store.Store(str(path))
             self.addCleanup(store.close)
             self.assertEqual(store.batch('old')['state'], 'success')
-            self.assertEqual(store.db.execute('SELECT version FROM meta').fetchone()[0], 3)
+            self.assertEqual(store.db.execute('SELECT version FROM meta').fetchone()[0], 4)
             self.assertTrue(store.batch('old')['source_done'])
 
 

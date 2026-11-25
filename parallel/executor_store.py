@@ -50,7 +50,17 @@ class Ledger:
                 if active or db.execute('SELECT 1 FROM reports WHERE delivered=0').fetchone():
                     raise protocol.Error('drain local allocations and deliver reports before upgrading')
                 db.execute("ALTER TABLE config ADD COLUMN gpu_uuids TEXT NOT NULL DEFAULT '[]'")
-            db.execute('CREATE TABLE IF NOT EXISTS held_gpus(uuid TEXT PRIMARY KEY, allocation TEXT UNIQUE NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS held_gpus(uuid TEXT PRIMARY KEY, allocation TEXT NOT NULL)')
+            indexes = db.execute('PRAGMA index_list(held_gpus)').fetchall()
+            single = any(index['unique'] and
+                         [column['name'] for column in db.execute('PRAGMA index_info("' +
+                          index['name'].replace('"', '""') + '")')] == ['allocation'] for index in indexes)
+            if single:
+                if active or db.execute('SELECT 1 FROM held_gpus').fetchone() or db.execute(
+                        'SELECT 1 FROM reports WHERE delivered=0').fetchone():
+                    raise protocol.Error('drain local allocations and deliver reports before upgrading GPU leases')
+                db.execute('DROP TABLE held_gpus')
+                db.execute('CREATE TABLE held_gpus(uuid TEXT PRIMARY KEY, allocation TEXT NOT NULL)')
             old = db.execute('SELECT groups_json,gpu_uuids FROM config WHERE id=1').fetchone()
             encoded = protocol.dumps(groups)
             cards = protocol.dumps(sorted(gpu_uuids))
@@ -106,8 +116,7 @@ class Ledger:
                 raise protocol.Error('local CPU groups do not match the central reservation')
             chosen = free[:need]
             cpus = []  # Retained database field for compatibility; no CPU IDs are assigned.
-            card = grant.get('gpu_uuid')
-            if card is not None:
+            for card in protocol.grant_cards(grant):
                 if card not in self.gpu_uuids or db.execute('SELECT 1 FROM held_gpus WHERE uuid=?', (card,)).fetchone():
                     raise protocol.Error('authorized GPU is not available in the local inventory')
                 db.execute('INSERT INTO held_gpus VALUES(?,?)', (card, aid))

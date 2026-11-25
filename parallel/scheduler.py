@@ -419,7 +419,7 @@ class Scheduler:
         if method == 'heartbeat':
             gpu_free_mib = params.get('gpu_free_mib')
             version = params.get('allocation_schema', 1)
-            gpu_capable = type(version) is int and version == 2
+            gpu_capable = type(version) is int and version in (2, 3)
             if gpu_free_mib is not None and not gpu_capable:
                 raise protocol.Error('GPU observations require allocation schema 2')
             readiness = {'ready_projects': params.get('ready_projects')}
@@ -441,9 +441,9 @@ class Scheduler:
             elif self.device_admission_file and not isinstance(readiness['ready_projects'], dict):
                 raise protocol.Error('report ready projects with device heartbeats')
             self.store.heartbeat(identity, params['runners'], drained=params.get('drained', False),
-                                 gpu_free_mib=gpu_free_mib, **readiness)
+                                 gpu_free_mib=gpu_free_mib, allocation_schema=version, **readiness)
             return [{k: a[k] for k in ('id', 'grant', 'cancelled', 'runner_done')}
-                    for a in self.store.allocations(host=identity) if gpu_capable or a['gpu_uuid'] is None]
+                    for a in self.store.allocations(host=identity) if a['grant']['allocation_schema'] <= version]
         if method == 'event':
             self.store.event(identity, params['event_id'], params['allocation_id'], params['kind'], params.get('result'))
             return {'accepted': True}

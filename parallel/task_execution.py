@@ -119,9 +119,10 @@ def check_fence(path, grant, cpus):
         row = db.execute('SELECT state,cancelled,grant_json,cpus FROM executions WHERE id=?', (grant['allocation_id'],)).fetchone()
         if (row is None or row[0] == 'released' or row[1] or json.loads(row[2]) != grant or json.loads(row[3]) != cpus):
             raise protocol.Error('allocation was closed before the scope started')
-        if grant.get('gpu_uuid') and not db.execute('SELECT 1 FROM held_gpus WHERE uuid=? AND allocation=?',
-                                                  (grant['gpu_uuid'], grant['allocation_id'])).fetchone():
-            raise protocol.Error('allocation no longer holds the authorized GPU')
+        for card in protocol.grant_cards(grant):
+            if not db.execute('SELECT 1 FROM held_gpus WHERE uuid=? AND allocation=?',
+                              (card, grant['allocation_id'])).fetchone():
+                raise protocol.Error('allocation no longer holds every authorized GPU')
         db.commit()
     finally:
         db.close()
@@ -137,16 +138,18 @@ def supervise(record, grant, cpus, command, fence=None, max_temp_c=80, gpu_mem_m
             quota, memory = resource_limits()
             width = slurm_cpu_width() if is_slurm else None
             check_limits(grant, quota, memory, slurm_width=width, supervisor_memory_cap=supervisor_memory_cap)
-        card = grant.get('gpu_uuid', '')
-        if card and gpu_resources.available([card], max_temp_c).get(card, -1) < gpu_mem_mib:
+        cards = protocol.grant_cards(grant)
+        ready = gpu_resources.available(cards, max_temp_c) if cards else {}
+        if any(ready.get(card, -1) < gpu_mem_mib for card in cards):
             raise protocol.Error('authorized GPU is no longer available')
         if fence is not None:
             check_fence(fence, grant, cpus)
-        os.environ.update(CUDA_VISIBLE_DEVICES=card, CI_CPUS=part.cpu_list(os.sched_getaffinity(0)),
+        os.environ.update(CUDA_VISIBLE_DEVICES=','.join(cards), CI_CPUS=part.cpu_list(os.sched_getaffinity(0)),
                           CI_CORES=str(grant['cores']), CI_WORKERS=str(grant['workers']),
                           CI_CPU_GROUPS=str(grant['cpu_groups']), CI_RAM=grant['RAM'])
         part._write_json(os.path.join(record, 'allocation-ready.json'), {'allocation_id': grant['allocation_id'],
-                         'cores': grant['cores'], 'RAM': grant['RAM'], 'workers': grant['workers'], 'gpu_uuid': card,
+                         'cores': grant['cores'], 'RAM': grant['RAM'], 'workers': grant['workers'],
+                         'gpu_uuid': cards[0] if len(cards) == 1 else '', 'gpu_uuids': cards,
                          'memory_enforcement': ('process-tree' if supervisor_memory_cap else
                                                 'cgroup' if verify_resource_limits else 'unverified')})
     except (OSError, ValueError, KeyError, sqlite3.Error) as e:
@@ -154,7 +157,10 @@ def supervise(record, grant, cpus, command, fence=None, max_temp_c=80, gpu_mem_m
                          'end_epoch': time.time(), 'boot_end': part.boot_id()})
         return 2
     argv = launch_argv if launch_argv is not None else part.command_argv(command, nice=10)
-    return part.supervise(record, grant['minutes']*60, argv, cap=supervisor_memory_cap)
+    options = {'cap': supervisor_memory_cap}
+    if len(cards) == 2:
+        options['p2p'] = part.p2p_argv(str(Path(__file__).resolve().parents[1]))
+    return part.supervise(record, grant['minutes']*60, argv, **options)
 
 
 def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subprocess.Popen):
@@ -194,12 +200,11 @@ def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subpro
     if (grant['workers'] != task['workers'] or grant['cores'] != task['cores']
             or grant['RAM'] != f'{protocol.part_memory_gib(task)}G'):
         raise protocol.Error('allocation changed the requested resources')
-    card = grant.get('gpu_uuid')
-    if (task.get('gpu', False) != (card is not None)
-            or card and (card not in inv.host.get('gpu_uuids', []) or grant['device'] not in proj.devices)
+    cards = protocol.grant_cards(grant)
+    if (protocol.gpu_count(task) != len(cards)
+            or cards and (not set(cards) <= set(inv.host.get('gpu_uuids', [])) or grant['device'] not in proj.devices)
             or task.get('device') and task['device'] != grant['device']):
         raise protocol.Error('allocation changed the requested GPU or device')
-    cards = [card] if card else []
     release = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     engine = part.Executor(inv, etc, env, release=release, run=run, spawn=spawn)
     slurm_target = source.get('slurm_target', '').replace('/', ':', 1)

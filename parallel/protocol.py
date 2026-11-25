@@ -28,6 +28,21 @@ def positive(value: object) -> bool:
     return type(value) is int and value > 0
 
 
+def gpu_count(part: Mapping) -> int:
+    """The original plan alone defines card demand; never infer it from workers."""
+    count = part.get('gpu_count', 1 if part.get('gpu', False) else 0)
+    if type(count) is not int or count not in (0, 1, 2) or bool(count) != part.get('gpu', False):
+        raise Error('gpu_count must be 0, 1 or 2 and agree with gpu')
+    return count
+
+
+def grant_cards(grant: Mapping) -> list[str]:
+    """Read an already validated grant, retaining the single-card wire format."""
+    if grant.get('allocation_schema', 1) == 3:
+        return list(grant['gpu_uuids'])
+    return [grant['gpu_uuid']] if grant.get('gpu_uuid') else []
+
+
 def number(value: object, maximum: float) -> bool:
     return type(value) in (int, float) and math.isfinite(value) and 0 < value <= maximum
 
@@ -101,7 +116,7 @@ def load_plan(doc: object, *, max_minutes: float = MAX_MINUTES) -> dict:
     if not isinstance(files, str) or files and not relative(files):
         raise Error('files must be a relative directory below the checkout')
     out, seen = [], set()
-    keys = {'id', 'needs', 'device', 'gpu', 'cores', 'workers', 'minutes', 'queue_minutes', 'memory_gib',
+    keys = {'id', 'needs', 'device', 'gpu', 'gpu_count', 'cores', 'workers', 'minutes', 'queue_minutes', 'memory_gib',
             'command', 'results', 'artifacts', 'history'}
     for p in parts:
         if not isinstance(p, dict) or set(p) - keys:
@@ -117,6 +132,7 @@ def load_plan(doc: object, *, max_minutes: float = MAX_MINUTES) -> dict:
             raise Error(f'{name}: device must be empty or one of {", ".join(sorted(DEVICES))}')
         if type(p.get('gpu', False)) is not bool:
             raise Error(f'{name}: gpu must be boolean')
+        gpu_count(p)
         if p.get('gpu') and device == 'slurm':
             raise Error(f'{name}: Slurm does not provide central GPU cards')
         cores = p.get('cores', GROUP_CPUS)
@@ -194,7 +210,7 @@ def execution_job_name(task_id: str, task_attempt: int) -> str:
 
 
 def validate_allocation(value: object) -> dict:
-    if not isinstance(value, dict) or type(value.get('allocation_schema')) is not int or value['allocation_schema'] not in (1, 2):
+    if not isinstance(value, dict) or type(value.get('allocation_schema')) is not int or value['allocation_schema'] not in (1, 2, 3):
         raise Error('unknown allocation schema')
     for key in ('allocation_id', 'task_id', 'runner_tag', 'host'):
         if not isinstance(value.get(key), str) or not ID.fullmatch(value[key]):
@@ -209,7 +225,16 @@ def validate_allocation(value: object) -> dict:
     if value['allocation_schema'] == 2:
         if device not in GPU_QUOTAS or not isinstance(value.get('gpu_uuid'), str) or not GPU_UUID.fullmatch(value['gpu_uuid']):
             raise Error('GPU allocation requires one physical GPU UUID on a local device')
-    elif 'gpu_uuid' in value:
+        if 'gpu_uuids' in value or 'gpu_count' in value:
+            raise Error('single-card allocation cannot carry a multi-card envelope')
+    elif value['allocation_schema'] == 3:
+        cards = value.get('gpu_uuids')
+        if (device not in GPU_QUOTAS or 'gpu_uuid' in value
+                or type(value.get('gpu_count')) is not int or value['gpu_count'] != 2
+                or not isinstance(cards, list) or len(cards) != 2):
+            raise Error('two-card allocation requires its complete physical UUID pair')
+        validate_gpu_list(device, cards)
+    elif any(k in value for k in ('gpu_uuid', 'gpu_uuids', 'gpu_count')):
         raise Error('CPU allocation cannot carry a GPU UUID')
     groups = value.get('cpu_groups')
     if not positive(groups) or groups > DEVICE_GROUPS[device]:

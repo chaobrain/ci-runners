@@ -99,13 +99,13 @@ class Store:
 
     def _upgrade_database(self):
         version = self.db.execute('SELECT version FROM meta').fetchone()[0]
-        if version == 3:
+        if version == 4:
             return
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             raise protocol.Error('unsupported scheduler database version')
         with self.transaction() as database:
             version = database.execute('SELECT version FROM meta').fetchone()[0]
-            if version == 3:
+            if version == 4:
                 return
             pending = database.execute("SELECT 1 FROM batches WHERE state='pending'").fetchone()
             active = database.execute('SELECT 1 FROM allocations WHERE released=0 OR runner_done=0').fetchone()
@@ -118,13 +118,21 @@ class Store:
                 database.execute('ALTER TABLE allocations ADD COLUMN task_attempt INTEGER NOT NULL DEFAULT 1')
                 database.execute('UPDATE batches SET source_done=1')
                 database.execute("DELETE FROM outbox WHERE kind IN ('dispatch','cancel')")
-            database.execute('''CREATE TABLE gpu_cards(uuid TEXT PRIMARY KEY, pool TEXT NOT NULL REFERENCES pools(name),
-                             host TEXT NOT NULL, position INTEGER NOT NULL UNIQUE, free_mib INTEGER)''')
-            database.execute('ALTER TABLE tasks ADD COLUMN gpu_mem_mib INTEGER NOT NULL DEFAULT 0')
-            database.execute('ALTER TABLE allocations ADD COLUMN gpu_uuid TEXT')
-            database.execute('''CREATE UNIQUE INDEX one_gpu_allocation ON allocations(gpu_uuid)
-                             WHERE gpu_uuid IS NOT NULL AND released=0''')
-            database.execute('UPDATE meta SET version=3')
+            if version < 3:
+                database.execute('''CREATE TABLE gpu_cards(uuid TEXT PRIMARY KEY, pool TEXT NOT NULL REFERENCES pools(name),
+                                 host TEXT NOT NULL, position INTEGER NOT NULL UNIQUE, free_mib INTEGER)''')
+                database.execute('ALTER TABLE tasks ADD COLUMN gpu_mem_mib INTEGER NOT NULL DEFAULT 0')
+                database.execute('ALTER TABLE allocations ADD COLUMN gpu_uuid TEXT')
+                database.execute('''CREATE UNIQUE INDEX one_gpu_allocation ON allocations(gpu_uuid)
+                                 WHERE gpu_uuid IS NOT NULL AND released=0''')
+            database.execute('''CREATE TABLE allocation_cards(
+                allocation TEXT NOT NULL REFERENCES allocations(id), uuid TEXT NOT NULL,
+                position INTEGER NOT NULL, PRIMARY KEY(allocation,uuid), UNIQUE(allocation,position))''')
+            database.execute('''INSERT INTO allocation_cards SELECT id,gpu_uuid,0 FROM allocations
+                                WHERE gpu_uuid IS NOT NULL''')
+            database.execute('''CREATE TABLE allocation_capabilities(
+                                host TEXT PRIMARY KEY REFERENCES hosts(name), schema INTEGER NOT NULL)''')
+            database.execute('UPDATE meta SET version=4')
 
     def prepared_environment(self, source, candidate=None):
         """The first trusted resolution for this source attempt wins across restarts."""
@@ -213,7 +221,8 @@ class Store:
                 match = next((r for r in runners if r['tag'] == a['runner']), None)
                 if not match or match['host'] != a['host'] or match['pool'] != a['pool']:
                     raise protocol.Error('drain active allocations before changing runner mappings')
-                if a['gpu_uuid'] and not a['released'] and cards.get(a['gpu_uuid']) != (a['pool'], a['host']):
+                held_cards = [r[0] for r in db.execute('SELECT uuid FROM allocation_cards WHERE allocation=?', (a['id'],))]
+                if not a['released'] and any(cards.get(card) != (a['pool'], a['host']) for card in held_cards):
                     raise protocol.Error('drain active GPU leases before changing the card inventory')
             for p, total in pools.items():
                 used = db.execute('SELECT COALESCE(SUM(groups),0) FROM allocations WHERE pool=? AND released=0', (p,)).fetchone()[0]
@@ -303,12 +312,17 @@ class Store:
         return {'schema': 1, 'devices': devices}
 
     def heartbeat(self, host: str, runners: list[dict], *, drained: bool = False, gpu_free_mib=None,
-                  ready_projects=None, organization_ready=False, organization_repositories=None, environment_cache=False):
+                  ready_projects=None, organization_ready=False, organization_repositories=None, environment_cache=False,
+                  allocation_schema=None):
         """Called only for an authenticated host; it cannot report another host's runners."""
         if (type(drained) is not bool or type(organization_ready) is not bool or not isinstance(runners, list)
                 or type(environment_cache) is not bool
                 or (environment_cache and (organization_ready or organization_repositories is not None))):
             raise protocol.Error('invalid heartbeat')
+        if allocation_schema is None:
+            allocation_schema = 2 if gpu_free_mib is not None else 1
+        if type(allocation_schema) is not int or allocation_schema not in (1, 2, 3):
+            raise protocol.Error('invalid allocation capability')
         with self.transaction() as db:
             known = {r[0] for r in db.execute('SELECT tag FROM runners WHERE host=?', (host,))}
             if not known:
@@ -361,6 +375,8 @@ class Store:
                 db.execute('UPDATE runners SET online=0 WHERE tag=?', (missing,))
             db.execute('INSERT INTO hosts VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET seen=excluded.seen,drained=excluded.drained',
                        (host, self.clock(), drained))
+            db.execute('''INSERT INTO allocation_capabilities VALUES(?,?) ON CONFLICT(host)
+                          DO UPDATE SET schema=excluded.schema''', (host, allocation_schema))
 
     def submit(self, source: dict, plan: dict, eligible: Mapping[str, list[str]], *, max_parallel=16, retries=1,
                gpu_mem_mib=0, organization=False) -> str:
@@ -516,16 +532,23 @@ class Store:
                 devices.sort(key=lambda device: -priorities.get(device, 0))
         if part.get('gpu'):
             free_cards = database.execute('''SELECT pool,uuid FROM gpu_cards c WHERE free_mib>=?
-                AND NOT EXISTS(SELECT 1 FROM allocations a WHERE a.gpu_uuid=c.uuid AND released=0)
+                AND NOT EXISTS(SELECT 1 FROM allocation_cards ac JOIN allocations a ON a.id=ac.allocation
+                               WHERE ac.uuid=c.uuid AND a.released=0)
                 ORDER BY position''', (task_record['gpu_mem_mib'],)).fetchall()
-            candidates = [(c['pool'], c['uuid']) for c in free_cards if c['pool'] in devices]
+            need = protocol.gpu_count(part)
+            candidates = [(c['pool'], [c['uuid']]) for c in free_cards if c['pool'] in devices] if need == 1 else []
+            if need == 2:
+                for device in dict.fromkeys(c['pool'] for c in free_cards if c['pool'] in devices):
+                    cards = [c['uuid'] for c in free_cards if c['pool'] == device]
+                    if len(cards) >= need:
+                        candidates.append((device, cards[:need]))
             if organization:
                 candidates.sort(key=lambda candidate: ORGANIZATION_DEVICE_ORDER.index(candidate[0]))
             elif allowed_devices is not None:
                 candidates.sort(key=lambda candidate: -priorities[candidate[0]])
         else:
-            candidates = [(device, None) for device in devices]
-        for device, gpu_uuid in candidates:
+            candidates = [(device, []) for device in devices]
+        for device, gpu_uuids in candidates:
             pool = database.execute('SELECT total FROM pools WHERE name=? AND enabled=1', (device,)).fetchone()
             occupied = database.execute('SELECT COALESCE(SUM(groups),0) FROM allocations WHERE pool=? AND released=0',
                                         (device,)).fetchone()[0]
@@ -537,6 +560,11 @@ class Store:
                 ORDER BY r.tag LIMIT 1''', (device, fresh_after, fresh_after)).fetchone()
             if runner is None or (allowed_devices is not None and device not in compatible.get(runner['host'], ())):
                 continue
+            if len(gpu_uuids) == 2:
+                capability = database.execute('SELECT schema FROM allocation_capabilities WHERE host=?',
+                                               (runner['host'],)).fetchone()
+                if capability is None or capability[0] < 3:
+                    continue
             if device != 'slurm':
                 registration = database.execute('SELECT profile FROM device_registrations WHERE device=?',
                                                 (runner['host'],)).fetchone()
@@ -555,7 +583,7 @@ class Store:
                     continue
             if organization and device == 'slurm' and (slurm_permitted is None or not slurm_permitted(source, part)):
                 continue
-            return runner, groups_required, gpu_uuid
+            return runner, groups_required, gpu_uuids
         return None
 
     def reserve(self, *, heartbeat_ttl=HEARTBEAT_TTL, allowed_devices=None, organization=False,
@@ -584,13 +612,16 @@ class Store:
                                                       require_repository_environment, require_environment_cache)
                     if selected is None:
                         continue
-                    runner_record, groups_required, gpu_uuid = selected
+                    runner_record, groups_required, gpu_uuids = selected
                     allocation_id = uuid.uuid4().hex
                     database.execute('''INSERT INTO allocations
                         (id,task,pool,runner,host,groups,state,run_id,run_attempt,task_attempt,created,updated,gpu_uuid)
                         VALUES(?,?,?,?,?,?,'reserved',?,?,?,?,?,?)''',
                         (allocation_id, task_record['id'], runner_record['pool'], runner_record['tag'], runner_record['host'],
-                         groups_required, source['run_id'], source['run_attempt'], task_record['attempts'] + 1, now, now, gpu_uuid))
+                         groups_required, source['run_id'], source['run_attempt'], task_record['attempts'] + 1, now, now,
+                         gpu_uuids[0] if len(gpu_uuids) == 1 else None))
+                    database.executemany('INSERT INTO allocation_cards VALUES(?,?,?)',
+                                         [(allocation_id, card, n) for n, card in enumerate(gpu_uuids)])
                     if organization and runner_record['pool'] != 'slurm':
                         database.execute('''INSERT INTO repository_environment_allocations(allocation)
                             SELECT ? FROM organization_environments WHERE device=? AND repository=?''',
@@ -618,6 +649,11 @@ class Store:
             grant.update(memory_gib=p['memory_gib'], RAM=f'{p["memory_gib"]}G')
         if a['gpu_uuid'] is not None:
             grant.update(allocation_schema=2, gpu_uuid=a['gpu_uuid'])
+        else:
+            cards = [row[0] for row in db.execute('''SELECT uuid FROM allocation_cards
+                          WHERE allocation=? ORDER BY position''', (aid,))]
+            if cards:
+                grant.update(allocation_schema=3, gpu_count=2, gpu_uuids=cards)
         return {**dict(a), 'grant': grant, 'part': p, 'source': source, 'batch_id': b['id'],
                 'deadline': t['deadline'], 'result': json.loads(a['result'])}
 
@@ -706,9 +742,9 @@ class Store:
                 if not isinstance(result, dict) or result.get('state') not in protocol.TERMINAL:
                     raise protocol.Error('release needs a terminal execution result')
                 if not a['released']:
-                    if a['gpu_uuid'] is not None:
+                    for card in protocol.grant_cards(a['grant']):
                         db.execute('''UPDATE gpu_cards SET position=(SELECT MAX(position)+1 FROM gpu_cards)
-                                   WHERE uuid=?''', (a['gpu_uuid'],))
+                                   WHERE uuid=?''', (card,))
                     db.execute("UPDATE allocations SET released=1,state='released',result=?,updated=? WHERE id=?",
                                (protocol.dumps(result), self.clock(), aid))
                     db.execute("UPDATE tasks SET state='finishing' WHERE id=?", (a['task'],))
@@ -866,7 +902,8 @@ class Store:
                          WHEN c.free_mib IS NULL OR h.seen IS NULL OR h.seen<=? OR h.drained THEN 'unavailable'
                          ELSE 'free' END AS status, COUNT(*) AS n
                     FROM gpu_cards c LEFT JOIN hosts h ON c.host=h.name
-                    LEFT JOIN allocations a ON a.gpu_uuid=c.uuid AND a.released=0
+                    LEFT JOIN (SELECT ac.uuid,a.id,a.state FROM allocation_cards ac
+                               JOIN allocations a ON a.id=ac.allocation WHERE a.released=0) a ON a.uuid=c.uuid
                     WHERE c.pool=? GROUP BY status''', (self.clock()-120, p['name'])).fetchall()
                 gpu = {row['status']: row['n'] for row in gpu_states}
                 out.append({'device': p['name'], 'groups_total': p['total'], 'groups_reserved': used.get('reserved', 0),

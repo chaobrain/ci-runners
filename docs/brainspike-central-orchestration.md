@@ -276,6 +276,9 @@ account, the shared host lock, a 2-GiB memory scope and two-CPU quota:
 
 - `python -m unittest discover -s parallel/tests -t . -p 'test_*.py' -q`:
   318 passed.
+- `python -m unittest discover -s tests -t . -p 'test_*.py' -q`:
+  1,448 passed, one skipped. This suite expects umask 022 for its temporary
+  setup-mode fixture; the export and its parent remain private.
 - `python parallel/tests/orchestration_mutants.py`: all 49 source/timing/report guards,
   with each new behavioral test mapped to a killing mutation in that file.
 - `python parallel/tests/multi_gpu_mutants.py`: all 18 existing GPU/Slurm safety
@@ -283,6 +286,9 @@ account, the shared host lock, a 2-GiB memory scope and two-CPU quota:
 - BrainSpike's converter, native receipt bridge, compatibility adapter and
   original golden-plan reader: 115 passed, no skips, against this source export;
   all 10 consumer conversion/report faults killed.
+- All 3,033 registered mutation snippets match the current stamped source.
+  The existing schema-upgrade mutation also kills its original v1-history test
+  through the production runner after updating its schema-5 source target.
 
 These are implementation/codec/state-machine checks. Physical reference-machine
 comparison, deployed selector/report acceptance, allocation-local PR dependency

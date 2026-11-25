@@ -128,7 +128,7 @@ CASES = [
      ['parallel.tests.test_single_workflow.WorkflowBridge.test_workflow_dependency_chain_carries_failure_to_the_source_run']),
     ('parallel/github_coordinator.py', '/attempts/{source["run_attempt"]}/jobs', '/jobs',
      ['parallel.tests.test_single_workflow.GitHubIdentity.test_job_listing_is_scoped_to_the_attempt_and_paginates']),
-    ('parallel/scheduler_store.py', "database.execute('UPDATE meta SET version=4')", "database.execute('SELECT version FROM meta')",
+    ('parallel/scheduler_store.py', "database.execute('UPDATE meta SET version=5')", "database.execute('SELECT version FROM meta')",
      ['parallel.tests.test_single_workflow.DatabaseUpgrade.test_v1_upgrade_preserves_history_and_refuses_pending_work']),
     ('ci_runners/hook.py', "source['run_id'] != int(env['GITHUB_RUN_ID'])", 'False',
      ['parallel.tests.test_central_services.GitHubProtocol.test_numbered_runner_hook_requires_allocation_and_original_admission']),

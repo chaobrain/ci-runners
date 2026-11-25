@@ -5756,3 +5756,34 @@ access plan in the draft PR. Before deployment, the lead approves SSH key or
 `authorized_keys` changes, any service/timer setup plan, capacity and recovery
 ownership, pilot consumer and rollout window. The detailed preparation and
 acceptance checklist is in [shared-storage-pilot.md](shared-storage-pilot.md).
+
+### Consumer migration: independent RAM request (proposed)
+
+BrainCell's existing CPU parts request 4/8/12/40 GiB independently of their
+CPU slot. The schema 2 default of one GiB per core cannot preserve that
+workload. Add optional integer `memory_gib` to a schema 2 part. Omission
+retains the existing core-derived limit. Explicit values are positive,
+bounded by the admitted host/project limit and carried unchanged to the
+authorized allocation's `RAM`, executor scope and result identity. They
+never increase a task's cores or workers to obtain more memory.
+
+Reservation accounts for the sum of RAM of every unreleased allocation on
+the physical host, independently of CPU-group and GPU reservations, inside
+the same scheduler transaction. Queued requests wait when RAM is occupied;
+they cannot oversubscribe RAM even when CPU groups remain free. Recovery
+derives RAM from each persisted part, including old parts without the new
+field; no destructive database migration or reset is required. Slurm CPU
+requests must also fit the admitted target's per-node RAM. Existing task
+timeouts, retries, worker counts and the default RAM behavior stay intact.
+
+This is an opt-in additive protocol extension. Install a matching client,
+scheduler and executor before accepting it; a current runtime rejecting the
+new field is an expected fail-closed result. Keep published tags and the
+BrainMass runtime unchanged until the candidate's tests, resource probes,
+exact deployment diff and rollback procedure have been reviewed.
+
+Acceptance covers unchanged old plans; invalid, boolean and over-limit RAM;
+two simultaneous requests whose sum exceeds host capacity; GPU and CPU
+sharing one memory budget; release/restart behavior; allocation tampering;
+and preservation of BrainCell's frozen commands, coverage thresholds and
+4/8/12/40 GiB limits. No historical report or artifact is deleted.

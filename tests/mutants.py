@@ -5219,7 +5219,10 @@ DYNAMIC_MUTANTS = [
 MUTANTS.extend(DYNAMIC_MUTANTS)
 
 from parallel.tests.central_mutants import CASES as CENTRAL_MUTANTS
+from parallel.tests.memory_mutants import CASES as MEMORY_MUTANTS
 MUTANTS.extend(CENTRAL_MUTANTS)
+MUTANTS.extend((name, old, new, ['parallel.tests.test_memory_requests.MemoryRequests.' + test])
+               for name, old, new, test in MEMORY_MUTANTS)
 from parallel.tests.deployment_mutants import CASES as DEPLOYMENT_MUTANTS
 MUTANTS.extend(DEPLOYMENT_MUTANTS)
 from parallel.tests.storage_mutants import CASES as STORAGE_MUTANTS

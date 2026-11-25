@@ -60,8 +60,11 @@ class Scheduling(unittest.TestCase):
         for host in {r['host'] for r in self.runners}:
             self.store.heartbeat(host, [dict(tag=r['tag'], online=True, busy=False) for r in self.runners if r['host'] == host])
 
-    def submit(self, run=1, n=1, cores=4, device='', **kw):
+    def submit(self, run=1, n=1, cores=4, device='', memory_gib=None, **kw):
         p = plan(n, cores, device)
+        if memory_gib is not None:
+            for item in p['parts']:
+                item['memory_gib'] = memory_gib
         choices = [device] if device else list(self.pools)
         batch_id = self.store.submit(source(run, **kw), p, {p['id']: choices for p in p['parts']})
         for task in self.store.batch(batch_id)['tasks']:
@@ -101,9 +104,10 @@ class Scheduling(unittest.TestCase):
         self.assertEqual(cap()['runners_free'], 4)
 
     def test_fixed_device_waits_and_cancellation_holds_resources(self):
-        self.submit(1, cores=16, device='3090a')
+        # Keep RAM free so its independent guard cannot mask a broken CPU-group guard.
+        self.submit(1, cores=16, device='3090a', memory_gib=1)
         a = self.claim(self.store.reserve())
-        b = self.submit(2, device='3090a')
+        b = self.submit(2, device='3090a', memory_gib=1)
         self.assertIsNone(self.store.reserve())
         self.store.cancel(a['batch_id'])
         self.assertIsNone(self.store.reserve())

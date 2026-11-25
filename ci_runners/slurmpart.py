@@ -239,10 +239,10 @@ def order(site: slurmsite.Site, target: str, spent: Mapping[str, float], turn: i
 
 
 def budget_refusal(site: slurmsite.Site, account: str, target: str, cards: int, minutes: float,
-                   spent: Mapping[str, tuple[float, float]]) -> str:
+                   spent: Mapping[str, tuple[float, float]], cores: int | None = None) -> str:
     """Why a part's worst case would cross a cap (14.7): the site's daily or monthly, or
     the account's monthly; ``spent`` maps every account to ``(month, today)``. Pure."""
-    worst = site.worst_cost(target, cards, minutes)
+    worst = site.worst_cost(target, cards, minutes) if cores is None else site.hourly(target, cards, cores) * (minutes + slurmsite.TIME_MARGIN) / 60
     month = sum(m for m, _ in spent.values())
     day = sum(d for _, d in spent.values())
     if day + worst > float(site.site['daily_cap']):
@@ -269,6 +269,21 @@ SYNC_TRANSIENT, SYNC_DROPPED, SYNC_WAITS = (frozenset({10, 12, 23, 255}),
                                             (b'broken pipe', b'connection reset', b'connection closed'), (2.0, 8.0))
 
 
+def control_socket_path(data: str, site_name: str, alias: str, *, pid: int | None = None) -> str:
+    """Locate the SSH master's socket under the private runtime, allowing for OpenSSH's temporary suffix."""
+    identity = f'{site_name}\0{alias}\0{os.getpid() if pid is None else pid}'
+    name = hashlib.sha256(identity.encode()).hexdigest()[:12]
+    path = os.path.join(state_dir(data, site_name), 'cm', name)
+    if len(os.fsencode(path)) + SSH_TMP < SUN_PATH:
+        return path
+    path = os.path.join(data, 'ci-runners', 'run', 'cm', name)
+    size = len(os.fsencode(path))
+    if size + SSH_TMP >= SUN_PATH:
+        raise Unreachable(f'{alias}: the data root is too long for the ssh control socket '
+                          f'({size} bytes; at most {SUN_PATH - SSH_TMP - 1})')
+    return path
+
+
 class Gate:
     """An account's gate over ssh: one master connection per process, batch mode, the
     account's key only. ``ssh`` and ``rsync`` are the tools' paths. Each process has a master
@@ -285,16 +300,20 @@ class Gate:
         self.site, self.alias, self.ssh, self.rsync, self.run, self.sleep = site, alias, ssh, rsync, run, sleep
         self.redact = redact  # the error text it raises, redacted before it is cut
         self.key = os.path.join(etc, 'slurm', 'keys', alias)
-        self.cm = os.path.join(state_dir(data, site.name), 'cm')
-        self.sock = os.path.join(self.cm, hashlib.sha256(f'{alias}\0{os.getpid()}'.encode()).hexdigest()[:12])
+        self.ssh_config = os.path.join(etc, 'slurm', 'ssh_config')
+        self.data = data
+        self.pid = os.getpid()
+
+    @property
+    def sock(self) -> str:
+        return control_socket_path(self.data, self.site.name, self.alias, pid=self.pid)
 
     def ssh_argv(self) -> list[str]:
-        if len(os.fsencode(self.sock)) + SSH_TMP >= SUN_PATH:
-            raise Unreachable(f'{self.alias}: the data root is too long for the ssh control socket '
-                              f'({len(os.fsencode(self.sock))} bytes; at most {SUN_PATH - SSH_TMP - 1})')
-        os.makedirs(self.cm, mode=0o700, exist_ok=True)
-        return [self.ssh, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', self.key, '-o', 'ControlMaster=auto',
-                '-o', f'ControlPath={self.sock}', '-o', 'ControlPersist=60', '-o', 'ConnectTimeout=20',
+        sock = self.sock
+        os.makedirs(os.path.dirname(sock), mode=0o700, exist_ok=True)
+        config = ['-F', self.ssh_config] if os.path.isfile(self.ssh_config) else []
+        return [self.ssh, *config, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', self.key, '-o', 'ControlMaster=auto',
+                '-o', f'ControlPath={sock}', '-o', 'ControlPersist=60', '-o', 'ConnectTimeout=20',
                 '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4']
 
     @property
@@ -305,7 +324,8 @@ class Gate:
         """``ssh -G``'s ``hostname``, ``user`` and ``proxyjump`` of the account's alias (no
         connection), for the redactor; None if ssh cannot say the first two."""
         try:
-            r = self.run([self.ssh, '-G', self.host], capture_output=True, timeout=20)
+            config = ['-F', self.ssh_config] if os.path.isfile(self.ssh_config) else []
+            r = self.run([self.ssh, *config, '-G', self.host], capture_output=True, timeout=20)
         except (OSError, subprocess.SubprocessError):
             return None
         if r.returncode != 0:
@@ -613,6 +633,10 @@ class Driver:
 
     def drive(self) -> int:
         deadline = float(self.plan['deadline'])
+        if self.plan.get('central'):
+            from parallel.task_execution import check_fence
+            check_fence(self.plan['central_fence'], self.plan['request']['allocation'], [])
+            return self._drive(deadline)
         slot = self.take_slot(deadline)
         if slot is None:
             return self.finish({'rc': None, 'signalled': True} if self.stopping else
@@ -653,7 +677,7 @@ class Driver:
                 if alias in silent:
                     why.append(f'{target}@{alias}: the login host did not answer')
                     continue
-                refusal = budget_refusal(self.site, alias, target, p['cards'], p['minutes'], spent)
+                refusal = budget_refusal(self.site, alias, target, p['cards'], p['minutes'], spent, p['request'].get('cores'))
                 if refusal:
                     why.append(refusal)
                     continue
@@ -712,8 +736,12 @@ class Driver:
         tried: dict[str, object] = {'account': g.alias, 'target': target}
         self.block['tried'].append(tried)  # type: ignore[union-attr]
         self.block.update(account=g.alias, target=target, partition=self.site.targets[target].t['partition'],
-                          cards=p['cards'], cpus=self.site.targets[target].cpus(p['cards']))
+                          cards=p['cards'], cpus=p['request'].get('cores', self.site.targets[target].cpus(p['cards'])))
         try:
+            if 'environment_recipe' in p['request'] and self.site.site['egress'] == 'tunnel':
+                from ci_runners import slurmcache
+                request = dict(p['request'], target=target)
+                slurmcache.prepare_tunnel(g, self.key, request, p.get('cache_tunnel_port'), lambda: self.stopping)
             self.stage(g)
         except (Unreachable, Refused) as e:
             tried['why'] = f'{target}@{g.alias}: {e}'
@@ -756,6 +784,11 @@ class Driver:
             except Refused as e:
                 st = {'state': 'UNKNOWN', 'why': str(e)}
             state = str(st.get('state', 'UNKNOWN'))
+            ready = st.get('allocation_ready')
+            if (p.get('central') and isinstance(ready, dict)
+                    and ready.get('allocation_id') == p['request']['allocation']['allocation_id']
+                    and not os.path.exists(os.path.join(self.record, 'allocation-ready.json'))):
+                _write_json(os.path.join(self.record, 'allocation-ready.json'), ready)
             self.node_seen(st)
             if state != self.block.get('state'):
                 self.block.update(state=state, node=st.get('node', ''))
@@ -888,6 +921,8 @@ def reap(data: str, etc: str, *, run: Callable = subprocess.run, ssh: str = '/us
         if isinstance(drv, list) and len(drv) == 2 and slots.alive(int(drv[0]), float(drv[1])):
             continue
         plan = _read_json(os.path.join(top, 'slurm-plan.json')) or {}
+        if plan.get('central'):
+            continue  # the durable executor service owns cleanup and the release report
         for alias, job in sorted(todo.items()):
             name = f'slurm reap: {os.path.relpath(top, root)}: job {job if job is not None else "?"} ({alias})'
             try:

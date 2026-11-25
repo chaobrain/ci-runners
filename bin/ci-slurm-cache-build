@@ -1,0 +1,7 @@
+#!/bin/sh
+# Fixed entry point of the site's login-side cache builder. All inputs are data on stdin.
+release=$(dirname "$(dirname "$(readlink -f "$0")")")
+base=$(dirname "$(dirname "$release")")
+py=/usr/bin/python3
+[ -f "$base/etc/python" ] && read -r py < "$base/etc/python"
+exec "$py" -I -c 'import sys; sys.path.insert(0,sys.argv.pop(1)); from ci_runners import slurmcache, slurmgate; sys.exit(slurmcache.builder(sys.argv[1], sys.stdin.buffer.read(slurmgate.MAX_REQUEST+1)))' "$release" "$base"

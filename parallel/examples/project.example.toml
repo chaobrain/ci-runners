@@ -1,0 +1,16 @@
+name = "example"
+repository = "chaobrain/example-private"
+context = "example/tests"
+devices = ["3090a", "3090b", "pro6000", "h100"]
+gpu_mem_mib = 0 # Minimum free MiB a card must have for this project's GPU tasks.
+max_parallel = 16
+retries = 1
+max_minutes = 1000
+# The controller checks repository membership and resolves the repository ID with its PAT.
+# To enable Slurm, add "slurm" to devices and slurm_target = "slurm1/cpu".
+
+[environment]
+mode = "build" # Controller builds from the trusted default branch's env spec.
+# For executor-only inputs, set mode to existing or kept.
+# mode = "existing" uses hosts.<device>.env or the generated runtime env path.
+# mode = "kept" needs record = "environments/example.json" below ci-deploy-input.

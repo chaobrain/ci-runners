@@ -191,7 +191,7 @@ def runners(inv: inventory.Inventory, ncpu: int | None = None) -> list[Runner]:
 def never_stopped(r: Runner) -> bool:
     """The host's light runner without a capability label (``ci-light``, ``ci-pub-light``):
     the ``home`` pool of §5.1, for the host's salvage legs, which presence never stops. Pure."""
-    return r.cls == 'light' and not any(lb.startswith('ci-') for lb in r.labels)
+    return r.cls in ('plan', 'executor') or r.cls == 'light' and not any(lb.startswith('ci-') for lb in r.labels)
 
 
 def per_card(h: Mapping[str, object]) -> bool:
@@ -950,6 +950,8 @@ def holder(inv: inventory.Inventory, env: Mapping[str, str], etc: str = '') -> t
     key = f'{repo}#{env.get("GITHUB_RUN_ID", "")}-{env.get("GITHUB_RUN_ATTEMPT", "")}'
     name = str(env.get('RUNNER_NAME') or '')
     r = next((x for x in runners(inv) if x.name == name), None)
+    if r is not None and r.cls in ('plan', 'executor'):
+        return key, repo, 'central CPU jobs cannot take a legacy home hold'
     if r is None or not never_stopped(r):
         return key, repo, f'a job holds its host only from the host\'s home runner, not {name or "an unnamed runner"}'
     from ci_runners import policy, pool

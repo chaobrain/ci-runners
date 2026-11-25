@@ -63,6 +63,7 @@ LOCKS = ('none', 's', 'x', 'l')  # the ``lock`` input: hold the host lock for th
 #: what each class's ``part`` accepts (design §4.8): ``(least cards, most cards, locks,
 #: longest timeout-minutes)``; most None: every card of the host
 ROWS: dict[str, tuple[int, int | None, tuple[str, ...], int]] = {
+    'plan': (0, 0, ('none',), 30),
     'light': (0, 0, ('none',), 30),
     'part': (0, 0, LOCKS, 240),
     'gpu': (1, 1, LOCKS, 240),
@@ -78,7 +79,7 @@ KILL_GRACE = 30  # s between TERM and KILL at the inner timeout
 RELAY_DRAIN = 5  # s the relay may still copy once the command has ended
 CAP_POLL = 2.0  # s between the supervisor's memory readings, where it enforces the cap
 OOM_POLICY_SYSTEMD = 253  # the first systemd that takes OOMPolicy on a scope
-SCOPE = re.compile(r'ci-part-[^/]*\.scope')  # a part's scope, the only cgroup the cap kills in
+SCOPE = re.compile(r'(?:ci|civ2)-part-[^/]*\.scope')  # a part's scope, the only cgroup the cap kills in
 _LEASE_TICKET = re.compile(r'([0-9]{12})\.json\Z')  # a lease ticket in ``state/leases/queue``
 #: the step's own files: the command must not write the part's outputs or the job's env
 STEP_FILES = frozenset({'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'GITHUB_ENV', 'GITHUB_PATH', 'GITHUB_STATE'})
@@ -119,11 +120,12 @@ def _read_json(path: str) -> dict | None:
         return None
 
 
-def unit_name(runner: str, part_id: str, run: str) -> str:
+def unit_name(runner: str, part_id: str, run: str, *, organization: bool = False) -> str:
     """The scope's name, unique per run and attempt; ``job-completed`` stops
-    ``ci-part-<runner>-*``. Pure."""
+    scopes in the matching runner namespace. Pure."""
     safe = re.sub(r'[^A-Za-z0-9_.-]', '_', runner) or 'runner'
-    return f'ci-part-{safe}-{part_id}-{run}.scope'
+    prefix = 'civ2-part' if organization else 'ci-part'
+    return f'{prefix}-{safe}-{part_id}-{run}.scope'
 
 
 #: what ``systemd-run --user`` needs to reach the user manager (a slurm part's minimal
@@ -131,12 +133,14 @@ def unit_name(runner: str, part_id: str, run: str) -> str:
 USER_BUS = ('XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS')
 
 
-def scope_argv(unit: str, project: str, memory: str, inner: Sequence[str], oom_policy: bool = True) -> list[str]:
+def scope_argv(unit: str, project: str, memory: str, inner: Sequence[str], oom_policy: bool = True,
+               *, slice_name: str | None = None) -> list[str]:
     """``systemd-run`` for the part's scope (design §4.3); ``oom_policy`` false on a
     systemd that refuses ``OOMPolicy`` on a scope. Pure."""
     policy = ['-p', 'OOMPolicy=continue'] if oom_policy else []
+    slice_name = slice_name or f'ci-{project}.slice'
     return ['systemd-run', '--user', '--scope', '--quiet', f'--unit={unit}',
-            f'--slice=ci-{project}.slice', '-p', f'MemoryMax={memory}', '-p', 'MemorySwapMax=0',
+            f'--slice={slice_name}', '-p', f'MemoryMax={memory}', '-p', 'MemorySwapMax=0',
             *policy, *inner]
 
 
@@ -369,7 +373,7 @@ def slot_memory(slot: RunnerSlot, asked: str, memory_max: str) -> str:
 
 
 def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, part_dir: str, results: str,
-             cards: Sequence[int], cpus: str, files: Mapping[str, str], slot: str, resume: bool,
+             cards: Sequence[int | str], cpus: str, files: Mapping[str, str], slot: str, resume: bool,
              held: str = '', runner: RunnerSlot | None = None) -> dict[str, str]:
     """The command's environment (design §4.3): the job's without our ``CI_*`` names,
     then the project's variables, then ours, which nothing overrides. On a host with the
@@ -954,6 +958,9 @@ def finish(record: str, rec: Mapping[str, object], ex: Mapping[str, object] | No
     end = float((ex or {}).get('end_epoch') or time.time())
     p2p = str((ex or {}).get('p2p') or '')
     unavailable = unavailable or str((ex or {}).get('unavailable') or '') or (f'p2p: {p2p}' if p2p else '')
+    if rec.get('uses_environment_cache') and ex and ex.get('rc'):
+        prep = _read_json(os.path.join(record, 'environment-preparation.json')) or {}
+        unavailable = unavailable or str(prep.get('error', ''))
     ev = outcome.Evidence(
         rc=None if ex is None else ex.get('rc'), timed_out=bool(ex and ex.get('timed_out')),
         stopped=stopped or bool(ex and ex.get('signalled') and not ex.get('timed_out')),
@@ -1125,14 +1132,17 @@ class Executor:
 
     # -- checks before anything is taken
 
-    def check(self, a: Inputs) -> tuple[registry.Project, str]:
+    def check(self, a: Inputs, *, organization_project: registry.Project | None = None) -> tuple[registry.Project, str]:
         if not ID.fullmatch(a.id):
             raise Refused(f'id must match {ID.pattern}')
-        try:
-            proj = registry.load_file(self.etc, a.project, self.inv.this)
-        except registry.RegistryError as e:
-            raise Refused(f'project {a.project}: {e}') from None
-        if self.env.get('GITHUB_REPOSITORY', '').lower() != proj.repository:
+        if organization_project is None:
+            try:
+                proj = registry.load_file(self.etc, a.project, self.inv.this)
+            except registry.RegistryError as e:
+                raise Refused(f'project {a.project}: {e}') from None
+        else:
+            proj = organization_project
+        if proj.name != a.project or self.env.get('GITHUB_REPOSITORY', '').lower() != proj.repository:
             raise Refused(f'project {a.project} belongs to another repository')
         cls = self.env.get('CI_RUNNER_CLASS', '')
         if not cls:
@@ -1320,8 +1330,13 @@ class Executor:
         if self.proc is not None:
             raise SystemExit(128 + signum)
 
-    def execute(self, a: Inputs) -> tuple[int, dict[str, object]]:
-        proj, memory = self.check(a)
+    def execute(self, a: Inputs, *, organization_project: registry.Project | None = None,
+                validate_env_build: Callable[[str], bool] | None = None,
+                environment_request: dict | None = None) -> tuple[int, dict[str, object]]:
+        if organization_project is None:
+            proj, memory = self.check(a)
+        else:
+            proj, memory = self.check(a, organization_project=organization_project)
         h = self.inv.host
         cls = self.env['CI_RUNNER_CLASS']
         attempt = self.attempt(a)
@@ -1516,7 +1531,10 @@ class Executor:
             if self.slot is not None:  # the runner's slot, before the host's (16.2); its CI slot has no CPUs
                 pin = self.slot.cpus
             cpus = pin or cpu_list(os.sched_getaffinity(0))  # a list, as the inventory's
-            build, env_fd = envuse.hold(proj.env) if proj.env else ('', None)  # the link, resolved once
+            build, env_fd = envuse.hold(proj.env, validate=validate_env_build) if proj.env else ('', None)
+            if validate_env_build is not None and not build:
+                return self._end(record, rec, a,
+                                 unavailable=f'organization environment for {proj.repository} is not ready on the plan runner')
             if build:
                 rec['env_build'] = os.path.basename(build)  # the one env this part runs in (design 12.11)
             env = part_env(self.env, role=self.inv.this, project=dataclasses.replace(proj, env=build), part_dir=work,
@@ -1525,6 +1543,12 @@ class Executor:
                            held=hold.mode if hold else '', runner=self.slot)
             # With an override, the in-scope supervisor pins itself and the command inherits its mask.
             inner = command_argv(a.command, cpus=pin if worker_spec is None and core_spec is None else '', nice=0 if cls == 'compile' else 10)
+            if (a.id == 'plan-v2' or a.id.startswith('plan-v2-')) and cls == 'plan':
+                env['CI_PYTEST_PLAN'] = os.path.join(self.release, 'bin', 'ci-pytest-plan')
+            if environment_request is not None:
+                from parallel import job_environment
+                rec['uses_environment_cache'] = True
+                inner = job_environment.wrap(record, environment_request, self.release, inner)
             cap = registry.memory_bytes(memory) if self.caps_memory() else 0
             p2p = self.p2p if cls in P2P_CLASSES else []
             # the inner timeout: the plan's minutes, times the slot's speed on a runner with one (16.2)
@@ -1543,7 +1567,8 @@ class Executor:
             self.unit = unit_name(self.env.get('RUNNER_NAME', ''), a.id, run_id) if self.scope else ''
             rec['unit'] = self.unit
             _write_json(os.path.join(record, 'record.json'), rec)
-            argv = scope_argv(self.unit, proj.name, memory, sup, self.oom_policy()) if self.scope else sup
+            slice_options = {'slice_name': 'ci.slice'} if organization_project is not None else {}
+            argv = scope_argv(self.unit, proj.name, memory, sup, self.oom_policy(), **slice_options) if self.scope else sup
             if self.stopped:
                 return self._end(record, rec, a, stopped=True)
             why = drain_mod.refusal(drain_mod.read(str(h['data'])), h, cls, pool)  # drained while it waited (13.1)
@@ -1597,7 +1622,8 @@ class Executor:
                     or not inventory.peer_labels(self.inv, cls))
 
     def _slurm(self, a: Inputs, proj: registry.Project, memory: str, record: str, rec: dict[str, object], work: str,
-               lock: str) -> tuple[int, dict[str, object]]:
+               lock: str, *, organization_slurm_project: str | None = None, isolated_scope: bool = False,
+               environment_recipe: dict | None = None) -> tuple[int, dict[str, object]]:
         """A ``slurm`` part (decision 14.3): the drain, the class row per target, then
         ``slurmpart.drive`` in the part's scope, as a supervisor; its ``exit.json`` and
         ``slurm.json`` end the part (14.4)."""
@@ -1620,7 +1646,8 @@ class Executor:
             with open(os.path.join(record, 'site-error.txt'), 'w', encoding='utf-8') as f:
                 f.write(f'{e}\n')
             return self._end(record, rec, a, unavailable='site config: invalid (python -m ci_runners.slurmsite check)')
-        targets, why = slurmpart.row(str(h['data']), site, [t for _, t in found], project=proj.name, gpus=a.gpus,
+        remote_project = organization_slurm_project or proj.name
+        targets, why = slurmpart.row(str(h['data']), site, [t for _, t in found], project=remote_project, gpus=a.gpus,
                                      minutes=a.timeout_minutes, lock=lock)
         if not targets:
             return self._end(record, rec, a, unavailable=slurmsite.Redactor(site)(why))  # what GitHub shows
@@ -1636,20 +1663,36 @@ class Executor:
             else slurmpart.POLL, 'deadline': time.time() + a.queue_timeout_minutes * 60, 'cards': a.gpus,
             'minutes': a.timeout_minutes, 'lost_after': slurmpart.LOST_AFTER, 'cancel_wait': slurmpart.CANCEL_WAIT,
             'workspace': ws, 'temp': temp if temp and os.path.isdir(temp) else '', 'part_dir': work,
-            'request': {'project': proj.name, 'cards': a.gpus, 'minutes': a.timeout_minutes,
+            'request': {'project': remote_project, 'cards': a.gpus, 'minutes': a.timeout_minutes,
                         'queue_minutes': min(a.queue_timeout_minutes, 24 * 60), 'memory': memory, 'command': a.command,
                         'variables': {**{k: e[k] for k in slurmpart.JOB_VARS if k in e}, **proj.variables},
                         'run_url': f'https://github.com/{e.get("GITHUB_REPOSITORY", "")}/actions/runs/'
                                    f'{e.get("GITHUB_RUN_ID", "0")}/attempts/{e.get("GITHUB_RUN_ATTEMPT", "1")}',
                         'host': self.inv.this, 'resume': a.resume}}
+        if environment_recipe is not None:
+            if not organization_slurm_project or getattr(self, 'central_allocation', None) is None:
+                raise Refused('a cached Slurm environment needs an authorized organization allocation')
+            plan['request']['environment_recipe'] = environment_recipe
+            if h.get('tunnel'):
+                plan['cache_tunnel_port'] = h['tunnel']['http_port']
+        if getattr(self, 'central_allocation', None) is not None:
+            plan['request']['allocation'] = self.central_allocation
+            plan['request']['cores'] = a.cores
+            plan['request']['workers'] = a.workers
+            plan['central'] = True
+            from parallel import layout
+            plan['central_fence'] = str(layout.executor_paths(self.inv)[0])
         _write_json(os.path.join(record, 'slurm-plan.json'), plan)
         drv = [sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); '
                'from ci_runners.slurmpart import drive; sys.exit(drive(sys.argv[1]))', self.release, record]
         run_id = f'{os.path.basename(os.path.dirname(record))}-{rec["attempt"]}'
-        self.unit = unit_name(e.get('RUNNER_NAME', ''), a.id, run_id) if self.scope else ''
+        self.unit = unit_name(e.get('RUNNER_NAME', ''), a.id, run_id, organization=isolated_scope) if self.scope else ''
         rec.update(unit=self.unit, cards=[], targets=targets)
         _write_json(os.path.join(record, 'record.json'), rec)
-        argv = scope_argv(self.unit, proj.name, slurmpart.DRIVER_MEMORY, drv, self.oom_policy()) if self.scope else drv
+        argv = drv
+        if self.scope:
+            argv = scope_argv(self.unit, proj.name, slurmpart.DRIVER_MEMORY, drv, self.oom_policy(),
+                              slice_name=('civ2.slice' if isolated_scope else 'ci.slice') if organization_slurm_project else None)
         if self.stopped:
             return self._end(record, rec, a, stopped=True)
         env = {'HOME': e.get('HOME') or os.path.expanduser('~'), 'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8',

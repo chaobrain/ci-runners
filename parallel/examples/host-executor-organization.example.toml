@@ -1,0 +1,23 @@
+schema = 2
+mode = "organization"
+
+[github]
+organization = "chaobrain"
+runner_group = "ci-v2"
+
+[controller]
+url = "https://controller.example.invalid:18444"
+
+[hosts.3090b]
+roles = ["executor"]
+account = "replace-account"
+home = "/example/executor-home"
+runtime = "/example/executor-runtime"
+cpu_count = 16
+memory_max = "24G"
+gpu_uuids = []
+runner_count = 4
+priority = 10
+
+env_cache = "/example/executor-runtime/ci-runners/environment-cache"
+# conda = "/example/miniforge/bin/conda" # Set when conda is outside the service PATH.

@@ -52,10 +52,34 @@ def load_inventory() -> inventory.Inventory:
 
 
 def main(argv: list[str]) -> int:
+    if argv in (['--version'], ['version']):
+        from ci_runners import __version__
+        print(__version__)
+        return 0
     if not argv:
         print(__doc__, file=sys.stderr)
         return 2
     cmd, args = argv[0], argv[1:]
+    if cmd in ('part', 'flow', 'verdict', 'salvage') and os.environ.get('GITHUB_REPOSITORY'):
+        from ci_runners import storage
+        try:
+            selected = storage.select(storage.read_config(etc_dir()), os.environ['GITHUB_REPOSITORY'])
+            if selected['backend'] == 'ssh':
+                print('ci-run: internal storage requires the schema 2 central workflow; migrate producers and readers together',
+                      file=sys.stderr)
+                return 2
+        except storage.Error as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    if cmd == 'central':
+        from parallel import workflow_client
+        return workflow_client.main(args, load_inventory(), etc_dir())
+    if cmd in ('scheduler', 'executor-service'):
+        from parallel import scheduler, executor
+        if args != ['serve']:
+            print(f'usage: ci-run {cmd} serve', file=sys.stderr)
+            return 2
+        return (scheduler if cmd == 'scheduler' else executor).serve(load_inventory(), etc_dir())
     if cmd == 'role':
         print(load_inventory().this)
         return 0
@@ -126,7 +150,10 @@ def main(argv: list[str]) -> int:
         return hookcopy.main(args, load_inventory().host)
     if cmd == 'drain':
         from ci_runners import drain
-        return drain.main(args, load_inventory())
+        from parallel import layout, organization, transport
+        etc = etc_dir()
+        isolated = layout.settings_path(etc).is_file() and organization.standalone_executor(transport.settings(etc))
+        return drain.main(args, load_inventory(), organization=isolated)
     if cmd == 'slurm':
         from ci_runners import slurmsetup
         return slurmsetup.main(args, load_inventory(), etc_dir())

@@ -1,0 +1,18 @@
+# Copy into the consumer repository's .github/workflows/ directory after publishing v2.1.2.
+name: CI tests
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+jobs:
+  tests:
+    uses: chaobrain/ci-runners/.github/workflows/ci-v2.yml@v2.1.2
+    with:
+      project: example
+      context: example/tests
+      # Use the checkout's CPU tests. Each shard chooses an available eligible device.
+      # For a GPU-only test directory, add --gpu and pass that directory.
+      plan: '"$CI_PYTEST_PLAN" --shards 24 --cores 4 --workers 1 --minutes 20 -- tests'

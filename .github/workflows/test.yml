@@ -24,9 +24,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'  # the hosts' system Python, which runs ci-run; one version only (lead, 2026-11-11)
+      - name: Install environment manifest reader
+        run: python -m pip install 'PyYAML>=6,<7'
       - name: unit tests and inventory lint
         run: |
           python -I tests/leaks.py --timeout 900 -- python -I -m unittest discover -s tests -t . -v
+          python -I tests/leaks.py --timeout 900 -- python -I -m unittest discover -s parallel/tests -t . -v
           python -m ci_runners.inventory lint . --deny tests/deny.sha256
   mutants:
     name: mutants (${{ matrix.shard }}/4)
@@ -43,6 +46,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install environment manifest reader
+        run: python -m pip install 'PyYAML>=6,<7'
       - name: mutants
         run: python tests/mutants.py --shard ${{ matrix.shard }}/4
   unit:

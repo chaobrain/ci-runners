@@ -4,7 +4,7 @@
 ``actions/RELEASE`` and rewrites, in the reusable workflows (``ci.yml``, ``part.yml``,
 ``sweep.yml``, and a public caller's ``public.yml`` and ``public-part.yml``, decision 18.7)
 alone, every reference to this repository's actions and their references to each other to
-``@<RELEASE>``, or to ``@v1`` for ``hook``. Nothing else changes, so a
+``@<RELEASE>``, or to ``@v2`` for ``hook``. Nothing else changes, so a
 caller pinned to ``ci.yml@vX.Y.Z`` runs that release's ``part.yml`` and actions, and they
 that release's host layer.
 
@@ -20,13 +20,14 @@ import re
 import sys
 
 WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml',
-             '.github/workflows/public.yml', '.github/workflows/public-part.yml')
+             '.github/workflows/public.yml', '.github/workflows/public-part.yml',
+             '.github/workflows/ci-v2.yml', '.github/workflows/execute.yml', '.github/workflows/cpu-task.yml')
 #: a reference this repository's reusable workflows make to itself
-REF = re.compile(r'(chaobrain/ci-runners/(?:actions/[a-z][a-z0-9-]*|\.github/workflows/(?:part|public|public-part)\.yml))'
+REF = re.compile(r'(chaobrain/ci-runners/(?:actions/[a-z][a-z0-9-]*|\.github/workflows/(?:part|public|public-part|ci-v2|execute|cpu-task)\.yml))'
                  r'@([A-Za-z0-9._/-]+)')
 RELEASE = re.compile(r'(hook|v\d+\.\d+\.\d+)\Z')
 GIT_REF = re.compile(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,99}\Z')
-MAJOR = 'v1'
+MAJOR = 'v2'
 
 
 def refs(text: str) -> list[tuple[str, str]]:

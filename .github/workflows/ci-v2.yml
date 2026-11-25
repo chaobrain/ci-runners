@@ -1,0 +1,158 @@
+name: CI tests
+on:
+  workflow_call:
+    inputs:
+      context:
+        description: Final status context on the original test SHA
+        type: string
+        required: true
+      plan:
+        description: Command printing a schema 2 test plan with explicit workers
+        type: string
+        required: true
+      project:
+        description: Project registry key; defaults to the repository name
+        type: string
+        default: ''
+      sha:
+        description: Original test SHA; defaults to the event head
+        type: string
+        default: ''
+      plan-only:
+        description: Validate without executing tests; uses a separate status context
+        type: boolean
+        default: false
+      cancel-in-progress:
+        description: Cancel the previous unfinished batch for this PR or branch
+        type: boolean
+        default: true
+    outputs:
+      batch_id:
+        description: Central batch identity
+        value: ${{ jobs.plan.outputs.batch_id }}
+      submission_state:
+        description: Plan submission result
+        value: ${{ jobs.plan.outputs.submission_state }}
+      state:
+        description: Final result of all required tests
+        value: ${{ jobs.verdict.outputs.state }}
+jobs:
+  plan:
+    if: >-
+      github.event.repository.visibility != 'public' && github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, ci-plan]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      batch_id: ${{ steps.submit.outputs.batch_id }}
+      submission_state: ${{ steps.submit.outputs.submission_state }}
+      cpu_task_matrix: ${{ steps.submit.outputs.cpu_task_matrix }}
+      cpu_task_count: ${{ steps.submit.outputs.cpu_task_count }}
+      gpu_task_matrix: ${{ steps.submit.outputs.gpu_task_matrix }}
+      gpu_task_count: ${{ steps.submit.outputs.gpu_task_count }}
+      max_parallel: ${{ steps.submit.outputs.max_parallel }}
+    env:
+      GIT_HTTP_LOW_SPEED_LIMIT: '1'
+      GIT_HTTP_LOW_SPEED_TIME: '60'
+    steps:
+      - id: prepare
+        uses: chaobrain/ci-runners/actions/central@v2.1.2
+        with:
+          command: prepare
+          project: ${{ inputs.project }}
+          context: ${{ inputs.context }}
+          sha: ${{ inputs.sha }}
+          plan-only: ${{ inputs.plan-only }}
+          cancel-in-progress: ${{ inputs.cancel-in-progress }}
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+        with:
+          ref: ${{ steps.prepare.outputs.sha }}
+          persist-credentials: false
+      - id: build
+        uses: chaobrain/ci-runners/actions/central@v2.1.2
+        with:
+          command: build
+          plan: ${{ inputs.plan }}
+      - id: files
+        if: steps.build.outputs.files != '' && !inputs.plan-only && steps.prepare.outputs.storage_backend != 'ssh'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-plan-files-${{ github.run_attempt }}
+          path: ${{ steps.build.outputs.files }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - id: bundle
+        if: steps.build.outputs.files != '' && !inputs.plan-only && steps.prepare.outputs.storage_backend == 'ssh'
+        uses: chaobrain/ci-runners/actions/central@v2.1.2
+        with:
+          command: publish-plan
+      - id: submit
+        uses: chaobrain/ci-runners/actions/central@v2.1.2
+        with:
+          command: submit
+          plan-only: ${{ inputs.plan-only }}
+          files-artifact-id: ${{ steps.files.outputs.artifact-id }}
+          files-bundle: ${{ steps.bundle.outputs.files_bundle }}
+      - if: failure() && steps.prepare.outcome == 'success'
+        uses: chaobrain/ci-runners/actions/central@v2.1.2
+        with:
+          command: failure
+
+  parts:
+    name: CPU ${{ matrix.task.part_id }}
+    needs: plan
+    if: needs.plan.outputs.submission_state == 'accepted' && needs.plan.outputs.cpu_task_count != '0'
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.plan.outputs.max_parallel) }}
+      matrix:
+        task: ${{ fromJSON(needs.plan.outputs.cpu_task_matrix) }}
+    uses: chaobrain/ci-runners/.github/workflows/cpu-task.yml@v2.1.2
+    with:
+      batch_id: ${{ needs.plan.outputs.batch_id }}
+      task_id: ${{ matrix.task.task_id }}
+      allocation_timeout_minutes: ${{ matrix.task.allocation_timeout_minutes }}
+
+  gpu_parts:
+    name: GPU ${{ matrix.task.part_id }}
+    needs: plan
+    if: needs.plan.outputs.submission_state == 'accepted' && needs.plan.outputs.gpu_task_count != '0'
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        task: ${{ fromJSON(needs.plan.outputs.gpu_task_matrix) }}
+    uses: chaobrain/ci-runners/.github/workflows/cpu-task.yml@v2.1.2
+    with:
+      batch_id: ${{ needs.plan.outputs.batch_id }}
+      task_id: ${{ matrix.task.task_id }}
+      allocation_timeout_minutes: ${{ matrix.task.allocation_timeout_minutes }}
+      gpu_lane: ${{ matrix.task.gpu_lane }}
+
+  verdict:
+    needs: [plan, parts, gpu_parts]
+    if: always() && !cancelled() && needs.plan.result != 'skipped'
+    runs-on: [self-hosted, ci-plan]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      state: ${{ steps.result.outputs.state }}
+    steps:
+      - id: result
+        uses: chaobrain/ci-runners/actions/central@v2.1.2
+        with:
+          command: batch-result
+          batch-id: ${{ needs.plan.outputs.batch_id }}
+          submission-state: ${{ needs.plan.outputs.submission_state }}

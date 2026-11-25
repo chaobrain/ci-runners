@@ -1,0 +1,142 @@
+name: Central test scheduling
+description: Submit a schema 2 plan or bridge an authorized allocation to the local executor.
+inputs:
+  command:
+    description: prepare, build, submit, failure, allocate, inspect, fetch, execute, publish-plan, publish-result, task-result or batch-result
+    required: true
+  project:
+    description: Project registry key
+    default: ''
+  context:
+    description: Final commit status context
+    default: ''
+  sha:
+    description: Original commit to test
+    default: ''
+  plan:
+    description: Command that prints a schema 2 plan
+    default: ''
+  plan-only:
+    description: Validate without executing tests
+    default: 'false'
+  cancel-in-progress:
+    description: Cancel the previous batch for the same source concurrency key
+    default: 'true'
+  files-artifact-id:
+    description: Uploaded plan files artifact
+    default: ''
+  files-bundle:
+    description: Completed internal plan bundle reference, mutually exclusive with files-artifact-id
+    default: ''
+  allocation-json:
+    description: Scheduler grant with CPU groups, RAM, workers and an optional GPU UUID
+    default: ''
+  token:
+    description: Read-only job token for the fetch operation only
+    default: ''
+  batch-id:
+    description: Batch belonging to this source run attempt
+    default: ''
+  task-id:
+    description: Task within the submitted batch
+    default: ''
+  task-attempt:
+    description: Task execution attempt, 1 or 2
+    default: '1'
+  submission-state:
+    description: Submission outcome for plan-only validation
+    default: ''
+outputs:
+  storage_backend:
+    description: Pinned file backend, github or ssh
+    value: ${{ steps.control.outputs.storage_backend }}
+  files_bundle:
+    description: Completed plan bundle reference
+    value: ${{ steps.control.outputs.files_bundle }}
+  result_bundle:
+    description: Completed allocation result bundle reference
+    value: ${{ steps.control.outputs.result_bundle }}
+  sha:
+    description: Authorized test SHA
+    value: ${{ steps.control.outputs.sha }}
+  project:
+    description: Registry project
+    value: ${{ steps.control.outputs.project }}
+  files:
+    description: Plan files directory
+    value: ${{ steps.control.outputs.files }}
+  batch_id:
+    description: Accepted batch identity
+    value: ${{ steps.control.outputs.batch_id }}
+  submission_state:
+    description: accepted or validated; not the final test result
+    value: ${{ steps.control.outputs.submission_state }}
+  task_matrix:
+    description: Task identities and allocation request timeouts
+    value: ${{ steps.control.outputs.task_matrix }}
+  task_count:
+    description: Number of required tasks
+    value: ${{ steps.control.outputs.task_count }}
+  cpu_task_matrix:
+    description: CPU task identities and allocation request timeouts
+    value: ${{ steps.control.outputs.cpu_task_matrix }}
+  cpu_task_count:
+    description: Number of CPU tasks
+    value: ${{ steps.control.outputs.cpu_task_count }}
+  gpu_task_matrix:
+    description: GPU task identities, request lanes and allocation timeouts
+    value: ${{ steps.control.outputs.gpu_task_matrix }}
+  gpu_task_count:
+    description: Number of GPU tasks
+    value: ${{ steps.control.outputs.gpu_task_count }}
+  max_parallel:
+    description: Effective project and plan concurrency bound
+    value: ${{ steps.control.outputs.max_parallel }}
+  runner_tag:
+    description: Unique runner selected for this task attempt
+    value: ${{ steps.control.outputs.runner_tag }}
+  allocation_json:
+    description: Scheduler authorization for this task attempt
+    value: ${{ steps.control.outputs.allocation_json }}
+  allocation_id:
+    description: Allocation identity
+    value: ${{ steps.control.outputs.allocation_id }}
+  part_id:
+    description: Test part identity
+    value: ${{ steps.control.outputs.part_id }}
+  fetch_depth:
+    description: Checkout depth from the authorized task
+    value: ${{ steps.control.outputs.fetch_depth }}
+  state:
+    description: Execution, task or batch result
+    value: ${{ steps.control.outputs.state }}
+runs:
+  using: composite
+  steps:
+    - id: control
+      shell: bash
+      env:
+        IN_COMMAND: ${{ inputs.command }}
+        IN_PROJECT: ${{ inputs.project }}
+        IN_CONTEXT: ${{ inputs.context }}
+        IN_SHA: ${{ inputs.sha }}
+        IN_PLAN: ${{ inputs.plan }}
+        IN_PLAN_ONLY: ${{ inputs.plan-only }}
+        IN_CANCEL: ${{ inputs.cancel-in-progress }}
+        IN_FILES: ${{ inputs.files-artifact-id }}
+        IN_FILES_BUNDLE: ${{ inputs.files-bundle }}
+        IN_ALLOCATION: ${{ inputs.allocation-json }}
+        IN_BATCH: ${{ inputs.batch-id }}
+        IN_TASK: ${{ inputs.task-id }}
+        IN_TASK_ATTEMPT: ${{ inputs.task-attempt }}
+        IN_SUBMISSION: ${{ inputs.submission-state }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      run: |
+        set --
+        if [ "$IN_PLAN_ONLY" = true ]; then set -- "$@" --plan-only; fi
+        if [ "$IN_CANCEL" = true ]; then set -- "$@" --cancel-in-progress; fi
+        exec "$GITHUB_ACTION_PATH/../lib/ci-run.sh" central "$IN_COMMAND" \
+          --project "$IN_PROJECT" --context "$IN_CONTEXT" --sha "$IN_SHA" \
+          --plan-command "$IN_PLAN" --files-artifact-id "$IN_FILES" --files-bundle "$IN_FILES_BUNDLE" \
+          --allocation-json "$IN_ALLOCATION" --batch-id "$IN_BATCH" --task-id "$IN_TASK" \
+          --task-attempt "$IN_TASK_ATTEMPT" --submission-state "$IN_SUBMISSION" "$@"

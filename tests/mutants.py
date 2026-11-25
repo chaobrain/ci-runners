@@ -237,8 +237,8 @@ MUTANTS = [
     (OUT, "os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW", "os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW",
      [f'{TT}.Execute.test_the_signal_marks_the_record_before_anything_else']),
     # RUN-10 R1 (decision 16.3): the new inventory keys accepted and ignored, checked for shape
-    (INV, "POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class', 'slot', 'audience'})",
-     "POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class'})", [f'{TI}.Load.test_the_keys_of_decision_16_are_accepted_and_ignored']),
+    (INV, "POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class', 'slot', 'audience', 'device', 'start', 'gpu_waiters'})",
+     "POOL_KEYS = frozenset({'count', 'labels', 'per_card', 'class', 'device', 'start', 'gpu_waiters'})", [f'{TI}.Load.test_the_keys_of_decision_16_are_accepted_and_ignored']),
     (INV, "    if 'slot' in v and not _slot(v['slot']) or 'audience' in v and v['audience'] not in AUDIENCES:\n        return False",
      "    if False:\n        return False", [f'{TI}.Load.test_the_keys_of_decision_16_are_accepted_and_ignored']),
     (INV, "    'presence': (lambda v: _presence(v), False),\n", "", [f'{TI}.Load.test_the_keys_of_decision_16_are_accepted_and_ignored']),
@@ -256,7 +256,7 @@ MUTANTS = [
      [f'{TI}.Load.test_the_keys_of_decision_16_are_accepted_and_ignored']),
     (INV, "            and _num(v['speed']) and ('isa' not in v", "            and True and ('isa' not in v",
      [f'{TI}.Load.test_the_keys_of_decision_16_are_accepted_and_ignored']),
-    (INV, "'peer_labels', 'memory', 'isa', 'audience', 'isolation'})", "'peer_labels', 'isolation'})",
+    (INV, "'peer_labels', 'memory', 'isa', 'audience', 'isolation', 'device'})", "'peer_labels', 'isolation', 'device'})",
      [f'{TI}.Load.test_the_keys_of_decision_16_are_accepted_and_ignored']),
     # C2b (decision 18.7): a public caller's legs: admit, the hosted route and retry, the verdict
     (FLW, "    if repo not in PUBLIC_CALLERS or repo == policy.SELF:", "    if repo == policy.SELF:",
@@ -524,9 +524,9 @@ MUTANTS = [
     # review: the decision under env -i, with what the hook reads; the public runner's stripped inventory
     (HKS, "exec /usr/bin/env -i PATH=/usr/bin:/bin", "exec /usr/bin/env PATH=/usr/bin:/bin", [THE]),
     (HKS, " RUNNER_NAME HOME; do", " RUNNER_NAME; do", [THE]),
-    (HKS, "GITHUB_RUN_ID GITHUB_TRIGGERING_ACTOR", "GITHUB_TRIGGERING_ACTOR", [THE]),
+    (HKS, 'GITHUB_RUN_ID GITHUB_RUN_ATTEMPT GITHUB_TRIGGERING_ACTOR', 'GITHUB_RUN_ATTEMPT GITHUB_TRIGGERING_ACTOR', [THE]),
     (HKS, '[ -z \\"\\${$v+x}\\" ]', '[ -z \\"\\${$v}\\" ]', [THE]),
-    (HOK, "'GITHUB_REPOSITORY_ID', 'GITHUB_RUN_ID',", "'GITHUB_REPOSITORY_ID',", [THE]),
+    (HOK, "\n       'GITHUB_REPOSITORY_ID', 'GITHUB_RUN_ID',", "\n       'GITHUB_REPOSITORY_ID',", [THE]),
     (INV, "    if not want or not set(want) <= set(inv.host['gpus']):", "    if not want:", [THV]),
     (INV, "    want = sorted(set(cards))", "    want = list(cards)", [THV]),
     (INV, "gpus = {json.dumps(want)}", "gpus = {json.dumps(inv.host['gpus'])}", [THV]),
@@ -543,7 +543,7 @@ MUTANTS = [
     (HOK, "-[0-9]{{1,12}}', name)", "-?[0-9]{{0,12}}', name)", [THI]),
     (HOK, "        return 'gpu', 'public'", "        return 'gpu', 'private'", [THI]),
     (HOK, "                d = policy.Decision(False, 'inventory')", "                d = policy.Decision(True, 'ok')", [THI]),
-    (HOK, "_read(os.path.join(etc, 'inventory.toml'), MAX_INVENTORY)", "_read(os.path.join(etc, 'inventory.toml'), 1 << 30)", [THI]),
+    (HOK, "_read(os.path.join(etc, 'inventory.toml'), MAX_INVENTORY).decode('utf-8')", "_read(os.path.join(etc, 'inventory.toml'), 1 << 30).decode('utf-8')", [THI]),
     (POL, "'stale', 'runner', 'policy',", "'stale', 'policy',", [f'{TP}.Public.test_the_reasons_the_hook_may_print']),
     (PRS, "HOOK_INFRA = ('stale', 'runner', 'policy', 'inventory', 'timeout', 'error')",
      "HOOK_INFRA = ('stale', 'policy', 'inventory', 'timeout', 'error')",
@@ -580,7 +580,7 @@ MUTANTS = [
      [f'{TI}.Load.test_the_keys_of_decision_18_are_accepted_and_ignored']),
     (INV, "            h['pools'] = {k: v for k, v in h['pools'].items() if k not in pub}", "            pass",
      [f'{TI}.Load.test_the_keys_of_decision_18_are_accepted_and_ignored']),
-    (INV, "'audience', 'isolation'})", "'audience'})", [f'{TI}.Load.test_the_keys_of_decision_18_are_accepted_and_ignored']),
+    (INV, "'audience', 'isolation', 'device'})", "'audience', 'device'})", [f'{TI}.Load.test_the_keys_of_decision_18_are_accepted_and_ignored']),
     (INV, "    return isinstance(v, dict) and v.get('audience') == 'public'", "    return False",
      [f'{TI}.Load.test_the_keys_of_decision_18_are_accepted_and_ignored']),
     (ENB, "'variables', 'conda', 'variant',\n                          'contract'}", "'variables', 'conda', 'variant'}",
@@ -685,7 +685,7 @@ MUTANTS = [
     (ENB, "        if not isinstance(v, dict):\n            raise SpecError(f'{SPEC}: variant.{name} must be a table')", "        if False:\n            raise SpecError(f'{SPEC}: variant.{name} must be a table')", ['tests.test_envbuild.Spec.test_a_malformed_variant_is_refused']),
     (ENB, "(f'-{variant}' if variant else '')", "''", ['tests.test_envbuild.Steps.test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table']),
     (ENB, ' or (variant and not VARIANT.fullmatch(variant)):', ':', ['tests.test_envbuild.Steps.test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table']),
-    (ENB, '    d = build_dir(envs, project, stamp, variant)', '    d = build_dir(envs, project, stamp)', ['tests.test_envbuild.Steps.test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table']),
+    (ENB, 'prefix_steps(spec, build_dir(envs, project, stamp, variant)', 'prefix_steps(spec, build_dir(envs, project, stamp)', ['tests.test_envbuild.Steps.test_a_variant_builds_in_its_own_directory_and_a_3090_build_ignores_the_table']),
     (SE, '    base = [v for v in variants if v not in spec.variants]', '    base = list(variants)', ['tests.test_slurmenv.Env.test_two_variants_get_two_builds_with_their_own_install']),
     (SE, '        if v in spec.variants:\n            vs = spec.variant(v)', '        if False:\n            vs = spec.variant(v)', ['tests.test_slurmenv.Env.test_a_variant_the_spec_does_not_name_links_the_base_build']),
     (SE, '            vs = spec.variant(v)', '            vs = spec', ['tests.test_slurmenv.Env.test_two_variants_get_two_builds_with_their_own_install']),
@@ -803,7 +803,7 @@ MUTANTS = [
     (PRT, "    return {c for lo, hi in inventory.cpu_ranges(slot.cpus) or () for c in range(lo, hi + 1)}", "    return {c for lo, hi in inventory.cpu_ranges(slot.cpus) or () for c in range(lo, hi)}", ['tests.test_part_slots.Pure.test_runner_slot']),
     (PRT, "        i = j + 1\n    return ','.join(out)", "        i = j + 1\n    return ' '.join(out)", ['tests.test_part.Pure.test_cpu_list_is_a_cpuset_list_as_the_inventory_writes_it']),
     # a master per process; a dropped transfer tried again (issue #103)
-    (SPT, "f'{alias}\\0{os.getpid()}'.encode()", "alias.encode()", ['tests.test_slurmpart.Pure.test_each_process_has_its_own_master']),
+    (SPT, 'self.pid = os.getpid()', 'self.pid = 1', ['tests.test_slurmpart.Pure.test_each_process_has_its_own_master']),
     (SPT, "            if not dropped or wait is None:\n                break", "            if True:\n                break", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
     (SPT, "dropped = r.returncode in SYNC_TRANSIENT and any(", "dropped = True or any(", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
     (SPT, "dropped = r.returncode in SYNC_TRANSIENT and any(w in err for w in SYNC_DROPPED)", "dropped = r.returncode in SYNC_TRANSIENT", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
@@ -811,12 +811,12 @@ MUTANTS = [
     (SPT, "(b'broken pipe', b'connection reset', b'connection closed')", "(b'broken pipe', b'connection closed')", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
     (SPT, "        for wait in (*SYNC_WAITS, None):", "        for wait in (*SYNC_WAITS, 1.0, None):", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
     (SPT, "            self.sleep(wait)", "            pass", ['tests.test_slurmpart.Pure.test_a_transfer_a_dropped_connection_ends_is_tried_again']),
-    (SPT, "        self.sock = os.path.join(self.cm, hashlib.sha256(f'{alias}\\0{os.getpid()}'.encode()).hexdigest()[:12])", "        self.sock = os.path.join(self.cm, '%C')", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
-    (SPT, "hexdigest()[:12])", "hexdigest())", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
-    (SPT, "hashlib.sha256(f'{alias}\\0{os.getpid()}'.encode())", "hashlib.sha256(b'')", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
-    (SPT, "        if len(os.fsencode(self.sock)) + SSH_TMP >= SUN_PATH:", "        if False:", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "path = os.path.join(data, 'ci-runners', 'run', 'cm', name)", "path = os.path.join(data, 'ci-runners', 'state', 'slurm', site_name, 'cm', name)", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, '    name = hashlib.sha256(identity.encode()).hexdigest()[:12]', '    name = hashlib.sha256(identity.encode()).hexdigest()', ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, 'hashlib.sha256(identity.encode())', "hashlib.sha256(b'')", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, '    if size + SSH_TMP >= SUN_PATH:', '    if False:', ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
     (SPT, "+ SSH_TMP >= SUN_PATH:", "+ SSH_TMP > SUN_PATH:", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
-    (SPT, "f'ControlPath={self.sock}'", "f'ControlPath={self.cm}/%C'", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
+    (SPT, "f'ControlPath={sock}'", "f'ControlPath={os.path.dirname(sock)}/%C'", ['tests.test_slurmpart.Pure.test_the_control_socket_fits_a_long_data_root']),
     (SPT, '    if not isinstance(v, list) or not v or not all(', '    if not isinstance(v, list) or not all(', [f'{TSP}.Pending.test_without_the_clusters_node_list_no_part_runs']),
     (SPT, 'not all(isinstance(x, str) and slurmsite.hostlist(x) for x in v):', 'not all(isinstance(x, str) for x in v):', [f'{TSP}.Pending.test_without_the_clusters_node_list_no_part_runs']),
     (SPT, '        return lists  # an answer that does not parse', '        if lists is not None:\n            return lists  # an answer that does not parse', [f'{TSP}.Pending.test_without_the_clusters_node_list_no_part_runs']),
@@ -854,7 +854,7 @@ MUTANTS = [
     (SPT, '            cut = self.redact.safe_cut(text, len(text) - LOG_KEEP)', '            cut = len(text)', [f'{TSP}.Pure.test_the_job_log_is_redacted_by_whole_lines']),
     (SPT, "        return out if out.get('hostname') and out.get('user') else None", '        return out', [f'{TSP}.Pure.test_ssh_facts_need_both_the_host_and_the_user']),
     (SPT, "            if k in ('hostname', 'user', 'proxyjump'):", "            if k in ('hostname', 'user'):", [f'{TSP}.Pure.test_ssh_facts_need_both_the_host_and_the_user']),
-    (SPT, "            r = self.run([self.ssh, '-G', self.host], capture_output=True, timeout=20)\n        except (OSError, subprocess.SubprocessError):", "            r = self.run([self.ssh, '-G', self.host], capture_output=True, timeout=20)\n        except ():", [f'{TSP}.Pure.test_ssh_facts_need_both_the_host_and_the_user']),
+    (SPT, "            r = self.run([self.ssh, *config, '-G', self.host], capture_output=True, timeout=20)\n        except (OSError, subprocess.SubprocessError):", "            r = self.run([self.ssh, *config, '-G', self.host], capture_output=True, timeout=20)\n        except ():", [f'{TSP}.Pure.test_ssh_facts_need_both_the_host_and_the_user']),
     (SPT, '            raise Refused(self.redact(why)[-300:] or', '            raise Refused(why[-300:] or', [f'{TSP}.Pure.test_a_gates_error_text_is_redacted_before_it_is_cut']),
     (SPT, "            raise Unreachable(f'{self.alias}: {self.redact((r.stderr", "            raise Unreachable(f'{self.alias}: {((r.stderr", [f'{TSP}.Pure.test_a_gates_error_text_is_redacted_before_it_is_cut']),
     (SPT, "            raise Unreachable(f'{self.alias}: {verb}: {self.redact((r.stderr", "            raise Unreachable(f'{self.alias}: {verb}: {((r.stderr", [f'{TSP}.Pure.test_a_gates_error_text_is_redacted_before_it_is_cut']),
@@ -877,7 +877,7 @@ MUTANTS = [
     (SGT, '    for start in (os.path.abspath(root), os.path.realpath(root)):', '    for start in (os.path.realpath(root),):', [f'{TSG}.UnsafeDirs.test_the_directories_above_the_root_as_resolved']),
     (SGT, "    facts['unsafe'] = unsafe_dirs(os.path.dirname(base), base)", "    facts['unsafe'] = {}", [f'{TSG}.Check.test_the_facts']),
     (SGT, "    return {'nodes': sorted({x.strip() for x in (r.stdout or '').splitlines() if x.strip()})}", "    return {'nodes': []}", [f'{TSP}.Pending.test_a_pending_reason_that_names_nodes_outside_the_config_is_redacted']),
-    (SGT, "VERBS = ('stage', 'fetch', 'submit', 'status', 'log', 'cancel', 'ledger', 'nodes', 'reap', 'check', 'capacity')", "VERBS = ('stage', 'fetch', 'submit', 'status', 'log', 'cancel', 'ledger', 'reap', 'check', 'capacity')", [f'{TSP}.Pending.test_a_pending_reason_that_names_nodes_outside_the_config_is_redacted']),
+    (SGT, "VERBS = ('stage', 'fetch', 'submit', 'status', 'log', 'cancel', 'ledger', 'nodes', 'reap'", "VERBS = ('stage', 'fetch', 'submit', 'status', 'log', 'cancel', 'ledger', 'reap'", [f'{TSP}.Pending.test_a_pending_reason_that_names_nodes_outside_the_config_is_redacted']),
     (SL, '    unsafe = _gate().unsafe_dirs(root)\n    if unsafe:', '    unsafe = _gate().unsafe_dirs(root)\n    if False:', [f'{TSU}.Install.test_a_root_others_may_write_is_refused']),
     (SL, "    if os.path.islink(root):\n        return {'root'", "    if False:\n        return {'root'", [f'{TSU}.Install.test_a_linked_root_is_advised_to_give_its_target']),
     (SS, '    if not isinstance(unsafe, dict):', '    if False:', [f'{TSU}.Pure.test_findings']),
@@ -1154,7 +1154,7 @@ MUTANTS = [
      [f'{TSG}.Requests.test_outside_the_minutes_and_the_memory']),
     (SGT, "    if _size_bytes(req['memory']) > _size_bytes(str(t['mem_per_node'])):", "    if False:",
      [f'{TSG}.Requests.test_outside_the_minutes_and_the_memory']),
-    (SGT, "    if not os.path.isdir(env_dir(base, req['project'], str(t['variant']))):", "    if False:",
+    (SGT, "    elif not os.path.isdir(env_dir(base, req['project'], str(t['variant']))):", "    elif False:",
      [f'{TSG}.Requests.test_an_env_that_is_not_built']),
     (SGT, "    unknown = set(req) - set(REQUEST)", "    unknown = set()", [f'{TSG}.Requests.test_a_malformed_request']),
     (SGT, " and k not in RESERVED_VARS and not k.startswith(RESERVED_PREFIXES)", " and not k.startswith(RESERVED_PREFIXES)",
@@ -1570,7 +1570,7 @@ MUTANTS = [
     (GHB, "        if not isinstance(got, list):\n            raise ApiError", "        if False:\n            raise ApiError",
      [f'{TQ}.Claim.test_statuses_are_read_page_by_page']),
     # the executor and the registry
-    (PRT, "        if self.env.get('GITHUB_REPOSITORY', '').lower() != proj.repository:", "        if False:",
+    (PRT, "        if proj.name != a.project or self.env.get('GITHUB_REPOSITORY', '').lower() != proj.repository:", "        if proj.name != a.project:",
      [f'{TT}.Execute.test_refusals']),
     (PRT, "base.items() if not k.startswith('CI_') and k not in STEP_FILES\n", "base.items() if k not in STEP_FILES\n",
      [f'{TT}.Execute.test_a_passing_part_and_its_environment']),
@@ -1587,7 +1587,7 @@ MUTANTS = [
     (PRT, "        return 'memory' in read(", "        return 'cpu' in read(", [f'{TT}.Pure.test_where_systemd_enforces_memory']),
     (PRT, "    return found.get('v1') or found.get('v2', '')", "    return found.get('v2') or found.get('v1', '')",
      [f'{TT}.Pure.test_the_scope_procs_file']),
-    (PRT, "SCOPE = re.compile(r'ci-part-[^/]*\\.scope')", "SCOPE = re.compile(r'[^/]*\\.scope')",
+    (PRT, "SCOPE = re.compile(r'(?:ci|civ2)-part-[^/]*\\.scope')", "SCOPE = re.compile(r'[^/]*\\.scope')",
      [f'{TT}.Pure.test_the_scope_procs_file']),
     (PRT, "        if not self.killed and self.used(pids) > self.cap:", "        if False:",
      [f'{TT}.OwnCap.test_a_part_over_its_memory_ends_oom']),
@@ -1640,7 +1640,7 @@ MUTANTS = [
     (RGY, "    if type(v) is not int or not lo <= v <= hi:", "    if not lo <= v <= hi:", [f'{TT}.Registry.test_malformed']),
     (RGY, " or (stem and name != stem)", "", [f'{TT}.Registry.test_malformed']),
     # the inventory: schema and lint
-    (INV, "    if doc.get('schema') != SCHEMA:", "    if False:", [f'{TI}.Load.test_an_unknown_schema_is_refused']),
+    (INV, "    if type(doc.get('schema')) is not int or doc['schema'] not in (1, 2):", "    if False:", [f'{TI}.Load.test_an_unknown_schema_is_refused']),
     (INV, "            if k not in PUBLIC_KEYS and (*path, k)", "            if True and (*path, k)", [f'{TI}.Deny.test_deny_tokens']),
     (INV, "len(t) >= MIN_TOKEN and", "len(t) >= 1 and", [f'{TI}.Deny.test_deny_tokens']),
     (INV, "spans[i:i + MAX_PARTS]", "spans[i:i + 1]", [f'{TI}.Scan.test_denied_tokens_anywhere_in_a_word']),
@@ -2209,11 +2209,11 @@ MUTANTS = [
     (INV, "{'slot_lock', 'slot_queue'} <= set(v) <= FILES", "set(v) == FILES", [f'{TI}.Load.test_the_example_loads']),
     (INV, "{'slot_lock', 'slot_queue'} <= set(v) <= FILES", "{'slot_lock', 'slot_queue'} <= set(v)",
      [f'{TI}.Load.test_the_retired_keys_are_accepted_and_ignored']),
-    (POL, "CLASSES = frozenset({'light', 'part', 'gpu', 'multi', 'compile', 'nightly', 'slurm'})",
-     "CLASSES = frozenset({'light', 'part', 'gpu', 'compile', 'nightly', 'slurm'})", [f'{TP}.Accepted.test_the_3090_classes_are_open']),
+    (POL, "CLASSES = frozenset({'light', 'part', 'gpu', 'multi', 'compile', 'nightly', 'slurm', 'plan', 'executor'})",
+     "CLASSES = frozenset({'light', 'part', 'gpu', 'compile', 'nightly', 'slurm', 'plan', 'executor'})", [f'{TP}.Accepted.test_the_3090_classes_are_open']),
     # the h100 class and the watchdog are gone (decision 13.4)
-    (POL, "CLASSES = frozenset({'light', 'part', 'gpu', 'multi', 'compile', 'nightly', 'slurm'})",
-     "CLASSES = frozenset({'light', 'part', 'h100', 'gpu', 'multi', 'compile', 'nightly', 'slurm'})",
+    (POL, "CLASSES = frozenset({'light', 'part', 'gpu', 'multi', 'compile', 'nightly', 'slurm', 'plan', 'executor'})",
+     "CLASSES = frozenset({'light', 'part', 'h100', 'gpu', 'multi', 'compile', 'nightly', 'slurm', 'plan', 'executor'})",
      [f'{TP}.Refused.test_an_unknown_runner_class']),
     (PRT, "    'gpu': (1, 1, LOCKS, 240),\n", "    'gpu': (1, 1, LOCKS, 240),\n    'h100': (1, 1, LOCKS, 240),\n",
      [f'{TT}.Classes.test_each_class_refuses_a_timeout_outside_its_row']),
@@ -2242,7 +2242,7 @@ MUTANTS = [
      [f'{TI}.Load.test_pools_name_their_class', f'{TU}.Standalone.test_a_3090_host_s_runners']),
     (INV, "if isinstance(v, dict) and v.get('per_card') and cls not in PER_CARD_CLASSES:", "if False:",
      [f'{TI}.Load.test_pools_name_their_class']),
-    (INV, "            if (cls, pub) in seen and cls != HOME_CLASS and not sized:", "            if False:", [f'{TI}.Load.test_pools_name_their_class']),
+    (INV, "            if (cls, pub) in seen and cls not in (HOME_CLASS, 'executor') and not sized:", "            if False:", [f'{TI}.Load.test_pools_name_their_class']),
     (INV, "'compile_cpus': (lambda v: isinstance(v, str) and bool(_CPUS.match(v)), False)", "'compile_cpus': (lambda v: True, False)",
      [f'{TI}.Load.test_pools_name_their_class']),
     (INV, "'gpu', 'multi',\n                             'slurm'})", "'gpu',\n                             'slurm'})", [f'{TI}.Load.test_pools_name_their_class']),
@@ -2896,7 +2896,7 @@ MUTANTS = [
      [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
     (SET, "'HOOKS_ORDER': HOOKS_ORDER if hookcopy.used(h)", "'HOOKS_ORDER': HOOKS_ORDER if True",
      [f'{TU}.Setup.test_a_host_without_a_tunnel_has_a_plain_runner_unit']),
-    (SET, "\n                or name == 'ci-hooks.service' and not hookcopy.used(h)):", "):",
+    (SET, "\n                or name == 'ci-hooks.service' and not hookcopy.used(h)", "",
      [f'{TU}.Setup.test_plan_apply_and_a_second_run']),
     (SET, "            if hooks_changed:", "            if True:", [f'{TU}.Shared.test_the_runners_run_the_hooks_copies']),
     (SET, "    hooks_changed = len(plan.actions) > before", "    hooks_changed = False",
@@ -3184,7 +3184,7 @@ MUTANTS = [
     (SGT, "CAPACITY_TIMEOUT = 20", "CAPACITY_TIMEOUT = 25", [f'{TSG}.Capacity.test_the_three_queries_of_the_accounts_partitions']),
     (SGT, "        elif verb == 'capacity' and not args:", "        elif verb == 'capacity':",
      [f'{TSG}.Capacity.test_the_verb_through_the_forced_command']),
-    (SGT, "'nodes', 'reap', 'check', 'capacity')", "'nodes', 'reap', 'check')", [f'{TSG}.Capacity.test_the_verb_through_the_forced_command']),
+    (SGT, "'nodes', 'reap', 'check', 'capacity',", "'nodes', 'reap', 'check',", [f'{TSG}.Capacity.test_the_verb_through_the_forced_command']),
     (SET, "line.split()[-1:] not in ([PUSH_MARK], [PROBE_MARK])]", "line.split()[-1:] != [PUSH_MARK]]",
      [f'{TU}.Shared.test_the_pool_probe_keys_line']),
     (SET, "        if not k:\n            continue", "        if False:\n            continue", [f'{TU}.Shared.test_the_push_keys_line']),
@@ -3904,7 +3904,7 @@ MUTANTS = [
     (HL, "for d in ['ci.slice', *apps]]", "for d in ['ci.slice']]", [f'{TPR}.Load.test_the_snapshot_reads_only_our_processes']),
     (HL, "listdir(f'{base}/app.slice') if OUR_UNIT.match(d)]", "listdir(f'{base}/app.slice')]",
      [f'{TPR}.Load.test_the_snapshot_reads_only_our_processes']),
-    (PRS, "    return r.cls == 'light' and not any(lb.startswith('ci-') for lb in r.labels)", "    return False",
+    (PRS, "    return r.cls in ('plan', 'executor') or r.cls == 'light' and not any(lb.startswith('ci-') for lb in r.labels)", "    return False",
      [f'{TPR}.Runners.test_the_home_light_runner_is_the_only_one_never_stopped', f'{TPR}.Tick.test_the_home_light_runner_is_never_stopped']),
     (PRS, "        if d:\n            why.append(d)", "        if False:\n            why.append(d)",
      [f'{TPR}.Causes.test_a_drained_host_pool_or_unreadable_state']),
@@ -4496,23 +4496,20 @@ MUTANTS = [
     (FLW, "runner.startswith(r + '-')", "runner.startswith(r)", [f'{TFL}.Locate.test_the_longest_role_the_name_starts_with']),
     (FLW, "json.dumps([rt.BASE, f'{role}-light'])", "json.dumps([rt.BASE, f'{role}-cpu'])",
      [f'{TFL}.Locate.test_the_salvage_leg_on_that_hosts_light_label']),
-    (RGY, "       'max_parallel'}", "       }", [f'{TFL}.Plan.test_the_registry_max_parallel']),
+    (RGY, "       'max_parallel', 'max_minutes', 'devices', 'slurm_target'}", "       'max_minutes', 'devices', 'slurm_target'}", [f'{TFL}.Plan.test_the_registry_max_parallel']),
     (RGY, "doc.get('max_parallel', MAX_PARALLEL), 1, MAX_PARALLEL_BOUND)", "doc.get('max_parallel', MAX_PARALLEL), 0, 999)",
      [f'{TFL}.Plan.test_the_registry_max_parallel']),
     (STP, "    if not ref and not RELEASE.match(release):", "    if False:", [f'{TRU}.Stamp.test_a_bad_release_or_ref_is_refused']),
     (STP, "    if ref and not GIT_REF.match(ref) or '..' in ref:", "    if False:", [f'{TRU}.Stamp.test_a_bad_release_or_ref_is_refused']),
     (STP, "    target = ref or (MAJOR if release == 'hook' else release)", "    target = ref or release",
      [f'{TRU}.Stamp.test_a_stamped_tree_differs_only_in_its_references_and_restores']),
-    (STP, "WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml',\n"
-          "             '.github/workflows/public.yml', '.github/workflows/public-part.yml')",
-     "WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml')",
+    (STP, "WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml',\n             '.github/workflows/public.yml', '.github/workflows/public-part.yml',\n             '.github/workflows/ci-v2.yml', '.github/workflows/execute.yml', '.github/workflows/cpu-task.yml')",
+     "WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml',\n             \n             '.github/workflows/ci-v2.yml', '.github/workflows/execute.yml', '.github/workflows/cpu-task.yml')",
      [f'{TRU}.Stamp.test_a_stamped_tree_differs_only_in_its_references_and_restores']),
-    (STP, "WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml',\n"
-          "             '.github/workflows/public.yml', '.github/workflows/public-part.yml')",
-     "WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml',\n"
-     "             '.github/workflows/public.yml', '.github/workflows/public-part.yml')",
+    (STP, "WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml',\n             '.github/workflows/public.yml', '.github/workflows/public-part.yml',\n             '.github/workflows/ci-v2.yml', '.github/workflows/execute.yml', '.github/workflows/cpu-task.yml')",
+     "WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml',\n             '.github/workflows/public.yml', '.github/workflows/public-part.yml',\n             '.github/workflows/ci-v2.yml', '.github/workflows/execute.yml', '.github/workflows/cpu-task.yml')",
      [f'{TRU}.Stamp.test_a_stamped_tree_differs_only_in_its_references_and_restores']),
-    (STP, r"|\.github/workflows/(?:part|public|public-part)\.yml))'", "))'", [f'{TRU}.Stamp.test_main_names_v1_and_hook',
+    (STP, "|\\.github/workflows/(?:part|public|public-part|ci-v2|execute|cpu-task)\\.yml))'", "))'", [f'{TRU}.Stamp.test_main_names_v2_and_hook',
                                                        f'{TRU}.Stamp.test_a_stamped_tree_differs_only_in_its_references_and_restores']),
     (AFL, "        [ -z \"$IN_ROLE\" ] || args+=(\"--role=$IN_ROLE\")\n", "", [f'{TRU}.Flow.test_each_input_reaches_its_flag']),
     (AFL, "exec sh \"$GITHUB_ACTION_PATH/../../bin/ci-run\" flow", "exec \"$GITHUB_ACTION_PATH/../lib/ci-run.sh\" flow",
@@ -4802,7 +4799,7 @@ MUTANTS = [
     (ASW, 'sweep "--workflow=$IN_WORKFLOW"', 'sweep "--workflow=${{ inputs.workflow }}"',
      [f'{TRU}.Sweep.test_no_head_code_no_artifact_and_no_expression_in_a_script']),
     # issue #232: the home pool beside the light pool, in the loader and every reader of a pool by class
-    (INV, " and cls != HOME_CLASS and not sized:  # the home pool", " and not sized:  # the home pool", [f'{TI}.Load.test_a_home_pool_beside_the_light_pool', f'{TPF}.HomeHold.test_a_job_on_the_home_runner_holds_its_host']),
+    (INV, " and cls not in (HOME_CLASS, 'executor') and not sized:  # the home pool", " and cls != 'executor' and not sized:  # the home pool", [f'{TI}.Load.test_a_home_pool_beside_the_light_pool', f'{TPF}.HomeHold.test_a_job_on_the_home_runner_holds_its_host']),
     (INV, "        _check_home(role, h)\n", "", [f'{TI}.Load.test_a_home_pool_beside_the_light_pool']),
     (INV, "    if len(light) > 2:", "    if False:", [f'{TI}.Load.test_a_home_pool_beside_the_light_pool']),
     (INV, "    if len(capable) != 1:", "    if False:", [f'{TI}.Load.test_a_home_pool_beside_the_light_pool']),
@@ -4828,8 +4825,8 @@ MUTANTS = [
      [f'{TI}.Load.test_a_home_pool_beside_the_light_pool']),
     ('ci_runners/drain.py', "    if name in pools and name == inventory.home_pool(host):", "    if False:",
      [f'{TD}.State.test_a_pool_by_key_or_class']),
-    (PRS, "    return r.cls == 'light' and not any(lb.startswith('ci-') for lb in r.labels)",
-     "    return r.cls == 'light'", [f'{TPR}.Home']),
+    (PRS, "    return r.cls in ('plan', 'executor') or r.cls == 'light' and not any(lb.startswith('ci-') for lb in r.labels)",
+     "    return r.cls in ('plan', 'executor', 'light')", [f'{TPR}.Home']),
     # issue #242: the verdict's kept connections, its reading through the API, a red part's one upload
     (CLT, "                if reused and not fresh:\n                    continue", "                if False:\n                    continue",
      [f'{TCT}.Kept.test_a_kept_connection_the_server_closed_is_opened_again_once']),
@@ -5221,16 +5218,37 @@ DYNAMIC_MUTANTS = [
 ]
 MUTANTS.extend(DYNAMIC_MUTANTS)
 
+MUTANTS.append(('parallel/workflow_client.py',
+                "protocol.fingerprint(src['context'])[:24]", "'shared'",
+                ['parallel.tests.test_plan_contexts.PlanContexts.test_distinct_contexts_execute_and_same_context_cannot_reexecute']))
+
+MUTANTS.append((PRT,
+                "(a.id == 'plan-v2' or a.id.startswith('plan-v2-'))", "a.id == 'plan-v2'",
+                ['parallel.tests.test_plan_contexts.PlanContexts.test_distinct_contexts_execute_and_same_context_cannot_reexecute']))
+
+from parallel.tests.central_mutants import CASES as CENTRAL_MUTANTS
+from parallel.tests.memory_mutants import CASES as MEMORY_MUTANTS
+MUTANTS.extend(CENTRAL_MUTANTS)
+MUTANTS.extend((name, old, new, ['parallel.tests.test_memory_requests.MemoryRequests.' + test])
+               for name, old, new, test in MEMORY_MUTANTS)
+from parallel.tests.deployment_mutants import CASES as DEPLOYMENT_MUTANTS
+MUTANTS.extend(DEPLOYMENT_MUTANTS)
+from parallel.tests.storage_mutants import CASES as STORAGE_MUTANTS
+MUTANTS.extend(STORAGE_MUTANTS)
+# Existing workflow mutations follow the major stamp just as the workflow does.
+MUTANTS = [(rel, stamp.rewrite(old, stamp.MAJOR), stamp.rewrite(new, stamp.MAJOR), cases)
+           if rel in stamp.WORKFLOWS else (rel, old, new, cases) for rel, old, new, cases in MUTANTS]
 
 
-def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:
+
+def run(tree: pathlib.Path, tests: list[str], hang: float = HANG, *, quiet: bool = True) -> int:
     """The tests' status: 124 for a hang, 125 when a process of the run outlived it
     (``tests/leaks.py``). Either way every process of the run is killed, in a new
     session or not, so no mutant leaves one behind."""
     # -B: a stale .pyc of an earlier mutant of the same size and second would be used.
     # No pipes: a holder a mutant leaves behind must not keep the run waiting.
     code, left = leaks.run([sys.executable, '-B', '-m', 'unittest', '-q', *tests], cwd=tree, timeout=hang,
-                           quiet=True)
+                           quiet=quiet)
     return 125 if code == 0 and left else code
 
 
@@ -5284,7 +5302,7 @@ def main(argv: list[str] | None = None) -> int:
             trees.put(tree)
         every = sorted({t for _, (*_, ts) in mine for t in ts})
         tree0 = trees.get()
-        if run(tree0, every, hang=600):
+        if run(tree0, every, hang=600, quiet=False):
             print('the unmutated tree fails its tests or leaves a process behind', file=sys.stderr)
             return 2
         trees.put(tree0)

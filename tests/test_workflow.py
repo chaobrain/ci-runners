@@ -80,13 +80,13 @@ class OwnCheck(unittest.TestCase):
                 mutants.shard(bad)
         calls = []
         with unittest.mock.patch.object(mutants, 'MUTANTS', [('README.md', 'x', 'y', [f't{i}']) for i in range(10)]), \
-                unittest.mock.patch.object(mutants, 'run', side_effect=lambda tree, tests, hang=0: calls.append(tests) or 0), \
+                unittest.mock.patch.object(mutants, 'run', side_effect=lambda tree, tests, hang=0, quiet=True: calls.append((tests, quiet)) or 0), \
                 unittest.mock.patch.object(mutants, 'one', side_effect=lambda tree, *m: (True, 0.0)), \
                 unittest.mock.patch.object(mutants.stamp, 'stamp'), \
                 unittest.mock.patch('pathlib.Path.read_text', return_value='x'), \
                 unittest.mock.patch('shutil.copytree'), unittest.mock.patch('builtins.print'):
             self.assertEqual(mutants.main(['--shard', '2/4']), 0)
-        self.assertEqual(calls, [['t1', 't5', 't9']])  # the shard's own tests, once, unmutated
+        self.assertEqual(calls, [(['t1', 't5', 't9'], False)])  # unmutated once, with diagnostic output
 
 
 if __name__ == '__main__':

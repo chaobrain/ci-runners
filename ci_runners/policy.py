@@ -27,7 +27,7 @@ from collections.abc import Mapping
 SELF = 'chaobrain/ci-runners'
 
 #: runner classes (``CI_RUNNER_CLASS``, design §5.1, decision 12.5)
-CLASSES = frozenset({'light', 'part', 'gpu', 'multi', 'compile', 'nightly', 'slurm'})
+CLASSES = frozenset({'light', 'part', 'gpu', 'multi', 'compile', 'nightly', 'slurm', 'plan', 'executor'})
 #: the classes that hold a host exclusively: accepted only for a repository whose entry
 #: lists them in ``classes`` (decision 12.14); the others are open to every repository
 OPT_IN = frozenset({'compile', 'nightly', 'slurm'})  # slurm: decision 14.2
@@ -327,8 +327,10 @@ def _actors(env: Mapping[str, str], event: dict, name: str) -> list[str | None]:
     return out
 
 
-def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
-    """Accept or refuse a job, by design §6.2, for the runner class ``CI_RUNNER_CLASS`` and
+def check_context(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
+    """Check repository and event identity before checking the actors' permissions.
+
+    This applies design §6.2 for the runner class ``CI_RUNNER_CLASS`` and
     the runner audience ``CI_RUNNER_AUDIENCE`` (``private`` where unset, decision 16.7).
 
     ``env`` is the job's environment as the runner sets it for the hook
@@ -401,14 +403,24 @@ def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
         wr = event.get('workflow_run')
         if not isinstance(wr, dict) or not _repo_matches(wr.get('head_repository'), repo):
             return no('fork')
+    return Decision(True, 'ok')
+
+
+def decide(policy: Policy, env: Mapping[str, str], event: object) -> Decision:
+    """Apply the repository and event checks, then the legacy actor policy."""
+    context = check_context(policy, env, event)
+    if not context.accepted:
+        return context
+    repo = policy.repos[env['GITHUB_REPOSITORY'].lower()]
+    event_name = env['GITHUB_EVENT_NAME']
     for login in _actors(env, event, event_name):  # None (absent or malformed) is on no list
         if repo.visibility != 'private' and login is not None and login.endswith('[bot]'):
-            return no('bot')  # never a bot on the public pool, the policy's included (16.7)
+            return Decision(False, 'bot')  # never a bot on the public pool, the policy's included (16.7)
         if login == policy.bot:  # on no allowlist: passes only where the repository's switch is on
             if not repo.bot_dispatch or event_name not in BOT_EVENTS:
-                return no('bot')
+                return Decision(False, 'bot')
         elif login not in policy.actors and not (repo.org_members and login in policy.members):
-            return no('actor')
+            return Decision(False, 'actor')
     return Decision(True, 'ok')
 
 

@@ -1,0 +1,19 @@
+[Unit]
+Description=CI organization runner %i
+After=network-online.target @CONTROL_UNITS@
+Wants=network-online.target @CONTROL_UNITS@
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=@RUNTIME@/actions-runner/%i
+ExecStart=@RUNTIME@/actions-runner/%i/run.sh
+Restart=always
+RestartSec=30
+UMask=0077
+NoNewPrivileges=yes
+TimeoutStopSec=5min
+KillMode=mixed
+Slice=@SLICE@
+
+[Install]
+WantedBy=default.target

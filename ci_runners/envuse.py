@@ -11,27 +11,32 @@ from __future__ import annotations
 import fcntl
 import os
 import shutil
+from collections.abc import Callable
 
 INUSE = '.inuse'
 
 
-def hold(link: str) -> tuple[str, int | None]:
+def hold(link: str, *, validate: Callable[[str], bool] | None = None) -> tuple[str, int | None]:
     """The build directory ``link`` names now, and a descriptor holding it (None when it
     cannot be held: the path is no directory, or ``.inuse`` cannot be opened). The caller
-    keeps the descriptor open for as long as the build is in use."""
+    keeps the descriptor open for as long as the build is in use. With a validator,
+    an unusable build yields an empty path. Check before opening its lock and after
+    acquiring it, since a build may be pruned while the lock is being acquired."""
     for _ in range(5):
         build = os.path.realpath(link)
+        if validate is not None and not validate(build):
+            return '', None
         if not os.path.isdir(build):
-            return link, None
+            return (link if validate is None else ''), None
         try:
             fd = os.open(os.path.join(build, INUSE), os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
         except OSError:
-            return build, None
+            return (build if validate is None or validate(build) else ''), None
         fcntl.flock(fd, fcntl.LOCK_SH)  # waits only for a prune that is deleting this build
-        if os.path.isdir(build):
+        if os.path.isdir(build) and (validate is None or validate(build)):
             return build, fd
         os.close(fd)  # the build went while we waited: take what the link names now
-    return os.path.realpath(link), None
+    return (os.path.realpath(link) if validate is None else ''), None
 
 
 def remove_unused(build: str) -> bool:

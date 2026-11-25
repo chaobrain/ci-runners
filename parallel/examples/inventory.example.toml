@@ -1,0 +1,54 @@
+# Synthetic schema 2 example. Replace paths/account locally; never commit live inventory.
+# CPU groups are 4 logical CPUs and 4 GiB. 3090a hosts the plan runner and Slurm drivers.
+# For GPU scheduling, list gpu_uuids on enrolled local executors and set the plan pool
+# to { class = "plan", count = 6, gpu_waiters = true }. deploy.sh renders this from host.toml.
+schema = 2
+this = "3090a"
+
+[hosts.3090a]
+account = "<ci account>"
+home = "/example/3090a/home"
+data = "/example/3090a/data"
+slots = 1
+memory_max = "24G"
+disk_min_gib = 20
+gpus = []
+max_temp_c = 80
+pools = { plan = { class = "plan", count = 1 }, cpu = { class = "executor", device = "3090a", count = 4 }, slurm = { class = "executor", device = "slurm", count = 20 } }
+files = { slot_lock = "/example/3090a/slot.lock", slot_queue = "/example/3090a/slot.queue" }
+
+[hosts.3090b]
+account = "<ci account>"
+home = "/example/3090b/home"
+data = "/example/3090b/data"
+slots = 1
+memory_max = "24G"
+disk_min_gib = 20
+gpus = []
+max_temp_c = 80
+pools = { cpu = { class = "executor", device = "3090b", count = 4 } }
+files = { slot_lock = "/example/3090b/slot.lock", slot_queue = "/example/3090b/slot.queue" }
+
+[hosts.pro6000]
+account = "<ci account>"
+home = "/example/pro6000/home"
+data = "/example/pro6000/data"
+slots = 1
+memory_max = "96G"
+disk_min_gib = 20
+gpus = []
+max_temp_c = 80
+pools = { cpu = { class = "executor", device = "pro6000", count = 20 } }
+files = { slot_lock = "/example/pro6000/slot.lock", slot_queue = "/example/pro6000/slot.queue" }
+
+[hosts.h100]
+account = "<ci account>"
+home = "/example/h100/home"
+data = "/example/h100/data"
+slots = 1
+memory_max = "48G"
+disk_min_gib = 20
+gpus = []
+max_temp_c = 80
+pools = { cpu = { class = "executor", device = "h100", count = 10 } }
+files = { slot_lock = "/example/h100/slot.lock", slot_queue = "/example/h100/slot.queue" }

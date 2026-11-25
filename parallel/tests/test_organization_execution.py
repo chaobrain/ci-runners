@@ -78,7 +78,7 @@ class OrganizationWorkflow(unittest.TestCase):
         self.assertEqual({key: persisted[key] for key in self.approved}, self.approved)
 
     def test_build_supplies_resolved_project_and_enforces_plan_limit(self):
-        origin = {**self.approved, 'repository': self.env['GITHUB_REPOSITORY']}
+        origin = {**self.approved, 'repository': self.env['GITHUB_REPOSITORY'], 'context': 'ci/tests'}
         workflow_client.state_file(self.env, 'source').write_text(json.dumps(origin))
         requested_plan = plan()
         requested_plan['parts'][0]['minutes'] = 5

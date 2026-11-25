@@ -2,9 +2,9 @@
 
 ## Proposed decision: central BrainSpike GPU capability parity
 
-**Draft; lead review required before implementation.** Preparing this proposal is
-authorized. Implementation, release, deployment, runner or service changes are
-not authorized by that preparation request. This addendum describes an additive
+**Implementation approved by the lead on 2026-11-25 in #296.** Release,
+deployment, runner and service changes still require separate approval.
+This addendum describes an additive
 extension to the deployed central schema 2 contract on `gpu-q-2.1.2`, not a claim
 that its implementation is already on `main`. Reconcile the pending independent
 memory and context-isolation changes before choosing an implementation base.

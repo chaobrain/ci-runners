@@ -79,7 +79,8 @@ def build(args, inv, etc, env):
     elif organization_project is not None:
         options.update(organization_project=organization_project,
                        validate_env_build=functools.partial(organization.build_ready, settings, src['repository']))
-    args_for_plan = part.Inputs(project=src['project'], id='plan-v2', timeout_minutes=30,
+    plan_id = 'plan-v2-' + protocol.fingerprint(src['context'])[:24]
+    args_for_plan = part.Inputs(project=src['project'], id=plan_id, timeout_minutes=30,
                                memory='4G', queue_timeout_minutes=1,
                                command='exec /bin/bash -e -o pipefail -c "$CIRUNNERS_PLAN" > "$CIRUNNERS_PLAN_OUTPUT"')
     _, outcome = engine.execute(args_for_plan, **options)

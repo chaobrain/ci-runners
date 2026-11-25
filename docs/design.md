@@ -5587,6 +5587,9 @@ Schema 2 plan bundle names contain the existing `protocol.source_key` and
 result bundle names contain the allocation ID, so two central workflow calls
 in the same run cannot collide on a reused part ID. The manifest binds their
 status context as well. Schema 1 retains its run-wide unique part-ID rule.
+The internal schema 2 plan-command record also uses a stable digest of that
+context within its existing repository/run/attempt directory. Distinct contexts
+can each plan once; a repeated context in the same attempt remains refused.
 Components are validated and encoded below one configured root. A rename of
 a repository cannot permit a different repository ID to read its objects.
 

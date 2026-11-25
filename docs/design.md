@@ -1,5 +1,17 @@
 # ci-runners: design (contract)
 
+## Proposed decision: complete central consumer orchestration
+
+**Draft for lead review; implementation is not approved.** The deployed
+BrainSpike candidate remains commit `0a4fa2b`. Its completed two-card/P2P/NEST
+canaries do not establish historical replay, compile-gate equivalence, or a
+primary status that waits for report projection. The concrete additive proposal
+and acceptance cases are in
+[brainspike-central-orchestration.md](brainspike-central-orchestration.md).
+Existing source restrictions and publication behavior remain in force until
+that contract is approved and separately deployed. No new actor or fork
+admission, runtime installation, budget or Slurm binding is authorized here.
+
 ## Proposed decision: central BrainSpike GPU capability parity
 
 **Implementation approved by the lead on 2026-11-25 in #296.** Release,

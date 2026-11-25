@@ -1,5 +1,11 @@
 """Focused target, hardware and report safety mutations for GPU Slurm."""
 MUTANTS = (
+    ('omit-authoritative-grant', 'parallel.scheduler_store',
+     "'grant': self._allocation(self.db, a['id'])['grant'],", "'grant': {},",
+     'TargetAuthorization.test_named_target_gets_a_versioned_profile_without_local_card_leases'),
+    ('invent-ready-environment', 'parallel.workflow_client',
+     "bool(preparation.get('prefix') and not preparation.get('error'))", 'True',
+     'Publication.test_success_requires_resource_evidence_but_a_test_failure_stays_failure'),
     ('revoked-target-accepted', 'parallel.scheduler',
      "if binding.get('gpu_targets', {}).get(task['cluster_target']) != profile['slurm_target']:", 'if False:',
      'TargetAuthorization.test_exact_resources_and_current_target_are_revalidated_at_reserve_and_claim'),

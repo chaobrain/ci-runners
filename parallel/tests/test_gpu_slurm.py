@@ -55,6 +55,9 @@ class TargetAuthorization(unittest.TestCase):
                          (2, 'cluster1/a40', 'a40', 'cuda13'))
         self.assertNotIn('gpu_uuid', grant)
         self.assertNotIn('gpu_uuids', grant)
+        record = self.store.batch(batch['id'])['allocations'][0]
+        self.assertEqual(record['grant'], grant)
+        self.assertIsNone(record['storage_reference'])
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM allocation_cards').fetchone()[0], 0)
         self.assertTrue(self.claim(allocation)['organization_slurm_verified'])
         self.assertEqual(batch['source']['slurm_gpu_targets']['architecture']['variant'], 'cuda13')
@@ -191,6 +194,19 @@ class Publication(unittest.TestCase):
                 (record / 'outcome.json').write_text('{"outcome":"pass"}')
                 workflow_client.collect_allocation_results(None, allocation, {'RUNNER_TEMP': directory}, {'state': 'success'})
                 self.assertEqual(json.loads((root / 'ci-allocation/pair/allocation-ready.json').read_text()), receipt)
+                allocation['source']['environment_recipe'] = {'revision': 'a' * 40}
+                workflow_client.collect_allocation_results(None, allocation, {'RUNNER_TEMP': directory}, {'state': 'failure'})
+                metadata = json.loads((root / 'ci-allocation/pair/allocation-result.json').read_text())
+                self.assertEqual(metadata['environment_preparation'],
+                                 {'mode': 'pinned-cache', 'ready': False, 'revision': None})
+                self.assertNotIn(str(root), json.dumps(metadata['environment_preparation']))
+                (record / 'environment-preparation.json').write_text(json.dumps(
+                    {'prefix': str(root / 'private-prefix'), 'revision': 'a' * 40}))
+                workflow_client.collect_allocation_results(None, allocation, {'RUNNER_TEMP': directory}, {'state': 'failure'})
+                metadata = json.loads((root / 'ci-allocation/pair/allocation-result.json').read_text())
+                self.assertEqual(metadata['environment_preparation'],
+                                 {'mode': 'pinned-cache', 'ready': True, 'revision': 'a' * 40})
+                self.assertNotIn(str(root), json.dumps(metadata['environment_preparation']))
 
 
 if __name__ == '__main__':

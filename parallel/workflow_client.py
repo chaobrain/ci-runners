@@ -256,6 +256,11 @@ def collect_allocation_results(inv, allocation, env, result):
                    for k in ('cluster_target', 'gpu_model', 'variant')) or not ready.get('slurm_job_id'))):
             raise protocol.Error('successful GPU execution lacks its complete resource receipt')
     copy_tree(Path(record)/'allocation-ready.json', destination/'allocation-ready.json')
+    preparation = part._read_json(str(Path(record) / 'environment-preparation.json')) or {}
+    cached = 'environment_recipe' in allocation['source']
+    environment = ({'mode': 'pinned-cache', 'ready': bool(preparation.get('prefix') and not preparation.get('error')),
+                    'revision': preparation.get('revision')}
+                   if cached else {'mode': 'existing-prefix', 'ready': True})
     copy_tree(Path(record)/'work'/'results', destination/'results')
     for name, relative in allocation['part'].get('artifacts', {}).items():
         origin = Path(env['RUNNER_TEMP']) / relative
@@ -266,7 +271,7 @@ def collect_allocation_results(inv, allocation, env, result):
         'allocation': allocation['grant'], 'source_repository': allocation['source']['repository'],
         'source_sha': allocation['source']['sha'], 'source_run_id': allocation['source']['run_id'],
         'source_run_attempt': allocation['source']['run_attempt'], 'execution_job_id': allocation['job_id'],
-        'task_attempt': allocation['task_attempt'], 'result': result})
+        'task_attempt': allocation['task_attempt'], 'result': result, 'environment_preparation': environment})
     output({'allocation_id': allocation_id, 'part_id': part_id, 'state': result['state']}, env)
 
 

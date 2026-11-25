@@ -920,7 +920,9 @@ class Store:
             return {**dict(b), 'source': json.loads(b['source']),
                     'tasks': [{**dict(t), 'part': json.loads(t['part']), 'result': json.loads(t['result'])}
                               for t in self.db.execute('SELECT * FROM tasks WHERE batch=? ORDER BY id', (key,))],
-                    'allocations': [{**dict(a), 'result': json.loads(a['result']), 'artifacts': json.loads(a['artifacts'])}
+                    'allocations': [{**dict(a), 'result': json.loads(a['result']), 'artifacts': json.loads(a['artifacts']),
+                                     'grant': self._allocation(self.db, a['id'])['grant'],
+                                     'storage_reference': self.storage_reference(a['id'])}
                                     for a in self.db.execute('SELECT a.* FROM allocations a JOIN tasks t ON a.task=t.id WHERE t.batch=? ORDER BY a.created,a.id', (key,))]}
 
     def capacity(self) -> list[dict]:

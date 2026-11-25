@@ -138,7 +138,9 @@ def supervise(record, grant, cpus, command, fence=None, max_temp_c=80, gpu_mem_m
             quota, memory = resource_limits()
             width = slurm_cpu_width() if is_slurm else None
             check_limits(grant, quota, memory, slurm_width=width, supervisor_memory_cap=supervisor_memory_cap)
-        cards = protocol.grant_cards(grant)
+        remote_cards = (gpu_resources.slurm_cards(grant, details=True)
+                        if grant.get('allocation_schema') == 4 else [])
+        cards = [item[0] for item in remote_cards] if remote_cards else protocol.grant_cards(grant)
         ready = gpu_resources.available(cards, max_temp_c) if cards else {}
         if any(ready.get(card, -1) < gpu_mem_mib for card in cards):
             raise protocol.Error('authorized GPU is no longer available')
@@ -150,6 +152,10 @@ def supervise(record, grant, cpus, command, fence=None, max_temp_c=80, gpu_mem_m
         part._write_json(os.path.join(record, 'allocation-ready.json'), {'allocation_id': grant['allocation_id'],
                          'cores': grant['cores'], 'RAM': grant['RAM'], 'workers': grant['workers'],
                          'gpu_uuid': cards[0] if len(cards) == 1 else '', 'gpu_uuids': cards,
+                         **({'cluster_target': grant['cluster_target'], 'variant': grant['variant'],
+                             'gpu_model': grant['gpu_model'], 'gpu_models': [item[1] for item in remote_cards],
+                             'slurm_job_id': os.environ['SLURM_JOB_ID']}
+                            if grant.get('allocation_schema') == 4 else {}),
                          'memory_enforcement': ('process-tree' if supervisor_memory_cap else
                                                 'cgroup' if verify_resource_limits else 'unverified')})
     except (OSError, ValueError, KeyError, sqlite3.Error) as e:
@@ -201,17 +207,24 @@ def execute(inv, etc, env, allocation, cpus, *, run=subprocess.run, spawn=subpro
             or grant['RAM'] != f'{protocol.part_memory_gib(task)}G'):
         raise protocol.Error('allocation changed the requested resources')
     cards = protocol.grant_cards(grant)
-    if (protocol.gpu_count(task) != len(cards)
+    remote_gpu = grant['allocation_schema'] == 4
+    if remote_gpu:
+        profile = organization.gpu_slurm_profile(source, task)
+        if (not organization_slurm or grant['cluster_target'] != task['cluster_target']
+                or any(grant.get(k) != v for k, v in profile.items())):
+            raise protocol.Error('GPU cluster grant differs from its prepared target')
+    if (protocol.gpu_count(task) != (grant['gpu_count'] if remote_gpu else len(cards))
             or cards and (not set(cards) <= set(inv.host.get('gpu_uuids', [])) or grant['device'] not in proj.devices)
             or task.get('device') and task['device'] != grant['device']):
         raise protocol.Error('allocation changed the requested GPU or device')
     release = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     engine = part.Executor(inv, etc, env, release=release, run=run, spawn=spawn)
-    slurm_target = source.get('slurm_target', '').replace('/', ':', 1)
+    slurm_target = (grant['slurm_target'] if remote_gpu else source.get('slurm_target', '')).replace('/', ':', 1)
     args = part.Inputs(project=proj.name, command=task['command'], id=task['id'], timeout_minutes=grant['minutes'],
                        memory=grant['RAM'], workers=grant['workers'], cores=grant['cores'],
                        queue_timeout_minutes=max(0., (allocation['deadline']-time.time())/60),
-                       results=task.get('results', ''), target=slurm_target, gpus=len(cards))
+                       results=task.get('results', ''), target=slurm_target,
+                       gpus=grant['gpu_count'] if remote_gpu else len(cards))
     task_attempt = grant.get('task_attempt', 1)
     record = engine.record_dir(args, task_attempt)
     engine.record = record

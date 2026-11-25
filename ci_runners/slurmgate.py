@@ -247,10 +247,16 @@ def check_request(req: object, account: Mapping[str, object], base: str) -> dict
             grant = protocol.validate_allocation(req.get('allocation'))
         except ValueError as e:
             raise GateError(f'allocation: {e}') from None
-        if (gpu or grant['backend'] != 'slurm' or req.get('cores') != grant['cores']
+        remote_gpu = grant['allocation_schema'] == 4
+        cpu_capacity = int(t['cpus_per_card']) * req['cards'] if gpu else int(t['cpus'])
+        if (gpu != remote_gpu or grant['backend'] != 'slurm' or req.get('cores') != grant['cores']
                 or req.get('workers') != grant['workers'] or req['memory'] != grant['RAM']
-                or req['minutes'] != grant['minutes'] or req['cores'] > int(t['cpus'])):
-            raise GateError('allocation exceeds the CPU target or differs from its authorized resources')
+                or req['minutes'] != grant['minutes'] or req['cores'] > cpu_capacity):
+            raise GateError('allocation exceeds the target or differs from its authorized resources')
+        if remote_gpu and (grant['gpu_count'] != req['cards'] or grant['gpu_model'] != t['gpu_model']
+                           or grant['variant'] != t['variant']
+                           or grant['slurm_target'] != account['site'] + '/' + req['target']):
+            raise GateError('GPU allocation differs from its authorized target, model or variant')
     if req['minutes'] > int(t['max_minutes']):
         raise GateError(f'minutes {req["minutes"]:g}: target {req["target"]} takes at most {t["max_minutes"]}')
     if _size_bytes(req['memory']) > _size_bytes(str(t['mem_per_node'])):

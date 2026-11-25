@@ -243,6 +243,19 @@ def collect_allocation_results(inv, allocation, env, result):
         'env': env, 'part': allocation['part'], 'task_attempt': allocation['task_attempt']})
     for name in ('outcome.json', 'summary.md'):
         copy_tree(Path(record)/name, destination/name)
+    ready = part._read_json(str(Path(record) / 'allocation-ready.json'))
+    if allocation['grant'].get('allocation_schema', 1) >= 3 and result['state'] == 'success':
+        grant = allocation['grant']
+        if (not isinstance(ready, dict) or any(ready.get(k) != grant.get(k)
+                for k in ('allocation_id', 'cores', 'RAM', 'workers'))
+                or not isinstance(ready.get('gpu_uuids'), list) or len(ready['gpu_uuids']) != grant['gpu_count']
+                or len(set(ready['gpu_uuids'])) != grant['gpu_count']
+                or any(not isinstance(card, str) or not protocol.GPU_UUID.fullmatch(card) for card in ready['gpu_uuids'])
+                or grant['allocation_schema'] == 3 and ready['gpu_uuids'] != grant['gpu_uuids']
+                or grant['allocation_schema'] == 4 and (any(ready.get(k) != grant[k]
+                   for k in ('cluster_target', 'gpu_model', 'variant')) or not ready.get('slurm_job_id'))):
+            raise protocol.Error('successful GPU execution lacks its complete resource receipt')
+    copy_tree(Path(record)/'allocation-ready.json', destination/'allocation-ready.json')
     copy_tree(Path(record)/'work'/'results', destination/'results')
     for name, relative in allocation['part'].get('artifacts', {}).items():
         origin = Path(env['RUNNER_TEMP']) / relative

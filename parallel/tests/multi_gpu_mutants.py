@@ -4,12 +4,13 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 MUTANTS = (
     ('no-central-exclusion', 'parallel.scheduler_store',
      'WHERE ac.uuid=c.uuid AND a.released=0)', 'WHERE ac.uuid=c.uuid AND a.released=1)',
      'Central.test_concurrent_pairs_have_disjoint_cards_and_preserve_memory_and_cpus'),
     ('old-executor-accepted', 'parallel.scheduler_store',
-     'if capability is None or capability[0] < 3:', 'if False:',
+     'if capability is None or capability[0] < (4 if remote_gpu else 3):', 'if False:',
      'Central.test_pair_does_not_span_devices_or_reach_old_executors'),
     ('duplicate-grant-cards', 'parallel.protocol',
      'validate_gpu_list(device, cards)\n    elif', 'pass\n    elif',
@@ -33,13 +34,16 @@ MUTANTS = (
 
 
 def main():
-    for label, module, before, after, case in MUTANTS:
+    from parallel.tests.gpu_slurm_mutants import MUTANTS as SLURM_MUTANTS
+    cases = [(*entry[:-1], 'parallel.tests.test_multi_gpu.' + entry[-1]) for entry in MUTANTS]
+    cases += [(*entry[:-1], 'parallel.tests.test_gpu_slurm.' + entry[-1]) for entry in SLURM_MUTANTS]
+    for label, module, before, after, case in cases:
         code = '''import importlib,pathlib,sys,unittest
 module=importlib.import_module(sys.argv[1]);path=pathlib.Path(module.__file__)
 source=path.read_text();before,after=sys.argv[2:4]
 if source.count(before)!=1:raise SystemExit(3)
 exec(compile(source.replace(before,after,1),str(path),'exec'),module.__dict__)
-suite=unittest.defaultTestLoader.loadTestsFromName('parallel.tests.test_multi_gpu.'+sys.argv[4])
+suite=unittest.defaultTestLoader.loadTestsFromName(sys.argv[4])
 result=unittest.TextTestRunner(verbosity=0).run(suite)
 raise SystemExit(0 if result.wasSuccessful() else 1)
 '''

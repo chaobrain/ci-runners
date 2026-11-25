@@ -116,7 +116,7 @@ def load_plan(doc: object, *, max_minutes: float = MAX_MINUTES) -> dict:
     if not isinstance(files, str) or files and not relative(files):
         raise Error('files must be a relative directory below the checkout')
     out, seen = [], set()
-    keys = {'id', 'needs', 'device', 'gpu', 'gpu_count', 'cores', 'workers', 'minutes', 'queue_minutes', 'memory_gib',
+    keys = {'id', 'needs', 'device', 'gpu', 'gpu_count', 'cluster_target', 'cores', 'workers', 'minutes', 'queue_minutes', 'memory_gib',
             'command', 'results', 'artifacts', 'history'}
     for p in parts:
         if not isinstance(p, dict) or set(p) - keys:
@@ -133,8 +133,11 @@ def load_plan(doc: object, *, max_minutes: float = MAX_MINUTES) -> dict:
         if type(p.get('gpu', False)) is not bool:
             raise Error(f'{name}: gpu must be boolean')
         gpu_count(p)
-        if p.get('gpu') and device == 'slurm':
-            raise Error(f'{name}: Slurm does not provide central GPU cards')
+        if 'cluster_target' in p and (device != 'slurm' or not p.get('gpu')
+                                     or not isinstance(p['cluster_target'], str) or not ID.fullmatch(p['cluster_target'])):
+            raise Error(f'{name}: cluster_target is a logical GPU Slurm target identifier')
+        if p.get('gpu') and device == 'slurm' and 'cluster_target' not in p:
+            raise Error(f'{name}: GPU Slurm requires an explicitly authorized cluster_target')
         cores = p.get('cores', GROUP_CPUS)
         if not positive(cores) or cores % GROUP_CPUS:
             raise Error(f'{name}: cores must be a positive multiple of {GROUP_CPUS}')
@@ -210,7 +213,7 @@ def execution_job_name(task_id: str, task_attempt: int) -> str:
 
 
 def validate_allocation(value: object) -> dict:
-    if not isinstance(value, dict) or type(value.get('allocation_schema')) is not int or value['allocation_schema'] not in (1, 2, 3):
+    if not isinstance(value, dict) or type(value.get('allocation_schema')) is not int or value['allocation_schema'] not in (1, 2, 3, 4):
         raise Error('unknown allocation schema')
     for key in ('allocation_id', 'task_id', 'runner_tag', 'host'):
         if not isinstance(value.get(key), str) or not ID.fullmatch(value[key]):
@@ -234,7 +237,17 @@ def validate_allocation(value: object) -> dict:
                 or not isinstance(cards, list) or len(cards) != 2):
             raise Error('two-card allocation requires its complete physical UUID pair')
         validate_gpu_list(device, cards)
-    elif any(k in value for k in ('gpu_uuid', 'gpu_uuids', 'gpu_count')):
+    elif value['allocation_schema'] == 4:
+        route = value.get('slurm_target', '')
+        if (device != 'slurm' or any(k in value for k in ('gpu_uuid', 'gpu_uuids'))
+                or type(value.get('gpu_count')) is not int or value['gpu_count'] not in (1, 2)
+                or not positive(value.get('cluster_max_parallel')) or value['cluster_max_parallel'] > 256
+                or any(not isinstance(value.get(k), str) or not ID.fullmatch(value[k])
+                       for k in ('cluster_target', 'gpu_model', 'variant'))
+                or not isinstance(route, str) or len(route.split('/')) != 2
+                or any(not ID.fullmatch(s) for s in route.split('/'))):
+            raise Error('GPU Slurm allocation requires its authorized target and exact resource profile')
+    elif any(k in value for k in ('gpu_uuid', 'gpu_uuids', 'gpu_count', 'cluster_target')):
         raise Error('CPU allocation cannot carry a GPU UUID')
     groups = value.get('cpu_groups')
     if not positive(groups) or groups > DEVICE_GROUPS[device]:

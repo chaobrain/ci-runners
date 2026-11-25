@@ -5235,6 +5235,12 @@ from parallel.tests.deployment_mutants import CASES as DEPLOYMENT_MUTANTS
 MUTANTS.extend(DEPLOYMENT_MUTANTS)
 from parallel.tests.storage_mutants import CASES as STORAGE_MUTANTS
 MUTANTS.extend(STORAGE_MUTANTS)
+from parallel.tests.multi_gpu_mutants import MUTANTS as MULTI_GPU_MUTANTS
+from parallel.tests.gpu_slurm_mutants import MUTANTS as GPU_SLURM_MUTANTS
+for cases, prefix in ((MULTI_GPU_MUTANTS, 'parallel.tests.test_multi_gpu.'),
+                      (GPU_SLURM_MUTANTS, 'parallel.tests.test_gpu_slurm.')):
+    MUTANTS.extend((module.replace('.', '/') + '.py', old, new, [prefix + case])
+                   for label, module, old, new, case in cases)
 # Existing workflow mutations follow the major stamp just as the workflow does.
 MUTANTS = [(rel, stamp.rewrite(old, stamp.MAJOR), stamp.rewrite(new, stamp.MAJOR), cases)
            if rel in stamp.WORKFLOWS else (rel, old, new, cases) for rel, old, new, cases in MUTANTS]

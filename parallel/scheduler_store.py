@@ -321,7 +321,7 @@ class Store:
             raise protocol.Error('invalid heartbeat')
         if allocation_schema is None:
             allocation_schema = 2 if gpu_free_mib is not None else 1
-        if type(allocation_schema) is not int or allocation_schema not in (1, 2, 3):
+        if type(allocation_schema) is not int or allocation_schema not in (1, 2, 3, 4):
             raise protocol.Error('invalid allocation capability')
         with self.transaction() as db:
             known = {r[0] for r in db.execute('SELECT tag FROM runners WHERE host=?', (host,))}
@@ -393,7 +393,7 @@ class Store:
                 # is checked independently when reserving and claiming, including for retries.
                 saved = json.loads(previous['source'])
                 source = dict(source)
-                for field in ('slurm_project', 'slurm_target'):
+                for field in ('slurm_project', 'slurm_target', 'slurm_gpu_targets'):
                     source.pop(field, None)
                     if field in saved:
                         source[field] = saved[field]
@@ -402,9 +402,15 @@ class Store:
             else:
                 for p in plan['parts']:
                     choices = eligible.get(p['id'], [])
+                    if p.get('gpu') and p['device'] == 'slurm':
+                        from parallel import organization as org
+                        if not organization:
+                            raise protocol.Error('GPU Slurm requires organization target authorization')
+                        org.gpu_slurm_profile(source, p)
                     if not choices and organization:
                         raise protocol.Error(f'{p["id"]}: no configured, admitted device satisfies the resource request')
                     if (not choices or any(d not in protocol.DEVICES or p.get('gpu') and d not in protocol.GPU_QUOTAS
+                                           and not (d == 'slurm' and p['device'] == 'slurm' and p.get('cluster_target'))
                                            or p['device'] and p['device'] != d or p['cores'] > protocol.DEVICE_GROUPS[d] * 4
                                            for d in choices)):
                         raise protocol.Error(f'{p["id"]}: no eligible device satisfies the request')
@@ -487,7 +493,7 @@ class Store:
         return {row[0] for row in rows}
 
     def _available_runner(self, database, task_record, source, heartbeat_ttl, allowed_devices, organization,
-                          slurm_permitted, require_repository_environment, require_environment_cache):
+                          slurm_permitted, require_repository_environment, require_environment_cache, slurm_capacity):
         cached_recipe = 'environment_recipe' in source
         if (cached_recipe != require_environment_cache or
                 (organization and 'organization_profile' not in source)):
@@ -530,7 +536,10 @@ class Store:
                 devices.sort(key=ORGANIZATION_DEVICE_ORDER.index)
             else:
                 devices.sort(key=lambda device: -priorities.get(device, 0))
-        if part.get('gpu'):
+        remote_gpu = part.get('gpu') and part['device'] == 'slurm'
+        if remote_gpu:
+            candidates = [('slurm', [])] if 'slurm' in devices else []
+        elif part.get('gpu'):
             free_cards = database.execute('''SELECT pool,uuid FROM gpu_cards c WHERE free_mib>=?
                 AND NOT EXISTS(SELECT 1 FROM allocation_cards ac JOIN allocations a ON a.id=ac.allocation
                                WHERE ac.uuid=c.uuid AND a.released=0)
@@ -560,10 +569,10 @@ class Store:
                 ORDER BY r.tag LIMIT 1''', (device, fresh_after, fresh_after)).fetchone()
             if runner is None or (allowed_devices is not None and device not in compatible.get(runner['host'], ())):
                 continue
-            if len(gpu_uuids) == 2:
+            if len(gpu_uuids) == 2 or remote_gpu:
                 capability = database.execute('SELECT schema FROM allocation_capabilities WHERE host=?',
                                                (runner['host'],)).fetchone()
-                if capability is None or capability[0] < 3:
+                if capability is None or capability[0] < (4 if remote_gpu else 3):
                     continue
             if device != 'slurm':
                 registration = database.execute('SELECT profile FROM device_registrations WHERE device=?',
@@ -583,11 +592,35 @@ class Store:
                     continue
             if organization and device == 'slurm' and (slurm_permitted is None or not slurm_permitted(source, part)):
                 continue
+            if device == 'slurm':
+                limit = slurm_capacity(source, part) if slurm_capacity is not None else None
+                if slurm_capacity is not None and limit is None:
+                    continue
+                if remote_gpu and limit is None:
+                    from parallel import organization as org
+                    profile = org.gpu_slurm_profile(source, part)
+                    limit = {'site': profile['slurm_target'].split('/')[0],
+                             'max_parallel': profile['cluster_max_parallel']}
+                if limit is not None:
+                    active = database.execute('''SELECT t.part,b.source FROM allocations a
+                        JOIN tasks t ON t.id=a.task JOIN batches b ON b.id=t.batch
+                        WHERE a.pool='slurm' AND a.host=? AND a.released=0''', (runner['host'],))
+                    count = 0
+                    for entry in active:
+                        task, origin = json.loads(entry['part']), json.loads(entry['source'])
+                        route = origin.get('slurm_target', '')
+                        if task.get('gpu'):
+                            from parallel import organization as org
+                            route = org.gpu_slurm_profile(origin, task)['slurm_target']
+                        count += not route or route.split('/')[0] == limit['site']
+                    if count >= limit['max_parallel']:
+                        continue
             return runner, groups_required, gpu_uuids
         return None
 
     def reserve(self, *, heartbeat_ttl=HEARTBEAT_TTL, allowed_devices=None, organization=False,
-                slurm_permitted=None, require_repository_environment=False, require_environment_cache=False) -> dict | None:
+                slurm_permitted=None, slurm_capacity=None,
+                require_repository_environment=False, require_environment_cache=False) -> dict | None:
         if organization and allowed_devices is None:
             raise protocol.Error('organization dispatch needs an authoritative device list')
         now = self.clock()
@@ -609,7 +642,7 @@ class Store:
                 for task_record in tasks:
                     selected = self._available_runner(database, task_record, source, heartbeat_ttl,
                                                       allowed_devices, organization, slurm_permitted,
-                                                      require_repository_environment, require_environment_cache)
+                                                      require_repository_environment, require_environment_cache, slurm_capacity)
                     if selected is None:
                         continue
                     runner_record, groups_required, gpu_uuids = selected
@@ -647,7 +680,11 @@ class Store:
         grant['job_timeout_minutes'] = math.ceil(p['minutes'] + p['queue_minutes'] + 30)
         if 'memory_gib' in p:
             grant.update(memory_gib=p['memory_gib'], RAM=f'{p["memory_gib"]}G')
-        if a['gpu_uuid'] is not None:
+        if a['pool'] == 'slurm' and p.get('gpu'):
+            from parallel import organization
+            profile = organization.gpu_slurm_profile(source, p)
+            grant.update(allocation_schema=4, gpu_count=protocol.gpu_count(p), cluster_target=p['cluster_target'], **profile)
+        elif a['gpu_uuid'] is not None:
             grant.update(allocation_schema=2, gpu_uuid=a['gpu_uuid'])
         else:
             cards = [row[0] for row in db.execute('''SELECT uuid FROM allocation_cards

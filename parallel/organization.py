@@ -138,7 +138,8 @@ def read_slurm_allowlist(path, organization_name):
         raise protocol.Error('invalid Slurm allowlist schema')
     bindings, names = {}, set()
     for entry in document['repositories']:
-        if not isinstance(entry, dict) or set(entry) != {'repository_id', 'repository', 'slurm_project', 'slurm_target'}:
+        required = {'repository_id', 'repository', 'slurm_project', 'slurm_target'}
+        if not isinstance(entry, dict) or not required <= set(entry) or set(entry) - required - {'gpu_targets'}:
             raise protocol.Error('invalid Slurm allowlist entry')
         ident, name = entry['repository_id'], entry['repository']
         if not protocol.positive(ident) or not isinstance(name, str) or not protocol.REPO.fullmatch(name):
@@ -147,6 +148,12 @@ def read_slurm_allowlist(path, organization_name):
         if name.split('/')[0] != organization_name.lower() or name == policy.SELF or ident in bindings or name in names:
             raise protocol.Error('duplicate or out-of-scope Slurm allowlist repository')
         validate_slurm_route(entry)
+        targets = entry.get('gpu_targets', {})
+        if (not isinstance(targets, dict) or len(targets) > 16
+                or any(not isinstance(key, str) or not protocol.ID.fullmatch(key) for key in targets)):
+            raise protocol.Error('invalid logical GPU Slurm targets')
+        for target in targets.values():
+            validate_slurm_route(dict(entry, slurm_target=target))
         bindings[ident] = {**entry, 'repository': name}
         names.add(name)
     return bindings
@@ -160,16 +167,16 @@ def slurm_binding(allowlist, source):
     return binding if binding is not None and binding['repository'] == name.lower() else None
 
 
-def slurm_cpu_target(site, binding):
-    """Return the enabled CPU target served by a non-retired account for this binding."""
+def slurm_cpu_target(site, binding, *, gpu=False):
+    """Return an enabled target of the requested class, served by a live account."""
     site_name, target_name = binding['slurm_target'].split('/')
     target = site.targets.get(target_name)
-    if site.name != site_name or target is None or target.gpu or not target.enabled_for(binding['slurm_project']):
+    if site.name != site_name or target is None or target.gpu != gpu or not target.enabled_for(binding['slurm_project']):
         return None
     return target if any(not acct.retired and target_name in acct.a['targets'] for acct in site.accounts.values()) else None
 
 
-def read_slurm_target(etc, binding):
+def read_slurm_target(etc, binding, *, gpu=False, capacity=False):
     """Check the installed site on every authorization, including after administrator edits."""
     try:
         validate_slurm_route(binding)
@@ -178,7 +185,33 @@ def read_slurm_target(etc, binding):
         site = slurmsite.load(deployment_files.read_private(path).decode('utf-8'))
     except (OSError, ValueError, RecursionError):
         return None
-    return slurm_cpu_target(site, binding)
+    target = slurm_cpu_target(site, binding, gpu=gpu)
+    return (target, min(site.site['max_parts'], registry.MAX_PARALLEL_BOUND)) if target and capacity else target
+
+
+def gpu_target_profiles(etc, binding):
+    """Pin only enabled, served profiles from the controller's private target table."""
+    profiles = {}
+    for logical, route in binding.get('gpu_targets', {}).items():
+        current = read_slurm_target(etc, dict(binding, slurm_target=route), gpu=True, capacity=True)
+        if current is not None:
+            target, maximum = current
+            profiles[logical] = dict(slurm_target=route, gpu_model=target.t['gpu_model'],
+                                     variant=target.t['variant'], cluster_max_parallel=maximum)
+    return profiles
+
+
+def gpu_slurm_profile(source, task):
+    """The caller's logical request selects a controller-prepared profile only."""
+    profiles = source.get('slurm_gpu_targets', {})
+    logical = task.get('cluster_target')
+    profile = profiles.get(logical) if isinstance(profiles, dict) else None
+    if (not task.get('gpu') or task.get('device') != 'slurm' or not isinstance(profile, dict)
+            or set(profile) != {'slurm_target', 'gpu_model', 'variant', 'cluster_max_parallel'}
+            or not protocol.positive(profile['cluster_max_parallel'])
+            or profile['cluster_max_parallel'] > registry.MAX_PARALLEL_BOUND):
+        raise protocol.Error('GPU Slurm target was not prepared by the controller')
+    return dict(profile)
 
 
 def _environment(config, repository):

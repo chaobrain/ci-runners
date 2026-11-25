@@ -112,16 +112,42 @@ class Scheduler:
         return None
 
     def slurm_permitted(self, source, task):
-        if not source or task.get('gpu') or not source.get('slurm_project') or not source.get('slurm_target'):
+        if not source or not source.get('slurm_project') or not source.get('slurm_target'):
             return False
         binding = self.slurm_binding(source)
         if (binding is None or binding['slurm_project'] != source['slurm_project']
                 or binding['slurm_target'] != source['slurm_target']):
             return False
-        target = organization.read_slurm_target(self.etc, binding)
-        return (target is not None and task['cores'] <= target.cpus(0)
+        cards = protocol.gpu_count(task)
+        if cards:
+            try:
+                profile = organization.gpu_slurm_profile(source, task)
+            except protocol.Error:
+                return False
+            if binding.get('gpu_targets', {}).get(task['cluster_target']) != profile['slurm_target']:
+                return False
+            binding = dict(binding, slurm_target=profile['slurm_target'])
+            current = organization.read_slurm_target(self.etc, binding, gpu=True, capacity=True)
+            target, maximum = current if current is not None else (None, 0)
+            if (target is None or cards > target.max_cards or profile['gpu_model'] != target.t['gpu_model']
+                    or profile['variant'] != target.t['variant'] or profile['cluster_max_parallel'] != maximum):
+                return False
+        else:
+            target = organization.read_slurm_target(self.etc, binding)
+        return (target is not None and task['cores'] <= target.cpus(cards)
                 and task['minutes'] <= target.max_minutes
                 and protocol.part_memory_gib(task) * (1 << 30) <= registry.memory_bytes(target.t['mem_per_node']))
+
+    def slurm_capacity(self, source, task):
+        """Read the current site concurrency bound for every CPU/GPU reservation."""
+        binding = self.slurm_binding(source)
+        if binding is None:
+            return None
+        if task.get('gpu'):
+            profile = organization.gpu_slurm_profile(source, task)
+            binding = dict(binding, slurm_target=profile['slurm_target'])
+        current = organization.read_slurm_target(self.etc, binding, gpu=bool(task.get('gpu')), capacity=True)
+        return {'site': binding['slurm_target'].split('/')[0], 'max_parallel': current[1]} if current else None
 
     def prepare(self, requested):
         if self.organization_config is not None:
@@ -138,6 +164,8 @@ class Scheduler:
             binding = self.slurm_binding(source)
             if binding:
                 source.update(slurm_project=binding['slurm_project'], slurm_target=binding['slurm_target'])
+                if binding.get('gpu_targets'):
+                    source['slurm_gpu_targets'] = organization.gpu_target_profiles(self.etc, binding)
             project = organization.project({'organization': self.organization_config}, self.inv, source)
             return source, project, None
         project = registry.load_file(self.etc, requested['project'], self.inv.this)
@@ -419,7 +447,7 @@ class Scheduler:
         if method == 'heartbeat':
             gpu_free_mib = params.get('gpu_free_mib')
             version = params.get('allocation_schema', 1)
-            gpu_capable = type(version) is int and version in (2, 3)
+            gpu_capable = type(version) is int and version in (2, 3, 4)
             if gpu_free_mib is not None and not gpu_capable:
                 raise protocol.Error('GPU observations require allocation schema 2')
             readiness = {'ready_projects': params.get('ready_projects')}
@@ -522,7 +550,7 @@ def serve(inv, etc):
                 if ready:
                     if app.organization_config is not None:
                         app.store.reserve(allowed_devices=allowed_devices, organization=True,
-                                          slurm_permitted=app.slurm_permitted,
+                                          slurm_permitted=app.slurm_permitted, slurm_capacity=app.slurm_capacity,
                                           require_repository_environment='env_root' in app.organization_config,
                                           require_environment_cache='env_cache' in app.organization_config)
                     else:

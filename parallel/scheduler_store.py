@@ -586,6 +586,14 @@ class Store:
                 ORDER BY r.tag LIMIT 1''', (device, fresh_after, fresh_after)).fetchone()
             if runner is None or (allowed_devices is not None and device not in compatible.get(runner['host'], ())):
                 continue
+            # New source/report contracts depend on the matching executor codec,
+            # even for a plain CPU part. Legacy CPU RAM validation and collectors
+            # cannot acknowledge these grants or their source-linked receipts.
+            if source.get('report_gate') is True or source.get('source_selection') is not None:
+                modern = database.execute('SELECT schema FROM allocation_capabilities WHERE host=?',
+                                          (runner['host'],)).fetchone()
+                if modern is None or modern[0] < 5:
+                    continue
             if len(gpu_uuids) == 2 or remote_gpu or part.get('isolation') == 'timing':
                 capability = database.execute('SELECT schema FROM allocation_capabilities WHERE host=?',
                                                (runner['host'],)).fetchone()

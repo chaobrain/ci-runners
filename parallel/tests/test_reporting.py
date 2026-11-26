@@ -158,7 +158,7 @@ class Receipt(unittest.TestCase):
         self.store = scheduler_store.Store(':memory:')
         self.addCleanup(self.store.close)
         self.store.configure({'3090a': 1}, [dict(tag='3090a-0', pool='3090a', host='worker')])
-        self.store.heartbeat('worker', [dict(tag='3090a-0', online=True, busy=False)])
+        self.store.heartbeat('worker', [dict(tag='3090a-0', online=True, busy=False)], allocation_schema=5)
         self.src = source(storage=BOUND, repository_id=17, report_gate=True,
                           report_namespace='project/reports', report_plan_name='ci-plan-files',
                           run_head_sha='c'*40)

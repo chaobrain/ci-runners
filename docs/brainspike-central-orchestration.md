@@ -295,3 +295,37 @@ comparison, deployed selector/report acceptance, allocation-local PR dependency
 isolation, the complete consumer graph, original RAM capacity and site-bound GPU
 Slurm/model acceptance remain outstanding. The running `0a4fa2b` canary remains
 unchanged; this handover is not production activation or full CI acceptance.
+
+
+### Mixed-executor compatibility correction (2026-11-26)
+
+The approved source/report features require a matching executor collector as well
+as matching controller, client and workflow revisions. Reserve CPU tasks carrying
+`report_gate` or resolved `source_selection` only on executor capability 5 or
+newer supported implementations. This also keeps their explicit RAM requests away
+from the older core-derived RAM codec. The existing timing and GPU capability
+checks remain independent; ungated, unmodified sources retain their original
+allocation behavior. This corrects the missing reservation-side check for the
+already approved opt-in contracts and adds no action/workflow input or grant
+schema. It does not authorize deploying a new revision or upgrading another host.
+
+The real canary exposed the gap when an unrestricted CPU request selected an older
+executor. Its workflow failed before the test step; recovery verified no local
+execution record/physical leases, preserved the original grant, wrote an unstarted
+cancellation tombstone through the existing ledger interface and delivered the
+normal authenticated release event. The consumer canary is also explicitly pinned
+to the reviewed local device. Tests must prove both new opt-ins wait at capability
+4 and reserve at 5, while the existing legacy CPU contract continues to reserve.
+
+
+Correction validation on the existing second native node, from a private source
+export under the host lock, 2-GiB scope and two-CPU quota: scheduler stdlib suite
+321 passed; base stdlib suite 1,448 tests passed with the same one skipped fixture;
+53 orchestration mutants and all 18 GPU/Slurm mutants were killed. Commands are
+`python -m unittest discover -s parallel/tests -t . -p 'test_*.py' -q`,
+`python -m unittest discover -s tests -t . -p 'test_*.py' -q`,
+`python parallel/tests/orchestration_mutants.py`, and
+`python parallel/tests/multi_gpu_mutants.py`. The new tests and exact killing
+mutations are listed in the orchestration mutant table. The base suite uses umask
+022 inside the private export. This correction has not replaced the deployed
+`5fe30b9` runtime; its installation still requires the reviewed deployment process.

@@ -24,13 +24,13 @@ class MemoryRequests(unittest.TestCase):
                              ready_projects={'project': project},
                              gpu_free_mib={'GPU-00000000-0000-0000-0000-000000000001': 8192})
 
-    def queue(self, run, memory=None, *, gpu=False):
+    def queue(self, run, memory=None, *, gpu=False, source_fields=None):
         document = plan(device='3090a')
         document['parts'][0]['gpu'] = gpu
         if memory is not None:
             document['parts'][0]['memory_gib'] = memory
         document = protocol.load_plan(document)
-        batch = self.store.submit(source(run), document, {'test-0': ['3090a']})
+        batch = self.store.submit(source(run, **(source_fields or {})), document, {'test-0': ['3090a']})
         self.store.request_task_allocation(batch, self.store.batch(batch)['tasks'][0]['id'], 1)
         return batch
 
@@ -44,6 +44,38 @@ class MemoryRequests(unittest.TestCase):
         self.assertEqual(protocol.validate_allocation(grant), grant)
         with self.assertRaises(protocol.Error):
             protocol.validate_allocation({**grant, 'RAM': '4G'})
+
+    def contract_capability(self, version):
+        self.store.heartbeat('3090a', [dict(tag=f'3090a-{i}', online=True, busy=False) for i in range(4)],
+                             allocation_schema=version,
+                             ready_projects={'project': dict(repository='example/project', memory_bytes=64 << 30,
+                                 max_minutes=600, devices=['3090a'])},
+                             gpu_free_mib={'GPU-00000000-0000-0000-0000-000000000001': 8192})
+
+    def test_report_gated_cpu_waits_for_matching_executor_codec(self):
+        self.contract_capability(4)
+        self.queue(1, 8, source_fields=dict(report_gate=True))
+        self.assertIsNone(self.reserve())
+        self.contract_capability(5)
+        allocation = self.reserve()
+        self.assertIsNotNone(allocation)
+        self.assertEqual(allocation['grant']['RAM'], '8G')
+
+    def test_overridden_cpu_source_waits_for_matching_executor_codec(self):
+        self.contract_capability(4)
+        self.queue(1, 8, source_fields=dict(source_selection=dict(kind='commit-replay')))
+        self.assertIsNone(self.reserve())
+        self.contract_capability(5)
+        allocation = self.reserve()
+        self.assertIsNotNone(allocation)
+        self.assertEqual(allocation['grant']['RAM'], '8G')
+
+    def test_new_contract_waits_without_executor_capability_advertisement(self):
+        self.store.db.execute('DELETE FROM allocation_capabilities WHERE host=?', ('3090a',))
+        self.queue(1, 8, source_fields=dict(report_gate=True))
+        self.assertIsNone(self.reserve())
+        self.contract_capability(5)
+        self.assertIsNotNone(self.reserve())
 
     def test_old_plan_keeps_its_exact_default(self):
         self.queue(1)

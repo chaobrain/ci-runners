@@ -125,6 +125,23 @@ case('policy-content-changes-fingerprint', 'parallel.deployment_config', 'hashli
      "'0'*64", 'test_organization_deployment', 'OrganizationDeployment.test_optional_feature_policies_are_role_scoped_private_and_plan_bound')
 
 
+case('gated-cpu-old-executor', 'parallel.scheduler_store',
+     "source.get('report_gate') is True or source.get('source_selection') is not None",
+     "source.get('source_selection') is not None", 'test_memory_requests',
+     'MemoryRequests.test_report_gated_cpu_waits_for_matching_executor_codec')
+case('override-cpu-old-executor', 'parallel.scheduler_store',
+     "source.get('report_gate') is True or source.get('source_selection') is not None",
+     "source.get('report_gate') is True", 'test_memory_requests',
+     'MemoryRequests.test_overridden_cpu_source_waits_for_matching_executor_codec')
+case('new-contract-codec-floor', 'parallel.scheduler_store', 'modern is None or modern[0] < 5',
+     'modern is None or modern[0] < 4', 'test_memory_requests',
+     'MemoryRequests.test_report_gated_cpu_waits_for_matching_executor_codec')
+
+case('new-contract-missing-codec', 'parallel.scheduler_store', 'modern is None or modern[0] < 5',
+     'modern is not None and modern[0] < 5', 'test_memory_requests',
+     'MemoryRequests.test_new_contract_waits_without_executor_capability_advertisement')
+
+
 def main():
     code = '''import importlib,pathlib,sys,unittest
 from unittest import mock

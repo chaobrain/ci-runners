@@ -483,6 +483,13 @@ class Store:
                 raise protocol.Error('unknown task in this batch')
             if task_attempt > task['attempts'] + 1:
                 raise protocol.Error('cannot skip a task attempt')
+            # GitHub's job queue precedes device waiting in report-gated workflows.
+            # Arm once per attempt, retaining the budget left by earlier attempts.
+            if (task['state'] == 'queued' and task_attempt == task['attempts'] + 1
+                    and task['requested_attempt'] < task_attempt
+                    and database.execute('SELECT 1 FROM batch_reports WHERE batch=?', (batch_id,)).fetchone()):
+                database.execute('UPDATE tasks SET deadline=? WHERE id=?',
+                                 (self.clock() + task['wait_remaining'], task_id))
             database.execute('UPDATE tasks SET requested_attempt=MAX(requested_attempt,?) WHERE id=?',
                              (task_attempt, task_id))
         return self.task_status(batch_id, task_id, task_attempt)
@@ -650,7 +657,9 @@ class Store:
             raise protocol.Error('organization dispatch needs an authoritative device list')
         now = self.clock()
         with self.transaction() as database:
-            expired = database.execute("SELECT id,batch FROM tasks WHERE state='queued' AND deadline<=?", (now,)).fetchall()
+            expired = database.execute("""SELECT id,batch FROM tasks WHERE state='queued' AND deadline<=?
+                AND (requested_attempt>attempts OR NOT EXISTS
+                     (SELECT 1 FROM batch_reports WHERE batch=tasks.batch))""", (now,)).fetchall()
             for task_record in expired:
                 database.execute("UPDATE tasks SET state='error',result=? WHERE id=?",
                                  (protocol.dumps({'state': 'error', 'reason': 'queue deadline exceeded'}), task_record['id']))

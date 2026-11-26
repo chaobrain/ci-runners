@@ -5493,7 +5493,13 @@ Scheduler database upgrades require all old batches and allocations to finish;
 old independent-run records must never be interpreted as same-run job records.
 
 `queue_minutes` is a cumulative waiting budget across attempts; execution time
-after allocation acknowledgement does not consume it. Each execution job allows
+after allocation acknowledgement does not consume it. For report-gated same-run
+workflows, waiting for the allocation-request job to start in GitHub does not
+consume device waiting time: the first request for an attempt starts its remaining
+budget. Duplicate requests never restart that clock, and a retry retains only the
+unspent budget. Cancellation and failed or missing request jobs still close tasks
+through source-job reconciliation. Existing ungated workflows retain their clock.
+Each execution job allows
 `ceil(minutes + queue_minutes + 30)` minutes for waiting, execution and collection,
 bounded to 1440 minutes to fit the job credential lifetime. Project `max_minutes`
 and Slurm target limits can lower this bound. A retry receives the remaining queue

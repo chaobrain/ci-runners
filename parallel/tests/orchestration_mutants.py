@@ -142,6 +142,35 @@ case('new-contract-missing-codec', 'parallel.scheduler_store', 'modern is None o
      'MemoryRequests.test_new_contract_waits_without_executor_capability_advertisement')
 
 
+S = 'test_single_workflow'
+C = 'SingleRunScheduling.'
+case('github-queue-excluded', 'parallel.scheduler_store',
+     'requested_attempt>attempts OR NOT EXISTS', '1 OR NOT EXISTS', S,
+     C+'test_report_gated_github_queue_does_not_spend_device_wait_budget')
+case('legacy-queue-clock-kept', 'parallel.scheduler_store',
+     'requested_attempt>attempts OR NOT EXISTS', 'requested_attempt>attempts AND NOT EXISTS', S,
+     C+'test_ungated_unrequested_task_keeps_original_queue_expiry')
+case('request-starts-clock', 'parallel.scheduler_store',
+     "self.clock() + task['wait_remaining'], task_id", "task['deadline'], task_id", S,
+     C+'test_report_gated_github_queue_does_not_spend_device_wait_budget')
+case('legacy-request-cannot-rearm', 'parallel.scheduler_store',
+     "and database.execute('SELECT 1 FROM batch_reports WHERE batch=?', (batch_id,)).fetchone()",
+     'and True', S, C+'test_ungated_unrequested_task_keeps_original_queue_expiry')
+case('duplicate-cannot-refill', 'parallel.scheduler_store',
+     "task['requested_attempt'] < task_attempt", 'True', S,
+     C+'test_report_gated_duplicate_request_cannot_refill_or_revive_expired_budget')
+case('requested-wait-still-expires', 'parallel.scheduler_store',
+     'requested_attempt>attempts OR NOT EXISTS', '0 OR NOT EXISTS', S,
+     C+'test_report_gated_duplicate_request_cannot_refill_or_revive_expired_budget')
+case('retry-keeps-remaining-budget', 'parallel.scheduler_store',
+     "self.clock() + task['wait_remaining'], task_id", "self.clock() + 900, task_id", S,
+     C+'test_report_gated_retry_excludes_github_queue_and_execution_but_retains_spent_wait')
+case('terminal-request-cannot-rearm', 'parallel.scheduler_store',
+     "task['state'] == 'queued' and task_attempt == task['attempts'] + 1",
+     "task_attempt == task['attempts'] + 1", S,
+     C+'test_report_gated_unrequested_tasks_close_on_source_and_request_failure')
+
+
 def main():
     code = '''import importlib,pathlib,sys,unittest
 from unittest import mock

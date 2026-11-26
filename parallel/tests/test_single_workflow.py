@@ -30,8 +30,13 @@ class SingleRunScheduling(unittest.TestCase):
         self.api.artifacts.return_value = []
         self.coordinator = github_coordinator.WorkflowCoordinator(self.store, self.api, clock=lambda: self.now)
 
-    def submit(self, count=1, *, run=1, retries=1, max_parallel=1):
-        batch_id = self.store.submit(source(run), plan(count),
+    def heartbeat(self):
+        self.store.heartbeat('worker', [{'tag': '3090a-0', 'online': True, 'busy': False}], allocation_schema=5)
+
+    def submit(self, count=1, *, run=1, retries=1, max_parallel=1, report_gate=False):
+        if report_gate:
+            self.heartbeat()
+        batch_id = self.store.submit(source(run, report_gate=report_gate), plan(count),
                                      {f'test-{index}': ['3090a'] for index in range(count)},
                                      retries=retries, max_parallel=max_parallel)
         return batch_id, self.store.batch(batch_id)['tasks']
@@ -65,6 +70,88 @@ class SingleRunScheduling(unittest.TestCase):
         self.assertEqual(self.store.capacity()[0]['groups_free'], 0)
         self.assertEqual(allocation['run_id'], 1)
         self.assertIsNone(self.store.reserve())
+
+    def test_report_gated_github_queue_does_not_spend_device_wait_budget(self):
+        batch_id, tasks = self.submit(report_gate=True)
+        self.now += 1800
+        self.assertIsNone(self.store.reserve())
+        self.assertEqual(self.store.task_status(batch_id, tasks[0]['id'])['state'], 'queued')
+        task = self.store.request_task_allocation(batch_id, tasks[0]['id'], 1)
+        self.assertEqual(task['deadline'] - self.now, 900)
+        self.heartbeat()
+        allocation = self.store.reserve()
+        self.assertIsNotNone(allocation)
+        self.assertEqual(allocation['grant']['workers'], 3)
+
+    def test_ungated_unrequested_task_keeps_original_queue_expiry(self):
+        batch_id, tasks = self.submit()
+        self.now += 901
+        self.assertIsNone(self.store.reserve())
+        self.assertEqual(self.store.task_status(batch_id, tasks[0]['id'])['state'], 'error')
+        batch_id, tasks = self.submit(run=2)
+        self.now += 901
+        self.store.request_task_allocation(batch_id, tasks[0]['id'], 1)
+        self.assertIsNone(self.store.reserve())
+        self.assertEqual(self.store.task_status(batch_id, tasks[0]['id'])['state'], 'error')
+
+    def test_report_gated_duplicate_request_cannot_refill_or_revive_expired_budget(self):
+        batch_id, tasks = self.submit(report_gate=True)
+        self.now += 1800
+        task = self.store.request_task_allocation(batch_id, tasks[0]['id'], 1)
+        deadline = task['deadline']
+        self.assertEqual(deadline - self.now, 900)
+        self.now += 500
+        self.assertEqual(self.store.request_task_allocation(batch_id, tasks[0]['id'], 1)['deadline'], deadline)
+        self.now += 401
+        self.assertIsNone(self.store.reserve())
+        task = self.store.request_task_allocation(batch_id, tasks[0]['id'], 1)
+        self.assertEqual(task['state'], 'error')
+        self.assertEqual(task['deadline'], deadline)
+        self.assertIsNone(self.store.reserve())
+
+    def test_report_gated_retry_excludes_github_queue_and_execution_but_retains_spent_wait(self):
+        batch_id, tasks = self.submit(report_gate=True)
+        self.now += 1800
+        self.heartbeat()
+        first = self.allocate(batch_id, tasks[0])
+        self.now += 30
+        self.store.event('worker', 'started', first['id'], 'allocated')
+        self.now += 36000
+        self.release(first, {'state': 'error', 'retryable': True})
+        self.complete(first, conclusion='failure')
+        self.now += 1800
+        self.assertIsNone(self.store.reserve())
+        before = self.store.task_status(batch_id, tasks[0]['id'])['deadline']
+        self.store.request_task_allocation(batch_id, tasks[0]['id'], 1)
+        self.assertEqual(self.store.task_status(batch_id, tasks[0]['id'])['deadline'], before)
+        task = self.store.request_task_allocation(batch_id, tasks[0]['id'], 2)
+        self.assertEqual(task['deadline'] - self.now, 870)
+        self.heartbeat()
+        second = self.store.reserve()
+        self.assertEqual(second['deadline'] - self.now, 870)
+        self.assertEqual(second['grant']['workers'], first['grant']['workers'])
+        self.assertEqual(second['grant']['device'], first['grant']['device'])
+
+    def test_report_gated_unrequested_tasks_close_on_source_and_request_failure(self):
+        for index, outcome in enumerate(('cancelled', 'failure', 'success', 'request-failure'), 10):
+            with self.subTest(outcome=outcome):
+                batch_id, tasks = self.submit(run=index, report_gate=True)
+                if outcome == 'request-failure':
+                    self.api.run_attempt.return_value = {'status': 'in_progress', 'run_attempt': 1}
+                    self.api.jobs.return_value = [{'name': protocol.allocation_job_name(tasks[0]['id'], 1),
+                                                  'status': 'completed', 'conclusion': 'failure'}]
+                else:
+                    self.api.run_attempt.return_value = {'status': 'completed', 'conclusion': outcome}
+                    self.api.jobs.return_value = []
+                self.coordinator.reconcile()
+                task = self.store.task_status(batch_id, tasks[0]['id'])
+                self.assertIn(task['state'], ('error', 'cancelled'))
+                self.now += 1800
+                deadline = task['deadline']
+                self.store.request_task_allocation(batch_id, tasks[0]['id'], 1)
+                self.assertEqual(self.store.task_status(batch_id, tasks[0]['id'])['state'], task['state'])
+                self.assertEqual(self.store.task_status(batch_id, tasks[0]['id'])['deadline'], deadline)
+                self.assertIsNone(self.store.reserve())
 
     def test_three_tasks_reuse_one_runner_without_waiting_for_the_run_to_end(self):
         for max_parallel in (1, 3):

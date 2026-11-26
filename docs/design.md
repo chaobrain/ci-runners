@@ -5962,3 +5962,50 @@ two simultaneous requests whose sum exceeds host capacity; GPU and CPU
 sharing one memory budget; release/restart behavior; allocation tampering;
 and preservation of BrainCell's frozen commands, coverage thresholds and
 4/8/12/40 GiB limits. No historical report or artifact is deleted.
+
+## Proposed decision: opt-in request clock for existing schema 2 workflows
+
+Status: proposed; lead approval is required before runtime implementation.
+
+BrainCell's same-run CPU workflow can spend its entire device wait budget in
+GitHub's queue before an allocation-request job starts. A real run exhausted
+both first-wave tasks with zero execution attempts after more than twenty
+minutes in the shared planning queue. Increasing the budget would also increase
+actual device waiting and would not separate these two clocks.
+
+Add the optional boolean source field `request_wait_clock`, default `false`,
+the matching `central prepare --request-wait-clock` flag, and the optional
+boolean `request-wait-clock` input on the central action and reusable schema 2
+workflow. Existing callers omit it and retain their current behavior. The
+existing `report_gate` opt-in continues to imply the request clock; this flag
+cannot weaken or disable report publication gates.
+
+For an explicitly opted-in same-run workflow, only the first authenticated
+allocation request for a task attempt starts its remaining `queue_minutes`
+budget. GitHub job-queue time and acknowledged execution time do not consume
+that budget. Duplicate requests cannot reset it, a retry keeps only unspent
+waiting time, and a terminal task cannot be revived. Source cancellation and
+failed or missing request jobs still close tasks through the existing source-job
+reconciler. Device wait budgets, test runtime limits and resource quantities do
+not increase.
+
+The controller validates and binds the opt-in during source preparation, echoes
+its acceptance to the client, and preserves it in the immutable prepared source
+and batch identity checks. An opting-in client must fail before submission if
+the controller does not acknowledge support. Unknown values, non-booleans and
+changes to an existing batch's clock selection are refused; no silent fallback.
+
+This is a controller scheduling feature. It adds no allocation, executor,
+storage, label or hook-authorization contract, and must remain usable with an
+otherwise compatible existing CPU executor. It does not enroll a consumer in
+the newer source-selection, report-gate or executor-codec contracts. BrainCell
+would opt in through a pinned, reviewed private client; public routing remains
+unchanged. No production deployment or authorization change is approved by this
+proposal.
+
+Acceptance must reproduce a thirty-minute GitHub queue followed by the original
+full device wait budget, reject unsupported controllers and malformed input,
+preserve legacy defaults, and cover duplicate requests, cumulative retries,
+source/request failure, cancellation, restart and an existing executor codec.
+BrainCell must then pass its unchanged full workload, coverage gates and SSH
+report upload/readback checks. Historical artifacts and reports are retained.

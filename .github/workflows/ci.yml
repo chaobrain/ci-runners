@@ -157,7 +157,7 @@ jobs:
       # plan named the directory; flow plan refused what this upload cannot carry)
       - id: files
         if: ${{ !cancelled() && steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != '' }}
-        uses: chaobrain/ci-runners/actions/upload@v1
+        uses: chaobrain/ci-runners/actions/upload@v1.23.0
         with:
           name: ci-plan-files
           path: ${{ github.workspace }}/${{ steps.plan.outputs.files }}

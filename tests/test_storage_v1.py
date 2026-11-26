@@ -185,6 +185,20 @@ class Bundles(unittest.TestCase):
             self.bundles.seal('cpu', 2, 'failure', [])
         self.assertTrue(self.bundles.report_gap(found))
 
+    def test_rerun_keeps_a_previous_pass_only_for_confirmed_skipped_jobs(self):
+        self.bundles.publish('ci-part-cpu-1', str(self.source))
+        self.bundles.seal('cpu', 1, 'success', [])
+        rerun = storage_v1.Bundles(self.transport, 'pilot', {**RUN, 'run_attempt': 2}, 100)
+        rerun.bind()
+        found = {'cpu': {1: ({'outcome': 'pass', 'run-attempt': 1}, '')}}
+        skipped = [{'name': 'ci / part cpu / first', 'conclusion': 'skipped'},
+                   {'name': 'ci / part cpu / retry', 'conclusion': 'skipped'}]
+        self.assertEqual(rerun.report_gap(found, skipped), '')
+        self.assertTrue(rerun.report_gap(found))
+        for conclusion in ('failure', 'success', 'cancelled', None):
+            self.assertTrue(rerun.report_gap(found, [*skipped, {
+                'name': 'ci / part cpu / first', 'conclusion': conclusion}]))
+
     @unittest.skipIf(os.name == 'nt', 'symlink privilege is not required on the maintenance workstation')
     def test_links_in_producers_and_destination_parents_are_rejected(self):
         (self.source / 'link').symlink_to(self.source / 'pytest.xml')

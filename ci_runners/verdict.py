@@ -231,10 +231,16 @@ def _verdict(a: argparse.Namespace, env: Mapping[str, str], inv: inventory.Inven
             v = decide(items)
             if internal is not None and v.state == 'success':
                 try:
+                    jobs = None
+                    if internal.old_passes(found):
+                        from ci_runners import flow
+                        jobs = flow.run_jobs(env, call)
                     gap = ('required standard outcome missing' if any(e.id not in found for e in items)
-                           else internal.report_gap(found))
+                           else internal.report_gap(found, jobs))
                 except storage.Error as e:
                     gap = 'internal report evidence: ' + e.code
+                except github.ApiError:
+                    gap = 'current part jobs could not be verified'
                 if gap:
                     v = Verdict('error', gap)
         call('POST', f'{base}/repos/{repo}/statuses/{a.sha}', token,

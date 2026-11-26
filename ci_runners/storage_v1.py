@@ -369,7 +369,20 @@ class Bundles:
             self.download(directory, pattern='ci-part-*')
             return {pid: attempts for pid, attempts in artifacts.collect(directory).items() if pid in ids}
 
-    def report_gap(self, found):
+    def old_passes(self, found):
+        return [pid for pid, attempts in found.items() if attempts and
+                (last := max(attempts.items())[1][0]).get('outcome') == 'pass' and
+                last.get('run-attempt') != self.run['run_attempt']]
+
+    def report_gap(self, found, jobs=None):
+        # A rerun may retain evidence only for jobs GitHub confirms were skipped.
+        # A failed current upload must never uncover the previous attempt's pass.
+        for pid in self.old_passes(found):
+            matching = [job for job in jobs or [] if isinstance(job, dict) and
+                        str(job.get('name', '')).split(' / ')[-2:] in
+                        (['part ' + pid, 'first'], ['part ' + pid, 'retry'])]
+            if not matching or any(job.get('conclusion') != 'skipped' for job in matching):
+                return 'current part publication missing'
         refs = self.references()
         for pid, attempts in found.items():
             n, (outcome, _) = max(attempts.items())

@@ -24,20 +24,30 @@ class Pipeline(unittest.TestCase):
         self.assertNotIn('CI_RUNNERS_ETC', env)
         self.assertNotIn('CI_STORAGE_KEY', env)
 
-    def verdict(self):
+    def verdict(self, jobs=None):
         from ci_runners import verdict
-        api = mock.Mock()
+        api = mock.Mock(return_value={'jobs': jobs or []})
         fetch = mock.Mock(side_effect=AssertionError('GitHub artifact API must not be called'))
         env = dict(GITHUB_REPOSITORY=RUN['repository'], GITHUB_RUN_ID=str(RUN['id']),
-                   GITHUB_RUN_ATTEMPT='1', GITHUB_TOKEN='fixture')
+                   GITHUB_RUN_ATTEMPT=str(self.bundles.run['run_attempt']), GITHUB_TOKEN='fixture')
         with mock.patch.dict(os.environ, env, clear=True), mock.patch(
                 'ci_runners.storage_v1.open_current', return_value=self.bundles):
             code = verdict.main(['--context', 'project/ci', '--sha', 'a' * 40, '--parts', 'cpu'], None,
                                 call=api, fetch=fetch)
         fetch.assert_not_called()
-        api.assert_called_once()
+        self.assertEqual(sum(c.args[0] == 'POST' for c in api.call_args_list), 1)
         self.assertEqual(api.call_args.args[0], 'POST')
         return code, api.call_args.args[3]['state']
+
+    def test_failed_rerun_upload_cannot_reveal_a_previous_success(self):
+        from ci_runners import storage_v1
+        (self.source / 'outcome.json').write_text(json.dumps({'outcome': 'pass', 'run-attempt': 1}))
+        self.bundles.publish('ci-part-cpu-1', str(self.source))
+        self.bundles.seal('cpu', 1, 'success', [])
+        self.bundles = storage_v1.Bundles(self.transport, 'pilot', {**RUN, 'run_attempt': 2}, 100)
+        self.bundles.bind()
+        self.assertEqual(self.verdict([{'name': 'ci / part cpu / first', 'conclusion': 'failure'}]), (1, 'error'))
+        self.assertEqual(self.verdict([{'name': 'ci / part cpu / first', 'conclusion': 'skipped'}]), (0, 'success'))
 
     def test_no_success_without_both_outcome_and_report_receipt(self):
         (self.source / 'outcome.json').write_text(json.dumps({'outcome': 'pass', 'run-attempt': 1}))

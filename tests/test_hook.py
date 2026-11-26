@@ -7,6 +7,7 @@ import datetime
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -471,7 +472,12 @@ class Completed(unittest.TestCase):
         gone.wait()
         g = self.record('gone', gone.pid)  # its executor died while the job ran: the host's end, not a cancel
         reused = self.record('reused', other.pid, runner='r-gpu0', run='77-3', start=time.time() - 3600)  # a pid reused
-        got = hook.cancel_parts(self.env)
+        with unittest.mock.patch.object(hook.os, 'kill', wraps=os.kill) as kill:
+            got = hook.cancel_parts(self.env)
+        # Signal delivery is asynchronous: poll() can still report a just-killed
+        # executor as running. Assert the targeted signals as well as real exits.
+        self.assertEqual([call.args for call in kill.call_args_list if call.args[1] != 0],
+                         [(waiting.pid, signal.SIGTERM), (again.pid, signal.SIGTERM)])
         self.assertEqual(sorted(got), ['77-1/run-1', '77-1/wait-1', '77-2/again-1'])
         for d in (w, r, a):
             self.assertEqual(json.loads((d / outcome.CANCELLED).read_text())['by'], 'job-completed')

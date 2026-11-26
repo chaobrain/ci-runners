@@ -12,6 +12,10 @@ name: ci-runners
 on:
   workflow_call:
     inputs:
+      storage-store:
+        description: require the configured internal logical store; empty preserves the default backend
+        type: string
+        default: ''
       context:
         description: the status context, such as myproj/ci
         type: string
@@ -64,6 +68,8 @@ jobs:
   # read-only (16.6 as amended): nothing of the head runs with a token that can post a status
   plan:
     name: plan
+    env:
+      CI_STORAGE_STORE: ${{ inputs.storage-store }}
     if: >-
       github.event.repository.visibility != 'public' && github.event_name != 'pull_request_target' &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
@@ -151,7 +157,7 @@ jobs:
       # plan named the directory; flow plan refused what this upload cannot carry)
       - id: files
         if: ${{ !cancelled() && steps.plan.outputs.routed == 'true' && steps.plan.outputs.files != '' }}
-        uses: actions/upload-artifact@v4
+        uses: chaobrain/ci-runners/actions/upload@v1
         with:
           name: ci-plan-files
           path: ${{ github.workspace }}/${{ steps.plan.outputs.files }}
@@ -202,6 +208,7 @@ jobs:
         part: ${{ fromJSON(needs.plan.outputs.parts) }}
     uses: chaobrain/ci-runners/.github/workflows/part.yml@v1.23.0
     with:
+      storage-store: ${{ inputs.storage-store }}
       part: ${{ toJSON(matrix.part) }}
       context: ${{ inputs.context }}
       sha: ${{ needs.plan.outputs.sha }}
@@ -215,6 +222,8 @@ jobs:
   # the lost job's outputs are gone
   verdict:
     name: verdict
+    env:
+      CI_STORAGE_STORE: ${{ inputs.storage-store }}
     needs: [plan, pending, parts]
     if: >-
       always() && !cancelled() && needs.plan.result != 'skipped' && needs.plan.outputs.run != 'false'

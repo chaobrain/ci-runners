@@ -1,0 +1,43 @@
+name: ci-runners download
+description: Read and verify CI files from the run's configured backend.
+inputs:
+  name:
+    description: one artifact, empty selects pattern
+    default: ''
+  pattern:
+    description: artifact name pattern
+    default: '*'
+  path:
+    description: destination directory
+    default: ${{ github.workspace }}
+  merge-multiple:
+    description: merge matching bundles, rejecting different bytes at one path internally
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - id: mode
+      shell: bash
+      run: |
+        if [ -z "${CI_RUNNERS_ETC:-}" ] && [ -z "${CI_STORAGE_STORE:-}" ]; then
+          echo 'backend=github' >> "$GITHUB_OUTPUT"
+        else
+          "$GITHUB_ACTION_PATH/../lib/ci-run.sh" storage mode
+        fi
+    - if: steps.mode.outputs.backend == 'ssh'
+      shell: bash
+      env:
+        IN_NAME: ${{ inputs.name }}
+        IN_PATTERN: ${{ inputs.pattern }}
+        IN_PATH: ${{ inputs.path }}
+        IN_MERGE: ${{ inputs.merge-multiple }}
+      run: >-
+        "$GITHUB_ACTION_PATH/../lib/ci-run.sh" storage download
+        --name "$IN_NAME" --pattern "$IN_PATTERN" --path "$IN_PATH" --merge "$IN_MERGE"
+    - if: steps.mode.outputs.backend == 'github'
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        pattern: ${{ inputs.pattern }}
+        path: ${{ inputs.path }}
+        merge-multiple: ${{ inputs.merge-multiple }}

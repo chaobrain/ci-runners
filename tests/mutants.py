@@ -5223,14 +5223,31 @@ MUTANTS.extend(DYNAMIC_MUTANTS)
 
 
 
-def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:
+# Preserve the existing wiring mutations as private transfers move behind the
+# paired actions. Public workflow mutations still target GitHub's own actions.
+def _paired_transfer(rel: str, snippet: str) -> str:
+    if rel in (PTW, '.github/workflows/ci.yml', APT, 'actions/salvage/action.yml'):
+        snippet = snippet.replace('actions/upload-artifact@v4', 'chaobrain/ci-runners/actions/upload@v1').replace(
+            'actions/download-artifact@v4', 'chaobrain/ci-runners/actions/download@v1')
+    if rel == PTW:
+        snippet = snippet.replace('  first:\n    name: first\n',
+                                  '  first:\n    name: first\n    env:\n'
+                                  '      CI_STORAGE_STORE: ${{ inputs.storage-store }}\n')
+    return snippet
+
+
+MUTANTS = [(rel, _paired_transfer(rel, old), _paired_transfer(rel, new), cases)
+           for rel, old, new, cases in MUTANTS]
+
+
+def run(tree: pathlib.Path, tests: list[str], hang: float = HANG, quiet: bool = True) -> int:
     """The tests' status: 124 for a hang, 125 when a process of the run outlived it
     (``tests/leaks.py``). Either way every process of the run is killed, in a new
     session or not, so no mutant leaves one behind."""
     # -B: a stale .pyc of an earlier mutant of the same size and second would be used.
     # No pipes: a holder a mutant leaves behind must not keep the run waiting.
     code, left = leaks.run([sys.executable, '-B', '-m', 'unittest', '-q', *tests], cwd=tree, timeout=hang,
-                           quiet=True)
+                           quiet=quiet)
     return 125 if code == 0 and left else code
 
 
@@ -5284,7 +5301,7 @@ def main(argv: list[str] | None = None) -> int:
             trees.put(tree)
         every = sorted({t for _, (*_, ts) in mine for t in ts})
         tree0 = trees.get()
-        if run(tree0, every, hang=600):
+        if run(tree0, every, hang=600, quiet=False):
             print('the unmutated tree fails its tests or leaves a process behind', file=sys.stderr)
             return 2
         trees.put(tree0)

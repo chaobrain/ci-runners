@@ -380,6 +380,9 @@ def part_env(base: Mapping[str, str], *, role: str, project: registry.Project, p
     env = {k: v for k, v in base.items() if not k.startswith('CI_') and k not in STEP_FILES
            and k not in (locks.ENV, 'LOCAL_CI_HOST_LOCK')}
     env.update(project.variables)
+    # The logical store is an evidence requirement, not a credential or endpoint.
+    if base.get('CI_STORAGE_STORE'):
+        env['CI_STORAGE_STORE'] = base['CI_STORAGE_STORE']
     if project.env:
         env['PATH'] = f'{project.env}/bin:' + env.get('PATH', '/usr/bin:/bin')
         env['CONDA_PREFIX'] = project.env

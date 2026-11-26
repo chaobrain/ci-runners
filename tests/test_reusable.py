@@ -21,7 +21,8 @@ REUSABLE = ('ci.yml', 'part.yml', 'sweep.yml', 'public.yml', 'public-part.yml')
 PUBLIC_WF = ('public.yml', 'public-part.yml')
 #: the reusable workflows the stamp rewrites, written out (never read from the stamp)
 STAMPED = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml',
-           '.github/workflows/public.yml', '.github/workflows/public-part.yml')
+           '.github/workflows/public.yml', '.github/workflows/public-part.yml',
+           'actions/part/action.yml', 'actions/salvage/action.yml')
 POOL_OR_HOSTED = ("${{ fromJSON(inputs.part).gpus > 0 && fromJSON('[\"self-hosted\",\"ci-pub-gpu\"]') "
                   "|| 'ubuntu-latest' }}")
 #: the capability labels a job may name literally (16.1)
@@ -235,10 +236,11 @@ class Structure(unittest.TestCase):
                 self.assertEqual(v.get('type'), want, f'{name}: {k}')
         self.assertEqual(set(load('public.yml')['on']['workflow_call']['inputs']),
                          {'context', 'plan', 'project', 'sha', 'plan-only'})  # no token for a public plan command
-        self.assertEqual(load('public-part.yml')['on']['workflow_call']['inputs'].keys(),
-                         load('part.yml')['on']['workflow_call']['inputs'].keys())
+        self.assertEqual(set(load('public-part.yml')['on']['workflow_call']['inputs']),
+                         set(load('part.yml')['on']['workflow_call']['inputs']) - {'storage-store'})
+        self.assertEqual(load('part.yml')['on']['workflow_call']['inputs']['storage-store']['default'], '')
         self.assertEqual(set(load('ci.yml')['on']['workflow_call']['inputs']),
-                         {'context', 'plan', 'project', 'sha', 'plan-only', 'plan-token'})
+                         {'context', 'plan', 'project', 'sha', 'plan-only', 'plan-token', 'storage-store'})
         for k in ('plan-only', 'plan-token'):
             self.assertIs(load('ci.yml')['on']['workflow_call']['inputs'][k]['default'], False)
         self.assertTrue(load('ci.yml')['on']['workflow_call']['inputs']['context']['required'])
@@ -276,7 +278,7 @@ class Structure(unittest.TestCase):
     def test_an_attempt_uploads_its_outcome_again_only_where_its_own_upload_failed(self):
         jobs = load('part.yml')['jobs']
         for jid in ('first', 'retry'):
-            [again] = [st for st in jobs[jid]['steps'] if st.get('uses', '').startswith('actions/upload-artifact@')
+            [again] = [st for st in jobs[jid]['steps'] if st.get('uses', '').startswith('chaobrain/ci-runners/actions/upload@')
                        and 'ci-part-' in st['with']['name']]
             self.assertEqual(again['if'], "always() && steps.part.outcome == 'failure' && steps.part.outputs.outcome != '' "
                                           "&& steps.part.outputs.uploaded != 'success'", jid)
@@ -341,7 +343,7 @@ class Structure(unittest.TestCase):
         for jid, attempt in (('first', '1'), ('retry', '2')):
             sts = load('part.yml')['jobs'][jid]['steps']
             ids = [st.get('id') for st in sts]
-            down = [i for i, st in enumerate(sts) if st.get('uses', '').startswith('actions/download-artifact@')]
+            down = [i for i, st in enumerate(sts) if st.get('uses', '').startswith('chaobrain/ci-runners/actions/download@')]
             self.assertEqual(len(down), 1, jid)
             files = ids.index('files')  # through the API first (#245), download-artifact where it refuses
             self.assertEqual((files + 1, down[0]), (down[0], ids.index('part') - 1), jid)
@@ -379,7 +381,7 @@ class Structure(unittest.TestCase):
         # a plan command whose part step left no outcome is lost, not passed
         self.assertEqual(plan['with']['plan-outcome'], "${{ inputs.plan != '' && (steps.command.outputs.outcome || 'lost') || '' }}")
         self.assertEqual(plan['if'], "always() && steps.start.outputs.ok == 'true'")
-        up = [st for st in sts if st.get('uses', '').startswith('actions/upload-artifact@')]
+        up = [st for st in sts if st.get('uses', '').startswith('chaobrain/ci-runners/actions/upload@')]
         self.assertEqual([u['with']['name'] for u in up], ['ci-plan-files'])
         # #227: hidden entries too (a `.ci-plan` directory, a `.name` inside); flow plan refused
         # what the upload cannot carry, and an upload that finds nothing fails the plan's files
@@ -463,7 +465,7 @@ class Structure(unittest.TestCase):
         self.assertEqual(flows, ['start', 'plan'])  # start: the key, the claim and the contract, one step
         uses = {st.get('uses', '').split('@')[0] for st in job['steps']} - {''}
         self.assertEqual(uses, {'chaobrain/ci-runners/actions/flow', 'actions/checkout', 'chaobrain/ci-runners/actions/part',
-                                'actions/upload-artifact'})  # no claim action: it posts pending
+                                'chaobrain/ci-runners/actions/upload'})  # no claim action: it posts pending
         for st in job['steps']:
             text = str(st.get('env', {})) + str(st.get('with', {}))
             if st.get('id') == 'command':
@@ -649,6 +651,17 @@ class Sweep(unittest.TestCase):
 
 
 class Stamp(unittest.TestCase):
+    def test_nested_upload_guards_accept_the_stamped_release(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(d)
+            stamp.stamp(tree, 'v1.22.9001')
+            result = subprocess.run([
+                sys.executable, '-B', '-m', 'unittest', '-q',
+                'tests.test_actions.Actions.test_the_part_action_uploads_its_outcome_unless_told_not_to',
+                'tests.test_actions.Salvage.test_one_upload_per_salvaged_part_up_to_the_bound',
+            ], cwd=tree, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def tree(self, d: str) -> pathlib.Path:
         t = pathlib.Path(d) / 'tree'
         shutil.copytree(ROOT, t, ignore=shutil.ignore_patterns('.git', '__pycache__'))
@@ -683,9 +696,9 @@ class Stamp(unittest.TestCase):
             after = self.files(t)
             changed = {k for k in before if before[k] != after[k]}
             self.assertEqual(changed, {'actions/RELEASE', *STAMPED})
-            self.assertEqual(set(STAMPED), {f'.github/workflows/{n}' for n in REUSABLE})
+            self.assertEqual(set(STAMPED), {f'.github/workflows/{n}' for n in REUSABLE} | {'actions/part/action.yml', 'actions/salvage/action.yml'})
             self.assertEqual(after['actions/RELEASE'], 'v1.17.0\n')
-            for rel in stamp.WORKFLOWS:
+            for rel in (*stamp.WORKFLOWS, *stamp.NESTED):
                 old, new = before[rel].splitlines(), after[rel].splitlines()
                 self.assertEqual(len(old), len(new))
                 for a, b in zip(old, new):

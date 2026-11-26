@@ -1,0 +1,34 @@
+name: ci-runners seal reports
+description: Require complete project evidence before an internal part can pass its verdict.
+inputs:
+  id:
+    description: part ID
+    required: true
+  attempt:
+    description: part attempt
+    required: true
+  state:
+    description: job state after all report uploads
+    required: true
+  part:
+    description: routed part JSON with its declared artifact names
+    default: ''
+  expected:
+    description: JSON array of required artifact names for a custom job
+    default: '[]'
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        IN_ID: ${{ inputs.id }}
+        IN_ATTEMPT: ${{ inputs.attempt }}
+        IN_STATE: ${{ inputs.state }}
+        IN_PART: ${{ inputs.part }}
+        IN_EXPECTED: ${{ inputs.expected }}
+      run: |
+        if [ -n "${CI_RUNNERS_ETC:-}" ] || [ -n "${CI_STORAGE_STORE:-}" ]; then
+          "$GITHUB_ACTION_PATH/../lib/ci-run.sh" storage seal \
+            --id "$IN_ID" --attempt "$IN_ATTEMPT" --state "$IN_STATE" \
+            --part "$IN_PART" --expected "$IN_EXPECTED"
+        fi

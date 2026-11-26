@@ -28,6 +28,8 @@ jobs:
         run: |
           python -I tests/leaks.py --timeout 900 -- python -I -m unittest discover -s tests -t . -v
           python -m ci_runners.inventory lint . --deny tests/deny.sha256
+      - name: storage fault injections
+        run: python -m tests.storage_mutants
   mutants:
     name: mutants (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest

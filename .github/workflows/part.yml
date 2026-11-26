@@ -14,6 +14,10 @@ name: ci-runners part
 on:
   workflow_call:
     inputs:
+      storage-store:
+        description: the internal logical store pinned by the caller
+        type: string
+        default: ''
       part:
         description: one routed part of the plan (ci-run flow plan), as JSON
         type: string
@@ -34,6 +38,8 @@ on:
 jobs:
   first:
     name: first
+    env:
+      CI_STORAGE_STORE: ${{ inputs.storage-store }}
     runs-on: ${{ fromJSON(inputs.part).labels }}
     timeout-minutes: ${{ fromJSON(inputs.part).timeout_minutes }}
     # actions: read lists the run's artifacts for the plan's files (#245); the step that
@@ -70,7 +76,7 @@ jobs:
           workspace: ${{ github.workspace }}
           dest: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}
       - if: fromJSON(inputs.part).files && steps.files.outputs.fallback == 'true'
-        uses: actions/download-artifact@v4
+        uses: chaobrain/ci-runners/actions/download@v1
         with:
           name: ci-plan-files
           path: ${{ runner.temp }}/ci-runners-files
@@ -96,7 +102,7 @@ jobs:
         if: >-
           always() && steps.part.outcome == 'failure' && steps.part.outputs.outcome != '' &&
           steps.part.outputs.uploaded != 'success'
-        uses: actions/upload-artifact@v4
+        uses: chaobrain/ci-runners/actions/upload@v1
         with:
           name: ci-part-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '1' }}
           path: ${{ runner.temp }}/ci-runners/${{ fromJSON(inputs.part).id }}
@@ -115,33 +121,42 @@ jobs:
           project: ${{ inputs.project }}
           outcome-file: ${{ runner.temp }}/ci-runners/${{ fromJSON(inputs.part).id }}/outcome.json
       - if: always() && steps.part.outputs.outcome != '' && fromJSON(inputs.part).artifacts[0].name
-        uses: actions/upload-artifact@v4
+        uses: chaobrain/ci-runners/actions/upload@v1
         with:
           name: ${{ fromJSON(inputs.part).artifacts[0].name }}-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '1' }}
           path: ${{ runner.temp }}/${{ fromJSON(inputs.part).artifacts[0].path }}
           retention-days: 7
           if-no-files-found: warn
       - if: always() && steps.part.outputs.outcome != '' && fromJSON(inputs.part).artifacts[1].name
-        uses: actions/upload-artifact@v4
+        uses: chaobrain/ci-runners/actions/upload@v1
         with:
           name: ${{ fromJSON(inputs.part).artifacts[1].name }}-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '1' }}
           path: ${{ runner.temp }}/${{ fromJSON(inputs.part).artifacts[1].path }}
           retention-days: 7
           if-no-files-found: warn
       - if: always() && steps.part.outputs.outcome != '' && fromJSON(inputs.part).artifacts[2].name
-        uses: actions/upload-artifact@v4
+        uses: chaobrain/ci-runners/actions/upload@v1
         with:
           name: ${{ fromJSON(inputs.part).artifacts[2].name }}-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '1' }}
           path: ${{ runner.temp }}/${{ fromJSON(inputs.part).artifacts[2].path }}
           retention-days: 7
           if-no-files-found: warn
       - if: always() && steps.part.outputs.outcome != '' && fromJSON(inputs.part).artifacts[3].name
-        uses: actions/upload-artifact@v4
+        uses: chaobrain/ci-runners/actions/upload@v1
         with:
           name: ${{ fromJSON(inputs.part).artifacts[3].name }}-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '1' }}
           path: ${{ runner.temp }}/${{ fromJSON(inputs.part).artifacts[3].path }}
           retention-days: 7
           if-no-files-found: warn
+
+      - name: Seal required project reports
+        if: always() && steps.part.outputs.outcome != ''
+        uses: chaobrain/ci-runners/actions/seal@v1
+        with:
+          id: ${{ fromJSON(inputs.part).id }}
+          attempt: ${{ steps.part.outputs.attempt || '1' }}
+          state: ${{ job.status }}
+          part: ${{ inputs.part }}
 
   # the lost path: the host whose runner took the first attempt, from its job's runner_name
   locate:
@@ -176,6 +191,8 @@ jobs:
   # part that still runs, uploads its outcome, and decides the retry from it
   salvage:
     name: salvage
+    env:
+      CI_STORAGE_STORE: ${{ inputs.storage-store }}
     needs: [first, locate]
     if: always() && !cancelled() && needs.locate.outputs.labels != ''
     runs-on: ${{ fromJSON(needs.locate.outputs.labels) }}
@@ -219,6 +236,7 @@ jobs:
     outputs:
       outcome: ${{ steps.part.outputs.outcome }}
     env:
+      CI_STORAGE_STORE: ${{ inputs.storage-store }}
       RETRY: ${{ needs.first.outputs.retry || needs.salvage.outputs.retry || needs.locate.outputs.retry }}
     steps:
       # one commit, or (the plan's history, #228) the head's whole history and every branch's
@@ -242,7 +260,7 @@ jobs:
           workspace: ${{ github.workspace }}
           dest: ${{ fromJSON(inputs.part).files && format('{0}/ci-runners-files', runner.temp) || '' }}
       - if: fromJSON(inputs.part).files && steps.files.outputs.fallback == 'true'
-        uses: actions/download-artifact@v4
+        uses: chaobrain/ci-runners/actions/download@v1
         with:
           name: ci-plan-files
           path: ${{ runner.temp }}/ci-runners-files
@@ -268,40 +286,49 @@ jobs:
       - if: >-
           always() && steps.part.outcome == 'failure' && steps.part.outputs.outcome != '' &&
           steps.part.outputs.uploaded != 'success'
-        uses: actions/upload-artifact@v4
+        uses: chaobrain/ci-runners/actions/upload@v1
         with:
           name: ci-part-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '2' }}
           path: ${{ runner.temp }}/ci-runners/${{ fromJSON(inputs.part).id }}
           retention-days: 7
           overwrite: true
       - if: always() && steps.part.outputs.outcome != '' && fromJSON(inputs.part).artifacts[0].name
-        uses: actions/upload-artifact@v4
+        uses: chaobrain/ci-runners/actions/upload@v1
         with:
           name: ${{ fromJSON(inputs.part).artifacts[0].name }}-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '2' }}
           path: ${{ runner.temp }}/${{ fromJSON(inputs.part).artifacts[0].path }}
           retention-days: 7
           if-no-files-found: warn
       - if: always() && steps.part.outputs.outcome != '' && fromJSON(inputs.part).artifacts[1].name
-        uses: actions/upload-artifact@v4
+        uses: chaobrain/ci-runners/actions/upload@v1
         with:
           name: ${{ fromJSON(inputs.part).artifacts[1].name }}-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '2' }}
           path: ${{ runner.temp }}/${{ fromJSON(inputs.part).artifacts[1].path }}
           retention-days: 7
           if-no-files-found: warn
       - if: always() && steps.part.outputs.outcome != '' && fromJSON(inputs.part).artifacts[2].name
-        uses: actions/upload-artifact@v4
+        uses: chaobrain/ci-runners/actions/upload@v1
         with:
           name: ${{ fromJSON(inputs.part).artifacts[2].name }}-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '2' }}
           path: ${{ runner.temp }}/${{ fromJSON(inputs.part).artifacts[2].path }}
           retention-days: 7
           if-no-files-found: warn
       - if: always() && steps.part.outputs.outcome != '' && fromJSON(inputs.part).artifacts[3].name
-        uses: actions/upload-artifact@v4
+        uses: chaobrain/ci-runners/actions/upload@v1
         with:
           name: ${{ fromJSON(inputs.part).artifacts[3].name }}-${{ fromJSON(inputs.part).id }}-${{ steps.part.outputs.attempt || '2' }}
           path: ${{ runner.temp }}/${{ fromJSON(inputs.part).artifacts[3].path }}
           retention-days: 7
           if-no-files-found: warn
+
+      - name: Seal required project reports
+        if: always() && steps.part.outputs.outcome != ''
+        uses: chaobrain/ci-runners/actions/seal@v1
+        with:
+          id: ${{ fromJSON(inputs.part).id }}
+          attempt: ${{ steps.part.outputs.attempt || '2' }}
+          state: ${{ job.status }}
+          part: ${{ inputs.part }}
 
   # a red attempt's failure, at once, from a light job that runs no head code: the
   # attempts' jobs hold no write permission (a part command runs as the runner's account

@@ -14,7 +14,7 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: actions/download-artifact@v4
+    - uses: chaobrain/ci-runners/actions/download@v1
       continue-on-error: true
       with:
         pattern: ci-part-*
@@ -31,97 +31,97 @@ runs:
         --artifacts "$ARTIFACTS" --out "$OUT"
     # one upload per salvaged part, up to MAX_SALVAGED (ci_runners/verdict.py)
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 1
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-1 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-1 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 2
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-2 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-2 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 3
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-3 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-3 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 4
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-4 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-4 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 5
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-5 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-5 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 6
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-6 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-6 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 7
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-7 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-7 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 8
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-8 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-8 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 9
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-9 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-9 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 10
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-10 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-10 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 11
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-11 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-11 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 12
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-12 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-12 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 13
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-13 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-13 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 14
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-14 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-14 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 15
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-15 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-15 }}
         retention-days: 7
     - if: fromJSON(steps.salvage.outputs.count || '0') >= 16
-      uses: actions/upload-artifact@v4
+      uses: chaobrain/ci-runners/actions/upload@v1
       with:
         name: ${{ steps.salvage.outputs.name-16 }}
         path: ${{ runner.temp }}/ci-salvage-out/${{ steps.salvage.outputs.name-16 }}

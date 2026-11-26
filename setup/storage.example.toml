@@ -1,0 +1,23 @@
+# Placeholder inventory. Configure producers and readers together before cutover.
+schema = 1
+default_backend = "github"
+
+[repositories."example/project"]
+backend = "ssh"
+store = "ci-files-v1"
+
+[schema1_cutover]
+"example/project" = 100
+
+[stores.ci-files-v1]
+ssh_alias = "storage.example.invalid"
+identity_file = "/example/private/storage-key"
+known_hosts_file = "/example/private/storage-known-hosts"
+root = "/example/ci-storage"
+helper = "/example/releases/storage/bin/ci-storage-helper"
+
+[retention]
+run_days = 3
+diagnostic_days = 7
+mapping_days = 14
+cleanup_dry_run = true

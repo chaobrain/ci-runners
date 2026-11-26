@@ -523,3 +523,56 @@ GH_TOKEN=$(gh auth token) ci-run stats [--repo OWNER/NAME ...] [--since 24h|90m|
 
 **API 开销**：每次调用 30 秒、3 次尝试；一个仓库有 R 个 run、P 次推送、K 个 run 里共 N 个被重试的部件时，共 ceil(R/100) + R + ceil(P/100) + K + 2N 次请求（作业每页 100 个；下载是两次请求：GitHub 的重定向，再是不带登录的签名 URL）。2026-11-12 金丝雀一天 44 个 run 用了 77 次。超过 `--max-requests`（默认 2000）就拒绝出报告，不会出一份不全的；GitHub 的 run 搜索最多给 1000 个 run，第一页的 `total_count` 超过 1000 也拒绝；`Link` 指向 GitHub API 之外的地址时拒绝（登录不会发到别处）。退出码：0 报告；1 GitHub 读不到或到了上限；2 参数错误或没有登录。
 
+## V1 internal file storage rollout
+
+The maintenance sequence is a storage-only change. It does not register runners,
+change capability labels or enable centralized scheduler/executor services.
+The lead approves the final release/tag and live cutovers after reviewing the
+code, test/mutant evidence, current `setup/plan.sh` output and protocol probes.
+
+1. Install the accepted v1 host release side by side on every producer/reader
+   and pin the storage helper to that release. Keep a verified backup of each
+   existing private configuration and its release fingerprint. Run the v1 setup
+   dry run; do not apply unrelated account, service or authorized-keys changes.
+2. Provision a dedicated CI directory on the storage role. Existing private SSH
+   credentials may be reused within their current trust boundary. Keep keys and
+   configuration private, pin known-hosts records, and use no interactive login,
+   agent forwarding or disabled host-key checking. Any new key, key relocation,
+   or authorization change is separately listed under Needs the lead.
+3. Prepare `CI_RUNNERS_ETC/storage.toml` on every producer and reader, mode 600.
+   Use the placeholder format in `setup/storage.example.toml`; real endpoints,
+   account names and paths stay on the hosts. Keep `default_backend = "github"`.
+   A repository's SSH override alone does not switch schema 1; its positive
+   integer entry in `schema1_cutover` is also required. All hosts must agree on
+   the logical store and cutover before that repository resumes admissions.
+4. During the reviewed maintenance window, drain active work, install matching
+   host/action support and merge the paired consumer workflow/readers. Record
+   the first eligible run ID. A new workflow's required store fails closed until
+   the matching host configuration is ready. Resume the previous admission
+   policy and rerun the bounded canary after enabling the cutover.
+5. Roll out BrainMass, BrainCell and BrainSpike in that order. For each, verify a
+   passing command, an intentional test failure, missing/corrupt evidence and a
+   rerun from another host. Verify BrainCell's coverage merge and later test-map
+   read, then BrainSpike PR/main/complete nightly reports and map history. Check
+   the opted-in private paths make no GitHub artifact transfers. A protocol-only
+   SSH probe is evidence for transport, not a substitute for workflow acceptance.
+
+Use `ci-run storage mode`, `upload`, `download` and `seal` through the installed
+release for diagnostics. Authentication/host-key/permission failures are permanent
+for that operation; only bounded transient transport failures retry. Do not work
+around failures by changing backend mid-run or accepting missing receipts.
+
+Initial retention classes are run (three days), diagnostic (seven days) and
+mapping (fourteen days). Deletion remains disabled: the helper's cleanup reports
+protected objects only. Keep active/retried runs and referenced maps, monitor
+available capacity, and review a separate retention change before enabling any
+destructive cleanup. Staging debris and the separate protocol-probe directories
+are not production results and are reviewed separately, never broadly deleted.
+
+For rollback, stop admissions and finish or cancel bound attempts first. Restore
+the reviewed consumer/configuration snapshots for new attempts, while retaining
+the matching reader release and private configuration snapshots for historical
+internal runs. Remove no stored evidence or credentials during the rollback.
+Old internally bound attempts must fail rather than silently start publishing
+to GitHub under a restored default. Preserve the cross-run full-selection rule
+when older map history is intentionally unavailable after a rollback.

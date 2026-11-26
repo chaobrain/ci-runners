@@ -5190,7 +5190,9 @@ retry keeps and revalidates both counts.
 
 ## Proposed decision: local file storage with the v1 runner path
 
-Status: proposed on 2026-11-26; implementation and rollout await lead approval.
+Status: implementation approved by the lead on 2026-11-26 in the maintenance
+conversation after review of draft PR #301. Release and rollout remain gated
+by the final evidence below.
 The request is to retain the restored v1 execution path while removing the
 GitHub artifact quota dependency from trusted private CI. The optional SSH
 storage contract approved in #292 supplies the bundle and transfer protocol.

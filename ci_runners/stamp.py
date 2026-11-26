@@ -21,6 +21,7 @@ import sys
 
 WORKFLOWS = ('.github/workflows/ci.yml', '.github/workflows/part.yml', '.github/workflows/sweep.yml',
              '.github/workflows/public.yml', '.github/workflows/public-part.yml')
+NESTED = ('actions/part/action.yml', 'actions/salvage/action.yml')
 #: a reference this repository's reusable workflows make to itself
 REF = re.compile(r'(chaobrain/ci-runners/(?:actions/[a-z][a-z0-9-]*|\.github/workflows/(?:part|public|public-part)\.yml))'
                  r'@([A-Za-z0-9._/-]+)')
@@ -52,7 +53,7 @@ def stamp(root: pathlib.Path, release: str, ref: str = '') -> list[str]:
         if f.read_text().strip() != release:
             f.write_text(release + '\n')
             changed.append('actions/RELEASE')
-    for rel in WORKFLOWS:
+    for rel in (*WORKFLOWS, *(p for p in NESTED if (root / p).exists())):
         f = root / rel
         old = f.read_text()
         if not refs(old):

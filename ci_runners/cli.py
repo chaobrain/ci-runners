@@ -56,6 +56,9 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     cmd, args = argv[0], argv[1:]
+    if cmd == 'storage':
+        from ci_runners import storage_v1
+        return storage_v1.main(args, etc_dir())
     if cmd == 'role':
         print(load_inventory().this)
         return 0

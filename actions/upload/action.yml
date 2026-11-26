@@ -1,0 +1,69 @@
+name: ci-runners upload
+description: Publish CI files through the run's configured backend.
+inputs:
+  name:
+    description: run-wide unique artifact name
+    required: true
+  path:
+    description: file or newline-separated file patterns
+    required: true
+  retention-days:
+    description: GitHub retention; internal retention uses its configured classes
+    default: '7'
+  retention:
+    description: internal retention class, run, diagnostic or mapping
+    default: diagnostic
+  if-no-files-found:
+    description: warn, ignore or error
+    default: warn
+  include-hidden-files:
+    description: include dotfiles such as raw coverage data
+    default: 'false'
+  overwrite:
+    description: GitHub overwrite; internal repeats must have identical content
+    default: 'false'
+  compression-level:
+    description: GitHub compression level; internal bundles use the bounded codec
+    default: '6'
+outputs:
+  artifact-id:
+    description: GitHub artifact ID or a logical internal manifest ID
+    value: ${{ steps.internal.outputs.artifact-id || steps.github.outputs.artifact-id }}
+  stored:
+    description: true where the internal bundle was published
+    value: ${{ steps.internal.outputs.stored }}
+runs:
+  using: composite
+  steps:
+    - id: mode
+      shell: bash
+      run: |
+        if [ -z "${CI_RUNNERS_ETC:-}" ] && [ -z "${CI_STORAGE_STORE:-}" ]; then
+          echo 'backend=github' >> "$GITHUB_OUTPUT"
+        else
+          "$GITHUB_ACTION_PATH/../lib/ci-run.sh" storage mode
+        fi
+    - id: internal
+      if: steps.mode.outputs.backend == 'ssh'
+      shell: bash
+      env:
+        IN_NAME: ${{ inputs.name }}
+        IN_PATH: ${{ inputs.path }}
+        IN_MISSING: ${{ inputs.if-no-files-found }}
+        IN_HIDDEN: ${{ inputs.include-hidden-files }}
+        IN_RETENTION: ${{ inputs.retention }}
+      run: >-
+        "$GITHUB_ACTION_PATH/../lib/ci-run.sh" storage upload
+        --name "$IN_NAME" --path "$IN_PATH" --missing "$IN_MISSING"
+        --hidden "$IN_HIDDEN" --retention "$IN_RETENTION"
+    - id: github
+      if: steps.mode.outputs.backend == 'github'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: ${{ inputs.if-no-files-found }}
+        include-hidden-files: ${{ inputs.include-hidden-files }}
+        overwrite: ${{ inputs.overwrite }}
+        compression-level: ${{ inputs.compression-level }}

@@ -214,15 +214,29 @@ def _verdict(a: argparse.Namespace, env: Mapping[str, str], inv: inventory.Inven
         token = env.get('GITHUB_TOKEN', '')
         if not token:
             raise ValueError('GITHUB_TOKEN is not set')
+        from ci_runners import cli, storage, storage_v1
+        internal = None
         try:  # each part's latest run attempt, not the artifact of the highest id (issue #169)
-            found = read(ids, call, fetch, base, repo, env['GITHUB_RUN_ID'], token,
-                         lambda text: print(f'ci-run verdict: {text}', file=sys.stderr), WORKERS)
+            internal = storage_v1.open_current(cli.etc_dir(), env)
+            found = (internal.read_outcomes(ids) if internal is not None else
+                     read(ids, call, fetch, base, repo, env['GITHUB_RUN_ID'], token,
+                          lambda text: print(f'ci-run verdict: {text}', file=sys.stderr), WORKERS))
         except github.ApiError as e:  # nothing is known of any part: not a part's loss
             items, v, detail = [], listing_error(e), str(e)
             print(f'ci-run verdict: the run\'s artifacts could not be listed ({e})', file=sys.stderr)
+        except storage.Error as e:
+            items, v, detail = [], Verdict('error', 'internal files: ' + e.code), e.code
         else:
             items, detail = ends(ids, found, salvage), ''
             v = decide(items)
+            if internal is not None and v.state == 'success':
+                try:
+                    gap = ('required standard outcome missing' if any(e.id not in found for e in items)
+                           else internal.report_gap(found))
+                except storage.Error as e:
+                    gap = 'internal report evidence: ' + e.code
+                if gap:
+                    v = Verdict('error', gap)
         call('POST', f'{base}/repos/{repo}/statuses/{a.sha}', token,
              {'state': v.state, 'context': a.context, 'description': v.description, 'target_url': target})
     except (OSError, ValueError, github.ApiError) as e:

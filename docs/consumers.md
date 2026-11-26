@@ -369,3 +369,50 @@ jobs:
 **上限**：每次 sweep 最多 50 个请求（重试也算）、取消 10 个运行、8 分钟（作业的 `timeout-minutes` 是 10）；GitHub 回的 `X-RateLimit-Remaining` 低于 100 时也停（job token 每小时 1,000 次调用，和 `ci.yml` 自己的调用共用）。到了任一上限，已做的保留，作业以状态 1 结束（红）。只有剩下的请求够做完一整套（发状态、取消、可能的 `force-cancel`）才会动一个运行。GitHub 读不到、发状态失败时作业也是红的，那个运行不会被取消（没有 `error` 就不取消），下一次 sweep 再看。每次 sweep 在日志里每个处理过或留下的运行一行，summary 里一张表。
 
 **从哪个版本起**：`v1.18.0` 之后的第一个发布；`v1` 指向它之前，`sweep.yml@v1` 不存在，调用会失败。
+
+## Optional internal CI files on v1
+
+The paired v1 storage adapters keep schema-1 plans, runner routing, retries and
+status contexts. A host-private `storage.toml` opts a repository in at a reviewed
+run-ID cutover; see `setup/storage.example.toml`. Until the new host layer and
+paired consumer workflow are installed, keep the repository on its existing
+backend. This feature needs the release carrying the adapters; older v1 tags
+do not provide the new actions or `storage-store` input.
+
+For a trusted private call to the shared workflow, set its optional
+`storage-store` input to the logical store configured on the hosts. The initial
+consumer migrations use `ci-files-v1`. The caller pins that logical name, so
+missing configuration or a changed backend is a failure, not a GitHub fallback.
+Public and hosted calls leave the input empty and retain GitHub transport.
+
+Custom step jobs use `actions/upload@v1` and `actions/download@v1` in place of
+GitHub's artifact actions and set `CI_STORAGE_STORE` only on the trusted private
+route. The adapters preserve current artifact names and directory layouts.
+Uploads accept `name`, newline-separated `path` globs, `include-hidden-files`,
+`if-no-files-found`, and GitHub retention/compression/overwrite options. Internal
+repeats are immutable: identical content is idempotent; different content at
+the same run/attempt/name is a conflict even with `overwrite: true`.
+
+Downloads accept `name` or `pattern`, `path`, and `merge-multiple`. They verify
+all selected bundles before writing files and refuse different bytes at one
+destination. An empty required download fails. An executed optional upload with
+no files records its absence, preventing a report from an earlier run attempt
+from resurfacing; reports from skipped jobs can still be reused on reruns.
+
+After all reports for a custom `actions/part` step, call `actions/seal@v1` with
+its `id`, `attempt`, final job `state`, and a JSON `expected` list of required
+artifact names. The shared workflow does this itself using the plan's artifact
+declarations. A passing command without a matching report receipt cannot make
+the final private verdict green. A test failure remains a failure.
+
+Cross-run readers use the installed host `storage_v1.adapt_api` adapter while
+retaining their original workflow, branch and ancestor selection. Pre-cutover
+runs read GitHub history explicitly. A completed historical run that published
+no files is an empty history entry. Corrupt or partially published internal
+history, missing bindings for published files, and transport failures are
+errors. A reader must not convert those into ordinary missing-map fallbacks.
+
+Job logs, summaries and commit statuses remain on GitHub. Internal files use
+logical manifest references; they are retrieved with the trusted reader on the
+CI hosts. Documentation deployment, packages, Release assets and environment/
+compilation caches retain their separate transport and retention policies.

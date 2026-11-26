@@ -5223,6 +5223,23 @@ MUTANTS.extend(DYNAMIC_MUTANTS)
 
 
 
+# Preserve the existing wiring mutations as private transfers move behind the
+# paired actions. Public workflow mutations still target GitHub's own actions.
+def _paired_transfer(rel: str, snippet: str) -> str:
+    if rel in (PTW, '.github/workflows/ci.yml', APT, 'actions/salvage/action.yml'):
+        snippet = snippet.replace('actions/upload-artifact@v4', 'chaobrain/ci-runners/actions/upload@v1').replace(
+            'actions/download-artifact@v4', 'chaobrain/ci-runners/actions/download@v1')
+    if rel == PTW:
+        snippet = snippet.replace('  first:\n    name: first\n',
+                                  '  first:\n    name: first\n    env:\n'
+                                  '      CI_STORAGE_STORE: ${{ inputs.storage-store }}\n')
+    return snippet
+
+
+MUTANTS = [(rel, _paired_transfer(rel, old), _paired_transfer(rel, new), cases)
+           for rel, old, new, cases in MUTANTS]
+
+
 def run(tree: pathlib.Path, tests: list[str], hang: float = HANG) -> int:
     """The tests' status: 124 for a hang, 125 when a process of the run outlived it
     (``tests/leaks.py``). Either way every process of the run is killed, in a new

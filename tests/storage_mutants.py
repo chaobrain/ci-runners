@@ -10,6 +10,12 @@ CASES = [('ci_runners/storage_ssh.py', "elif b'permission denied' in private_err
 V='ci_runners/storage_v1.py'
 T='tests.test_storage_v1.'
 CASES += [
+ ('ci_runners/flow.py', '        internal.prepare_download()\n', '',
+  ['tests.test_storage_pipeline.Pipeline.test_rerun_fetch_initializes_its_binding_before_reading_the_kept_plan']),
+ (V, '            bundles.prepare_download()\n', '',
+  ['tests.test_storage_pipeline.Pipeline.test_rerun_download_command_initializes_the_new_attempt_only']),
+ (V, '        if not self.references(history=False, allow_empty=True):\n            self.bind()', '        self.bind()',
+  [T+'Bundles.test_download_initialization_does_not_repair_a_missing_existing_binding']),
  ('tests/test_actions.py', "return 'v1' if release == 'hook' else release", "return 'v1'",
   ['tests.test_reusable.Stamp.test_nested_upload_guards_accept_the_stamped_release']),
  ('.github/workflows/test.yml', 'run: python -m tests.storage_mutants', 'run: true',

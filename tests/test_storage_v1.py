@@ -90,6 +90,14 @@ class Bundles(unittest.TestCase):
             self.bundles.references()
         self.assertIsNone(self.bundles.references({**RUN, 'id': 99}))
 
+    def test_download_initialization_does_not_repair_a_missing_existing_binding(self):
+        self.bundles.publish('report', str(self.source))
+        key = storage.dumps(self.bundles.identity('run-backend'))
+        del self.transport.objects[key]
+        with self.assertRaisesRegex(storage.Error, 'missing'):
+            self.bundles.prepare_download()
+        self.assertNotIn(key, self.transport.objects)
+
     def test_rerun_uses_new_outcomes_and_retains_skipped_job_reports(self):
         self.bundles.publish('report', str(self.source))
         self.bundles.publish('unchanged', str(self.source))

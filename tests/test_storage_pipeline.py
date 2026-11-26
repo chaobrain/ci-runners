@@ -1,6 +1,7 @@
 """The normal v1 status path must consume verified internal evidence."""
 from __future__ import annotations
 import json
+import argparse
 import os
 import unittest
 from unittest import mock
@@ -11,6 +12,27 @@ from tests.test_storage_v1 import Bundles, RUN
 @unittest.skipIf(os.name == 'nt', 'the v1 execution modules use Linux locks')
 class Pipeline(unittest.TestCase):
     setUp = Bundles.setUp
+
+    def test_rerun_fetch_initializes_its_binding_before_reading_the_kept_plan(self):
+        from ci_runners import flow, storage_v1
+        self.bundles.publish('ci-plan-files', str(self.source))
+        rerun = storage_v1.Bundles(self.transport, 'pilot', {**RUN, 'run_attempt': 2}, 100)
+        dest = self.root / 'fetched'
+        api = mock.Mock(side_effect=AssertionError('GitHub artifact API must not be called'))
+        with mock.patch('ci_runners.flow.check_checkout', return_value=True), mock.patch(
+                'ci_runners.storage_v1.open_current', return_value=rerun):
+            self.assertEqual(flow.run_fetch(argparse.Namespace(workspace=str(self.root), dest=str(dest)), {}, api, api), 0)
+        self.assertEqual((dest / 'pytest.xml').read_bytes(), (self.source / 'pytest.xml').read_bytes())
+        api.assert_not_called()
+
+    def test_rerun_download_command_initializes_the_new_attempt_only(self):
+        from ci_runners import storage_v1
+        self.bundles.publish('test-skip', str(self.source))
+        rerun = storage_v1.Bundles(self.transport, 'pilot', {**RUN, 'run_attempt': 2}, 100)
+        dest = self.root / 'downloaded'
+        with mock.patch('ci_runners.storage_v1.open_current', return_value=rerun):
+            self.assertEqual(storage_v1.main(['download', '--name', 'test-skip', '--path', str(dest)], '/unused', {}), 0)
+        self.assertTrue((dest / 'pytest.xml').is_file())
 
     def test_part_preserves_only_the_logical_storage_requirement(self):
         from ci_runners import part, registry

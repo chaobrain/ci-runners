@@ -202,6 +202,15 @@ class Bundles:
             raise storage.Error('missing')
         return found
 
+    def prepare_download(self):
+        """Bind a fresh current attempt before it reads files kept from a rerun.
+
+        Existing current-attempt objects must already have their valid binding;
+        a read must not repair missing identity evidence around those objects.
+        """
+        if not self.references(history=False, allow_empty=True):
+            self.bind()
+
     @staticmethod
     def absence_name(name):
         return 'ci-absent-' + storage.digest(name.encode())
@@ -558,6 +567,7 @@ def main(argv, etc, env=None):
             output(env, stored='true' if ref else 'false', **{
                 'artifact-id': 'internal-' + ref['manifest_sha256'] if ref else ''})
         elif args.command == 'download':
+            bundles.prepare_download()
             bundles.download(args.path, args.name, args.pattern, args.merge == 'true')
         else:
             expected = json.loads(args.expected)

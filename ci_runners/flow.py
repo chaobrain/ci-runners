@@ -635,6 +635,7 @@ def run_fetch(a: argparse.Namespace, env: Mapping[str, str], call: Callable, fet
     from ci_runners import cli, storage_v1
     internal = storage_v1.open_current(cli.etc_dir(), env)
     if internal is not None:
+        internal.prepare_download()
         internal.download(a.dest, name=FILES_ARTIFACT)
         _out(env, fallback='false')
         return 0

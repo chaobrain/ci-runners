@@ -64,9 +64,10 @@ class OwnCheck(unittest.TestCase):
         self.assertEqual(unit['steps'][0]['env'], {'TESTS': '${{ needs.tests.result }}',
                                                    'MUTANTS': '${{ needs.mutants.result }}'})
         self.assertTrue(unit['steps'][0]['run'].endswith('[ "$TESTS" = success ] && [ "$MUTANTS" = success ]\n'))
-        tests_run = jobs['tests']['steps'][-1]['run']
+        tests_run = '\n'.join(step.get('run', '') for step in jobs['tests']['steps'])
         self.assertIn('python -I -m unittest discover -s tests -t .', tests_run)
         self.assertIn('python -m ci_runners.inventory lint . --deny tests/deny.sha256', tests_run)
+        self.assertIn('python -m tests.storage_mutants', tests_run)
 
     def test_a_shard_is_every_nth_mutant(self):
         import sys
@@ -80,7 +81,7 @@ class OwnCheck(unittest.TestCase):
                 mutants.shard(bad)
         calls = []
         with unittest.mock.patch.object(mutants, 'MUTANTS', [('README.md', 'x', 'y', [f't{i}']) for i in range(10)]), \
-                unittest.mock.patch.object(mutants, 'run', side_effect=lambda tree, tests, hang=0: calls.append(tests) or 0), \
+                unittest.mock.patch.object(mutants, 'run', side_effect=lambda tree, tests, hang=0, quiet=True: calls.append(tests) or 0), \
                 unittest.mock.patch.object(mutants, 'one', side_effect=lambda tree, *m: (True, 0.0)), \
                 unittest.mock.patch.object(mutants.stamp, 'stamp'), \
                 unittest.mock.patch('pathlib.Path.read_text', return_value='x'), \

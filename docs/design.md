@@ -5187,3 +5187,148 @@ N CPUs remain. Verify `CI_CPUS` against the measured mask; cover the worker
 default, a worker count that fits, and refusal above each bound. Compare
 routes with and without workers. After a lost first attempt, confirm the
 retry keeps and revalidates both counts.
+
+## Proposed decision: local file storage with the v1 runner path
+
+Status: proposed on 2026-11-26; implementation and rollout await lead approval.
+The request is to retain the restored v1 execution path while removing the
+GitHub artifact quota dependency from trusted private CI. The optional SSH
+storage contract approved in #292 supplies the bundle and transfer protocol.
+Its original implementation enabled schema 2; this proposal delivers the
+paired schema 1 adapters on the v1 line. Approval of this proposal covers the
+implementation below. Release publication and live cutover are reviewed
+against the final code, test evidence and host dry-run plans.
+
+### Execution and compatibility
+
+Keep the existing runner groups, capability labels, fixed slots, locks,
+resource limits, part plans, outcome classification, retry and salvage policy.
+Do not import or start the centralized scheduler or executor services. The
+consumer plan remains schema 1, and existing GitHub commit status contexts and
+required checks retain their meanings. Test commands and scientific source
+changes are outside this migration.
+
+GitHub storage stays the default for repositories without an explicit private
+opt-in. Public, fork and GitHub-hosted jobs keep their current transport and
+receive no LAN credentials. Documentation deployment, package publishing,
+Release assets, dependency environments and compilation caches keep their
+separate retention and transport policies. This change therefore removes the
+quota dependency from opted-in private CI, not from every GitHub workflow.
+
+Deliver a backwards-compatible v1 minor release after acceptance. Install its
+host layer on every participating producer and reader before opting in any
+repository. Old action callers and repositories without opt-in continue to
+work. A changed public input or output must retain its existing meaning or be
+introduced as an optional addition; no v2 plan or control protocol is required.
+
+### Store and run binding
+
+Use the existing CI storage role on `3090a`, with direct SSH/SFTP transfers
+from the other runner roles. All endpoints, account names, paths, credentials,
+known-hosts records and repository IDs stay in private host configuration.
+Reuse the approved immutable ZIP/manifest protocol, checksums, staging and
+atomic publication, including its bounded transfer/retry behavior. Storage
+does not pass through the maintainer's workstation.
+
+Backport only the storage modules required by that protocol and add schema 1
+integration. The server helper must have a reviewed, pinned implementation
+that remains usable while all v2 services are disabled. Reuse existing storage
+credentials where available; inventory any missing access before rollout.
+Creating credentials or changing authorized keys is a separate lead action.
+
+Keep `storage.toml` as the backend configuration. Add an optional
+`schema1_cutover` table mapping canonical repository names to the first
+eligible workflow run ID. Validate positive integer cutovers and require
+matching SSH overrides for opted-in repositories. An absent table leaves
+schema 1 on GitHub. Invalid or partially installed opt-in refuses execution.
+Only host configuration may select a store; workflow inputs cannot supply an
+SSH endpoint, credential, directory or helper command.
+
+Before the first publication, durably bind the repository ID, workflow run ID
+and run attempt to one backend/store/protocol and its authorized source SHA.
+Every producer and reader verifies that binding. Status context and unique
+part IDs preserve the existing schema 1 identities; generic project files
+add a validated bundle name. Distinguish a workflow's source commit from a
+dispatched test commit, and record the verified producer checkout SHA where
+those differ. A repository rename must not change its repository ID authority.
+
+Runs before the configured cutover use their original GitHub history reader.
+Runs at or after cutover require a valid internal binding. Missing files,
+missing bindings, timeouts, permission errors and corrupt manifests must not
+select GitHub or another run as a transport fallback. An explicit new cutover
+or rollback affects newly started attempts only; preserve existing bindings
+and their matching reader revisions until those attempts finish.
+
+### Paired producers and readers
+
+Add common upload/download actions and host commands with the artifact-name,
+glob, hidden-file, destination and missing-file behavior required by current
+v1 consumers. Resolve configuration through the pinned installed host layer.
+Keep transport failures visible to the existing job and final verdict. A
+successful test command without its required published evidence is not a
+successful CI run. Do not replace failures with continue-on-error or remove
+reports to obtain a green status.
+
+Migrate all of these paths together for each opted-in repository:
+
+- The reusable workflow's plan files and the part-side plan downloader.
+- Standard part outcomes/summaries, caller-defined part files, retry readers,
+  same-host salvage and the final verdict's direct artifact API reader.
+- BrainMass coverage and compatibility results, including failing tests.
+- BrainCell shard reports, JUnit, raw coverage, merged coverage, validation
+  and equivalence footprints, and test-map production and selection.
+- BrainSpike PR, main, nightly, cache-warm and cluster CI file producers and
+  report readers, including partial results and diagnostic summaries.
+- Cross-run test maps, impact maps and timing references, retaining the
+  original workflow, branch, ancestor and source-identity selection rules.
+
+Preserve artifact directory layouts expected by existing report code. Pattern
+downloads need explicit empty-match behavior and deterministic collision
+handling. Re-runs retain GitHub run-attempt and part-attempt ordering: a stale
+retry cannot outrank the new first attempt. Missing map history uses only the
+existing conservative full-selection rule; corruption or transport failure
+cannot be treated as ordinary missing history. Cross-run indexing identifies
+completed objects and does not choose the newest run without ancestry checks.
+
+GitHub continues to hold job logs, summaries, commit statuses and workflow
+conclusions. Summaries may show a logical object reference and sanitized
+storage errors. Do not expose private endpoints or credentials. The files
+themselves are retrieved through the trusted internal reader; this proposal
+does not require a new public download service.
+
+### Retention, rollout and acceptance
+
+Use the #292 bounded bundle limits and initial retention classes: run files
+three days, diagnostics seven days, mapping history fourteen days. These are
+minimum cleanup ages, not permission to delete reachable data. Preserve
+active runs, retries, manual holds and maps still referenced by later runs.
+Actual deletion remains disabled; produce a dry-run inventory first. Monitor
+free capacity and reject incomplete publication rather than discarding older
+objects or writing outside the configured CI root.
+
+Roll out in three stages: BrainMass, BrainCell, then BrainSpike. Prepare the
+producer and reader changes and private configurations before each cutover.
+Record the installed commit, private config backup and per-repository cutover.
+Keep the v2 services disabled throughout. Inspect the v1 setup dry run but
+apply only required storage changes; unrelated keys, runner registrations,
+resource policies and services are outside that plan.
+
+Offline tests must cover missing/invalid configuration, wrong repository/run/
+attempt/SHA/store, tampered bytes, unsafe ZIP members, incomplete uploads,
+duplicate publication, conflicting content, exhausted capacity, timeouts,
+missing required reports, pattern downloads and rerun ordering. Show each
+new critical guard failing under a corresponding mutant. Existing v1 route,
+retry, salvage and verdict tests must continue to pass with opt-in absent.
+
+Live acceptance requires a green test, an intentional test failure, a lost
+publication and a rerun across two hosts with independent reads and checksum
+verification. Missing evidence must prevent success. BrainCell must exercise
+coverage merge and a later run's test-map lookup. BrainSpike must exercise PR,
+main and complete nightly report/mapping paths, including failed/partial
+results. Verify the opted-in private paths make no GitHub artifact upload or
+download calls, and that public/hosted paths retain their existing transport.
+No model benchmark is added by this migration.
+
+Before production activation, hand over the exact PR heads, test and mutant
+evidence, reviewed host plans, canary results and remaining limitations. The
+lead approves the v1 release/tag change and the per-repository live cutover.

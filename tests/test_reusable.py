@@ -651,6 +651,17 @@ class Sweep(unittest.TestCase):
 
 
 class Stamp(unittest.TestCase):
+    def test_nested_upload_guards_accept_the_stamped_release(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = self.tree(d)
+            stamp.stamp(tree, 'v1.22.9001')
+            result = subprocess.run([
+                sys.executable, '-B', '-m', 'unittest', '-q',
+                'tests.test_actions.Actions.test_the_part_action_uploads_its_outcome_unless_told_not_to',
+                'tests.test_actions.Salvage.test_one_upload_per_salvaged_part_up_to_the_bound',
+            ], cwd=tree, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def tree(self, d: str) -> pathlib.Path:
         t = pathlib.Path(d) / 'tree'
         shutil.copytree(ROOT, t, ignore=shutil.ignore_patterns('.git', '__pycache__'))

@@ -15,6 +15,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 ACTIONS = ('claim', 'part', 'salvage', 'verdict')
 
 
+def release_ref() -> str:
+    release = (ROOT / 'actions' / 'RELEASE').read_text().strip()
+    return 'v1' if release == 'hook' else release
+
+
 def declared(text: str, section: str) -> list[str]:
     m = re.search(rf'^{section}:\n((?:  .*\n|\n)*)', text, re.M)
     return re.findall(r'^  ([a-z][a-z0-9-]*):', m.group(1), re.M) if m else []
@@ -51,7 +56,7 @@ class Actions(unittest.TestCase):
         self.assertIn("  upload:\n    description: \"false: no outcome artifact", text)
         self.assertTrue(text.split('  upload:\n', 1)[1].split('\noutputs:', 1)[0].endswith("    default: 'true'"))
         self.assertIn("    - id: upload\n      if: always() && steps.part.outputs.outcome != '' && inputs.upload != 'false'\n"
-                      "      uses: chaobrain/ci-runners/actions/upload@v1\n", text)
+                      f"      uses: chaobrain/ci-runners/actions/upload@{release_ref()}\n", text)
 
     def test_no_flow_mappings(self):
         """A flow mapping (``{description: a, b, value: ...}``) reads a comma in the text as
@@ -144,7 +149,7 @@ class Salvage(unittest.TestCase):
         from ci_runners import verdict
         text = (ROOT / 'actions' / 'salvage' / 'action.yml').read_text()
         steps = re.findall(r"- if: fromJSON\(steps\.salvage\.outputs\.count \|\| '0'\) >= ([0-9]+)\n"
-                           r"      uses: chaobrain/ci-runners/actions/upload@v1\n      with:\n"
+                           r"      uses: chaobrain/ci-runners/actions/upload@" + re.escape(release_ref()) + r"\n      with:\n"
                            r"        name: \$\{\{ steps\.salvage\.outputs\.name-([0-9]+) \}\}\n"
                            r"        path: \$\{\{ runner\.temp \}\}/ci-salvage-out/\$\{\{ steps\.salvage\.outputs\.name-([0-9]+) \}\}\n",
                            text)

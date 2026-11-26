@@ -10,6 +10,8 @@ CASES = [('ci_runners/storage_ssh.py', "elif b'permission denied' in private_err
 V='ci_runners/storage_v1.py'
 T='tests.test_storage_v1.'
 CASES += [
+ ('tests/test_actions.py', "return 'v1' if release == 'hook' else release", "return 'v1'",
+  ['tests.test_reusable.Stamp.test_nested_upload_guards_accept_the_stamped_release']),
  ('.github/workflows/test.yml', 'run: python -m tests.storage_mutants', 'run: true',
   ['tests.test_workflow.OwnCheck.test_the_shards_cover_every_mutant_and_the_required_check_needs_them_all']),
  (V, "if not matching or any(job.get('conclusion') != 'skipped' for job in matching):", "if False:",
